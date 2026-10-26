@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import parse_qs, quote, urlsplit
 
+from fake_github_http import json_response
 from review_sensei_github.approval import ApprovalFacts, ReviewApprovalEligibility
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.publication import (
@@ -50,7 +51,6 @@ from review_sensei.presentation import (
     render_finding_reference,
 )
 from review_sensei.session import LocalSessionLedger, SessionIdentity
-from tests.fake_github_http import json_response
 
 HEAD, BASE, APP = "b" * 40, "a" * 40, "reviewsensei[bot]"
 IDENTITY = SessionIdentity("owner/repo", 1, 1)

@@ -2,23 +2,18 @@
 
 import io
 import json
-import os
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
-from hashlib import sha256
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
+from fake_github_http import json_response
 from review_sensei_github import GitHubApplication, GitHubHttp, GitHubWriteOptions
-from review_sensei_github.cli import main as github_main
 from review_sensei_github.errors import GitHubBrokerClientError
 
 from review_sensei.broker_diagnostics import BrokerDiagnostic
 from review_sensei.disposition import command_exit_code
 from review_sensei.models import ReviewResult
-from tests.fake_github_http import json_response
 
 
 class MissingCheckBroker:
@@ -58,110 +53,79 @@ class MediaCommandReportingTests(unittest.TestCase):
         )
 
     def assert_check_failure(self, error=None):
-        import review_sensei_github as github_module
+        from urllib.error import HTTPError
 
-        body = "@reviewsensei I reviewed the media files and I approve"
-        attestation = {
-            "version": 1,
-            "repository": "owner/repo",
-            "repository_id": 1,
-            "pull_request": 2,
-            "head_sha": "a" * 40,
-            "operation": "command",
-            "source_comment_id": 20,
-            "concurrency_group": "reviewsensei-session-1-2",
-        }
-        broker = Mock()
-        broker.authorize_session_mutation.return_value = SimpleNamespace(
-            token="synthetic-command-capability",
-            grant="synthetic-command-grant",
-            attestation=attestation
-            | {
-                "actor": "maintainer",
-                "actor_type": "User",
-                "association": "OWNER",
-                "command_id": 20,
-                "command_digest": sha256(body.encode()).hexdigest(),
-            },
-        )
-        if error is not None:
-            broker.exchange.side_effect = error
-        calls = []
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_action_run import CommandEntryFixture
+        from test_api_work_persistence import IDENTITY
 
-        def metadata_only(request, timeout):
-            calls.append((request.method, request.full_url))
-            self.assertEqual(request.method, "GET")
-            if "/collaborators/maintainer/permission" in request.full_url:
-                return json_response({"permission": "admin"})
-            if "/pulls/2/reviews?" in request.full_url:
-                return json_response([])
-            raise AssertionError("unexpected command metadata request")
-
-        stdout, stderr = io.StringIO(), io.StringIO()
-        with tempfile.TemporaryDirectory() as scratch:
-            path = Path(scratch) / "attestation.json"
-            path.write_text(json.dumps(attestation), encoding="utf-8")
-            with (
-                patch.dict(
-                    os.environ, {"GITHUB_TOKEN": "synthetic-metadata-token"}, clear=True
-                ),
-                patch.object(github_module, "BrokerClient", return_value=broker),
-                patch.object(
-                    github_module,
-                    "GitHubHttp",
-                    return_value=GitHubHttp(opener=metadata_only),
-                ),
-                patch.object(
-                    GitHubApplication, "_session_ledger_for_token"
-                ) as ledger_factory,
-                redirect_stdout(stdout),
-                redirect_stderr(stderr),
-            ):
-                status = github_main(
-                    [
-                        "github",
-                        "command",
-                        "--comment-body",
-                        body,
-                        "--actor",
-                        "maintainer",
-                        "--association",
-                        "OWNER",
-                        "--repository",
-                        "owner/repo",
-                        "--repository-id",
-                        "1",
-                        "--pull-request",
-                        "2",
-                        "--head-sha",
-                        "a" * 40,
-                        "--source-comment-id",
-                        "20",
-                        "--session-attestation",
-                        str(path),
-                        "--github-session-ledger",
-                        "--oidc-token",
-                        "synthetic-oidc",
-                        "--allow-write",
-                    ]
+        class CurrentMediaFailureFixture(CommandEntryFixture):
+            def _broker_response(fixture, request):
+                payload = json.loads(request.data)
+                if payload.get("capability") != "check_publish":
+                    return super()._broker_response(request)
+                fixture._meter(request)
+                fixture.broker_requests.append(payload)
+                if error is not None:
+                    diagnostic = error.broker_diagnostic
+                    body = {
+                        "error": "synthetic-untrusted-exception-detail",
+                        "diagnostic": {
+                            "version": 1,
+                            "code": diagnostic.code,
+                            "stage": diagnostic.stage,
+                            "action": diagnostic.action,
+                            "correlation_id": diagnostic.correlation_id,
+                        },
+                    }
+                    raise HTTPError(
+                        request.full_url,
+                        403,
+                        "Forbidden",
+                        {"cf-ray": diagnostic.correlation_id},
+                        io.BytesIO(json.dumps(body).encode()),
+                    )
+                return json_response(
+                    {
+                        "token": "",
+                        "capability": "check_publish",
+                        "control_receipt": {
+                            **payload["control_budget"],
+                            "dispatched": 1,
+                        },
+                    }
                 )
-        self.assertEqual(status, 1)
-        if error is None:
-            self.assertIn(
-                "media approval could not fund its check capability", stdout.getvalue()
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentMediaFailureFixture(directory)
+            status = f.invoke_command(
+                "@reviewsensei I reviewed the media files and I approve"
             )
-        else:
-            self.assertIn("broker_control_budget_exhausted", stderr.getvalue())
-            self.assertIn("0123456789abcdef-YYZ", stderr.getvalue())
-            self.assertIn("broker_rejected", stderr.getvalue())
-            self.assertNotIn("synthetic-untrusted-exception-detail", stderr.getvalue())
-        self.assertEqual(len(calls), 1)
-        self.assertTrue(all(method == "GET" for method, _ in calls))
-        broker.authorize_session_mutation.assert_called_once()
-        broker.exchange.assert_called_once_with(
-            "synthetic-oidc", capability="check_publish"
-        )
-        ledger_factory.assert_not_called()
+            self.assertNotEqual(status, 0, (f.error, f.exception))
+            if error is None:
+                self.assertIn("Broker token response was invalid", f.error)
+            else:
+                self.assertIn("broker_control_budget_exhausted", f.error)
+                self.assertIn("0123456789abcdef-YYZ", f.error)
+                self.assertIn("Broker token request was rejected", f.error)
+                self.assertNotIn("synthetic-untrusted-exception-detail", f.error)
+            self.assertEqual(
+                [
+                    item["capability"]
+                    for item in f.broker_requests
+                    if item.get("capability") == "check_publish"
+                ],
+                ["check_publish"],
+            )
+            self.assertEqual(f.business_writes, 0)
+            self.assertEqual(f.closure_writes, 0)
+            self.assertFalse(f.reviews)
+            self.assertFalse(
+                any(path.endswith("/check-runs") for _, _, path in f.trace)
+            )
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(record.api_run_accounting["action"]["phase"], "pending")
+            self.assertEqual(len(f.accounted.observations), len(f.trace))
 
     def test_missing_media_dependencies_fail_before_evaluation_or_writes(self):
         for operation_entry in ("disabled", "enabled"):

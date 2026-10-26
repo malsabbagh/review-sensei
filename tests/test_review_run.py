@@ -10,12 +10,36 @@ from pathlib import Path
 
 from review_sensei_github.api_run_host import ApiRunReviewHooks
 from review_sensei_github.api_run_requests import ApiRunSessionLedger
-
-from tests.test_api_work_lifecycle import QUALIFICATION_LIMIT, LifecycleFixture
-from tests.test_api_work_persistence import BASE, HEAD, IDENTITY
+from test_api_work_lifecycle import QUALIFICATION_LIMIT, LifecycleFixture
+from test_api_work_persistence import BASE, HEAD, IDENTITY
 
 
 class ReviewRunPolicyTests(unittest.TestCase):
+    def test_owner_allocation_conserves_closed_integer_limit(self):
+        from review_sensei_github.api_run_plan import owner_allocations
+
+        from review_sensei.api_work import MAX_API_REQUEST_LIMIT
+        from review_sensei.errors import ReviewInputError
+
+        for limit in (512, 1024, MAX_API_REQUEST_LIMIT):
+            with self.subTest(limit=limit):
+                allocation = owner_allocations(limit, 130)
+                self.assertEqual(
+                    130 + allocation.first_total + allocation.successor_total,
+                    limit,
+                )
+        for limit, startup in (
+            (True, 130),
+            (512.0, 130),
+            (MAX_API_REQUEST_LIMIT + 1, 130),
+            (512, MAX_API_REQUEST_LIMIT + 1),
+            (512, True),
+            (512, -1),
+        ):
+            with self.subTest(limit=limit, startup=startup):
+                with self.assertRaises(ReviewInputError):
+                    owner_allocations(limit, startup)
+
     def test_frozen_policy_commit_is_independent_from_reviewed_base(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = LifecycleFixture(directory)
@@ -45,7 +69,7 @@ class EntryFixture(LifecycleFixture):
     def __init__(self, directory, *, limit=512, runner_kind="hosted"):
         import subprocess
 
-        from tests import test_review_transaction as tx
+        import test_review_transaction as tx
 
         super().__init__(directory, limit=limit)
         self.root = Path(directory)
@@ -113,7 +137,7 @@ class EntryFixture(LifecycleFixture):
         import json
         from urllib.parse import urlsplit
 
-        from tests.fake_github_http import json_response
+        from fake_github_http import json_response
 
         path = urlsplit(request.full_url).path
         if path.endswith("/collaborators/alice/permission"):
@@ -326,6 +350,7 @@ class EntryFixture(LifecycleFixture):
         from contextlib import ExitStack, redirect_stderr, redirect_stdout
         from unittest.mock import patch
 
+        import test_review_transaction as tx
         from review_sensei_github import cli as package_cli
         from review_sensei_github import review_run
         from review_sensei_github.api_run_requests import ApiRunRequestTransport
@@ -334,7 +359,6 @@ class EntryFixture(LifecycleFixture):
 
         from review_sensei.bounded_evidence import EvidenceReadBudget
         from review_sensei.models import ProviderResponse
-        from tests import test_review_transaction as tx
 
         fixture = self
         event_file = self.root / "event.json"
@@ -541,7 +565,7 @@ class ReviewRunEntryTests(unittest.TestCase):
                 script = """
 import json, os, sys
 from pathlib import Path
-from tests.test_review_run import EntryFixture
+from test_review_run import EntryFixture
 f = EntryFixture(sys.argv[1], limit=512)
 def killed():
     Path(sys.argv[2]).write_text(json.dumps({"comment":f.comment,"extra":f.extra_comments,"policy":f.policy,"provider_calls":f.provider_calls}))
@@ -635,7 +659,7 @@ os._exit(92)
     def test_actual_package_entry_owns_analysis_and_publication(self):
         import json
 
-        from tests.test_api_work_lifecycle import caller_measurement
+        from test_api_work_lifecycle import caller_measurement
 
         for human in (False, True):
             with self.subTest(human=human), tempfile.TemporaryDirectory() as directory:
@@ -660,7 +684,10 @@ os._exit(92)
         import os
 
         for missing_broker_identity in (False, True):
-            with self.subTest(missing=missing_broker_identity), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(missing=missing_broker_identity),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 fixture = EntryFixture(directory)
                 if missing_broker_identity:
                     original = fixture.broker_response
@@ -672,18 +699,30 @@ os._exit(92)
 
                     fixture.broker_response = without_app_id
                 else:
-                    fixture.before_entry = lambda: os.environ.pop("REVIEWSENSEI_APP_ID", None)
-                self.assertEqual(fixture.invoke(), 1 if missing_broker_identity else 0, fixture.error)
-                self.assertEqual(fixture.provider_calls, 0 if missing_broker_identity else 1)
+                    fixture.before_entry = lambda: os.environ.pop(
+                        "REVIEWSENSEI_APP_ID", None
+                    )
+                self.assertEqual(
+                    fixture.invoke(), 1 if missing_broker_identity else 0, fixture.error
+                )
+                self.assertEqual(
+                    fixture.provider_calls, 0 if missing_broker_identity else 1
+                )
                 if missing_broker_identity:
                     self.assertIsNone(fixture.comment)
                     self.assertIn("authenticated App identity", fixture.error)
                 else:
-                    from review_sensei_github.session_ledger import parse_session_comment
+                    from review_sensei_github.session_ledger import (
+                        parse_session_comment,
+                    )
 
-                    stored = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
-                    self.assertEqual(fixture.accounted.accounting.terminal_transaction,
-                                     stored.transaction.transaction_id)
+                    stored = parse_session_comment(
+                        fixture.comment["body"], identity=IDENTITY
+                    )
+                    self.assertEqual(
+                        fixture.accounted.accounting.terminal_transaction,
+                        stored.transaction.transaction_id,
+                    )
 
     def test_diagnostic_files_cannot_replace_in_memory_publication(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -857,16 +896,14 @@ os._exit(92)
                 path = f.root / ".reviewsensei.yml"
                 path.write_text(
                     path.read_text().replace(
-                        str(QUALIFICATION_LIMIT), str(QUALIFICATION_LIMIT + 2)
+                        "api_request_limit: 512", "api_request_limit: 514"
                     )
                 )
 
             f.before_provider = change
             self.assertEqual(f.invoke(), 1)
             self.assertFalse(f.reviews)
-            self.assertEqual(
-                f.accounted.accounting.configuration.limit, QUALIFICATION_LIMIT
-            )
+            self.assertEqual(f.accounted.accounting.configuration.limit, 512)
 
     def test_changed_head_before_publication_preserves_pending_review(self):
         from review_sensei_github.session_ledger import parse_session_comment
@@ -1056,7 +1093,7 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
 import json, os, sys
 from pathlib import Path
 from unittest.mock import patch
-from tests.test_review_run import EntryFixture
+from test_review_run import EntryFixture
 from review_sensei_github import review_run
 f = EntryFixture(sys.argv[1])
 def killed(*args, **kwargs):
@@ -1132,9 +1169,8 @@ os._exit(92)
             self.assertEqual(f.accounted._terminal_reason, "already-published")
 
     def test_unresolved_mutation_response_cannot_close_or_roll_over_run(self):
+        from fake_github_http import json_response
         from review_sensei_github.session_ledger import parse_session_comment
-
-        from tests.fake_github_http import json_response
 
         # One extra attempted caller operation per owner in this control only.
         with tempfile.TemporaryDirectory() as directory:

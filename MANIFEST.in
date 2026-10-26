@@ -97,4 +97,7 @@ include tests/test_api_work_rescan.py
 include tests/test_api_work_root_bounds.py
 include tests/test_review_run.py
 include tests/test_review_run_rescan.py
+include tests/test_action_reply_entry.py
+include tests/test_current_command_inventory.py
+include tests/test_work_continuation.py
 global-exclude *.py[cod]

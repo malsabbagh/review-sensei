@@ -18,6 +18,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
+from fake_github_http import FakeHTTPResponse, json_response
 from review_sensei_github.api_run_owner import (
     ApiRunActionsEvidence,
 )
@@ -55,7 +56,6 @@ from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.configuration import parse_configuration_text
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionIdentity, SessionRecord
-from tests.fake_github_http import FakeHTTPResponse, json_response
 
 IDENTITY = SessionIdentity("owner/repo", 7, repository_id=123)
 RUN = ApiRunIdentity(123, 456)
@@ -776,21 +776,20 @@ class ApiPredispatchQualificationTests(unittest.TestCase):
             fixture.recover(reserve_successor=True)
             before = len(fixture.trace)
             with self.assertRaisesRegex(
-                ReviewInputError, "confirmation allocation exhausted"
+                ReviewInputError, "cannot preserve write confirmation"
             ):
                 fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
-            # Both oversized responses, both smaller enumerations, the PATCH
-            # and two confirmation requests are charged. A third confirmation
-            # request cannot take a new operation allocation.
-            self.assertEqual(len(fixture.trace) - before, 9)
-            self.assertEqual(fixture.accounted.accounting.confirmed, 9)
-            self.assertEqual(fixture.accounted.usable, 22)
-            self.assertIsNotNone(fixture.accounted._checkpoint)
-            with self.assertRaisesRegex(
-                ReviewInputError, "confirmation allocation exhausted"
-            ):
+            # Oversized attempts and smaller-page fallbacks remain charged.
+            # Enumeration stops before it can consume protected confirmation
+            # capacity, so no PATCH or checkpoint authority is created.
+            self.assertEqual(len(fixture.trace) - before, 7)
+            self.assertFalse(any(m == "PATCH" for _, m, _ in fixture.trace[before:]))
+            self.assertEqual(fixture.accounted.accounting.confirmed, 7)
+            self.assertEqual(fixture.accounted.usable, 24)
+            self.assertIsNone(fixture.accounted._checkpoint)
+            with self.assertRaisesRegex(ReviewInputError, "no funded reconciliation"):
                 fixture.accounted.reconcile_checkpoint(fixture.ledger, IDENTITY)
-            self.assertEqual(len(fixture.trace) - before, 9)
+            self.assertEqual(len(fixture.trace) - before, 7)
 
     def test_unknown_reservation_write_activates_only_matching_readback_once(self):
         for fault in ("unknown-stored", "unknown-absent"):

@@ -15,18 +15,18 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+from fake_github_http import json_response
 from review_sensei_github.action_completion import require_reply_completion
 from review_sensei_github.api_run_budget import CallerRunBudget
 from review_sensei_github.operation_host import OPERATION_COMMENT_MARKER
 from review_sensei_github.run_authority import REQUEST_KEYS, parse_authority
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_persistence import HEAD, IDENTITY
+from test_review_run import EntryFixture
 
 from review_sensei.api_work import ApiRunAccounting
 from review_sensei.errors import ProviderError
 from review_sensei.models import ProviderResponse
-from tests.fake_github_http import json_response
-from tests.test_api_work_persistence import HEAD, IDENTITY
-from tests.test_review_run import EntryFixture
 
 BODY = "@reviewsensei explain the changed branch"
 UPDATED = "2026-10-26T00:00:00Z"
@@ -524,7 +524,7 @@ class ActionReplyEntryTests(unittest.TestCase):
     def test_human_reassessment_keeps_twenty_retained_decisions_and_finishes_known_withholding(
         self,
     ):
-        from tests.test_review_run_rescan import partial_fixture
+        from test_review_run_rescan import partial_fixture
 
         with tempfile.TemporaryDirectory() as directory:
             prior, _transaction = partial_fixture(directory)

@@ -12,13 +12,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from review_sensei_github.rescan import resolve_rescan
-
-from review_sensei.bounded_evidence import EvidenceReadBudget
-from review_sensei.errors import ReviewInputError
-from review_sensei.session import LocalSessionLedger
-from tests import test_default_human_inventory as inventory_acceptance
-from tests.default_human_inventory_contract import (
+import test_default_human_inventory as inventory_acceptance
+from default_human_inventory_contract import (
     APP,
     HEAD,
     IDENTITY,
@@ -27,7 +22,12 @@ from tests.default_human_inventory_contract import (
     human_inventory_parts,
     publish_human,
 )
-from tests.fake_github_http import json_response
+from fake_github_http import json_response
+from review_sensei_github.rescan import resolve_rescan
+
+from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.errors import ReviewInputError
+from review_sensei.session import LocalSessionLedger
 
 
 class DefaultHumanRescanTests(unittest.TestCase):

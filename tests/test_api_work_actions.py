@@ -24,6 +24,8 @@ from review_sensei_github.session_ledger import (
     GitHubIssueCommentSessionLedger,
     parse_session_comment,
 )
+from test_api_work_lifecycle import LifecycleFixture
+from test_api_work_persistence import BASE, HEAD, IDENTITY
 
 from review_sensei.api_work import (
     ApiExecutionOwner,
@@ -38,8 +40,6 @@ from review_sensei.bounded_evidence import (
 )
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewTransaction
-from tests.test_api_work_lifecycle import LifecycleFixture
-from tests.test_api_work_persistence import BASE, HEAD, IDENTITY
 
 SOURCE = {
     "kind": "issue_comment",

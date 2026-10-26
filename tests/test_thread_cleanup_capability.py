@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fake_github_http import json_response
 from review_sensei_github.application import (
     GitHubApplication,
     GitHubWriteOptions,
@@ -23,18 +24,27 @@ from review_sensei_github.publication import (
 )
 from review_sensei_github.publication_recovery import publication_http
 from review_sensei_github.thread_resolution import FindingThreadResolver
-
-from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
-from review_sensei.errors import ReviewInputError
-from review_sensei.session import LocalSessionLedger
-from tests.fake_github_http import json_response
-from tests.test_command_capacity_recovery import (
+from test_command_capacity_recovery import (
     APP,
     BASE,
     HEAD,
     CommandCapacityState,
 )
-from tests.test_github_broker_client import FakeResponse
+from test_github_broker_client import FakeResponse
+
+from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
+from review_sensei.errors import ReviewInputError
+from review_sensei.session import LocalSessionLedger
+
+
+def _cleanup_authority():
+    from test_github_broker_client import current_authority
+
+    return {
+        **current_authority("command", repository_id=1, head_sha=HEAD),
+        "repository": "owner/repo",
+        "pull_request": 1,
+    }
 
 
 class CleanupCapabilityTests(unittest.TestCase):
@@ -282,9 +292,13 @@ class CleanupBrokerResponseTests(unittest.TestCase):
         for label in ("thread_resolve", "review_publish", None):
 
             def opener(request, timeout):
+                payload = json.loads(request.data)
+                self.assertEqual(payload["oidc_token"], "synthetic")
+                self.assertEqual(payload["capability"], "thread_resolve")
+                self.assertEqual(payload["session_attestation"]["version"], 3)
+                self.assertEqual(payload["session_attestation"]["purpose"], "command")
                 self.assertEqual(
-                    json.loads(request.data),
-                    {"oidc_token": "synthetic", "capability": "thread_resolve"},
+                    set(payload), {"oidc_token", "capability", "session_attestation"}
                 )
                 return FakeResponse(
                     json.dumps(
@@ -292,7 +306,7 @@ class CleanupBrokerResponseTests(unittest.TestCase):
                     ).encode()
                 )
 
-            client = BrokerClient(opener=opener)
+            client = BrokerClient(authority=_cleanup_authority(), opener=opener)
             if label == "thread_resolve":
                 self.assertEqual(
                     client.exchange("synthetic", capability=label), "synthetic-cleanup"
@@ -354,7 +368,7 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 )
 
     def test_deferred_check_drift_cannot_approve_a_stale_head(self):
-        from tests.test_github_publication import pr_payload
+        from test_github_publication import pr_payload
 
         state = CommandCapacityState(
             complete=True, schema="1", inline_range=(0, 1), human_count=1, padded=False
@@ -677,6 +691,7 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             http = GitHubHttp(api_url="https://api.github.test", opener=state.open)
             app = GitHubApplication(
                 broker=BrokerClient(
+                    authority=_cleanup_authority(),
                     opener=exchange,
                     control=BrokerDispatchAccounting(
                         budget, "f" * 64, configured_liability, 1
@@ -746,7 +761,9 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             state.record(directory)
             http = GitHubHttp(api_url="https://api.github.test", opener=state.open)
             app = GitHubApplication(
-                broker=BrokerClient(),
+                broker=BrokerClient(
+                    authority=_cleanup_authority(),
+                ),
                 http=http,
                 reviewer=ReviewPublisher(http=http),
                 learner=None,
@@ -757,6 +774,7 @@ class CleanupCommandCompositionTests(unittest.TestCase):
 
             def verify(budget, operation_id):
                 app.broker = BrokerClient(
+                    authority=_cleanup_authority(),
                     opener=exchange_for(budget),
                     control=BrokerDispatchAccounting(budget, operation_id, 10, 1),
                 )
@@ -853,7 +871,9 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             state.record(directory)
             http = GitHubHttp(api_url="https://api.github.test", opener=state.open)
             app = GitHubApplication(
-                broker=BrokerClient(),
+                broker=BrokerClient(
+                    authority=_cleanup_authority(),
+                ),
                 http=http,
                 reviewer=ReviewPublisher(http=http),
                 learner=None,
@@ -864,6 +884,7 @@ class CleanupCommandCompositionTests(unittest.TestCase):
 
             budget = EvidenceReadBudget()
             app.broker = BrokerClient(
+                authority=_cleanup_authority(),
                 opener=exchange_for(budget),
                 control=BrokerDispatchAccounting(budget, "c" * 64, 10, 1),
             )
@@ -1043,6 +1064,7 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 )
 
             broker = BrokerClient(
+                authority=_cleanup_authority(),
                 opener=exchange,
                 control=BrokerDispatchAccounting(EvidenceReadBudget(), "e" * 64, 10, 1)
                 if mismatch
@@ -1113,6 +1135,7 @@ class CleanupCommandCompositionTests(unittest.TestCase):
 
         app = GitHubApplication(
             broker=BrokerClient(
+                authority=_cleanup_authority(),
                 opener=exchange,
                 control=BrokerDispatchAccounting(
                     EvidenceReadBudget(), "e" * 64, configured_liability, 1
@@ -1365,6 +1388,7 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                     )
 
                 broker = BrokerClient(
+                    authority=_cleanup_authority(),
                     opener=exchange,
                     control=BrokerDispatchAccounting(
                         budget, f"{attempt + 1:064x}", 10, 1
@@ -1460,7 +1484,9 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             return state.open(request, timeout)
 
         broker = BrokerClient(
-            opener=exchange, control=BrokerDispatchAccounting(budget, "c" * 64, 10, 1)
+            authority=_cleanup_authority(),
+            opener=exchange,
+            control=BrokerDispatchAccounting(budget, "c" * 64, 10, 1),
         )
         http = GitHubHttp(api_url="https://api.github.test", opener=open_request)
         app = GitHubApplication(
@@ -1510,7 +1536,9 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         budget = EvidenceReadBudget()
         original_deadline = budget.wall_deadline_ms
         app.broker = BrokerClient(
-            opener=exchange, control=BrokerDispatchAccounting(budget, "d" * 64, 10, 1)
+            authority=_cleanup_authority(),
+            opener=exchange,
+            control=BrokerDispatchAccounting(budget, "d" * 64, 10, 1),
         )
         before = len(exchanges)
         with tempfile.TemporaryDirectory() as directory:

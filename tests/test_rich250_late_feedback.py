@@ -23,6 +23,12 @@ from review_sensei_github.human_assessment import HumanAssessmentPublisher
 from review_sensei_github.partitioned_assessment import PartitionedAssessmentPlan
 from review_sensei_github.prose_publication import CommentReviewProseStore
 from review_sensei_github.publication_parts import prepare_finding_prose_parts
+from test_evidence_capacity import human_result, publication_diff, varied_comments
+from test_human_assessment import APP, BASE, DIFF, HEAD
+from test_public_feedback_continuation import LocalFeedbackHost
+from test_review_transaction import CONFIGURATION
+from test_review_work import AssessingProvider
+from test_rich250_public_writer import LocalPublicationHost, RichState
 
 from review_sensei.assessment_queue import pack_queue_state
 from review_sensei.bounded_evidence import EvidenceReadBudget
@@ -34,12 +40,6 @@ from review_sensei.feedback import FeedbackReference, FeedbackSelector
 from review_sensei.human_assessment import finding_instance_fingerprint
 from review_sensei.presentation import assign_finding_identifiers
 from review_sensei.session import LocalSessionLedger, mutate_commit
-from tests.test_evidence_capacity import human_result, publication_diff, varied_comments
-from tests.test_human_assessment import APP, BASE, DIFF, HEAD
-from tests.test_public_feedback_continuation import LocalFeedbackHost
-from tests.test_review_transaction import CONFIGURATION
-from tests.test_review_work import AssessingProvider
-from tests.test_rich250_public_writer import LocalPublicationHost, RichState
 
 
 class CapturedFeedbackHost(LocalFeedbackHost):

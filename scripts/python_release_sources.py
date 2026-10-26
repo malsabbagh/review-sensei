@@ -39,7 +39,11 @@ WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml"
 # workflow under the registry-only core contract. Never derive this allowlist
 # from a candidate, its selector, a receipt or downloaded release data.
 REGISTRY_ONLY_WORKFLOWS = frozenset(
-    {"2f7ea8f388968b8cadab9dae156e90a8fb636c945b28585cde6ae04412bccf0c"}
+    {
+        "2f7ea8f388968b8cadab9dae156e90a8fb636c945b28585cde6ae04412bccf0c",
+        # Current run-owned lifecycle; exact four installation lanes reviewed.
+        "5c06dc37b6875df24c9ac6ece3a410d32eeb7b1d2671e7c1bfae412703656185",
+    }
 )
 
 

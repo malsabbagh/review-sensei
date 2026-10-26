@@ -1965,20 +1965,11 @@ class GitHubApplication:
             # cold JWKS/tag fallback remains independently Worker-bounded.
             check_broker = self.broker
             if type(check_broker) is BrokerClient:
-                from .broker_control import BrokerDispatchAccounting
-
                 control = check_broker.control
                 if control is None or control.budget is not media_budget:
                     raise GitHubPublicationError(
                         "media command broker accounting is unavailable"
                     )
-                check_broker = copy(check_broker)
-                check_broker.control = BrokerDispatchAccounting(
-                    media_budget,
-                    control.operation_id,
-                    8,
-                    control.verification_liability,
-                )
             # This capability is required here. Preserve broker diagnostics for
             # the CLI's existing sanitized failure reporter instead of silently
             # degrading to a missing optional review check.

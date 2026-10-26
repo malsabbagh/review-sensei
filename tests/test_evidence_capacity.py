@@ -12,6 +12,8 @@ from review_sensei_github.publication import (
     MAX_PUBLISHED_REVIEW_BODY_BYTES,
     approval_eligibility_from_body,
 )
+from test_human_assessment import APP, BASE, DIFF, HEAD, State
+from test_review_transaction import IDENTITY, NOW, _baseline
 
 from review_sensei.baseline import (
     BaselinePersistenceError,
@@ -25,8 +27,6 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import MAX_HUMAN_REVIEW_BYTES, PendingHumanReview
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.session import SessionRecord, checkpoint_baseline_capacity
-from tests.test_human_assessment import APP, BASE, DIFF, HEAD, State
-from tests.test_review_transaction import IDENTITY, NOW, _baseline
 
 CAUSES = (
     "The retry acknowledges an event before its durable offset is committed.",

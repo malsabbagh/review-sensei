@@ -21,6 +21,7 @@ from pathlib import Path
 
 from review_sensei_github.checks import REVIEW_CHECK_NAME
 from review_sensei_github.doctor import with_github_checks
+from review_sensei_github.run_authority import CAPABILITIES as PYTHON_CAPABILITIES
 from review_sensei_github.setup import SETUP_APP_LOGIN
 
 from review_sensei.diagnostics import run_doctor
@@ -112,9 +113,7 @@ def _worker_capabilities() -> dict[str, set[str]]:
 
 
 def _python_capabilities() -> set[str]:
-    text = BROKER_CLIENT.read_text(encoding="utf-8")
-    body = text.split("if capability not in {", 1)[1].split("}:", 1)[0]
-    return set(re.findall(r'"([a-z_]+)"', body))
+    return set().union(*PYTHON_CAPABILITIES.values())
 
 
 def _normalized(text: str) -> str:
@@ -191,6 +190,12 @@ class GateReconciliationTests(unittest.TestCase):
         self.assertEqual(set(documented), set(worker))
         self.assertEqual(documented, worker)
         self.assertEqual(_python_capabilities(), set(worker))
+        self.assertEqual(set(PYTHON_CAPABILITIES), {"review", "command", "reply"})
+        for purpose, capabilities in PYTHON_CAPABILITIES.items():
+            with self.subTest(purpose=purpose):
+                self.assertLessEqual(capabilities, set(worker))
+                self.assertIn("review_session", capabilities)
+                self.assertIn("review_actions", capabilities)
 
         permissions = {
             entry.split(": ", 1)[0] for row in worker.values() for entry in row

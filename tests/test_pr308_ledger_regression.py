@@ -103,46 +103,6 @@ class DisposableComments:
         return [call for call in self.calls if call[0] != "GET"]
 
 
-class SyntheticConsumingBroker:
-    """Test authority only; deliberately makes no original-authenticity claim."""
-
-    def __init__(self):
-        self.used = set()
-        self.returned = "echo"
-        self.calls = []
-
-    def verify_session_grant(self, grant, attestation):
-        self.calls.append(grant)
-        if grant in self.used:
-            raise GitHubBrokerClientError("synthetic one-attempt grant consumed")
-        self.used.add(grant)
-        return dict(attestation) if self.returned == "echo" else self.returned
-
-
-def synthetic_attestation():
-    return {
-        "version": 1,
-        "repository": IDENTITY.repository,
-        "repository_id": IDENTITY.repository_id,
-        "pull_request": IDENTITY.pull_request,
-        "head_sha": HEAD,
-        "operation": "command",
-        "source_comment_id": 900000001,
-        "run_id": "900000001",
-        "issued_at": int(NOW.timestamp()),
-        "concurrency_group": "reviewsensei-session-1336322077-308",
-        "job_workflow_ref": (
-            "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5"
-        ),
-        "job_workflow_sha": "b" * 40,
-        "actor": "synthetic-maintainer",
-        "actor_type": "User",
-        "association": "OWNER",
-        "command_id": 900000001,
-        "command_digest": "c" * 64,
-    }
-
-
 class PreservedLedgerRegressionTests(unittest.TestCase):
     def setUp(self):
         self.original = json.loads(FIXTURE.read_text())
@@ -152,23 +112,14 @@ class PreservedLedgerRegressionTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.storage = DisposableComments(Path(self.temp.name) / "comments.json")
         self.storage.write([self.original])
-        self.broker = SyntheticConsumingBroker()
-        self.grant_number = 0
 
-    def reader(self, *, mutation=False, grant=None, attestation=None, broker=None):
-        http = GitHubHttp(api_url="https://api.github.test", opener=self.storage.opener)
-        kwargs = {}
-        if mutation:
-            self.grant_number += 1
-            kwargs = {
-                "broker": self.broker if broker is None else broker,
-                "session_grant": grant
-                or "sg1.1780000000000." + str(self.grant_number) * 43,
-                "session_attestation": attestation or synthetic_attestation(),
-                "head_sha": HEAD,
-            }
+    def reader(self):
+        # This unbound library reader preserves historical native state. It is
+        # not an authenticated Actions mutation authority or a migration path.
         return GitHubIssueCommentSessionLedger(
-            http, token="synthetic-test-token", app_slug="reviewsensei[bot]", **kwargs
+            GitHubHttp(api_url="https://api.github.test", opener=self.storage.opener),
+            token="synthetic-test-token",
+            app_slug="reviewsensei[bot]",
         )
 
     def load(self):
@@ -181,7 +132,7 @@ class PreservedLedgerRegressionTests(unittest.TestCase):
             "@reviewsensei review pause", actor="synthetic-maintainer", head_sha=HEAD
         )
         return apply_session_command(
-            reader or self.reader(mutation=True), IDENTITY, command, now=NOW
+            reader or self.reader(), IDENTITY, command, now=NOW
         )
 
     def test_exact_fixture_origin_and_canonical_digest_are_preserved(self):
@@ -242,7 +193,6 @@ class PreservedLedgerRegressionTests(unittest.TestCase):
         )
         self.assertEqual(self.storage.path.read_bytes(), before)
         self.assertFalse(self.storage.writes)
-        self.assertFalse(self.broker.calls)  # Reads neither consume nor invent grants.
         self.assertEqual(self.load().record_sha256, loaded.record_sha256)
         baseline = read_session_baseline(self.reader(), loaded)
         self.assertEqual(baseline.cache_key.repository, IDENTITY.repository)
@@ -309,11 +259,11 @@ class PreservedLedgerRegressionTests(unittest.TestCase):
                 )
         self.assertFalse(self.storage.writes)
 
-    def test_next_command_restart_and_duplicate_preserve_history_and_consumed_grants(
+    def test_unbound_library_restart_preserves_history_without_inventing_grants(
         self,
     ):
         initial_grants = set(GRANT_RE.findall(self.original["body"]))
-        ledger = self.reader(mutation=True)
+        ledger = self.reader()
         updated, result = self.pause(ledger)
         self.assertTrue(result.applied)
         self.assertEqual(updated.generation, 6)
@@ -334,22 +284,18 @@ class PreservedLedgerRegressionTests(unittest.TestCase):
         ):
             self.assertEqual(after.to_dict()[key], self.expected[key], key)
         all_grants = set(GRANT_RE.findall(self.storage.read()[0]["body"]))
-        self.assertTrue(initial_grants < all_grants)
-        self.assertEqual(len(all_grants), len(initial_grants) + 1)
+        self.assertEqual(initial_grants, all_grants)
         before_retry = self.storage.path.read_bytes()
         writes = len(self.storage.writes)
-        duplicate, result = self.pause(
-            self.reader(mutation=True, grant=ledger._session_grant)
-        )
+        duplicate, result = self.pause(self.reader())
         self.assertTrue(result.applied)
         self.assertEqual(duplicate, after)
         self.assertEqual(self.storage.path.read_bytes(), before_retry)
         self.assertEqual(len(self.storage.writes), writes)
-        self.assertEqual(len(self.broker.calls), 1)
 
     def test_supported_round_commit_restart_and_duplicate_do_not_double_count(self):
         reservation = "d" * 64
-        reserved = self.reader(mutation=True).reserve(
+        reserved = self.reader().reserve(
             IDENTITY,
             slot="verification",
             reservation_id=reservation,
@@ -363,7 +309,7 @@ class PreservedLedgerRegressionTests(unittest.TestCase):
             reserved.transaction
         )  # Completed prior transaction is retired on new reservation.
         self.assertEqual(self.load(), reserved)
-        committed = self.reader(mutation=True).commit(
+        committed = self.reader().commit(
             IDENTITY, reservation_id=reservation, expected_generation=6, now=NOW
         )
         self.assertEqual(
@@ -380,18 +326,17 @@ class PreservedLedgerRegressionTests(unittest.TestCase):
         self.assertIsNone(committed.reservation_id)
         self.assertEqual(self.load(), committed)
         before = self.storage.path.read_bytes()
-        duplicate = self.reader(mutation=True).commit(
+        duplicate = self.reader().commit(
             IDENTITY, reservation_id=reservation, expected_generation=6, now=NOW
         )
         self.assertEqual(duplicate, committed)
-        # A fresh one-use grant may be durably consumed on a semantic no-op.
-        # The record and counters stay identical; grant history may grow.
+        # Unbound library no-ops preserve the historical grant inventory.
         self.assertEqual(
             document(self.storage.read()[0]), document(json.loads(before)[0])
         )
-        self.assertTrue(
-            set(GRANT_RE.findall(json.loads(before)[0]["body"]))
-            <= set(GRANT_RE.findall(self.storage.read()[0]["body"]))
+        self.assertEqual(
+            set(GRANT_RE.findall(json.loads(before)[0]["body"])),
+            set(GRANT_RE.findall(self.storage.read()[0]["body"])),
         )
 
     def test_tampering_and_wrong_identity_fail_closed_without_repair(self):
@@ -430,15 +375,6 @@ class PreservedLedgerRegressionTests(unittest.TestCase):
             self.pause()
         self.assertFalse(self.storage.writes)
 
-    def test_stale_live_head_prevents_write_without_altering_old_head_decisions(self):
-        self.storage.live_head = "f" * 40
-        before = self.storage.path.read_bytes()
-        with self.assertRaisesRegex(ReviewInputError, "head is stale"):
-            self.pause()
-        self.assertEqual(self.storage.path.read_bytes(), before)
-        self.assertFalse(self.storage.writes)
-        self.assertEqual(self.load().to_dict(), self.expected)
-
     def test_conflicting_generation_preserves_concurrent_writer(self):
         def concurrent(read_number):
             if read_number == 2:
@@ -461,68 +397,103 @@ class PreservedLedgerRegressionTests(unittest.TestCase):
         self.assertEqual(self.load().generation, 6)
         self.assertEqual(list(self.load().dispositions), self.expected["dispositions"])
 
-    def test_incomplete_or_unverified_broker_evidence_never_writes(self):
-        with self.assertRaisesRegex(
-            ReviewInputError, "grant configuration is incomplete"
-        ):
-            GitHubIssueCommentSessionLedger(
-                GitHubHttp(opener=self.storage.opener),
-                token="synthetic",
-                broker=self.broker,
-                session_grant="sg1.1780000000000." + "a" * 43,
-                head_sha=HEAD,
-            )
-        for returned in (None, {}, {**synthetic_attestation(), "head_sha": "f" * 40}):
-            with self.subTest(returned=returned):
-                self.broker.returned = returned
-                with self.assertRaisesRegex(ReviewInputError, "verification failed"):
-                    self.pause()
-        wrong_scope = {**synthetic_attestation(), "pull_request": 309}
-        with self.assertRaisesRegex(ReviewInputError, "scope does not match"):
-            self.pause(self.reader(mutation=True, attestation=wrong_scope))
-        self.assertFalse(self.storage.writes)
-        self.assertEqual(self.load().to_dict(), self.expected)
-
-    def test_real_broker_client_rejects_missing_or_incomplete_verification_response(
+    def test_current_initializer_refuses_historical_root_without_importing_allowance(
         self,
     ):
+        from review_sensei_github.api_run_host import HOSTED_API_STARTUP_PLAN
+        from review_sensei_github.api_run_requests import ApiRunRequestTransport
+
+        from review_sensei.api_work import (
+            ApiExecutionOwner,
+            ApiRunIdentity,
+            FrozenApiConfiguration,
+        )
+
+        before = self.storage.path.read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            caller = ApiRunRequestTransport(
+                directory=Path(directory),
+                run=ApiRunIdentity(IDENTITY.repository_id, 900000002),
+                plan=HOSTED_API_STARTUP_PLAN,
+                attempt=1,
+                opener=self.storage.opener,
+            )
+            ledger = GitHubIssueCommentSessionLedger(
+                GitHubHttp(api_url="https://api.github.test", opener=caller.open),
+                token="synthetic",
+                app_slug="reviewsensei[bot]",
+            )
+            with self.assertRaisesRegex(ReviewInputError, "already exists"):
+                caller.initialize_and_activate(
+                    ledger,
+                    IDENTITY,
+                    FrozenApiConfiguration("b" * 40, "c" * 64, 512),
+                    ApiExecutionOwner(1, "hosted", 0),
+                )
+            self.assertTrue(caller.observations)
+            self.assertIsNone(caller._state)
+        self.assertFalse(self.storage.writes)
+        self.assertEqual(self.storage.path.read_bytes(), before)
+        self.assertEqual(self.load().to_dict(), self.expected)
+
+    def test_phase_bound_authority_is_retired_for_every_version_before_http(self):
+        before = self.storage.path.read_bytes()
+        for version in (1, 2, 3):
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "phase ledgers are retired"
+                ):
+                    GitHubIssueCommentSessionLedger(
+                        GitHubHttp(opener=self.storage.opener),
+                        token="synthetic",
+                        broker=object(),
+                        session_grant="synthetic-never-replayed",
+                        session_attestation={"version": version},
+                        head_sha=HEAD,
+                    )
+        self.assertFalse(self.storage.calls)
+        self.assertEqual(self.storage.path.read_bytes(), before)
+
+    def test_real_current_broker_rejects_incomplete_or_wrong_scope_verification(self):
+        from test_github_broker_client import current_authority, current_grant
+
+        authority = current_authority(
+            "command", repository_id=IDENTITY.repository_id, head_sha=HEAD
+        )
+        authority.update(repository=IDENTITY.repository, pull_request=308)
+        grant = current_grant(authority)
         responses = (
             {},
             {"session_attestation": {"version": 1}},
-            {"session_attestation": {**synthetic_attestation(), "head_sha": "f" * 40}},
+            {"session_attestation": {**grant, "head_sha": "f" * 40}},
         )
         for response in responses:
             with self.subTest(response=response):
+                calls = []
 
                 def broker_opener(request, timeout):
-                    self.assertEqual(
-                        urlparse(request.full_url).hostname, "broker.github.test"
-                    )
+                    calls.append(request)
                     self.assertTrue(request.full_url.endswith("/session-grant"))
                     return Response(response)
 
                 broker = BrokerClient(
                     broker_url="https://broker.github.test/api/github/token",
                     opener=broker_opener,
+                    authority=authority,
                 )
-                with self.assertRaisesRegex(
-                    ReviewInputError, "grant verification failed"
-                ):
-                    self.pause(self.reader(mutation=True, broker=broker))
+                with self.assertRaises(GitHubBrokerClientError):
+                    broker.verify_session_grant("sg1.1780000000000." + "A" * 43, grant)
+                self.assertEqual(len(calls), 1)
         self.assertFalse(self.storage.writes)
         self.assertEqual(self.load().to_dict(), self.expected)
 
-    def test_interrupted_write_requires_fresh_grant_and_readback_before_continuing(
-        self,
-    ):
+    def test_unbound_library_interrupted_write_requires_readback(self):
         for mode, persisted in (("before-store", False), ("after-store", True)):
             with self.subTest(mode=mode):
                 self.storage.write([self.original])
                 self.storage.interrupt = mode
-                ledger = self.reader(mutation=True)
-                grant = ledger._session_grant
                 with self.assertRaises(GitHubPublicationTransientError):
-                    self.pause(ledger)
+                    self.pause(self.reader())
                 self.storage.interrupt = None
                 record = self.load()
                 self.assertEqual(record.operator_paused, persisted)
@@ -530,21 +501,83 @@ class PreservedLedgerRegressionTests(unittest.TestCase):
                 self.assertEqual(
                     list(record.dispositions), self.expected["dispositions"]
                 )
-                if not persisted:
-                    with self.assertRaisesRegex(
-                        ReviewInputError, "grant verification failed"
-                    ):
-                        self.pause(self.reader(mutation=True, grant=grant))
-                updated, result = (
-                    self.pause()
-                )  # New grant; public command sees any durable prior success.
-                self.assertTrue(result.applied)
-                self.assertEqual(updated.generation, 6)
-                self.assertEqual(self.load(), updated)
+                self.assertEqual(
+                    set(GRANT_RE.findall(self.storage.read()[0]["body"])),
+                    set(GRANT_RE.findall(self.original["body"])),
+                )
         self.assertEqual(
             hashlib.sha256(FIXTURE.read_bytes()).hexdigest(),
             self.evidence["fixture_sha256"],
         )
+
+
+class CurrentActionPreservationTests(unittest.TestCase):
+    """Current Actions behavior is qualified independently of historical bytes."""
+
+    def test_current_pause_survives_reconstruction_and_stale_head_refuses(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_action_run import CommandEntryFixture
+        from test_api_work_persistence import IDENTITY as CURRENT_IDENTITY
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = CommandEntryFixture(directory)
+            self.assertEqual(f.invoke_command(), 0, f.error)
+            original = parse_session_comment(
+                f.comment["body"], identity=CURRENT_IDENTITY
+            )
+            self.assertTrue(original.operator_paused)
+            self.assertEqual(original.api_run_accounting["action"]["phase"], "terminal")
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error)
+            current = parse_session_comment(
+                f.comment["body"], identity=CURRENT_IDENTITY
+            )
+            self.assertTrue(current.operator_paused)
+            self.assertEqual(f.business_writes, 1)
+            self.assertEqual(
+                current.completed_initial_reviews, original.completed_initial_reviews
+            )
+            self.assertEqual(
+                current.completed_verification_rounds,
+                original.completed_verification_rounds,
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            f = CommandEntryFixture(directory)
+            f.requested_head = "f" * 40
+            self.assertNotEqual(f.invoke_command(), 0)
+            self.assertIsNone(f.comment)
+            self.assertEqual(f.business_writes, 0)
+
+    def test_current_unknown_business_write_retains_charge_and_never_replays(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_action_run import CommandEntryFixture
+        from test_api_work_persistence import IDENTITY as CURRENT_IDENTITY
+
+        for outcome in ("stored", "absent"):
+            with (
+                self.subTest(outcome=outcome),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = CommandEntryFixture(directory)
+                f.action_fault = "business-" + outcome
+                status = f.invoke_command()
+                record = parse_session_comment(
+                    f.comment["body"], identity=CURRENT_IDENTITY
+                )
+                self.assertEqual(status == 0, outcome == "stored", f.error)
+                self.assertEqual(record.operator_paused, outcome == "stored")
+                self.assertEqual(
+                    record.api_run_accounting["action"]["phase"],
+                    "terminal" if outcome == "stored" else "pending",
+                )
+                self.assertGreaterEqual(f.accounted.accounting.uncertain, 1)
+                self.assertEqual(f.business_writes, 1)
+                if outcome == "absent":
+                    retained = f.comment["body"]
+                    f.select_command("@reviewsensei review status", new_run=True)
+                    self.assertNotEqual(f.invoke_command(), 0)
+                    self.assertEqual(f.comment["body"], retained)
+                    self.assertEqual(f.business_writes, 1)
 
 
 if __name__ == "__main__":

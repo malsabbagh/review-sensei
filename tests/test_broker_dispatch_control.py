@@ -12,10 +12,10 @@ from review_sensei_github.broker_control import (
     BrokerDispatchAccounting,
 )
 from review_sensei_github.errors import GitHubBrokerClientError
+from test_github_broker_client import FakeResponse, current_authority
 
 from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
-from tests.test_github_broker_client import FakeResponse, current_authority
 
 
 class BrokerDispatchControlTests(unittest.TestCase):

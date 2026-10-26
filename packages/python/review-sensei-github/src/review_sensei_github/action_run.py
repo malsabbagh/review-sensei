@@ -198,6 +198,13 @@ def execute_command(run: ReviewRun, args: Any) -> int:
         )
     authority.fence()
     boundary = caller.begin_action_effect(run.ledger, run.identity, intent)
+    explicit_mode = getattr(args, "review_mode", None)
+    if (
+        explicit_mode is None
+        and not os.environ.get("REVIEWSENSEI_REVIEW_MODE", "").strip()
+        and run.plan.policy.reviews == "advisory"
+    ):
+        explicit_mode = "advisory"
     result = app.apply_maintainer_command(
         options=_options(run),
         oidc_token=run.oidc,
@@ -222,7 +229,7 @@ def execute_command(run: ReviewRun, args: Any) -> int:
         run_id=str(caller.run.run_id),
         run_attempt=str(caller.attempt),
         reviews_policy=run.plan.policy.reviews,
-        convergence_policy=resolve_review_convergence_policy(),
+        convergence_policy=resolve_review_convergence_policy(mode=explicit_mode),
     )
     if result.evaluation_failed:
         raise ReviewInputError(

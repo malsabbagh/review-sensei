@@ -1,16 +1,18 @@
 """Public hosted entry points over the captured PR316 history size distribution."""
 
+import copy
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
+import test_activation_tail as tail_fixture
+import test_default_publication_cli_journey as cli_fixture
+from fake_github_http import json_response
 from review_sensei_github.application import (
     GitHubWriteOptions,
-    resolve_hosted_session_ledger,
 )
 from review_sensei_github.errors import (
     GitHubHTTPError,
@@ -26,13 +28,10 @@ from review_sensei_github.operation_entry import (
 from review_sensei_github.release_reservation import release_own_reservation
 from review_sensei_github.session_ledger import render_session_comment
 from review_sensei_github.thread_resolution import FindingThreadResolver
+from test_publication_recovery import application, checkpoint, publish, recover
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionIdentity, SessionRecord
-from tests import test_activation_tail as tail_fixture
-from tests import test_default_publication_cli_journey as cli_fixture
-from tests.fake_github_http import json_response
-from tests.test_publication_recovery import application, checkpoint, publish, recover
 
 IDENTITY = SessionIdentity("owner/repo", 1, repository_id=1)
 HEAD = "b" * 40
@@ -177,59 +176,210 @@ class Broker:
         )
 
 
+class CurrentLargeEntryFixture:
+    """Construct actual current entry, preserving captured external wire objects."""
+
+    @staticmethod
+    def create(directory, items=None, *, limit=512, reviews=None):
+        from test_review_run import EntryFixture
+
+        class LargeEntry(EntryFixture):
+            def __init__(self):
+                super().__init__(directory, limit=limit)
+                self.comment_page_reads = []
+                self.review_page_reads = []
+
+            def external(self, request, timeout):
+                path = urlsplit(request.full_url).path
+                query = parse_qs(urlsplit(request.full_url).query)
+                if request.method == "GET" and path.endswith("/issues/7/comments"):
+                    assert (
+                        len(self.accounted.observations)
+                        == sum(a == self.attempt for a, _, _ in self.trace) + 1
+                    )
+                    self.trace.append((self.attempt, request.method, path))
+                    size, page = (
+                        int(query.get("per_page", [100])[0]),
+                        int(query.get("page", [1])[0]),
+                    )
+                    self.comment_page_reads.append((size, page))
+                    rows = ([self.comment] if self.comment else []) + list(
+                        self.extra_comments.values()
+                    )
+                    since = query.get("since", [None])[0]
+                    if since:
+                        rows = [
+                            r
+                            for r in rows
+                            if not isinstance(r.get("updated_at"), str)
+                            or r["updated_at"] >= since
+                        ]
+                    return json_response(rows[(page - 1) * size : page * size])
+                if request.method == "GET" and path.endswith("/pulls/7/reviews"):
+                    assert (
+                        len(self.accounted.observations)
+                        == sum(a == self.attempt for a, _, _ in self.trace) + 1
+                    )
+                    self.trace.append((self.attempt, request.method, path))
+                    size, page = (
+                        int(query.get("per_page", [100])[0]),
+                        int(query.get("page", [1])[0]),
+                    )
+                    self.review_page_reads.append((size, page))
+                    return json_response(self.reviews[(page - 1) * size : page * size])
+                result = super().external(request, timeout)
+                if self.comment is not None:
+                    self.comment["updated_at"] = "2026-10-26T00:00:00Z"
+                return result
+
+        f = LargeEntry()
+        for item in items if items is not None else captured_shape():
+            f.extra_comments[item["id"]] = {
+                **json.loads(json.dumps(item)),
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            }
+        f.reviews = json.loads(json.dumps(reviews or []))
+        return f
+
+
+def current_history_fixture(directory, items=None):
+    """Real current caller ledger with synthetic large native history."""
+    f = tail_fixture.CurrentHostedFixture(directory)
+    raw = f.caller._opener
+    f.urls = []
+    f.service.comment["updated_at"] = "2026-10-26T00:00:00Z"
+
+    def recorded(request, timeout):
+        f.urls.append((request.method, request.full_url))
+        path = urlsplit(request.full_url).path
+        if request.method == "GET" and path.endswith("/issues/7/comments"):
+            assert (
+                len(f.caller.observations)
+                == sum(a == f.service.attempt for a, _, _ in f.service.trace) + 1
+            )
+            f.service.trace.append((f.service.attempt, request.method, path))
+            query = parse_qs(urlsplit(request.full_url).query)
+            size, page = (
+                int(query.get("per_page", [100])[0]),
+                int(query.get("page", [1])[0]),
+            )
+            rows = [f.service.comment] + list(f.service.extra_comments.values())
+            since = query.get("since", [None])[0]
+            if since:
+                rows = [
+                    r
+                    for r in rows
+                    if not isinstance(r.get("updated_at"), str)
+                    or r["updated_at"] >= since
+                ]
+            return json_response(rows[(page - 1) * size : page * size])
+        result = raw(request, timeout)
+        f.service.comment["updated_at"] = "2026-10-26T00:00:00Z"
+        return result
+
+    f.caller._opener = recorded
+    for item in items if items is not None else captured_shape():
+        item = {**item, "id": item["id"] + 5000}
+        f.service.extra_comments[item["id"]] = item
+    return f
+
+
 class HostedHistoryReaderTests(unittest.TestCase):
-    def test_actual_cli_keeps_77_findings_and_accepted_operation_with_both_large_histories(
+    def test_current_review_entry_keeps_77_findings_and_result_with_both_large_histories(
         self,
     ):
-        for extra_review in (False, True):
-            with self.subTest(near_capacity=extra_review):
-                case = cli_fixture.DefaultPublicationCliJourneyTests()
-                state = LargeJourneyState()
-                state.reviews = captured_reviews()
-                if extra_review:
-                    state.reviews.append(
-                        {**state.reviews[0], "id": 4999, "body": "x" * 60_000}
-                    )
-                    self.assertGreater(encoded_size(state.reviews), 512 * 1024)
-                with tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
-                    result, _ = case.setup_files(root)
-                    case.configuration(root, "complete")
-                    case.accept_analysis(state, result)
-                    code, output, error = case.invoke(root, state, actions=True)
-                    self.assertEqual(code, 0, (output, error))
-                    case.assert_complete_publication(state, result)
-                    if extra_review:
-                        self.assertTrue(
-                            any(size < 100 for size, _ in state.review_page_reads)
-                        )
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_api_work_persistence import IDENTITY as CURRENT_IDENTITY
 
-    def test_sealed_tail_binds_smaller_fence_pages_and_original_accounting(self):
-        case = tail_fixture.HostedTailTests()
-        state, broker, ledger = case.setup_host()
-        for item in captured_shape():
-            item = {
-                **item,
-                "id": item["id"] + 5000,
-                "created_at": "2020-01-01T00:00:01Z",
-                "updated_at": "2020-01-01T00:00:01Z",
-            }
-            state.comments[item["id"]] = item
-        case.reserve(ledger)
-        case.fresh(broker, ledger, pages=2)
-        saved = case.activate(ledger, pages=2)
-        self.assertIsNotNone(saved.assessment_queue)
-        self.assertEqual(
-            ledger.evidence_budget.calls, len(state.calls) + len(broker.calls)
-        )
-        self.assertEqual(
-            saved.assessment_queue["active_operation"]["read_accounting"]["calls"],
-            ledger.evidence_budget.calls,
-        )
-        self.assertLessEqual(ledger.evidence_budget.calls, 64)
-        self.assertTrue(
-            any("per_page=20" in url and "since=" in url for _, url in state.calls)
-        )
+        for extra_review in (False, True):
+            with (
+                self.subTest(near_capacity=extra_review),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                reviews = captured_reviews()
+                if extra_review:
+                    reviews.append({**reviews[0], "id": 4999, "body": "x" * 60000})
+                    self.assertGreater(encoded_size(reviews), 512 * 1024)
+                f = CurrentLargeEntryFixture.create(directory, reviews=reviews)
+                original_history = copy.deepcopy(f.extra_comments)
+                f.provider_comments = [
+                    {
+                        "path": "src/app.py",
+                        "line": 2,
+                        "side": "RIGHT",
+                        "body": f"Nonblocking observation {i}.",
+                        "severity": "low",
+                        "blocking": False,
+                        "needs_human": False,
+                    }
+                    for i in range(77)
+                ]
+                self.assertEqual(f.invoke(), 0, f.error)
+                current = parse_session_comment(
+                    f.comment["body"], identity=CURRENT_IDENTITY
+                )
+                self.assertEqual(current.transaction.phase, "publication_succeeded")
+                from review_sensei_github.publication import parse_finding_index
+
+                from review_sensei.human_assessment import finding_instance_fingerprint
+                from review_sensei.models import ReviewResult
+
+                result = ReviewResult.from_dict(
+                    json.loads((f.root / "review.json").read_text())
+                )
+                indexes = [
+                    index
+                    for r in f.reviews
+                    if (
+                        index := parse_finding_index(
+                            r["body"], repository_id=123, pull_request=7, head_sha=HEAD
+                        )
+                    )
+                    is not None
+                ]
+                self.assertEqual(len(result.comments), 77)
+                self.assertEqual(len(indexes), 1)
+                self.assertEqual(len(indexes[0].entries), 77)
+                self.assertEqual(
+                    {entry.instance for entry in indexes[0].entries},
+                    {finding_instance_fingerprint(c) for c in result.comments},
+                )
+                complete_text = "\n".join(r["body"] for r in f.reviews) + "\n".join(
+                    c["body"] for c in f.inline
+                )
+                for comment in result.comments:
+                    self.assertIn(comment.body, complete_text)
+                self.assertNotIn("omitted for size", complete_text)
+                self.assertFalse(
+                    any(
+                        entry.blocking or entry.needs_human
+                        for entry in indexes[0].entries
+                    )
+                )
+                self.assertEqual(f.provider_calls, 1)
+                self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
+                self.assertTrue(any(size < 100 for size, _ in f.comment_page_reads))
+                if extra_review:
+                    self.assertTrue(any(size < 100 for size, _ in f.review_page_reads))
+                for key, value in original_history.items():
+                    self.assertEqual(f.extra_comments[key], value)
+                self.assertEqual(len(f.accounted.observations), len(f.trace))
+
+    def test_current_native_checkpoint_binds_adaptive_pages_and_original_accounting(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            f = current_history_fixture(directory)
+            before = len(f.service.trace)
+            saved = f.checkpoint(1)
+            self.assertTrue(saved.operator_paused)
+            self.assertGreater(len(f.service.trace) - before, 4)
+            self.assertTrue(any("per_page=20" in url for _, url in f.urls))
+            self.assertEqual(
+                f.caller.accounting.confirmed, len(f.service.trace) - before
+            )
+            self.assertEqual(f.caller.accounting.uncertain, 0)
+            f.assert_physical_accounting(self)
 
     def server(self):
         items = captured_shape()
@@ -242,38 +392,40 @@ class HostedHistoryReaderTests(unittest.TestCase):
         )
         return HistoryServer(items)
 
-    def test_startup_resolves_real_ledger_after_broker_accepts_large_history(self):
-        server, broker = self.server(), Broker()
-        ledger = resolve_hosted_session_ledger(
-            broker=broker,
-            http=server.http,
-            oidc_token="fixture-oidc",
-            repository="owner/repo",
-            repository_id=1,
-            pull_request=1,
-            head_sha=HEAD,
-            app_slug=APP,
-        )
-        self.assertEqual(broker.calls, 1)
-        loaded = ledger.load(IDENTITY)
-        self.assertEqual(loaded.status, "ok")
-        self.assertEqual(loaded.record.generation, 0)
-        self.assertTrue(all(method == "GET" for method, *_ in server.calls))
+    def test_current_startup_resolves_native_history_after_v3_scope(self):
+        from review_sensei_github.api_run_requests import ApiRunSessionLedger
 
-    def test_cleanup_discovers_no_reservation_without_mutation(self):
-        server = self.server()
-        outcome = release_own_reservation(
-            broker=Broker(),
-            http=server.http,
-            oidc_token="fixture-oidc",
-            repository="owner/repo",
-            repository_id=1,
-            pull_request=1,
-            head_sha=HEAD,
-            run_id="10000000001",
-        )
-        self.assertEqual(outcome, "no-reservation")
-        self.assertTrue(all(method == "GET" for method, *_ in server.calls))
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentLargeEntryFixture.create(directory)
+
+            def observe():
+                self.assertIsInstance(f.selected.ledger, ApiRunSessionLedger)
+                self.assertEqual(f.selected.ledger.authenticated_app_id, 999)
+                self.assertEqual(f.selected.session_authority["version"], 3)
+
+            f.before_provider = observe
+            self.assertEqual(f.invoke(), 0, f.error)
+            self.assertEqual(f.provider_calls, 1)
+            self.assertTrue(any(size < 100 for size, _ in f.comment_page_reads))
+            self.assertEqual(len(f.accounted.observations), len(f.trace))
+
+    def test_separate_cleanup_refuses_before_broker_or_history_http(self):
+        server, broker = self.server(), Broker()
+        with self.assertRaisesRegex(
+            ReviewInputError, "separate reservation cleanup is retired"
+        ):
+            release_own_reservation(
+                broker=broker,
+                http=server.http,
+                oidc_token="fixture-oidc",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD,
+                run_id="10000000001",
+            )
+        self.assertEqual(server.calls, [])
+        self.assertEqual(broker.calls, 0)
 
     def test_default_list_reader_returns_every_full_captured_shape_object(self):
         items = captured_shape()
@@ -343,7 +495,7 @@ class HostedHistoryReaderTests(unittest.TestCase):
         self.assertEqual(result.resolved, ())
         self.assertEqual(calls, [(100, 0), (50, 0), (50, 50)])
 
-    def test_large_history_crosses_startup_operation_checkpoint_publication_and_replay(
+    def test_library_large_history_crosses_operation_checkpoint_publication_and_replay(
         self,
     ):
         self.journey(captured_shape(), findings=77)
@@ -367,15 +519,10 @@ class HostedHistoryReaderTests(unittest.TestCase):
         state = LargeJourneyState()
         state.history = history
         original_history = json.loads(json.dumps(history))
-        ledger = resolve_hosted_session_ledger(
-            broker=Broker(),
-            http=state.http,
-            oidc_token="fixture-oidc",
-            repository="owner/repo",
-            repository_id=1,
-            pull_request=1,
-            head_sha=HEAD,
-            app_slug=APP,
+        from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
+
+        ledger = GitHubIssueCommentSessionLedger(
+            state.http, token="fixture-token", app_slug=APP
         )
         result, key = checkpoint(ledger, count=findings)
         payload = json.dumps(result.to_dict(), sort_keys=True).encode()
@@ -429,19 +576,8 @@ class HostedHistoryReaderTests(unittest.TestCase):
         loaded = ledger.load(IDENTITY)
         self.assertEqual(loaded.record.transaction.phase, "publication_succeeded")
         self.assertIsNone(loaded.record.reservation_id)
-        self.assertEqual(
-            release_own_reservation(
-                broker=Broker(),
-                http=state.http,
-                oidc_token="fixture-oidc",
-                repository="owner/repo",
-                repository_id=1,
-                pull_request=1,
-                head_sha=HEAD,
-                run_id="10000000001",
-            ),
-            "no-reservation",
-        )
+        # Terminal library publication proves no reservation survives without
+        # invoking a separate hosted cleanup process.
         replay = run_actions_analysis(**arguments)
         self.assertIsInstance(replay, HostedProviderResult)
         self.assertEqual(executions, [1])
@@ -584,66 +720,36 @@ class HostedHistoryReaderTests(unittest.TestCase):
                     self.assertEqual([v["first"] for v in calls], [100, 50, 25, 5, 1])
                     self.assertEqual({v["after"] for v in calls}, {None})
 
-    def test_sealed_tail_growth_refuses_without_unplanned_smaller_reads_or_activation(
+    def test_current_native_history_growth_exhausts_finite_scan_before_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = current_history_fixture(directory)
+            first = next(iter(f.service.extra_comments.values()))
+            first["body"] = "x" * 600000
+            before = len(f.service.trace)
+            with self.assertRaises(ReviewInputError):
+                f.checkpoint()
+            used = len(f.service.trace)
+            self.assertLessEqual(used - before, 7)
+            self.assertTrue(all(m == "GET" for _, m, _ in f.service.trace[before:]))
+            self.assertTrue(any("per_page=1" in url for _, url in f.urls))
+            with self.assertRaisesRegex(ReviewInputError, "cannot be replenished"):
+                f.checkpoint()
+            self.assertEqual(len(f.service.trace), used)
+            f.assert_physical_accounting(self)
+
+    def test_current_remote_ledger_reaches_single_item_pages_without_refilling_allowance(
         self,
     ):
-        case = tail_fixture.HostedTailTests()
-        state, broker, ledger = case.setup_host()
-        history = captured_shape()
-        for item in history:
-            item = {
-                **item,
-                "id": item["id"] + 5000,
-                "created_at": "2020-01-01T00:00:01Z",
-                "updated_at": "2020-01-01T00:00:01Z",
-            }
-            state.comments[item["id"]] = item
-        case.reserve(ledger)
-        case.fresh(broker, ledger, pages=2)
-        issue = ledger.evidence_budget.reserve_tail
-        tickets = []
-
-        def grow_after_seal(plan):
-            ticket = issue(plan)
-            tickets.append(ticket)
-            state.comments[history[0]["id"] + 5000]["body"] = "x" * 600_000
-            return ticket
-
-        start = len(state.calls)
-        with patch.object(
-            ledger.evidence_budget, "reserve_tail", side_effect=grow_after_seal
-        ):
-            with self.assertRaises(GitHubPublicationError):
-                case.activate(ledger, pages=2)
-        self.assertEqual(len(tickets), 1)
-        tail_calls = state.calls[start:]
-        self.assertTrue(all(method != "PATCH" for method, _ in tail_calls))
-        self.assertFalse(
-            any("per_page=5&" in url or "per_page=1&" in url for _, url in tail_calls)
-        )
-        self.assertIsNone(ledger._activation_ticket)
-
-    def test_remote_ledger_reaches_single_item_pages_without_refilling_allowance(self):
-        case = tail_fixture.HostedTailTests()
-        state, broker, ledger = case.setup_host()
-        for item in captured_shape()[:2]:
-            item = {
-                **item,
-                "id": item["id"] + 5000,
-                "opaque": {"padding": "m" * 300_000},
-            }
-            state.comments[item["id"]] = item
-        self.assertEqual(
-            ledger.load(
-                tail_fixture.fixture.IDENTITY, now=tail_fixture.fixture.NOW
-            ).status,
-            "ok",
-        )
-        self.assertTrue(any("per_page=1&" in url for _, url in state.calls))
-        self.assertEqual(
-            ledger.evidence_budget.calls, len(state.calls) + len(broker.calls)
-        )
-        self.assertLessEqual(ledger.evidence_budget.calls, 64)
+        items = [
+            {**item, "opaque": {"padding": "m" * 300000}}
+            for item in captured_shape()[:2]
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            f = current_history_fixture(directory, items)
+            self.assertEqual(f.ledger.load(f.identity).status, "ok")
+            self.assertTrue(any("per_page=1&" in url for _, url in f.urls))
+            self.assertEqual(f.caller.accounting.confirmed, len(f.urls))
+            f.assert_physical_accounting(self)
 
     def test_history_reader_keeps_medium_page_capacity_and_exact_unaligned_offsets(
         self,

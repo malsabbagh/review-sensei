@@ -1,4 +1,4 @@
-"""Explicit caller recovery reconstructs original context without inference."""
+"""Local/core recovery and current Actions successors retain exact context."""
 
 from __future__ import annotations
 
@@ -15,16 +15,16 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import review_sensei_github as github
+import test_default_publication_cli_journey as journey_fixture
+from fake_github_http import json_response
 from review_sensei_github.cli import main as github_main
 from review_sensei_github.review_hooks import GitHubReviewHooks
+from test_publication_recovery import APP, BASE, HEAD, IDENTITY, _Broker
 
 import review_sensei.cli as engine_cli
 from review_sensei.models import ProviderResponse, ReviewResult
 from review_sensei.service import ReviewService
 from review_sensei.session import LocalSessionLedger
-from tests import test_default_publication_cli_journey as journey_fixture
-from tests.fake_github_http import json_response
-from tests.test_publication_recovery import APP, BASE, HEAD, IDENTITY, _Broker
 
 
 class _AnalysisProvider:
@@ -133,7 +133,7 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
             redirect_stdout(io.StringIO()),
             redirect_stderr(io.StringIO()),
         ):
-            self.assertEqual(github_main(["review", *argv]), 0)
+            self.assertEqual(engine_cli.main(argv, hosted_hooks=GitHubReviewHooks()), 0)
         return argv
 
     def invoke(
@@ -253,7 +253,9 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
                 redirect_stdout(io.StringIO()),
                 redirect_stderr(io.StringIO()),
             ):
-                self.assertEqual(github_main(["review", *argv]), 1)
+                self.assertEqual(
+                    engine_cli.main(argv, hosted_hooks=GitHubReviewHooks()), 1
+                )
             outcome = json.loads((root / "analysis-outcome.json").read_text())
             self.assertEqual(outcome["diagnostic"], "publication_recovery_required")
             self.assertEqual(outcome["provider_calls"], 0)
@@ -472,35 +474,101 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
                 self.assertFalse(any(m != "GET" for m, _, _ in state.calls))
                 self.assertEqual(ledger.load(IDENTITY).record, before)
 
-    def test_reconstructed_recovery_still_requires_the_actual_accepted_result(self):
+    def test_separate_actions_reconstruction_refuses_even_an_accepted_result(self):
         for changed in (False, True):
             with (
                 self.subTest(changed=changed),
                 tempfile.TemporaryDirectory() as directory,
             ):
-                root = Path(directory)
+                root, state = Path(directory), _FailedPublication()
                 self.original_analysis(root)
+                self.assertEqual(self.invoke(root, state)[0], 1)
                 result = ReviewResult.from_dict(
                     json.loads((root / "result.json").read_text())
                 )
-                state = _FailedPublication()
-                self.assertEqual(self.invoke(root, state)[0], 1)
                 journey_fixture.DefaultPublicationCliJourneyTests.accept_analysis(
                     self, state, result, changed=changed
                 )
+                before = LocalSessionLedger(root / "ledger").load(IDENTITY).record
+                parts = [dict(item) for item in state.parts]
                 state.calls.clear()
-                state.fail_review = False
-                code, output, error = self.invoke(
+                code, _, error = self.invoke(
                     root, state, reconstruct=True, actions=True
                 )
-                if changed:
-                    self.assertEqual(code, 1, error)
-                    self.assertIn("does not match the accepted operation", error)
-                    self.assertFalse(any(m != "GET" for m, _, _ in state.calls))
-                else:
-                    self.assertEqual(code, 0, error)
-                    self.assertIn("published", output)
-                    self.assertLessEqual(len(state.calls), 60)
+                self.assertEqual(code, 1, error)
+                self.assertIn("Actions phase entry is retired", error)
+                self.assertEqual(state.calls, [])
+                self.assertEqual(state.parts, parts)
+                self.assertEqual(
+                    LocalSessionLedger(root / "ledger").load(IDENTITY).record, before
+                )
+
+    def test_current_original_run_successor_uses_retained_result_and_same_allowance(
+        self,
+    ):
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_api_work_lifecycle import caller_measurement
+        from test_api_work_persistence import IDENTITY as CURRENT_IDENTITY
+        from test_review_run import EntryFixture
+
+        from review_sensei.api_work import ApiRunAccounting
+
+        with tempfile.TemporaryDirectory() as directory:
+            current = EntryFixture(directory, limit=512)
+
+            def interrupted():
+                raise KeyboardInterrupt()
+
+            current.before_publication = interrupted
+            self.assertEqual(current.invoke(), 130, current.error)
+            pending = parse_session_comment(
+                current.comment["body"], identity=CURRENT_IDENTITY
+            )
+            self.assertEqual(pending.transaction.phase, "publication_pending")
+            old = ApiRunAccounting.from_document(pending.api_run_accounting)
+            retained = {
+                key: dict(value) for key, value in current.extra_comments.items()
+            }
+            for name in ("review.json", "configuration.json", "admission.json"):
+                (current.root / name).unlink()
+            current.attempt = 2
+            current.before_publication = None
+            self.assertEqual(current.invoke(), 0, current.error)
+            self.assertEqual(current.provider_calls, 1)
+            final = parse_session_comment(
+                current.comment["body"], identity=CURRENT_IDENTITY
+            )
+            self.assertEqual(
+                final.transaction.transaction_id, pending.transaction.transaction_id
+            )
+            self.assertEqual(
+                final.transaction.result_sha256, pending.transaction.result_sha256
+            )
+            self.assertEqual(final.transaction.phase, "publication_succeeded")
+            self.assertEqual(
+                final.completed_initial_reviews, pending.completed_initial_reviews
+            )
+            self.assertEqual(
+                final.completed_verification_rounds,
+                pending.completed_verification_rounds,
+            )
+            accounting = ApiRunAccounting.from_document(final.api_run_accounting)
+            self.assertEqual(accounting.identity, old.identity)
+            self.assertEqual(accounting.configuration, old.configuration)
+            self.assertEqual(accounting.startup, old.startup)
+            self.assertEqual(accounting.blocks[: len(old.blocks)], old.blocks)
+            self.assertEqual(
+                accounting.terminal_transaction, final.transaction.transaction_id
+            )
+            for key, item in retained.items():
+                self.assertEqual(current.extra_comments[key], item)
+            measurement = caller_measurement(current)
+            self.assertEqual(
+                measurement["physical_attempts"],
+                sum(len(t.observations) for t in current.transports),
+            )
+            self.assertLessEqual(measurement["physical_attempts"], 512)
+            self.assertEqual(measurement["terminal_owner"], "publication-completion")
 
     def test_overwritten_original_verification_baseline_requires_original_document(
         self,

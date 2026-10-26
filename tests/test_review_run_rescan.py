@@ -18,13 +18,13 @@ from review_sensei_github.publication import (
     approval_eligibility_marker,
 )
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_persistence import BASE, HEAD, IDENTITY
+from test_review_run import EntryFixture
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import finding_instance_fingerprint
 from review_sensei.human_inventory import inventory_from_result_document
 from review_sensei.models import ReviewResult
-from tests.test_api_work_persistence import BASE, HEAD, IDENTITY
-from tests.test_review_run import EntryFixture
 
 
 def partial_fixture(directory, *, limit=512):
@@ -166,8 +166,7 @@ class RetainedEntryTests(unittest.TestCase):
             self.assertEqual(f.provider_calls, 2)
             self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
             from review_sensei_github.api_run_history import read_previous_run
-
-            from tests.test_api_work_lifecycle import caller_measurement
+            from test_api_work_lifecycle import caller_measurement
 
             archived = read_previous_run(
                 f.selected.ledger, IDENTITY, f.accounted.accounting.previous_record

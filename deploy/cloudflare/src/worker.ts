@@ -674,11 +674,13 @@ const worker = {
       return response({ ok: true });
     }
     if (
-      (url.pathname === "/github/token" || url.pathname === "/github/session-grant") &&
+      ["/github/token", "/github/session-grant", "/github/webhook", "/github/setup-continue"].includes(url.pathname) &&
       env.BROKER_ADMISSION_MODE !== undefined && env.BROKER_ADMISSION_MODE !== "open"
     ) {
       // A sustained operator hold spans caller and Worker cutover. Refuse
-      // before parsing, OIDC, token/grant issuance or any queued continuation.
+      // before parsing, OIDC, token/grant/cursor issuance, setup writes or any
+      // queued continuation. Held webhooks are refused, never acknowledged as
+      // completed work. Direct/public/SELF requests all enter this handler.
       // Invalid configured modes fail held. This never revokes existing tokens.
       return response({ error: "broker_admission_held", temporary: true }, 503, true);
     }

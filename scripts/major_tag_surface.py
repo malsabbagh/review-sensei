@@ -153,7 +153,9 @@ def validate_surface(root: Path):
             or script.count(lifecycle_command) != 1
             or '--policy-commit "$POLICY_COMMIT"' not in script
         ):
-            raise ValueError("review lifecycle metadata or frozen policy binding is missing")
+            raise ValueError(
+                "review lifecycle metadata or frozen policy binding is missing"
+            )
         if any(
             step.get("id") == "publish-admission"
             or step.get("name", "").startswith("Publish or promote validated")
@@ -163,7 +165,9 @@ def validate_surface(root: Path):
             )
             for step in runtime_steps
         ):
-            raise ValueError("review lifecycle has a separate publication or cleanup owner")
+            raise ValueError(
+                "review lifecycle has a separate publication or cleanup owner"
+            )
         publication.append(owner)
     identity = next(
         (

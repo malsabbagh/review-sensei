@@ -125,6 +125,8 @@ def cli_arguments(root, *, base_sha=tx.BASE_SHA, diff=partial.gates.DIFF):
 
 
 def ledger_hooks(ledger):
+    """Inject core/local authority tests; current Actions entry is covered below."""
+
     class Hooks(GitHubReviewHooks):
         def resolve_ledger(self, args, **kwargs):
             return ledger
@@ -1573,3 +1575,423 @@ class RescanPublicationTests(unittest.TestCase):
                 step["run"],
             )
             self.assertIn('review-sensei-github" review-run', step["run"])
+
+
+class CurrentDispatchRescanEntryTests(unittest.TestCase):
+    """Hosted dispatch uses the current process, native source and caller meter."""
+
+    def fixture(self, directory, *, remaining=False):
+        from tests.test_review_run_rescan import partial_fixture
+
+        fixture, source = partial_fixture(directory)
+        self.dispatch(fixture, remaining=remaining)
+        return fixture, source
+
+    def dispatch(self, fixture, *, remaining=False):
+        from urllib.parse import urlsplit
+
+        from tests.fake_github_http import json_response
+        from tests.test_api_work_persistence import HEAD
+
+        fixture.next_run()
+        fixture.requested_head = fixture.live_head = HEAD
+        fixture.event_name = "workflow_dispatch"
+        fixture.review_intent = "--review-remaining" if remaining else "--rescan"
+        fixture.event_document = {
+            "repository": {"id": 123, "full_name": "owner/repo"},
+            "sender": {"login": "alice", "type": "User"},
+            "inputs": {
+                "pull_request_number": "7",
+                "operation": "review",
+                "review_remaining" if remaining else "rescan": "true",
+            },
+        }
+        fixture.provider_comments = []
+        fixture.dispatch_reads = []
+        fixture.run_metadata = {
+            "actor": {"login": "alice"},
+            "created_at": "2026-10-26T00:00:10Z",
+            "path": ".github/workflows/review-sensei-review.yml",
+            # This is the workflow's revision, deliberately distinct from the
+            # exact reviewed PR head. The live PR read establishes that head.
+            "head_sha": fixture.policy,
+        }
+        fixture.rescan_permission = "maintain"
+        original = fixture.external
+
+        def external(request, timeout):
+            response = original(request, timeout)
+            path = urlsplit(request.full_url).path
+            fixture.dispatch_reads.append(
+                (request.get_method(), path, request.get_header("Authorization"))
+            )
+            if path == f"/repos/owner/repo/actions/runs/{fixture.run_id}":
+                payload = json.loads(response.read(524288))
+                payload.update(fixture.run_metadata)
+                return json_response(payload)
+            if path.endswith("/collaborators/alice/permission"):
+                return json_response({"permission": fixture.rescan_permission})
+            return response
+
+        fixture.external = external
+
+    def assert_metered(self, fixture):
+        caller = fixture.accounted
+        self.assertEqual(len(fixture.transports), 1)
+        self.assertEqual(len(caller.observations), len(fixture.trace))
+        self.assertEqual(
+            caller.budget_view.calls,
+            sum(o["phase"] != "startup" for o in caller.observations),
+        )
+        self.assertIs(fixture.selected.ledger.evidence_budget, caller.budget_view)
+        # Startup exchanges the capability once. Resolver authentication of the
+        # actual dispatch must reuse it, never issue another Worker POST.
+        self.assertEqual(
+            [o["capability"] for o in fixture.worker_observations].count(
+                "review_actions"
+            ),
+            1,
+        )
+        live_run_reads = [
+            token
+            for method, path, token in fixture.dispatch_reads
+            if method == "GET"
+            and path == f"/repos/owner/repo/actions/runs/{fixture.run_id}"
+        ]
+        self.assertEqual(live_run_reads, ["Bearer synthetic-review_actions"] * 2)
+
+    def test_actual_dispatch_full_rescan_writes_through_completion_on_same_allowance(
+        self,
+    ):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from tests.test_api_work_persistence import HEAD, IDENTITY
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, source = self.fixture(directory)
+            original = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            self.assertEqual(fixture.invoke(), 0, fixture.error)
+            final = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            self.assertEqual(final.transaction.phase, "publication_succeeded")
+            self.assertEqual(final.transaction.head_sha, HEAD)
+            self.assertNotEqual(final.transaction.transaction_id, source.transaction_id)
+            self.assertEqual(final.dispositions, original.dispositions)
+            self.assertEqual(len(final.dispositions), 20)
+            receipt = final.rescan_state["receipts"][-1]
+            self.assertEqual(receipt["kind"], "workflow_dispatch")
+            self.assertEqual(receipt["request_id"], fixture.run_id)
+            self.assertEqual(receipt["source"]["transaction_id"], source.transaction_id)
+            self.assertEqual(fixture.provider_calls, 2)
+            self.assertFalse(
+                any(review["state"] == "APPROVED" for review in fixture.reviews)
+            )
+            self.assert_metered(fixture)
+
+    def test_actual_dispatch_remaining_authenticates_source_then_refuses_no_reusable_work(
+        self,
+    ):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from tests.test_api_work_persistence import IDENTITY
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, _ = self.fixture(directory, remaining=True)
+            original = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            self.assertEqual(fixture.invoke(), 1)
+            self.assertIn("no reusable partial scope or reviewable work", fixture.error)
+            final = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            self.assertEqual(final.dispositions, original.dispositions)
+            self.assertEqual(len(final.dispositions), 20)
+            self.assertIsNone(final.rescan_state)
+            self.assertEqual(fixture.provider_calls, 1)
+            self.assertEqual(len(fixture.reviews), 1)
+            self.assert_metered(fixture)
+
+    def test_actual_dispatch_authority_and_exact_source_controls_keep_decisions(self):
+        import copy
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from tests.test_api_work_persistence import IDENTITY
+
+        for fault, message in (
+            ("actor", "run identity is unauthorized"),
+            ("workflow", "run identity is unauthorized"),
+            ("permission", "current maintainer permission"),
+            ("target", "targets another pull request"),
+            ("newer-head", "explicit rescan pull request is stale"),
+            ("newer-review", "published coverage is unverifiable"),
+        ):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                fixture, _ = self.fixture(directory)
+                original = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                if fault == "actor":
+                    fixture.run_metadata["actor"] = {"login": "mallory"}
+                elif fault == "workflow":
+                    fixture.run_metadata["path"] = ".github/workflows/unrelated.yml"
+                elif fault == "permission":
+                    fixture.rescan_permission = "read"
+                elif fault == "target":
+                    fixture.event_document["inputs"]["pull_request_number"] = "8"
+                elif fault == "newer-review":
+                    fixture.reviews.append(
+                        {
+                            **copy.deepcopy(fixture.reviews[0]),
+                            "id": 101,
+                            "body": "<!-- reviewsensei:eligibility:v1 broken -->"
+                            + fixture.reviews[0]["body"].split(
+                                "<!-- reviewsensei:eligibility:v1"
+                            )[0],
+                        }
+                    )
+                else:
+                    # Startup reads the exact PR head first. Change only the
+                    # later resolver read to prove reauthentication occurs.
+                    external = fixture.external
+                    reads = [0]
+
+                    def changed(request, timeout):
+                        from urllib.parse import urlsplit
+
+                        from tests.fake_github_http import json_response
+
+                        response = external(request, timeout)
+                        if urlsplit(request.full_url).path.endswith("/pulls/7"):
+                            reads[0] += 1
+                            if reads[0] > 1:
+                                payload = json.loads(response.read(524288))
+                                payload["head"]["sha"] = "d" * 40
+                                return json_response(payload)
+                        return response
+
+                    fixture.external = changed
+                self.assertEqual(fixture.invoke(), 1, fixture.error)
+                self.assertIn(message, fixture.error)
+                final = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                self.assertEqual(final.dispositions, original.dispositions)
+                self.assertEqual(len(final.dispositions), 20)
+                self.assertIsNone(final.rescan_state)
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertEqual(
+                    len(fixture.reviews), 2 if fault == "newer-review" else 1
+                )
+                self.assertEqual(
+                    len(fixture.accounted.observations), len(fixture.trace)
+                )
+                self.assertEqual(
+                    [o["capability"] for o in fixture.worker_observations],
+                    ["review_actions", "review_session"],
+                )
+
+    def test_queued_dispatch_does_not_reopen_newer_publication_or_refund_charges(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from tests.test_api_work_persistence import IDENTITY
+
+        for remaining in (False, True):
+            with (
+                self.subTest(remaining=remaining),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture, _ = self.fixture(directory, remaining=remaining)
+                fixture.run_metadata["created_at"] = "2026-10-25T21:00:00Z"
+                original = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                self.assertEqual(fixture.invoke(), 1 if remaining else 0, fixture.error)
+                if remaining:
+                    self.assertIn("event is not newer than its source", fixture.error)
+                final = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                self.assertEqual(final.dispositions, original.dispositions)
+                self.assertIsNone(final.rescan_state)
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertEqual(len(fixture.reviews), 1)
+                self.assertGreater(fixture.accounted.accounting.confirmed, 0)
+                self.assert_metered(fixture)
+
+    def test_actual_dispatch_remaining_reviews_only_unfinished_file_and_completes(self):
+        import subprocess
+        from urllib.parse import urlsplit
+
+        from review_sensei_github import review_run
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.models import ReviewResult
+        from review_sensei.validation import ReviewLimits
+        from tests.fake_github_http import json_response
+        from tests.test_api_work_persistence import IDENTITY
+        from tests.test_review_run import EntryFixture
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EntryFixture(directory)
+            fixture.config_bytes += (
+                b"advanced:\n  resources:\n    max_provider_calls: 8\n"
+                b"  large_changes:\n    orchestrate: true\n"
+            )
+            (fixture.root / ".reviewsensei.yml").write_bytes(fixture.config_bytes)
+            for command in (
+                ["git", "-C", directory, "add", ".reviewsensei.yml"],
+                [
+                    "git",
+                    "-C",
+                    directory,
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "-m",
+                    "fixture limits",
+                ],
+            ):
+                subprocess.run(command, check=True, capture_output=True)
+            fixture.policy = fixture.policy_ref = subprocess.check_output(
+                ["git", "-C", directory, "rev-parse", "HEAD"], text=True
+            ).strip()
+            (fixture.root / "review.patch").write_text(
+                "".join(
+                    f"diff --git a/src/mod_{i}.py b/src/mod_{i}.py\nnew file mode 100644\n"
+                    f"index 0000000..1111111\n--- /dev/null\n+++ b/src/mod_{i}.py\n"
+                    f"@@ -0,0 +1,2 @@\n+value_{i}=1\n+other_{i}=2\n"
+                    for i in range(9)
+                )
+            )
+            original = fixture.external
+
+            def external(request, timeout):
+                path = urlsplit(request.full_url).path
+                if path.endswith("/pulls/7/files"):
+                    fixture.trace.append((fixture.attempt, request.get_method(), path))
+                    return json_response(
+                        [
+                            {
+                                "filename": f"src/mod_{i}.py",
+                                "patch": f"@@ -0,0 +1,2 @@\n+value_{i}=1\n+other_{i}=2",
+                                "additions": 2,
+                                "deletions": 0,
+                                "status": "added",
+                            }
+                            for i in range(9)
+                        ]
+                    )
+                return original(request, timeout)
+
+            fixture.external = external
+            original_engine = review_run.engine_main
+
+            def engine(argv, **kwargs):
+                return original_engine([*argv, "--orchestrate-large-changes"], **kwargs)
+
+            limits = ReviewLimits(
+                max_diff_bytes=65536,
+                max_diff_lines=1600,
+                max_diff_files=1,
+                max_diff_hunks=1,
+            )
+            with (
+                patch("review_sensei.cli.DEFAULT_REVIEW_LIMITS", limits),
+                patch.object(review_run, "engine_main", engine),
+            ):
+                self.assertEqual(fixture.invoke(), 0, fixture.error)
+                before = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                first = ReviewResult.from_dict(
+                    json.loads((fixture.root / "review.json").read_text())
+                )
+                self.assertEqual(first.review_status, "partial")
+                self.assertEqual(
+                    sum(f.outcome == "reviewed" for f in first.coverage.files), 8
+                )
+                self.assertEqual(fixture.provider_calls, 8)
+                self.dispatch(fixture, remaining=True)
+                self.assertEqual(fixture.invoke(), 0, fixture.error)
+            final = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            result = ReviewResult.from_dict(
+                json.loads((fixture.root / "review.json").read_text())
+            )
+            self.assertEqual(result.review_status, "complete")
+            self.assertTrue(result.coverage.fully_reviewed)
+            self.assertEqual(fixture.provider_calls, 9)
+            self.assertEqual(final.transaction.phase, "publication_succeeded")
+            self.assertEqual(final.failed_attempts, before.failed_attempts)
+            self.assertEqual(final.rescan_state["receipts"][-1]["mode"], "remaining")
+            self.assertEqual(
+                final.rescan_state["receipts"][-1]["source"]["transaction_id"],
+                before.transaction.transaction_id,
+            )
+            self.assert_metered(fixture)
+
+    def test_dispatch_source_unknown_and_deadline_keep_physical_charge_and_decisions(
+        self,
+    ):
+        from urllib.parse import urlsplit
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from tests.test_api_work_persistence import IDENTITY
+
+        for fault in ("unknown", "deadline"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                fixture, _ = self.fixture(directory)
+                original = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                external = fixture.external
+                authenticated = [False]
+                faulted = []
+
+                def failed_read(request, timeout):
+                    path = urlsplit(request.full_url).path
+                    run_path = f"/repos/owner/repo/actions/runs/{fixture.run_id}"
+                    if (
+                        path == run_path
+                        and sum(p == path for _, p, _ in fixture.dispatch_reads) == 1
+                    ):
+                        authenticated[0] = True
+                    if (
+                        authenticated[0]
+                        and path.endswith("/issues/7/comments")
+                        and not faulted
+                    ):
+                        faulted.append(path)
+                        if fault == "unknown":
+                            fixture.trace.append(
+                                (fixture.attempt, request.get_method(), path)
+                            )
+                            raise TimeoutError("synthetic unknown retained source read")
+                        response = external(request, timeout)
+                        now = fixture.accounted._clock()
+                        fixture.accounted._clock = lambda: now + 61
+                        return response
+                    return external(request, timeout)
+
+                fixture.external = failed_read
+                self.assertEqual(fixture.invoke(), 1)
+                self.assertEqual(len(faulted), 1)
+                self.assertNotIn("published coverage is unverifiable", fixture.error)
+                if fault == "deadline":
+                    self.assertIn("original request deadline", fixture.error)
+                final = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                self.assertEqual(final.dispositions, original.dispositions)
+                self.assertEqual(len(final.dispositions), 20)
+                self.assertIsNone(final.rescan_state)
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertEqual(len(fixture.reviews), 1)
+                self.assertEqual(
+                    fixture.accounted.accounting.uncertain,
+                    1 if fault == "unknown" else 0,
+                )
+                self.assertEqual(
+                    fixture.accounted.observations[-1]["outcome"],
+                    "unknown" if fault == "unknown" else "expired",
+                )
+                self.assert_metered(fixture)

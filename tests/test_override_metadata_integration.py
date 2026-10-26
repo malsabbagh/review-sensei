@@ -14,8 +14,7 @@ from unittest.mock import patch
 
 from review_sensei_github import action_run
 from review_sensei_github import cli as package_cli
-
-from tests.test_current_command_inventory import HEAD, CurrentMetadataFixture
+from test_current_command_inventory import HEAD, CurrentMetadataFixture
 
 
 class HostedOverrideMetadataTests(unittest.TestCase):

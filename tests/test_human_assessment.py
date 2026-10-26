@@ -14,6 +14,7 @@ from dataclasses import replace
 from unittest.mock import patch
 from urllib.parse import urlparse
 
+from fake_github_http import json_response
 from review_sensei_github import (
     GitHubApplication,
     GitHubHttp,
@@ -57,7 +58,6 @@ from review_sensei.models import (
     ReviewComment,
     ReviewResult,
 )
-from tests.fake_github_http import json_response
 
 HEAD = "b" * 40
 BASE = "a" * 40
@@ -381,8 +381,9 @@ class State:
 
 class HumanAssessmentTests(unittest.TestCase):
     def test_encoded_inventory_uses_batches_under_default_reply_configuration(self):
+        from test_review_work import AssessingProvider
+
         from review_sensei.human_assessment import HumanReviewFinding
-        from tests.test_review_work import AssessingProvider
 
         original = prior()
         inventory = PendingHumanReview(
@@ -409,8 +410,9 @@ class HumanAssessmentTests(unittest.TestCase):
         self.assertEqual(refreshed.result_digest, original.result_digest)
 
     def test_unified_reads_v2_required_file_groups_and_old_mode_refuses_them(self):
+        from test_review_work import AssessingProvider
+
         from review_sensei.budgets import ReviewWorkBudgets
-        from tests.test_review_work import AssessingProvider
 
         original = prior()
         finding = replace(
@@ -433,12 +435,13 @@ class HumanAssessmentTests(unittest.TestCase):
         self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
 
     def test_unified_complete_file_batches_publish_one_v1_refresh_and_approval(self):
+        from test_review_work import AssessingProvider, large_patch
+
         from review_sensei.budgets import ReviewWorkBudgets
         from review_sensei.human_assessment import (
             HumanReviewFinding,
             PendingHumanReview,
         )
-        from tests.test_review_work import AssessingProvider, large_patch
 
         original = prior()
         inventory = PendingHumanReview(
@@ -475,12 +478,13 @@ class HumanAssessmentTests(unittest.TestCase):
         self.assertEqual(refreshed.result_digest, original.result_digest)
 
     def test_unified_oversized_file_retains_pending_and_never_approves(self):
+        from test_review_work import AssessingProvider, large_patch
+
         from review_sensei.budgets import ReviewWorkBudgets
         from review_sensei.human_assessment import (
             HumanReviewFinding,
             PendingHumanReview,
         )
-        from tests.test_review_work import AssessingProvider, large_patch
 
         original = prior()
         inventory = PendingHumanReview(
@@ -518,8 +522,9 @@ class HumanAssessmentTests(unittest.TestCase):
         )
 
     def test_unified_races_during_provider_execution_never_write_authority(self):
+        from test_review_work import AssessingProvider
+
         from review_sensei.budgets import ReviewWorkBudgets
-        from tests.test_review_work import AssessingProvider
 
         for mutation in ("head", "base", "source"):
             with self.subTest(mutation=mutation):

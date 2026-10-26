@@ -12,6 +12,9 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import test_review_transaction as fixture
+from test_authenticated_partitions import GitHubState, binding, checkpoint, packed
+
 from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
 from review_sensei.errors import ReviewInputError
 from review_sensei.schemas import validate_public_document
@@ -24,8 +27,6 @@ from review_sensei.session import (
     read_session_assessment_queue,
     read_session_baseline,
 )
-from tests import test_review_transaction as fixture
-from tests.test_authenticated_partitions import GitHubState, binding, checkpoint, packed
 
 
 def active_summary():

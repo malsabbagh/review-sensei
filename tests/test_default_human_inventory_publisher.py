@@ -10,6 +10,17 @@ from unittest.mock import patch
 from urllib.error import URLError
 from urllib.parse import urlparse
 
+from default_human_inventory_contract import (
+    APP,
+    BASE,
+    CONFIGURATION,
+    EVIDENCE,
+    HEAD,
+    IDENTITY,
+    POLICY,
+    DefaultHumanState,
+    human_checkpoint,
+)
 from review_sensei_github import GitHubPublicationError, ReviewPublisher
 from review_sensei_github.default_human_inventory import (
     HumanInventoryStore,
@@ -46,17 +57,6 @@ from review_sensei.session import (
     LocalSessionLedger,
     checkpoint_review_analysis,
     prepare_review_transaction,
-)
-from tests.default_human_inventory_contract import (
-    APP,
-    BASE,
-    CONFIGURATION,
-    EVIDENCE,
-    HEAD,
-    IDENTITY,
-    POLICY,
-    DefaultHumanState,
-    human_checkpoint,
 )
 
 

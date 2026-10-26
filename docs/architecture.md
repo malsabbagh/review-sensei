@@ -1,3 +1,40 @@
+# Architecture
+
+## Repository caller accounting and current Actions authority
+
+The root `api_request_limit` selects one physical caller HTTP allowance per
+authenticated repository ID and Actions `run_id`. Its default is 512; accepted
+integers are bounded by the exact JSON/JavaScript integer range. Startup,
+authorization, OIDC, GitHub reads and writes, Worker POSTs, publication and cleanup
+share that allowance. Each Worker POST counts once, with its internal dispatches
+observed separately. Inference, checkout, dependency installation and artifact
+upload retain their independent limits. See [ADR 0111](adr/0111-caller-api-work-allowance.md).
+
+The hosted adapter's `review_run` and `action_run` own their selected lifecycle in
+one process. `api_run_requests` charges immediately before physical dispatch and
+persists owner-bound request intent. `api_run_plan` allocates finite work and
+protected confirmation/terminal capacity to the initial owner and one successor.
+Trusted policy commit P and its exact configuration bytes remain distinct from
+reviewed base B and head. The native ledger holds immutable accounting blocks,
+pending effects and typed terminal evidence. A successor must prove predecessor
+job cessation; uncertainty and abandoned capacity remain charged. A different run
+archives exact terminal predecessor state before replacing its accounting root.
+
+`run_authority` binds version 3 review, command and reply authority to the exact
+purpose, source, repository, PR, head, run, attempt, job and workflow. The Worker
+authenticates those bindings before issuance and independently enforces its
+60-dispatch/25-second exchange ceiling and bounded upstream requests. The caller
+cannot spend, refund or reset its allowance from Worker receipts. Historical
+transactions are read through `prior_rescan_publication`, explicitly bound to the
+authorized review/archive and fresh current authority; they confer no write power.
+
+Only confirmed exact results can close an entered action. A narrowly typed abort
+closure requires proof that analysis entry never began and cleanup completed.
+Unknown provider or mutation effects stay pending. Started media actions with a
+retained receipt but no terminal result refuse automatic successor replay.
+Complete history authentication is mandatory: finite pagination and operation
+allocations can refuse even when the root allowance has unused capacity.
+
 ## Default human inventory references
 
 Beyond legacy future-assessment capacity, closed schema 5 owned purpose-bound parts
@@ -29,15 +66,14 @@ parts refuse. Unbound gains no checkpoint authority. See ADR 0093.
 The packaged v5 schema validates structure; explicit rescan uses the trusted reader
 and one original command read allowance.
 
-# Architecture
-
 ## Explicit human file review (local, opt-in)
 
 [Human file review](human-file-review.md) binds an owned exact result/root, complete inventory,
 regular base/head blobs and current authorized source. Hosted composition reads canonical retained
 state after broker authorization. V1 parts keep 32 files; groups keep 32 KiB and exact union coverage.
-One publisher keeps 60 ordinary/four finalization calls and 60 seconds, including broker liability.
-Media check accounting covers cold JWKS and annotated-tag fallback within that allowance.
+Current Actions publication uses the repository caller allowance and finite
+operation allocations above. Its check exchange retains the independent Worker
+ceiling across cold JWKS and annotated-tag fallback.
 First-directory subtree proofs reduce shared-prefix reads; ADR 0103 describes capacity tradeoffs.
 Broker failures use the closed diagnostic catalog.
 Native media approval follows the review endpoint's HTTP 200 contract; audit
@@ -46,7 +82,8 @@ stay in place. Protocol failures expose fixed operation/status fields without ra
 Fresh source, permission, root, request, thread, qualification and full PR facts gate approval.
 Current finding facts require an exact-result index and positive resolution proof; never infer
 resolution from false flags. Never complete AI coverage/result/baseline/cache or carry across heads.
-Unknown writes reconcile only on explicit retry; no cap increase, model approval or new authority.
+Unknown writes require exact owned readback; an entered action without a typed
+terminal result refuses automatic replay. Model output confers no new authority.
 See [Proposed ADR 0103](adr/0103-bounded-hosted-media-confirmation.md) and [ADR 0077](adr/0077-explicit-human-file-review.md).
 
 For the operational flows and separate analysis, persistence, reassessment and

@@ -14,7 +14,9 @@ class CallerOperationDiagnosticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             fixture = LifecycleFixture(directory, limit=512)
             native, configuration, _, owner = fixture.prelude()
-            fixture.accounted.initialize_and_activate(native, IDENTITY, configuration, owner)
+            fixture.accounted.initialize_and_activate(
+                native, IDENTITY, configuration, owner
+            )
             for _ in range(70):
                 fixture.http.request(
                     "GET", "/repos/owner/repo/pulls/7", token="synthetic"
@@ -27,7 +29,9 @@ class CallerOperationDiagnosticsTests(unittest.TestCase):
             self.assertGreater(report["budget_calls"], 64)
             self.assertEqual(report["budget_calls"], budget.calls)
             self.assertEqual(report["call_limit"], 512)
-            self.assertEqual(report["ordinary_call_limit"], 512 - fixture.plan.liability)
+            self.assertEqual(
+                report["ordinary_call_limit"], 512 - fixture.plan.liability
+            )
             self.assertEqual(report["check"]["first"]["budget_calls"], budget.calls)
 
     def test_unbound_local_evidence_diagnostics_keep_their_own_limits(self):
@@ -36,4 +40,6 @@ class CallerOperationDiagnosticsTests(unittest.TestCase):
         observer = OperationObserver(EvidenceReadBudget())
         observer.response(500, None)
         report = observer.report().to_dict()
-        self.assertEqual((report["call_limit"], report["ordinary_call_limit"]), (64, 60))
+        self.assertEqual(
+            (report["call_limit"], report["ordinary_call_limit"]), (64, 60)
+        )

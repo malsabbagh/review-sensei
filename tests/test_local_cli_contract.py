@@ -27,7 +27,7 @@ from review_sensei.session import default_local_session_root
 try:
     from isolated_working_directory import IsolatedWorkingDirectoryMixin
 except ModuleNotFoundError:
-    from tests.isolated_working_directory import IsolatedWorkingDirectoryMixin
+    from isolated_working_directory import IsolatedWorkingDirectoryMixin
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "standalone-smoke"
@@ -99,9 +99,9 @@ class LocalReviewHarness:
             redirect_stderr(stderr),
         ):
             if "--github-session-ledger" in argv:
-                from review_sensei_github.cli import main as github_main
-
-                status = github_main(["review", *argv])
+                # Exercise the core argument contract directly. The public
+                # hosted phase command is retired; this is a local input error.
+                status = main(argv, hosted_hooks=object())
             else:
                 status = main(argv)
         return status, stdout.getvalue(), stderr.getvalue()

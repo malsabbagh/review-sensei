@@ -10,6 +10,8 @@ from dataclasses import replace
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+import test_default_human_rescan as rescan_fixture
+from default_human_inventory_contract import APP, HEAD, IDENTITY
 from review_sensei_github.default_human_inventory import (
     HumanInventoryReference,
     HumanInventoryStore,
@@ -34,8 +36,6 @@ from review_sensei.human_assessment import finding_instance_fingerprint
 from review_sensei.human_inventory import inventory_from_result_document
 from review_sensei.rescan import AuthorizedRescan, consume_rescan_request, rescan_source
 from review_sensei.session import SessionLoadResult
-from tests import test_default_human_rescan as rescan_fixture
-from tests.default_human_inventory_contract import APP, HEAD, IDENTITY
 
 
 class RetainedFullRescanTests(unittest.TestCase):
@@ -207,7 +207,7 @@ class RetainedFullRescanTests(unittest.TestCase):
                 elif fault == "root-producer":
                     state.reviews[-1]["user"]["id"] += 1
                 else:
-                    from tests.default_human_inventory_contract import (
+                    from default_human_inventory_contract import (
                         human_inventory_parts,
                     )
 

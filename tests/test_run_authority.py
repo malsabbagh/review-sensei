@@ -22,7 +22,9 @@ from review_sensei_github.run_authority import (
 NOW = 1_700_000_000
 MAX_INTEGER = 9_007_199_254_740_991
 HEAD = "b" * 40
-WORKFLOW = "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5"
+WORKFLOW = (
+    "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5"
+)
 SOURCE_TIME = "2026-10-26T00:00:00Z"
 BODY = "@reviewsensei verify"
 OPAQUE_GRANT = f"sg1.{NOW * 1000}." + "a" * 43
@@ -177,7 +179,9 @@ class CurrentAuthorityParserTests(unittest.TestCase):
                             continue
                         document = copy.deepcopy(original)
                         document[key] = malformed
-                        with self.subTest(purpose=purpose, grant=grant, key=key, value=malformed):
+                        with self.subTest(
+                            purpose=purpose, grant=grant, key=key, value=malformed
+                        ):
                             with self.assertRaises(GitHubBrokerClientError):
                                 parse_authority(document, grant=grant)
                 for key in original["source"]:
@@ -222,7 +226,7 @@ class CurrentAuthorityParserTests(unittest.TestCase):
         self.assertEqual(parse_authority(document), document)
         for duration in (1, 600):
             document = authority()
-            document.update(issued_at=MAX_INTEGER-duration, expires_at=MAX_INTEGER)
+            document.update(issued_at=MAX_INTEGER - duration, expires_at=MAX_INTEGER)
             self.assertEqual(parse_authority(document), document)
         for duration in (-1, 0, 601):
             document = authority()
@@ -255,7 +259,8 @@ class CurrentAuthorityParserTests(unittest.TestCase):
             document = granted(authority(purpose))
             document["actor"] = (
                 {"login": "alice", "type": "User", "association": "OWNER"}
-                if purpose == "review" else None
+                if purpose == "review"
+                else None
             )
             with self.subTest(purpose=purpose):
                 with self.assertRaises(GitHubBrokerClientError):
@@ -269,18 +274,24 @@ class CurrentAuthorityParserTests(unittest.TestCase):
 
     def test_request_builder_uses_current_run_and_preserves_comment_source(self):
         env = {
-            "GITHUB_RUN_ID": "456", "GITHUB_RUN_ATTEMPT": "2",
+            "GITHUB_RUN_ID": "456",
+            "GITHUB_RUN_ATTEMPT": "2",
             "REVIEW_SENSEI_WORKFLOW_REF": WORKFLOW,
             "REVIEW_SENSEI_WORKFLOW_SHA": "c" * 40,
         }
         for purpose in CAPABILITIES:
             document = authority(purpose)
-            with patch.dict("os.environ", env, clear=True), patch(
-                "review_sensei_github.run_authority.time.time", return_value=NOW
+            with (
+                patch.dict("os.environ", env, clear=True),
+                patch("review_sensei_github.run_authority.time.time", return_value=NOW),
             ):
                 built = request_authority(
-                    purpose=purpose, repository="owner/repo", repository_id=123,
-                    pull_request=7, head_sha=HEAD, job=document["job"],
+                    purpose=purpose,
+                    repository="owner/repo",
+                    repository_id=123,
+                    pull_request=7,
+                    head_sha=HEAD,
+                    job=document["job"],
                     source=None if purpose == "review" else document["source"],
                 )
             self.assertEqual(built, {**document, "run_attempt": 2})
@@ -293,23 +304,33 @@ class CurrentBrokerAuthorityTests(unittest.TestCase):
                 with self.subTest(purpose=purpose, capability=capability):
                     request = authority(purpose)
                     fixture = BrokerFixture(request)
-                    with patch("review_sensei_github.broker_client.time.time", return_value=NOW):
-                        token = fixture.client.exchange("synthetic-oidc", capability=capability)
+                    with patch(
+                        "review_sensei_github.broker_client.time.time", return_value=NOW
+                    ):
+                        token = fixture.client.exchange(
+                            "synthetic-oidc", capability=capability
+                        )
                     self.assertEqual(token, "synthetic-installation-token")
                     self.assertEqual(len(fixture.calls), 1)
                     self.assertEqual(len(fixture.admissions), 1)
                     payload = fixture.calls[0][1]
-                    self.assertEqual(payload, {
-                        "oidc_token": "synthetic-oidc", "capability": capability,
-                        "session_attestation": request,
-                    })
+                    self.assertEqual(
+                        payload,
+                        {
+                            "oidc_token": "synthetic-oidc",
+                            "capability": capability,
+                            "session_attestation": request,
+                        },
+                    )
 
     def test_unknown_obsolete_or_nested_accounting_refuses_before_post(self):
         documents = []
         for version in (1, 2, True):
             documents.append({**authority(), "version": version})
         documents.append({**authority(), "read_accounting": {}})
-        documents.append({**authority(), "source": {**authority()["source"], "read_accounting": {}}})
+        documents.append(
+            {**authority(), "source": {**authority()["source"], "read_accounting": {}}}
+        )
         for request in documents:
             for route in ("construct", "authorize", "verify"):
                 calls = []
@@ -320,8 +341,11 @@ class CurrentBrokerAuthorityTests(unittest.TestCase):
                             BrokerClient(authority=request, opener=client.opener)
                         elif route == "authorize":
                             client.authorize_session_mutation(
-                                "synthetic-oidc", repository_id=123, pull_request=7,
-                                head_sha=HEAD, session_attestation=request,
+                                "synthetic-oidc",
+                                repository_id=123,
+                                pull_request=7,
+                                head_sha=HEAD,
+                                session_attestation=request,
                             )
                         else:
                             client.verify_session_grant(OPAQUE_GRANT, granted(request))
@@ -329,8 +353,10 @@ class CurrentBrokerAuthorityTests(unittest.TestCase):
 
     def test_wrong_purpose_capability_refuses_before_admission_or_post(self):
         for purpose, capability in (
-            ("review", "inline_reply"), ("review", "issue_reply"),
-            ("command", "learning_write"), ("command", "inline_reply"),
+            ("review", "inline_reply"),
+            ("review", "issue_reply"),
+            ("command", "learning_write"),
+            ("command", "inline_reply"),
             ("reply", "learning_write"),
         ):
             fixture = BrokerFixture(authority(purpose))
@@ -353,57 +379,91 @@ class CurrentBrokerAuthorityTests(unittest.TestCase):
         for purpose in CAPABILITIES:
             request = authority(purpose)
             fixture = BrokerFixture(request)
-            with self.subTest(purpose=purpose), patch(
-                "review_sensei_github.broker_client.time.time", return_value=NOW
+            with (
+                self.subTest(purpose=purpose),
+                patch("review_sensei_github.broker_client.time.time", return_value=NOW),
             ):
                 session = fixture.client.open_session(
                     "synthetic-oidc", repository_id=123, pull_request=7, head_sha=HEAD
                 )
             self.assertEqual(session.attestation, granted(request))
             self.assertEqual(session.grant, OPAQUE_GRANT)
-            self.assertEqual(fixture.calls[0][1]["session"], {
-                "repository_id": 123, "pull_request": 7, "head_sha": HEAD,
-            })
+            self.assertEqual(
+                fixture.calls[0][1]["session"],
+                {
+                    "repository_id": 123,
+                    "pull_request": 7,
+                    "head_sha": HEAD,
+                },
+            )
 
     def test_returned_grant_scope_mismatch_refuses(self):
         mutations = {
-            "repository": "other/repo", "repository_id": 124,
-            "pull_request": 8, "head_sha": "d" * 40, "run_id": "457",
-            "run_attempt": 2, "job": "local", "job_workflow_sha": "e" * 40,
+            "repository": "other/repo",
+            "repository_id": 124,
+            "pull_request": 8,
+            "head_sha": "d" * 40,
+            "run_id": "457",
+            "run_attempt": 2,
+            "job": "local",
+            "job_workflow_sha": "e" * 40,
             "job_workflow_ref": "other/repo/.github/workflows/review-sensei-run.yml@v5",
-            "issued_at": NOW-1, "expires_at": NOW+599,
-            "source": {"kind": "pull_request", "id": 8, "updated_at": None, "body_sha256": None},
+            "issued_at": NOW - 1,
+            "expires_at": NOW + 599,
+            "source": {
+                "kind": "pull_request",
+                "id": 8,
+                "updated_at": None,
+                "body_sha256": None,
+            },
         }
         for key, value in mutations.items():
+
             def reply(document):
                 document["session_attestation"][key] = value
                 return document
+
             fixture = BrokerFixture(authority(), reply)
-            with self.subTest(key=key), patch(
-                "review_sensei_github.broker_client.time.time", return_value=NOW
+            with (
+                self.subTest(key=key),
+                patch("review_sensei_github.broker_client.time.time", return_value=NOW),
             ):
                 with self.assertRaises(GitHubBrokerClientError):
                     fixture.client.open_session(
-                        "synthetic-oidc", repository_id=123, pull_request=7, head_sha=HEAD
+                        "synthetic-oidc",
+                        repository_id=123,
+                        pull_request=7,
+                        head_sha=HEAD,
                     )
                 self.assertEqual(len(fixture.calls), 1)
 
     def test_malformed_returned_state_has_typed_error(self):
         for route in ("open", "authorize"):
             for state in ([], {}, True, None, "unknown"):
-                fixture = BrokerFixture(authority(), lambda d: {**d, "session_state": state})
-                with self.subTest(route=route, state=state), patch(
-                    "review_sensei_github.broker_client.time.time", return_value=NOW
+                fixture = BrokerFixture(
+                    authority(), lambda d: {**d, "session_state": state}
+                )
+                with (
+                    self.subTest(route=route, state=state),
+                    patch(
+                        "review_sensei_github.broker_client.time.time", return_value=NOW
+                    ),
                 ):
                     with self.assertRaises(GitHubBrokerClientError):
                         if route == "open":
                             fixture.client.open_session(
-                                "synthetic-oidc", repository_id=123, pull_request=7, head_sha=HEAD
+                                "synthetic-oidc",
+                                repository_id=123,
+                                pull_request=7,
+                                head_sha=HEAD,
                             )
                         else:
                             fixture.client.authorize_session_mutation(
-                                "synthetic-oidc", repository_id=123, pull_request=7,
-                                head_sha=HEAD, session_attestation=authority(),
+                                "synthetic-oidc",
+                                repository_id=123,
+                                pull_request=7,
+                                head_sha=HEAD,
+                                session_attestation=authority(),
                             )
                     self.assertEqual(len(fixture.calls), 1)
 
@@ -412,28 +472,46 @@ class CurrentBrokerAuthorityTests(unittest.TestCase):
             request = authority(purpose)
             grant = granted(request)
             fixture = BrokerFixture(request)
-            self.assertEqual(fixture.client.verify_session_grant(OPAQUE_GRANT, grant), grant)
+            self.assertEqual(
+                fixture.client.verify_session_grant(OPAQUE_GRANT, grant), grant
+            )
             url_request, payload = fixture.calls[0]
             self.assertTrue(url_request.full_url.endswith("/session-grant"))
-            self.assertEqual(payload, {"session_grant": OPAQUE_GRANT, "session_attestation": grant})
-        for field, value in (("actor", {"login": "bob", "type": "User", "association": "OWNER"}),
-                             ("source", {**authority("command")["source"], "id": 82})):
-            fixture = BrokerFixture(authority("command"), lambda d: {
-                **d, "session_attestation": {**d["session_attestation"], field: value},
-            })
+            self.assertEqual(
+                payload, {"session_grant": OPAQUE_GRANT, "session_attestation": grant}
+            )
+        for field, value in (
+            ("actor", {"login": "bob", "type": "User", "association": "OWNER"}),
+            ("source", {**authority("command")["source"], "id": 82}),
+        ):
+            fixture = BrokerFixture(
+                authority("command"),
+                lambda d: {
+                    **d,
+                    "session_attestation": {**d["session_attestation"], field: value},
+                },
+            )
             with self.subTest(field=field):
                 with self.assertRaises(GitHubBrokerClientError):
-                    fixture.client.verify_session_grant(OPAQUE_GRANT, granted(authority("command")))
+                    fixture.client.verify_session_grant(
+                        OPAQUE_GRANT, granted(authority("command"))
+                    )
 
     def test_exchange_refresh_changes_only_request_age(self):
         for purpose in CAPABILITIES:
             original = authority(purpose)
             fixture = BrokerFixture(original)
-            for now in (NOW+10, NOW+20):
-                with patch("review_sensei_github.broker_client.time.time", return_value=now):
-                    fixture.client.exchange("synthetic-oidc", capability="review_status")
+            for now in (NOW + 10, NOW + 20):
+                with patch(
+                    "review_sensei_github.broker_client.time.time", return_value=now
+                ):
+                    fixture.client.exchange(
+                        "synthetic-oidc", capability="review_status"
+                    )
                 sent = fixture.calls[-1][1]["session_attestation"]
-                self.assertEqual(sent, {**original, "issued_at": now, "expires_at": now+600})
+                self.assertEqual(
+                    sent, {**original, "issued_at": now, "expires_at": now + 600}
+                )
                 self.assertEqual(set(sent), REQUEST_KEYS)
             self.assertEqual(original, authority(purpose))
 
@@ -441,16 +519,30 @@ class CurrentBrokerAuthorityTests(unittest.TestCase):
         for purpose in CAPABILITIES:
             request = authority(purpose)
             fixture = BrokerFixture(request)
-            with self.subTest(purpose=purpose), patch(
-                "review_sensei_github.broker_client.time.time", return_value=NOW+10
+            with (
+                self.subTest(purpose=purpose),
+                patch(
+                    "review_sensei_github.broker_client.time.time",
+                    return_value=NOW + 10,
+                ),
             ):
                 result = fixture.client.authorize_session_mutation(
-                    "synthetic-oidc", repository_id=123, pull_request=7, head_sha=HEAD,
+                    "synthetic-oidc",
+                    repository_id=123,
+                    pull_request=7,
+                    head_sha=HEAD,
                     session_attestation=request,
                 )
-                self.assertEqual(result.attestation, granted({
-                    **request, "issued_at": NOW+10, "expires_at": NOW+610,
-                }))
+                self.assertEqual(
+                    result.attestation,
+                    granted(
+                        {
+                            **request,
+                            "issued_at": NOW + 10,
+                            "expires_at": NOW + 610,
+                        }
+                    ),
+                )
 
 
 if __name__ == "__main__":

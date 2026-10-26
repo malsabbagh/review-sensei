@@ -11,11 +11,15 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
+import test_assessment_history_index as index_fixture
+from fake_github_http import json_response
 from review_sensei_github import GitHubHttp
 from review_sensei_github.session_ledger import (
     GitHubIssueCommentSessionLedger,
     render_session_comment,
 )
+from test_activation_tail import OPERATION, RESERVATION
+from test_assessment_queue_storage import active_summary
 
 from review_sensei.assessment_history_index import (
     IndexedAssessmentJournal,
@@ -45,10 +49,6 @@ from review_sensei.session import (
     _tail_plan_scope,
     read_session_assessment_queue,
 )
-from tests import test_assessment_history_index as index_fixture
-from tests.fake_github_http import json_response
-from tests.test_activation_tail import OPERATION, RESERVATION
-from tests.test_assessment_queue_storage import active_summary
 
 NOW = datetime(2026, 10, 9, tzinfo=timezone.utc)
 
@@ -758,36 +758,38 @@ class HistoryAssociationTests(unittest.TestCase):
                         read_session_assessment_queue(ledger, result), envelope
                     )
 
-    def test_frozen_combined_reason_requires_both_exact_digests_and_primitive_reason(
-        self,
-    ):
+    def test_old_combined_mutation_documents_cannot_issue_current_authority(self):
+        from review_sensei_github.broker_client import BrokerClient
         from review_sensei_github.errors import GitHubBrokerClientError
+        from test_run_authority import authority
 
-        from tests import test_review_transaction as original
-        from tests.test_activation_tail import ConsumingBroker, feedback_request
-
-        for kind in ("valid", "request", "dispatch", "array"):
-            with self.subTest(kind=kind):
-                budget = EvidenceReadBudget()
-                broker = ConsumingBroker()
-                record = SessionRecord.create(original.IDENTITY, now=NOW)
-                broker.request = feedback_request(
-                    record, budget, reason="admission-dispatch"
+        budget = EvidenceReadBudget()
+        calls = []
+        current = authority("reply")
+        client = BrokerClient(
+            authority=current,
+            before_request=budget.consume,
+            opener=lambda *a, **k: calls.append(a),
+        )
+        for kind in ("formerly-valid", "request", "dispatch", "array"):
+            mutation = {
+                "reason": "admission-dispatch",
+                "request_digest": "a" * 64,
+                "dispatch_digest": "b" * 64,
+            }
+            if kind == "request":
+                mutation["request_digest"] = None
+            elif kind == "dispatch":
+                mutation["dispatch_digest"] = None
+            elif kind == "array":
+                mutation["reason"] = ["admission-dispatch"]
+            with self.subTest(kind=kind), self.assertRaises(GitHubBrokerClientError):
+                client.authorize_session_mutation(
+                    "synthetic-oidc",
+                    repository_id=current["repository_id"],
+                    pull_request=current["pull_request"],
+                    head_sha=current["head_sha"],
+                    session_attestation={**current, "version": 2, "mutation": mutation},
                 )
-                broker.request["mutation"].update(
-                    request_digest="a" * 64, dispatch_digest="b" * 64
-                )
-                if kind == "request":
-                    broker.request["mutation"]["request_digest"] = None
-                elif kind == "dispatch":
-                    broker.request["mutation"]["dispatch_digest"] = None
-                elif kind == "array":
-                    broker.request["mutation"]["reason"] = ["admission-dispatch"]
-                if kind == "valid":
-                    grant = broker.issue(budget)
-                    self.assertEqual(
-                        grant.attestation["mutation"]["reason"], "admission-dispatch"
-                    )
-                else:
-                    with self.assertRaises(GitHubBrokerClientError):
-                        broker.issue(budget)
+            self.assertFalse(calls)
+            self.assertEqual(budget.calls, 0)

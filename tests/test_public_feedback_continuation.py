@@ -18,6 +18,9 @@ from pathlib import Path
 from review_sensei_github.errors import GitHubConversationError, GitHubPublicationError
 from review_sensei_github.human_assessment import HumanAssessmentPublisher
 from review_sensei_github.pending import pending_reply_pages
+from test_human_assessment import APP
+from test_large_public_lifecycle import PagedState
+from test_review_work import AssessingProvider
 
 from review_sensei.assessment_queue import (
     AssessmentQueue,
@@ -50,9 +53,6 @@ from review_sensei.session import (
     assessment_queue_manifest_capacity,
     read_session_assessment_queue,
 )
-from tests.test_human_assessment import APP
-from tests.test_large_public_lifecycle import PagedState
-from tests.test_review_work import AssessingProvider
 
 
 class LocalFeedbackHost:

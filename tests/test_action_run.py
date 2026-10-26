@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+from fake_github_http import json_response
 from review_sensei_github import action_run, review_run
 from review_sensei_github import cli as package_cli
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
@@ -26,13 +27,12 @@ from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.run_authority import REQUEST_KEYS, parse_authority
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_persistence import HEAD, IDENTITY
+from test_review_run import EntryFixture
 
 from review_sensei.api_work import ApiExecutionOwner, ApiRunAccounting
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
-from tests.fake_github_http import json_response
-from tests.test_api_work_persistence import HEAD, IDENTITY
-from tests.test_review_run import EntryFixture
 
 
 class CommandEntryFixture(EntryFixture):

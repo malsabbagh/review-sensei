@@ -109,7 +109,18 @@
         "tests/test_media_cli_activation.py",
         "tests/test_hosted_media_context.py",
         "tests/test_github_human_file_review.py",
-        "tests/test_remaining_progress.py"
+        "tests/test_remaining_progress.py",
+        "tests/test_action_reply_entry.py",
+        "tests/test_action_run.py",
+        "tests/test_api_work_actions.py",
+        "tests/test_api_work_lifecycle.py",
+        "tests/test_api_work_persistence.py",
+        "tests/test_api_work_public_review.py",
+        "tests/test_current_command_inventory.py",
+        "tests/test_review_run.py",
+        "tests/test_review_run_rescan.py",
+        "tests/test_run_authority.py",
+        "tests/test_work_continuation.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },

@@ -15,6 +15,9 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+import test_api_work_public_review as fixture_module
+import test_review_transaction as tx
+from fake_github_http import json_response
 from review_sensei_github import GitHubApplication, GitHubWriteOptions, ReviewPublisher
 from review_sensei_github.api_run_host import HOSTED_API_STARTUP_PLAN, ApiRunReviewHooks
 from review_sensei_github.api_run_plan import (
@@ -26,6 +29,7 @@ from review_sensei_github.api_run_requests import ApiRunSessionLedger
 from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.broker_control import BrokerDispatchAccounting
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_persistence import BASE, HEAD, IDENTITY
 
 from review_sensei.api_work import ApiRunAccounting
 from review_sensei.baseline import admission_context_from_document
@@ -33,10 +37,6 @@ from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.cli import main
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ProviderResponse, ReviewResult
-from tests import test_api_work_public_review as fixture_module
-from tests import test_review_transaction as tx
-from tests.fake_github_http import json_response
-from tests.test_api_work_persistence import BASE, HEAD, IDENTITY
 
 # Fixed modest fixture: measured work attempts, not a shipping default/minimum.
 # Admission 11 + provider metadata 4 + completion 8 + publication 45.
@@ -559,7 +559,8 @@ class CallerLifecycleTests(unittest.TestCase):
             # floor(remaining/2). These are fixed fixture measurements only.
             minimum = (
                 HOSTED_API_STARTUP_PLAN.liability
-                + 2 * (TERMINAL_REQUESTS + work + QUALIFIED_CONFIRMATION_HEADROOM) - 1
+                + 2 * (TERMINAL_REQUESTS + work + QUALIFIED_CONFIRMATION_HEADROOM)
+                - 1
             )
             for limit in (minimum - 1, minimum):
                 with (
@@ -572,7 +573,9 @@ class CallerLifecycleTests(unittest.TestCase):
                         native, IDENTITY, config, owner
                     )
                     if limit < minimum:
-                        with self.assertRaisesRegex(ReviewInputError, "cannot fund|write/readback tail"):
+                        with self.assertRaisesRegex(
+                            ReviewInputError, "cannot fund|write/readback tail"
+                        ):
                             self.journey(
                                 directory, prepared=(fixture, native), human=human
                             )
@@ -612,7 +615,9 @@ class CallerLifecycleTests(unittest.TestCase):
             fixture.interrupt_engine_read = True
             self.journey(directory, prepared=(fixture, native), expected_analysis=130)
             native = fixture.recover_lifecycle()
-            with self.assertRaisesRegex(ReviewInputError, "cannot fund|write/readback tail"):
+            with self.assertRaisesRegex(
+                ReviewInputError, "cannot fund|write/readback tail"
+            ):
                 self.journey(directory, prepared=(fixture, native))
             self.assertEqual(fixture.accounted.accounting.blocks[:2], original.blocks)
             self.assertEqual(fixture.accounted.accounting.remaining, 0)

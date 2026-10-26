@@ -17,7 +17,7 @@ from review_sensei.providers.openrouter import OpenRouterProvider
 try:
     from isolated_working_directory import IsolatedWorkingDirectoryMixin
 except ModuleNotFoundError:
-    from tests.isolated_working_directory import IsolatedWorkingDirectoryMixin
+    from isolated_working_directory import IsolatedWorkingDirectoryMixin
 
 PATCH = (
     "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 0\n+x = 1\n"

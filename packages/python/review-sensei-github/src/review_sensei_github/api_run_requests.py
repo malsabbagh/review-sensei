@@ -493,6 +493,10 @@ class ApiRunRequestTransport:
             raise ReviewInputError("caller reservation was already attempted")
         self._reservation_started = True
         self._producer = ledger.evidence_producer()
+        # The cessation proof runs inside the mutation callback. Keep native
+        # preactivation readback enabled so a root changed during that proof
+        # cannot be overwritten by the successor's previously read candidate.
+        ledger.evidence_budget = self.budget_view
 
         def prepare(record: SessionRecord) -> SessionRecord:
             if ledger.evidence_producer() != self._producer:

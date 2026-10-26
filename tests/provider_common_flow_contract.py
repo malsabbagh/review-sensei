@@ -999,7 +999,7 @@ class _CommonFlows:
         try:
             from test_operation_entry import MemoryComments
         except ModuleNotFoundError:
-            from tests.test_operation_entry import MemoryComments
+            from test_operation_entry import MemoryComments
         for mode in ("legacy", "unified"):
             with self.subTest(mode=mode):
                 provider, transport = self.fixture([(0, CLEAN)])

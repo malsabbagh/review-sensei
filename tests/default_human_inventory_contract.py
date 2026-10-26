@@ -12,21 +12,13 @@ import json
 from dataclasses import replace
 from urllib.parse import parse_qs, urlparse
 
+from fake_github_http import json_response
 from review_sensei_github import GitHubApplication, GitHubWriteOptions, ReviewPublisher
 from review_sensei_github.conversation import ConversationPublisher
 from review_sensei_github.operation_host import RESULT_COMMENT_MARKER, comment_payload
-
-from review_sensei.baseline import ReviewBaseline, baseline_finding_from_comment
-from review_sensei.budgets import ReviewWorkBudgets
-from review_sensei.context import ReviewContextCacheKey
-from review_sensei.convergence import derive_blocker_candidate
-from review_sensei.coverage import CoverageManifest, FileCoverage
-from review_sensei.models import ReviewTransaction
-from review_sensei.session import checkpoint_review_analysis, prepare_review_transaction
-from tests.fake_github_http import json_response
-from tests.test_evidence_capacity import human_result, varied_comments
-from tests.test_human_assessment import HUMAN
-from tests.test_publication_recovery import (
+from test_evidence_capacity import human_result, varied_comments
+from test_human_assessment import HUMAN
+from test_publication_recovery import (
     APP,
     BASE,
     CONFIGURATION,
@@ -38,6 +30,14 @@ from tests.test_publication_recovery import (
     _Broker,
     _Noop,
 )
+
+from review_sensei.baseline import ReviewBaseline, baseline_finding_from_comment
+from review_sensei.budgets import ReviewWorkBudgets
+from review_sensei.context import ReviewContextCacheKey
+from review_sensei.convergence import derive_blocker_candidate
+from review_sensei.coverage import CoverageManifest, FileCoverage
+from review_sensei.models import ReviewTransaction
+from review_sensei.session import checkpoint_review_analysis, prepare_review_transaction
 
 DEFAULT_INVENTORY_INTENT_MARKER = (
     "<!-- reviewsensei:default-human-inventory-intent:v1 -->"

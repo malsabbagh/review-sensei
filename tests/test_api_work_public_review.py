@@ -8,9 +8,10 @@ import tempfile
 import unittest
 from urllib.parse import parse_qs, urlsplit
 
+from fake_github_http import json_response
+from test_api_work_persistence import IDENTITY, StartupFixture
+
 from review_sensei.errors import ReviewInputError
-from tests.fake_github_http import json_response
-from tests.test_api_work_persistence import IDENTITY, StartupFixture
 
 
 class HostedRunFixture(StartupFixture):
@@ -107,7 +108,7 @@ class PublicCallerRunTests(unittest.TestCase):
     def test_comment_write_keeps_its_bounded_confirmation_tail(self):
         from urllib.request import Request
 
-        from tests.test_api_work_persistence import QUALIFICATION_LIMIT
+        from test_api_work_persistence import QUALIFICATION_LIMIT
 
         for remaining in (2, 3):
             with (

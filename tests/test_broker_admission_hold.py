@@ -24,7 +24,9 @@ GRANT_URL = "https://github.reviewsensei.dev/github/session-grant"
 
 class TrackedError(HTTPError):
     def __init__(self, code=503, body=HELD, *, read_error=False, close_error=False):
-        super().__init__(TOKEN_URL, code, "remote reason withheld", {}, io.BytesIO(body))
+        super().__init__(
+            TOKEN_URL, code, "remote reason withheld", {}, io.BytesIO(body)
+        )
         self.read_sizes = []
         self.close_calls = 0
         self.read_error, self.close_error = read_error, close_error
@@ -68,9 +70,13 @@ class BrokerAdmissionHoldTests(unittest.TestCase):
             for maximum in (9, 12, 30):
                 with self.subTest(url=url, maximum=maximum):
                     error = TrackedError()
-                    raised, attempts, budget = self.call(error, url=url, maximum=maximum)
+                    raised, attempts, budget = self.call(
+                        error, url=url, maximum=maximum
+                    )
                     self.assertIs(type(raised), GitHubBrokerAdmissionHeldError)
-                    self.assertEqual(raised.error_category, "github_broker_admission_held")
+                    self.assertEqual(
+                        raised.error_category, "github_broker_admission_held"
+                    )
                     self.assertIn("temporarily held by the operator", str(raised))
                     self.assertIn("no automatic retry", str(raised))
                     self.assertIsNone(raised.broker_diagnostic)
@@ -88,20 +94,34 @@ class BrokerAdmissionHoldTests(unittest.TestCase):
             (503, b'{"error":"broker_admission_held","temporary":"true"}'),
             (503, b'{"error":"broker_admission_held","temporary":false}'),
             (503, b'{"error":"broker_admission_held"}'),
-            (503, b'{"error":"broker_admission_held","temporary":true,"token":"sensitive"}'),
-            (503, b'{"error":"broker_admission_held","temporary":false,"temporary":true}'),
+            (
+                503,
+                b'{"error":"broker_admission_held","temporary":true,"token":"sensitive"}',
+            ),
+            (
+                503,
+                b'{"error":"broker_admission_held","temporary":false,"temporary":true}',
+            ),
             (503, b'{"error":"another_error","temporary":true}'),
             (503, b'["broker_admission_held",true]'),
             (503, b'{"error":"broker_admission_held","temporary":tru'),
-            (503, b'\xffsensitive'),
+            (503, b"\xffsensitive"),
             (503, HELD + b" " * MAX_DIAGNOSTIC_BYTES),
-            (429, HELD), (431, HELD), (500, HELD), (502, HELD), (504, HELD),
+            (429, HELD),
+            (431, HELD),
+            (500, HELD),
+            (502, HELD),
+            (504, HELD),
         ]
         for code, body in cases:
             with self.subTest(code=code, body_length=len(body)):
                 error = TrackedError(code, body)
                 raised, attempts, budget = self.call(error)
-                expected = GitHubHTTPTransientError if code == 429 or code >= 500 else GitHubBrokerClientError
+                expected = (
+                    GitHubHTTPTransientError
+                    if code == 429 or code >= 500
+                    else GitHubBrokerClientError
+                )
                 self.assertIs(type(raised), expected)
                 self.assertEqual(raised.broker_diagnostic.code, "broker_unknown")
                 self.assertNotIn("sensitive", str(raised))
@@ -110,12 +130,22 @@ class BrokerAdmissionHoldTests(unittest.TestCase):
                 self.assertEqual(error.read_sizes, [MAX_DIAGNOSTIC_BYTES + 1])
                 self.assertEqual(error.close_calls, 1)
 
-    def test_existing_closed_ordinary_diagnostic_and_correlation_survive_single_read(self):
+    def test_existing_closed_ordinary_diagnostic_and_correlation_survive_single_read(
+        self,
+    ):
         diagnostic = BrokerDiagnostic("broker_unknown", "0123456789abcdef-ABC")
-        body = json.dumps({"error": "ordinary", "diagnostic": {
-            "version": 1, "code": diagnostic.code, "stage": diagnostic.stage,
-            "action": diagnostic.action, "correlation_id": diagnostic.correlation_id,
-        }}).encode()
+        body = json.dumps(
+            {
+                "error": "ordinary",
+                "diagnostic": {
+                    "version": 1,
+                    "code": diagnostic.code,
+                    "stage": diagnostic.stage,
+                    "action": diagnostic.action,
+                    "correlation_id": diagnostic.correlation_id,
+                },
+            }
+        ).encode()
         error = TrackedError(431, body)
         raised, attempts, budget = self.call(error)
         self.assertIs(type(raised), GitHubBrokerClientError)
@@ -131,14 +161,24 @@ class BrokerAdmissionHoldTests(unittest.TestCase):
                     diagnostic = BrokerDiagnostic(
                         "github_capability_issue_failed", upstream_status=upstream
                     )
-                    body = json.dumps({"diagnostic": {
-                        "version": 1, "code": diagnostic.code,
-                        "stage": diagnostic.stage, "action": diagnostic.action,
-                        "upstream_status": upstream,
-                    }}).encode()
+                    body = json.dumps(
+                        {
+                            "diagnostic": {
+                                "version": 1,
+                                "code": diagnostic.code,
+                                "stage": diagnostic.stage,
+                                "action": diagnostic.action,
+                                "upstream_status": upstream,
+                            }
+                        }
+                    ).encode()
                     error = TrackedError(code, body)
                     raised, attempts, budget = self.call(error)
-                    expected = GitHubBrokerClientError if code == 431 else GitHubHTTPTransientError
+                    expected = (
+                        GitHubBrokerClientError
+                        if code == 431
+                        else GitHubHTTPTransientError
+                    )
                     self.assertIs(type(raised), expected)
                     self.assertEqual(raised.broker_diagnostic, diagnostic)
                     self.assertEqual((len(attempts), budget.calls), (1, 1))
@@ -148,7 +188,11 @@ class BrokerAdmissionHoldTests(unittest.TestCase):
     def test_failed_body_read_and_failed_close_are_sanitized_without_followup(self):
         for read_error, close_error in ((True, False), (False, True), (True, True)):
             with self.subTest(read_error=read_error, close_error=close_error):
-                error = TrackedError(body=b"sensitive body", read_error=read_error, close_error=close_error)
+                error = TrackedError(
+                    body=b"sensitive body",
+                    read_error=read_error,
+                    close_error=close_error,
+                )
                 raised, attempts, budget = self.call(error)
                 self.assertIs(type(raised), GitHubHTTPTransientError)
                 self.assertEqual(raised.broker_diagnostic.code, "broker_unknown")

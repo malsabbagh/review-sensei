@@ -11,6 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import test_review_transaction as fixture
+from test_authenticated_partitions import binding, checkpoint
+
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import (
@@ -18,8 +21,6 @@ from review_sensei.session import (
     complete_review_publication,
     read_session_baseline,
 )
-from tests import test_review_transaction as fixture
-from tests.test_authenticated_partitions import binding, checkpoint
 
 
 def descriptor_stat_shape(value, *, ctime_delta=1):

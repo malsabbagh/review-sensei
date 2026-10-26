@@ -13,9 +13,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei_github.api_run_host import HOSTED_API_STARTUP_PLAN
-from review_sensei_github.api_run_requests import ApiRunRequestTransport
-from review_sensei_github.rescan import resolve_rescan
+from review_sensei_github.api_run_host import HOSTED_API_STARTUP_PLAN, ApiRunReviewHooks
+from review_sensei_github.api_run_requests import (
+    ApiRunRequestTransport,
+    ApiRunSessionLedger,
+)
 from review_sensei_github.session_ledger import (
     GitHubIssueCommentSessionLedger,
     parse_session_comment,
@@ -88,11 +90,18 @@ class CallerRescanReadTests(unittest.TestCase):
                 ),
                 block_id="rescan-reads",
             )
-            # The explicit reader guard is preserved; it neither constructs a
-            # caller allowance nor replaces the physical pre-dispatch meter.
+            # The resolver, reader and native transport share the same caller
+            # facade. Neither hook entry nor retained pagination opens a window.
             native.http.request("GET", "/repos/owner/repo/pulls/1", token=native.token)
-            guard = EvidenceReadBudget()
-            native.evidence_budget = guard
+            native.evidence_budget = caller.budget_view
+            ledger = ApiRunSessionLedger(native, caller, IDENTITY)
+            hooks = ApiRunReviewHooks(
+                ledger,
+                IDENTITY,
+                base_sha=source.base_sha,
+                head_sha=source.head_sha,
+                actions_token="synthetic-startup-actions",
+            )
             before = state.session_comment["body"]
             prior = caller.accounting.confirmed
             self.assertEqual(prior, 1)
@@ -106,11 +115,12 @@ class CallerRescanReadTests(unittest.TestCase):
                     side_effect=AssertionError("no fallback read window"),
                 ),
             ):
-                request = resolve_rescan(
-                    args, native, actions_token="synthetic-actions"
-                )
+                request = hooks.resolve_rescan(args, ledger)
             self.assertEqual(request.mode, "full")
             self.assertEqual(request.source, source)
+            self.assertIs(ledger.evidence_budget, caller.budget_view)
+            self.assertIs(native.evidence_budget, caller.budget_view)
+            self.assertEqual(hooks.rescan_request, request)
             reads = len(state.rescan_calls) - call_offset
             self.assertGreater(reads, 13)  # Real remote ledger fences are included.
             self.assertEqual(len(caller.observations) - offset, reads)

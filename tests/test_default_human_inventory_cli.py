@@ -15,21 +15,8 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from review_sensei.baseline import (
-    ReviewBaseline,
-    admission_context_document,
-    baseline_finding_from_comment,
-)
-from review_sensei.context import ReviewContextCacheKey
-from review_sensei.human_assessment import finding_instance_fingerprint
-from review_sensei.models import ReviewTransaction
-from review_sensei.session import (
-    LocalSessionLedger,
-    checkpoint_review_analysis,
-    prepare_review_transaction,
-)
-from tests import test_default_publication_cli_journey as publication_cli
-from tests.default_human_inventory_contract import (
+import test_default_publication_cli_journey as publication_cli
+from default_human_inventory_contract import (
     APP,
     BASE,
     CONFIGURATION,
@@ -43,8 +30,22 @@ from tests.default_human_inventory_contract import (
     next_mention,
     reply_human,
 )
-from tests.test_evidence_capacity import human_result, varied_comments
-from tests.test_review_work import AssessingProvider
+from test_evidence_capacity import human_result, varied_comments
+from test_review_work import AssessingProvider
+
+from review_sensei.baseline import (
+    ReviewBaseline,
+    admission_context_document,
+    baseline_finding_from_comment,
+)
+from review_sensei.context import ReviewContextCacheKey
+from review_sensei.human_assessment import finding_instance_fingerprint
+from review_sensei.models import ReviewTransaction
+from review_sensei.session import (
+    LocalSessionLedger,
+    checkpoint_review_analysis,
+    prepare_review_transaction,
+)
 
 
 def checkpoint_raw_proposals(root):

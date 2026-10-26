@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from review_sensei.api_work import MAX_API_REQUEST_LIMIT
 from review_sensei.errors import ReviewInputError
 
 from .http import MAX_PAGINATION_PAGES
@@ -46,7 +47,12 @@ class OwnerAllocations:
 
 
 def owner_allocations(limit: int, startup: int) -> OwnerAllocations:
-    if type(limit) is not int or type(startup) is not int or startup < 0:
+    if (
+        type(limit) is not int
+        or not 1 <= limit <= MAX_API_REQUEST_LIMIT
+        or type(startup) is not int
+        or not 0 <= startup <= MAX_API_REQUEST_LIMIT
+    ):
         raise ReviewInputError("caller allocation inputs are invalid")
     remaining = limit - startup
     successor = remaining // 2

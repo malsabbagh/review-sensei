@@ -16,11 +16,7 @@ from review_sensei_github.session_ledger import (
     GitHubIssueCommentSessionLedger,
     render_session_comment,
 )
-
-from review_sensei.bounded_evidence import EvidenceReadBudget
-from review_sensei.errors import ReviewInputError
-from review_sensei.session import LocalSessionLedger, read_session_baseline
-from tests.test_publication_recovery import (
+from test_publication_recovery import (
     APP,
     BASE,
     CONFIGURATION,
@@ -31,6 +27,10 @@ from tests.test_publication_recovery import (
     RetentionState,
     checkpoint,
 )
+
+from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.errors import ReviewInputError
+from review_sensei.session import LocalSessionLedger, read_session_baseline
 
 
 class PublicationRecoveryReadPhaseTests(unittest.TestCase):

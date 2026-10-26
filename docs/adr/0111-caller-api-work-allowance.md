@@ -124,6 +124,27 @@ including confirmed withholding. Actual Worker qualification uses fake external
 HTTP around production authentication, grant and service-ceiling code; synthetic
 receipts alone are insufficient.
 
+The exact 300-comment input with twenty 60-KiB bodies exceeds the ten-attempt
+native discovery envelope and refuses before provider entry or root/business
+writes (19 physical startup requests). The earlier positive for that input
+covered checkpoint phases, not a complete CLI lifecycle. A bounded adaptive
+24-comment workload completes the current CLI at 138 caller requests. Raising
+the root allowance does not enlarge this independent discovery envelope.
+
+The media check capability uses its existing independent Worker ceiling of 60;
+the current cold JWKS/annotated-tag/source-validation path needs 11 internal
+dispatches. It still costs one caller POST. A known media receipt followed by
+an incomplete approval/check result remains pending and refuses automatic
+successor replay; this change does not add general partial-action recovery.
+
+The offline production-code matrix accepts matching versions for review,
+command and reply. Released callers refuse against the current Worker before
+installation-token issuance. Current v3 sessions refuse against the released
+Worker after two internal token requests; its separate Actions read capability
+can succeed before that mandatory session barrier. No mixed-version session
+grant or enrollment response is returned. These refusal details are part of the
+cutover contract, not a compatibility fallback.
+
 Final acceptance requires immutable-head source and installed tests, platform
 qualification, production Worker contract tests, exact workflow recognition,
 required CI and independent review. Moving-source or earlier checkpoint counts

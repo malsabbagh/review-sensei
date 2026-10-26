@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fake_github_http import json_response, make_http
 from review_sensei_github.commands import (
     require_accepted_result as _require_accepted_result,
 )
@@ -20,6 +21,8 @@ from review_sensei_github.operation_entry import (
     run_hosted_provider,
 )
 from review_sensei_github.operation_host import GitHubCommentOperationStore
+from test_operation_entry import MemoryComments
+from test_review_transaction import CONFIGURATION
 
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
@@ -31,9 +34,6 @@ from review_sensei.session import (
     complete_review_publication,
     prepare_review_transaction,
 )
-from tests.fake_github_http import json_response, make_http
-from tests.test_operation_entry import MemoryComments
-from tests.test_review_transaction import CONFIGURATION
 
 APP = "reviewsensei[bot]"
 BASE = "a" * 40

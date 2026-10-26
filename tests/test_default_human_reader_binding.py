@@ -11,12 +11,8 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
-from review_sensei_github.errors import GitHubPublicationError
-
-from review_sensei.errors import ReviewInputError
-from review_sensei.session import LocalSessionLedger
-from tests import test_default_human_inventory as inventory_acceptance
-from tests.default_human_inventory_contract import (
+import test_default_human_inventory as inventory_acceptance
+from default_human_inventory_contract import (
     APP,
     HEAD,
     IDENTITY,
@@ -26,7 +22,11 @@ from tests.default_human_inventory_contract import (
     publish_human,
     reply_human,
 )
-from tests.test_review_work import AssessingProvider
+from review_sensei_github.errors import GitHubPublicationError
+from test_review_work import AssessingProvider
+
+from review_sensei.errors import ReviewInputError
+from review_sensei.session import LocalSessionLedger
 
 MARKER = re.compile(r"<!-- reviewsensei:eligibility:v1 ([A-Za-z0-9_=-]+) -->")
 

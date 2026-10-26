@@ -8,6 +8,7 @@ import unittest
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlsplit
 
+from fake_github_http import json_response
 from review_sensei_github.action_run import current_inventory
 from review_sensei_github.api_run_requests import ApiRunSessionLedger
 from review_sensei_github.errors import GitHubHTTPError
@@ -19,13 +20,12 @@ from review_sensei_github.publication import (
 )
 from review_sensei_github.publication_recovery import _PaginationObservationHttp
 from review_sensei_github.session_ledger import parse_session_comment
-from tests.test_action_run import CommandEntryFixture
+from test_action_run import CommandEntryFixture
+from test_api_work_lifecycle import LifecycleFixture
+from test_api_work_persistence import HEAD, IDENTITY
 
 from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
 from review_sensei.session import SessionIdentity
-from tests.fake_github_http import json_response
-from tests.test_api_work_lifecycle import LifecycleFixture
-from tests.test_api_work_persistence import HEAD, IDENTITY
 
 FINGERPRINT = "abc123" + "0" * 58
 
