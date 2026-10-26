@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import os
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,11 +24,14 @@ from published_cli_release_gate import (
     release_identity,
 )
 from qualify_published_cli import (
+    HISTORICAL_DIGESTS,
+    HISTORICAL_SUITES,
     HOSTED_MANIFEST,
     clean_environment,
     download_command,
     exact_version,
     propagation_download,
+    qualification_mode,
     require_hosted_pin,
     require_installed_distribution,
     require_wheel_digest,
@@ -34,9 +39,73 @@ from qualify_published_cli import (
     validate_receipt,
     wheel_for,
 )
+from qualify_published_cli import (
+    main as qualify_main,
+)
 
 
 class BootstrapContracts(unittest.TestCase):
+    def test_invalid_historical_cli_refuses_before_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "not-created"
+            argv = [
+                "qualify_published_cli.py",
+                "--historical-baseline",
+                "--version",
+                "0.8.14",
+                "--github-version",
+                "0.3.20",
+                "--output",
+                str(output),
+            ]
+            with patch.object(sys, "argv", argv), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    qualify_main()
+            self.assertEqual(raised.exception.code, 2)
+            self.assertFalse(output.exists())
+
+    def test_historical_operation_fixtures_keep_original_bytes(self):
+        root = Path(__file__).parent
+        expected = {
+            "historical_operations.py": "e42b435753425f9a055ac9a14fc3c2b5bba2f17a0541c3af9458e009685b84d9",
+            "operation_child.py": "e9b5f50e1ff777c342031d768fef9e18d9ab718ffb462624808e78f442bd587a",
+        }
+        for name, digest in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    hashlib.sha256((root / name).read_bytes()).hexdigest(), digest
+                )
+
+    def test_historical_fixture_requires_exact_explicit_identity_and_inventory(self):
+        args = argparse.Namespace(
+            historical_baseline=True,
+            version="0.6.23",
+            github_version="0.1.1",
+            expected_wheel_sha256=HISTORICAL_DIGESTS[0],
+            expected_github_wheel_sha256=HISTORICAL_DIGESTS[1],
+        )
+        self.assertEqual(
+            qualification_mode(args, HISTORICAL_SUITES),
+            ("historical-regression", "historical_operations.py"),
+        )
+        for field, value in (
+            ("version", "0.8.14"),
+            ("github_version", "0.3.20"),
+            ("expected_wheel_sha256", None),
+            ("expected_github_wheel_sha256", "f" * 64),
+        ):
+            with self.subTest(field=field), patch.object(args, field, value):
+                with self.assertRaisesRegex(ValueError, "historical baseline requires"):
+                    qualification_mode(args, HISTORICAL_SUITES)
+        for suites in (HISTORICAL_SUITES[:-1], (*HISTORICAL_SUITES, "lifecycle")):
+            with self.subTest(suites=suites), self.assertRaises(ValueError):
+                qualification_mode(args, suites)
+        args.historical_baseline = False
+        self.assertEqual(
+            qualification_mode(args, HISTORICAL_SUITES),
+            ("current-lifecycle", "operations.py"),
+        )
+
     def test_default_suite_set_includes_lifecycle_and_subsets_are_explicit(self):
         self.assertIn("lifecycle", selected_suites(None))
         original = [

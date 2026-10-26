@@ -8,7 +8,7 @@ checkout, configures credentials, or makes paid model/GitHub calls. Expectations
 are ordinary contracts: known released defects remain failures.
 
 ```sh
-python scripts/qualify_published_cli.py --version 0.6.23 --github-version 0.1.1 \
+python scripts/qualify_published_cli.py --version 0.8.14 --github-version 0.3.20 \
   --output /tmp/qualification-unique
 ```
 
@@ -33,7 +33,14 @@ case ceilings. The full lane has a 25-minute Actions ceiling.
 
 `qualify.py` drives the installed console process with deterministic fixture
 responses. `transports.py` drives real loopback HTTP and POSIX SIGINT with fake
-Ollama responses. `operations.py` reproduces missing metadata tokens and complete/paginated operation-record discovery through the installed hosted CLI's `publish` command, run in-process so the blocked sockets and mocked publication continuation apply (the engine's `github review` forwards to a hosted subprocess). `operation_state.py` exercises trusted operation creation, body/author readback, partial acceptance and replay through an in-memory HTTP opener. `seam_boundaries.py` supplements console tests with installed
+Ollama responses. `operations.py` exercises actual installed `review-run` and
+`reply-run` authorization, accounting, ledger, provider adapter and publication
+through synthetic external HTTP, including partial-result withholding and
+explicit refusal of retired Actions phases. It does not replace a publication
+continuation. `operation_state.py` retains its unchanged low-level operation
+port/state components; these are not current public-entry qualification.
+See the [complete old-to-current oracle mapping](../../docs/validation/published-consumer-run-paths.md).
+`seam_boundaries.py` supplements console tests with installed
 model/budget constructor boundaries; those are not evidence of live inference.
 Cases test numeric/type limits, canonical config precedence, diff admission,
 chunking and cumulative calls, normalized output, retry/correction, persistence
@@ -93,8 +100,11 @@ The lifecycle receipt retains one canonical row per parent method, including
 the count of its failing subtests, separately from executed method identities.
 
 The immutable major-validator baseline deliberately selects its original five
-contracts with repeated `--suite` options, preserving the exact 0.6.23/0.1.1 wheel
-digests. It does not claim those old bytes implement newer lifecycle behavior.
+contracts with repeated `--suite` options and `--historical-baseline`, preserving
+the exact 0.6.23/0.1.1 wheel digests and original historical operation fixtures.
+That explicit mode rejects any other pair, digest or suite inventory before
+installation. It does not claim those old bytes implement newer lifecycle behavior.
+Default qualification always selects current entry tests and never falls back.
 Default post-publication qualification runs all six suites; receipts always list
 selected and excluded suites so a subset cannot be mistaken for full coverage.
 
