@@ -18,6 +18,8 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 from urllib.request import Request
 
+import test_api_work_persistence as foundation
+from fake_github_http import json_response
 from review_sensei_github.action_completion import _reply_unnecessary, reply_source
 from review_sensei_github.action_reply import _outcome, _providers, execute_reply
 from review_sensei_github.api_run_history import read_action_result
@@ -29,6 +31,8 @@ from review_sensei_github.operation_host import GitHubCommentOperationStore
 from review_sensei_github.review_run import ActionRunLedger, ReviewRun
 from review_sensei_github.run_authority import AUDIENCE
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_lifecycle import LifecycleFixture
+from test_api_work_persistence import BASE, HEAD, IDENTITY
 
 from review_sensei.api_work import ApiRunAccounting
 from review_sensei.configuration import load_configuration
@@ -36,10 +40,6 @@ from review_sensei.errors import ProviderError, ReviewInputError, ReviewSenseiEr
 from review_sensei.hosted import plan_hosted_execution
 from review_sensei.outcomes import ResourceBudget
 from review_sensei.service import ReviewService
-from tests import test_api_work_persistence as foundation
-from tests.fake_github_http import json_response
-from tests.test_api_work_lifecycle import LifecycleFixture
-from tests.test_api_work_persistence import BASE, HEAD, IDENTITY
 
 BODY = "@reviewsensei explain the changed branch"
 SOURCE = {

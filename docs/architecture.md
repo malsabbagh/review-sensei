@@ -2,38 +2,27 @@
 
 ## Repository caller accounting and current Actions authority
 
-The root `api_request_limit` selects one physical caller HTTP allowance per
-authenticated repository ID and Actions `run_id`. Its default is 512; accepted
-integers are bounded by the exact JSON/JavaScript integer range. Startup,
-authorization, OIDC, GitHub reads and writes, Worker POSTs, publication and cleanup
-share that allowance. Each Worker POST counts once, with its internal dispatches
-observed separately. Inference, checkout, dependency installation and artifact
-upload retain their independent limits. See [ADR 0111](adr/0111-caller-api-work-allowance.md).
+Actions retain one caller HTTP allowance: root `api_request_limit` (default 512).
+Only v3 purpose/source/repo/PR/head/run/attempt/job/workflow authority enables work.
+Successors must prove cessation; uncertainty and abandoned capacity stay charged.
+New runs must archive terminal predecessor accounting.
+Only exact results/proven pre-entry aborts close actions; unknown work stays pending.
+Historical readers retain exact review/archive evidence and fresh authority, without writes.
+Finite operation/page limits can refuse with caller capacity unused.
 
-The hosted adapter's `review_run` and `action_run` own their selected lifecycle in
-one process. `api_run_requests` charges immediately before physical dispatch and
-persists owner-bound request intent. `api_run_plan` allocates finite work and
-protected confirmation/terminal capacity to the initial owner and one successor.
-Trusted policy commit P and its exact configuration bytes remain distinct from
-reviewed base B and head. The native ledger holds immutable accounting blocks,
-pending effects and typed terminal evidence. A successor must prove predecessor
-job cessation; uncertainty and abandoned capacity remain charged. A different run
-archives exact terminal predecessor state before replacing its accounting root.
+`review_run` and `action_run` own one lifecycle process across startup, review,
+command/reply, publication and cleanup. `api_run_requests` charges immediately
+before physical dispatch and persists owner-bound intent. `api_run_plan` allocates
+finite work and protected confirmation/terminal capacity. Policy commit P and its
+exact configuration bytes are distinct from reviewed base B and head.
 
-`run_authority` binds version 3 review, command and reply authority to the exact
-purpose, source, repository, PR, head, run, attempt, job and workflow. The Worker
-authenticates those bindings before issuance and independently enforces its
-60-dispatch/25-second exchange ceiling and bounded upstream requests. The caller
-cannot spend, refund or reset its allowance from Worker receipts. Historical
-transactions are read through `prior_rescan_publication`, explicitly bound to the
-authorized review/archive and fresh current authority; they confer no write power.
-
-Only confirmed exact results can close an entered action. A narrowly typed abort
-closure requires proof that analysis entry never began and cleanup completed.
-Unknown provider or mutation effects stay pending. Started media actions with a
-retained receipt but no terminal result refuse automatic successor replay.
-Complete history authentication is mandatory: finite pagination and operation
-allocations can refuse even when the root allowance has unused capacity.
+Worker POSTs cost one caller request. Internal dispatches are observations;
+Worker exchanges have independent 60-dispatch/25-second ceilings and bounded
+upstream requests. Inference and checkout/install/artifact infrastructure have
+separate limits. `run_authority` authenticates current bindings, and
+`prior_rescan_publication` supplies historical evidence without write authority.
+A media receipt alone does not provide typed terminal-result proof.
+See [ADR 0111](adr/0111-caller-api-work-allowance.md).
 
 ## Default human inventory references
 
@@ -71,9 +60,7 @@ and one original command read allowance.
 [Human file review](human-file-review.md) binds an owned exact result/root, complete inventory,
 regular base/head blobs and current authorized source. Hosted composition reads canonical retained
 state after broker authorization. V1 parts keep 32 files; groups keep 32 KiB and exact union coverage.
-Current Actions publication uses the repository caller allowance and finite
-operation allocations above. Its check exchange retains the independent Worker
-ceiling across cold JWKS and annotated-tag fallback.
+Media keeps caller accounting and independent Worker check ceilings.
 First-directory subtree proofs reduce shared-prefix reads; ADR 0103 describes capacity tradeoffs.
 Broker failures use the closed diagnostic catalog.
 Native media approval follows the review endpoint's HTTP 200 contract; audit
@@ -82,8 +69,7 @@ stay in place. Protocol failures expose fixed operation/status fields without ra
 Fresh source, permission, root, request, thread, qualification and full PR facts gate approval.
 Current finding facts require an exact-result index and positive resolution proof; never infer
 resolution from false flags. Never complete AI coverage/result/baseline/cache or carry across heads.
-Unknown writes require exact owned readback; an entered action without a typed
-terminal result refuses automatic replay. Model output confers no new authority.
+Unknown writes need exact owned readback; unproven entered actions refuse replay.
 See [Proposed ADR 0103](adr/0103-bounded-hosted-media-confirmation.md) and [ADR 0077](adr/0077-explicit-human-file-review.md).
 
 For the operational flows and separate analysis, persistence, reassessment and
@@ -491,16 +477,12 @@ Template placeholder names are allowlisted, and replacement occurs in one regex
 pass so tokens embedded in untrusted diffs, learnings, documents, or
 instructions remain literal.
 
-`applies_to` defaults to the whole diff and controls whether a lens is active.
-The CLI derives applicability paths independently from inline-comment locations,
-including deleted paths and both sides of renames. An active lens can select
-approved learning categories and repository-relative document sources. A source
-can be a file or directory with include/exclude patterns and can be optional or
-required. The CLI resolves documents against
-`--context-root`, falling back to the already trusted `--learning-root`. It does
-not implicitly use the current directory. The packaged architecture lens opts
-into conventional architecture sources; other lenses receive no document
-context unless configured.
+`applies_to` defaults to the whole diff. CLI applicability covers deleted paths
+and both rename sides independently of inline locations. Active lenses select
+approved learning categories and optional/required repository sources: files or
+directories with filters. `--context-root` falls back to trusted `--learning-root`,
+never the ambient directory. The packaged architecture lens selects conventional
+sources; other lenses need configuration.
 
 Document selection resolves the active lenses together, deduplicates paths, and
 keeps the existing global limits of 64 documents, 128 KiB per supplied document,
@@ -512,16 +494,13 @@ overlap with changed file stems in document paths, headings, and text; canonical
 paths break ties. Fitting foundational documents remain eligible even without
 lexical matches. No implicit repository scan or category override is required.
 
-Under byte pressure, optional documents may become bounded **verbatim line
-excerpts**, with complete-source and payload digests, original line ranges,
-method/version, and explicit loss warnings. This is extractive summarization,
-with zero additional provider calls; it cannot establish that omitted sections
-contain no requirements. Discovery, inspection, and extraction have separate
-bounds. Selection metadata belongs to the lens prompt and cache identity, and
-loss counts appear on stderr. `--context-selection-output PATH` writes the full
-bounded path/provenance inventory without document text. These counts describe
-supplemental context, independently of source-review coverage and approval.
-See proposed [ADR 0058](adr/0058-budgeted-document-context.md).
+Optional documents can become bounded verbatim line excerpts with source/payload
+digests, original line ranges, method/version and loss warnings.
+Extraction makes zero provider calls and cannot prove omitted requirements absent.
+Discovery, inspection and extraction have separate bounds. Selection metadata
+enters lens prompts and cache identity. Loss counts appear on stderr.
+`--context-selection-output PATH` writes bounded path/provenance without text.
+Context counts are independent of source coverage/approval. See ADR 0058.
 
 Symbol-aware source selection is a separate opt-in policy
 (`SymbolAwareContextPolicy`, `--enable-symbol-context`). Disabled by default,
@@ -1264,9 +1243,8 @@ uses exact owned POST-ID readback followed by the complete report scan; the
 ordinary conversation route remains available. See
 [Proposed ADR 0087](adr/0087-selected-assessment-context-and-owned-page-readback.md).
 
-Broker control prepays original liability; original deadlines gate fetches/JWKS waits.
-Reject redirects/bad or v2 scope/deadline-mismatched receipts. Isolate requests;
-no refunds/new authority/durability; legacy unchanged (ADR 0088).
+Worker bounds are independent; receipts never refund caller POSTs or grant authority.
+Reject redirects and mismatched receipts; isolate requests (ADR 0111).
 
 `admit_with_tail` joins reservation/admission; owned readback precedes inference (ADR 0090).
 

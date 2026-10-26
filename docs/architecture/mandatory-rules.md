@@ -1,3 +1,10 @@
+Actions retain one caller HTTP allowance: root `api_request_limit` (default 512).
+Only v3 purpose/source/repo/PR/head/run/attempt/job/workflow authority enables work.
+Successors must prove cessation; uncertainty and abandoned capacity stay charged.
+New runs must archive terminal predecessor accounting.
+Only exact results/proven pre-entry aborts close actions; unknown work stays pending.
+Historical readers retain exact review/archive evidence and fresh authority, without writes.
+Finite operation/page limits can refuse with caller capacity unused.
 Same-operation inventory handoff must retain budget/transport/token/scope,
 fresh complete intent/parts reads and fresh ledger/Bot/PR/root/index/full-prose fences.
 Canonical admission is evidence only; see ADR 0098.
@@ -29,11 +36,11 @@ parts refuse. Unbound gains no checkpoint authority. See ADR 0093.
 [Human file review](human-file-review.md) binds an owned exact result/root, complete inventory,
 regular base/head blobs and current authorized source. Hosted composition reads canonical retained
 state after broker authorization. V1 parts keep 32 files; groups keep 32 KiB and exact union coverage.
-One publisher keeps 60 ordinary/four finalization calls and 60 seconds, including broker liability.
+Media keeps caller accounting and independent Worker check ceilings.
 Fresh source, permission, root, request, thread, qualification and full PR facts gate approval.
 Current finding facts require an exact-result index and positive resolution proof; never infer
 resolution from false flags. Never complete AI coverage/result/baseline/cache or carry across heads.
-Unknown writes reconcile only on explicit retry; no cap increase, model approval or new authority.
+Unknown writes need exact owned readback; unproven entered actions refuse replay.
 See [Proposed ADR 0103](adr/0103-bounded-hosted-media-confirmation.md) and [ADR 0077](adr/0077-explicit-human-file-review.md).
 
 reassessment check that identity before planning and dispatch. Ollama advertises
@@ -250,18 +257,12 @@ The category block is configuration, not provider output. A stage with
 categories must include `{review_categories}` in its template so focus data
 cannot be configured but silently omitted from the model prompt. A stage whose
 categories request supplemental context must also include `{review_context}`.
-
-`applies_to` defaults to the whole diff and controls whether a lens is active.
-The CLI derives applicability paths independently from inline-comment locations,
-including deleted paths and both sides of renames. An active lens can select
-approved learning categories and repository-relative document sources. A source
-can be a file or directory with include/exclude patterns and can be optional or
-required. The CLI resolves documents against
-`--context-root`, falling back to the already trusted `--learning-root`. It does
-not implicitly use the current directory. The packaged architecture lens opts
-into conventional architecture sources; other lenses receive no document
-context unless configured.
-
+`applies_to` defaults to the whole diff. CLI applicability covers deleted paths
+and both rename sides independently of inline locations. Active lenses select
+approved learning categories and optional/required repository sources: files or
+directories with filters. `--context-root` falls back to trusted `--learning-root`,
+never the ambient directory. The packaged architecture lens selects conventional
+sources; other lenses need configuration.
 Document selection resolves the active lenses together, deduplicates paths, and
 keeps the existing global limits of 64 documents, 128 KiB per supplied document,
 and 512 KiB of unique supplied content. Present explicit-file sources, all
@@ -271,18 +272,13 @@ directory documents are ranked by references to each lens's changed paths and
 overlap with changed file stems in document paths, headings, and text; canonical
 paths break ties. Fitting foundational documents remain eligible even without
 lexical matches. No implicit repository scan or category override is required.
-
-Under byte pressure, optional documents may become bounded **verbatim line
-excerpts**, with complete-source and payload digests, original line ranges,
-method/version, and explicit loss warnings. This is extractive summarization,
-with zero additional provider calls; it cannot establish that omitted sections
-contain no requirements. Discovery, inspection, and extraction have separate
-bounds. Selection metadata belongs to the lens prompt and cache identity, and
-loss counts appear on stderr. `--context-selection-output PATH` writes the full
-bounded path/provenance inventory without document text. These counts describe
-supplemental context, independently of source-review coverage and approval.
-See proposed [ADR 0058](adr/0058-budgeted-document-context.md).
-
+Optional documents can become bounded verbatim line excerpts with source/payload
+digests, original line ranges, method/version and loss warnings.
+Extraction makes zero provider calls and cannot prove omitted requirements absent.
+Discovery, inspection and extraction have separate bounds. Selection metadata
+enters lens prompts and cache identity. Loss counts appear on stderr.
+`--context-selection-output PATH` writes bounded path/provenance without text.
+Context counts are independent of source coverage/approval. See ADR 0058.
 (`SymbolAwareContextPolicy`, `--enable-symbol-context`). Disabled by default,
 it never expands trusted context. When enabled, `SymbolAwareContextSelector`
 reads only the trusted-base snapshot identified by `--base-sha`. Head source
@@ -634,19 +630,14 @@ Missing/ambiguous facts or newer distinct executions block qualification.
 Restored handles bind operation/inventory/source, original clock/charges and time/generation/
 expiry/rollback limits. No replay reexecution, unknown-work publication, CLI/grant activation
 or broker funding (ADR 0086).
-
-Broker control prepays original liability; original deadlines gate fetches/JWKS waits.
-Reject redirects/bad or v2 scope/deadline-mismatched receipts. Isolate requests;
-no refunds/new authority/durability; legacy unchanged (ADR 0088).
-
+Worker bounds are independent; receipts never refund caller POSTs or grant authority.
+Reject redirects and mismatched receipts; isolate requests (ADR 0111).
 `admit_with_tail` joins reservation/admission; owned readback precedes inference (ADR 0090).
 
 Opt-in partitioned publication binds independent result/snapshot/policy/config/producer,
 original budget/conditional generation/owned numeric readback. Fresh scans verify all prose;
 partial roots keep links/capacity/full-ID status. Local replay only; default routes/all-resolved
 approval unqualified (ADR 0089).
-
-
 Continuation must verify full input scope; absent/changed scope refuses reuse.
 
 Hosted-only reuse requires core-input proof and per-package signed provenance (ADR 0105).

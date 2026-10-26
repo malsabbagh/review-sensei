@@ -45,13 +45,13 @@ from review_sensei_github.session_ledger import (
     parse_session_comment,
 )
 from review_sensei_github.thread_resolution import ThreadResolutionResult
+from test_action_reply import BODY, SOURCE, ReplyFixture
+from test_api_work_persistence import BASE, HEAD, IDENTITY
+from test_human_assessment import APP, HUMAN, Provider, State, prior, response_for
 
 from review_sensei.api_work import ApiExecutionOwner, ApiRunIdentity
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ConversationReply
-from tests.test_action_reply import BODY, SOURCE, ReplyFixture
-from tests.test_api_work_persistence import BASE, HEAD, IDENTITY
-from tests.test_human_assessment import APP, HUMAN, Provider, State, prior, response_for
 
 ENV = {"GITHUB_RUN_ID": "456", "GITHUB_RUN_ATTEMPT": "1"}
 

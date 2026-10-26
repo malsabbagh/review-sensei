@@ -150,6 +150,8 @@ class CloudflarePackageTests(unittest.TestCase):
             "`# ReviewSensei setup version: ${SETUP_VERSION}\\n`",
             '"# Configuration version. Leave this at 1.\\n"',
             '"schema: 1\\n"',
+            '"# ReviewSensei caller HTTP attempts per authenticated Actions run.\\n"',
+            '"api_request_limit: 512\\n"',
             '"# Backend and model used for review.\\n"',
             '"inference:\\n"',
             '"  # local-ollama, cloud-ollama, openrouter, or openai-compatible\\n"',
@@ -199,6 +201,9 @@ class CloudflarePackageTests(unittest.TestCase):
             "# ReviewSensei setup version: 5\n"
             "# Configuration version. Leave this at 1.\n"
             "schema: 1\n"
+            "\n"
+            "# ReviewSensei caller HTTP attempts per authenticated Actions run.\n"
+            "api_request_limit: 512\n"
             "\n"
             "# Backend and model used for review.\n"
             "inference:\n"
