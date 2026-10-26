@@ -2,6 +2,8 @@
  * Grant verification is never stubbed. The worker stores nothing.
  */
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import type { RunAuthorityRequest } from "../src/run-authority";
 import { TokenBroker } from "../src/token-broker";
 import { GitHubApi } from "../src/github-api";
 import type { WorkerEnv } from "../src/env";
@@ -36,14 +38,21 @@ export function claims(jti = "assertion-1") {
   };
 }
 
-export function requestAttestation(operation: "review" | "command" = "command") {
+export function requestAttestation(purpose: "review" | "command" | "reply" = "command", source = {
+  kind: "issue_comment" as "issue_comment" | "review_comment", id: 13579,
+  body: "@sensei review continue", updatedAt: "2026-10-09T00:00:00Z",
+}): RunAuthorityRequest {
+  const now = Math.floor(Date.now() / 1000);
   return {
-    version: 1, repository: "acme/widgets", repository_id: 987654321,
-    pull_request: 7, head_sha: SHA, operation,
-    source_comment_id: operation === "command" ? 13579 : null,
-    run_id: "10000000001", issued_at: Math.floor(Date.now() / 1000),
-    concurrency_group: "reviewsensei-session-987654321-7",
+    version: 3, purpose, repository: "acme/widgets", repository_id: 987654321,
+    pull_request: 7, head_sha: SHA, run_id: "10000000001", run_attempt: 1,
+    job: purpose === "command" ? "command" : "hosted",
+    issued_at: now, expires_at: now + 600, audience: "reviewsensei-run-action",
     job_workflow_ref: WORKFLOW, job_workflow_sha: SHA,
+    source: purpose === "review"
+      ? { kind: "pull_request", id: 7, updated_at: null, body_sha256: null }
+      : { kind: source.kind, id: source.id, updated_at: source.updatedAt,
+        body_sha256: createHash("sha256").update(source.body).digest("hex") },
   };
 }
 
@@ -70,6 +79,8 @@ export async function consumingBroker(_filename = ":memory:", traceFile?: string
     number: 7, state: "open", draft: false,
     base: "b".repeat(40),
     head: SHA,
+    comments: [] as unknown[],
+    reviews: [] as unknown[],
     source: {
       id: 13579, body: "@sensei review continue", login: "octocat",
       authorId: 12345678, updatedAt: "2026-10-09T00:00:00Z",
@@ -93,7 +104,10 @@ export async function consumingBroker(_filename = ":memory:", traceFile?: string
         association: source.association, rootCommentId: source.root_comment_id,
       });
     }
-    return feedbackAttestation();
+    return requestAttestation("reply", {
+      kind: "issue_comment", id: githubInputs.source.id,
+      body: githubInputs.source.body, updatedAt: githubInputs.source.updatedAt,
+    });
   };
   const transportRequests: { method: string; path: string; kind: string }[] = [];
   const transport = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -110,18 +124,18 @@ export async function consumingBroker(_filename = ":memory:", traceFile?: string
       const request = JSON.parse(String(init?.body));
       body = { token: "synthetic-scoped", expires_at: new Date(Date.now() + 60_000).toISOString(), permissions: { metadata: "read", ...request.permissions } };
     } else if (url.pathname === `/repos/${githubInputs.repository}`) body = { id: githubInputs.repositoryId, fork: false };
-    else if (url.pathname === "/repos/acme/widgets/pulls/7") body = { number: githubInputs.number, state: githubInputs.state, draft: githubInputs.draft, base: { sha: githubInputs.base }, head: { sha: githubInputs.head } };
-    else if (url.pathname === "/repos/acme/widgets/issues/comments/13579") {
+    else if (url.pathname === `/repos/${githubInputs.repository}/pulls/${githubInputs.number}`) body = { number: githubInputs.number, state: githubInputs.state, draft: githubInputs.draft, base: { sha: githubInputs.base }, head: { sha: githubInputs.head } };
+    else if (url.pathname === `/repos/${githubInputs.repository}/issues/comments/${githubInputs.source.id}`) {
       const source = githubInputs.source;
       body = { id: source.id, body: source.body, updated_at: source.updatedAt, user: { id: source.authorId, login: source.login, type: source.userType }, author_association: source.association, issue_url: source.url };
       status = source.status;
-    }     else if (url.pathname === "/repos/acme/widgets/pulls/comments/24680") {
+    }     else if (url.pathname === `/repos/${githubInputs.repository}/pulls/comments/${githubInputs.inlineSource.id}`) {
       const source = githubInputs.inlineSource;
       body = { id: source.id, body: source.body, updated_at: source.updatedAt, user: { id: source.authorId, login: source.login, type: source.userType }, author_association: source.association, pull_request_url: source.url, in_reply_to_id: source.rootCommentId };
       status = source.status;
     } else if (url.pathname === "/app") body = { slug: "reviewsensei" };
-    else if (url.pathname === "/repos/acme/widgets/pulls/7/reviews") body = [];
-    else if (url.pathname === "/repos/acme/widgets/issues/7/comments") body = [];
+    else if (url.pathname === `/repos/${githubInputs.repository}/pulls/${githubInputs.number}/reviews`) body = githubInputs.reviews;
+    else if (url.pathname === `/repos/${githubInputs.repository}/issues/${githubInputs.number}/comments`) body = githubInputs.comments;
     else { body = { message: "Not Found" }; status = 404; }
     return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   };
@@ -137,6 +151,10 @@ export async function consumingBroker(_filename = ":memory:", traceFile?: string
   };
   return {
     broker: new TokenBroker(env, new GitHubApi(env)), ledgerRequests, githubInputs, configureFeedback,
+    authority: (purpose: "review" | "command" | "reply" = "command", kind: "issue_comment" | "review_comment" = "issue_comment") => {
+      const source = kind === "issue_comment" ? githubInputs.source : githubInputs.inlineSource;
+      return requestAttestation(purpose, { kind, id: source.id, body: source.body, updatedAt: source.updatedAt });
+    },
     transport, transportRequests, oidcToken,
     grantCount: () => 0,
     close: () => undefined,

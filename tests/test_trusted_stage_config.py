@@ -259,8 +259,6 @@ class CallerRunnerInputContractTests(unittest.TestCase):
                 self.assertEqual(
                     passed,
                     invocation_inputs
-                    if name == "example"
-                    else invocation_inputs
                     - {
                         "recover_publication",
                         "recovery_policy_commit",

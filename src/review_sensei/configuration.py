@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
-from .api_work import DEFAULT_API_REQUEST_LIMIT
+from .api_work import DEFAULT_API_REQUEST_LIMIT, MAX_API_REQUEST_LIMIT
 from .budgets import MAX_TOTAL_OUTPUT_BYTES, MAX_TOTAL_PROMPT_BYTES, ReviewWorkBudgets
 from .errors import ReviewInputError
 from .outcomes import (
@@ -983,10 +983,13 @@ def _build_configuration(
     github = _build_github(values.get("github"), lines, source=source, fail=fail)
     advanced = _build_advanced(values.get("advanced"), lines, source=source, fail=fail)
     api_request_limit = values.get("api_request_limit", DEFAULT_API_REQUEST_LIMIT)
-    if type(api_request_limit) is not int or api_request_limit < 1:
+    if (
+        type(api_request_limit) is not int
+        or not 1 <= api_request_limit <= MAX_API_REQUEST_LIMIT
+    ):
         raise fail(
             "api_request_limit",
-            "must be a positive integer; admission also requires the measured startup envelope",
+            f"must be an integer from 1 to {MAX_API_REQUEST_LIMIT}; admission also requires the measured startup envelope",
         )
     return ProductConfiguration(
         schema=schema,
@@ -2468,7 +2471,7 @@ def render_configuration(
         f"configuration: {configuration.source or 'none (packaged defaults)'}"
         f" (schema {configuration.schema})",
         f"configuration root: {configuration.root}",
-        f"api_request_limit: {configuration.api_request_limit} (caller requests per Actions run; provisional)",
+        f"api_request_limit: {configuration.api_request_limit} (caller requests per Actions run)",
         "effective inference:",
     ]
     inference_rows = (

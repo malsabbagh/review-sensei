@@ -42,7 +42,7 @@ class ReviewRunPolicyTests(unittest.TestCase):
 class EntryFixture(LifecycleFixture):
     """Reuse the accepted real publisher/ledger fixture, adding policy startup."""
 
-    def __init__(self, directory, *, limit=QUALIFICATION_LIMIT, runner_kind="hosted"):
+    def __init__(self, directory, *, limit=512, runner_kind="hosted"):
         import subprocess
 
         from tests import test_review_transaction as tx
@@ -93,6 +93,10 @@ class EntryFixture(LifecycleFixture):
         self.before_publication = None
         self.selected = None
         self.provider_calls = 0
+        self.provider_comments = None
+        self.event_name = "pull_request"
+        self.event_document = None
+        self.review_intent = None
         self.overlap = False
         self.refuse_broker = False
         self.run_id = 456
@@ -112,6 +116,9 @@ class EntryFixture(LifecycleFixture):
         from tests.fake_github_http import json_response
 
         path = urlsplit(request.full_url).path
+        if path.endswith("/collaborators/alice/permission"):
+            self.trace.append((self.attempt, request.get_method(), path))
+            return json_response({"permission": "maintain"})
         if path == "/api/tags":
             assert request.get_header("Authorization") is None
             self.trace.append((self.attempt, request.get_method(), path))
@@ -206,7 +213,7 @@ class EntryFixture(LifecycleFixture):
                     "run_attempt": self.attempt,
                     "repository": {"id": 123, "full_name": "owner/repo"},
                     "status": "in_progress" if active else "completed",
-                    "event": "pull_request",
+                    "event": self.event_name if current else "pull_request",
                 }
             )
         payload = json.loads(request.data) if request.data else {}
@@ -269,12 +276,6 @@ class EntryFixture(LifecycleFixture):
                 else:
                     value["body"] += "tampered"
             return json_response(value)
-        if urlsplit(request.full_url).hostname == "broker.github.test":
-            value = json.loads(response.read(524288))
-            if "reservation_owner" in value:
-                value["reservation_owner"]["run_id"] = str(self.run_id)
-                value["reservation_owner"]["head_sha"] = self.requested_head
-            return json_response(value)
         if path.endswith("/pulls/7"):
             pull = json.loads(response.read(524288))
             pull["head"]["sha"] = self.live_head
@@ -316,6 +317,7 @@ class EntryFixture(LifecycleFixture):
         self.live_head = self.requested_head = "d" * 40
         self.trace.clear()
         self.transports.clear()
+        self.worker_observations.clear()
 
     def invoke(self, *, human=False):
         import io
@@ -335,6 +337,9 @@ class EntryFixture(LifecycleFixture):
         from tests import test_review_transaction as tx
 
         fixture = self
+        event_file = self.root / "event.json"
+        if self.event_document is not None:
+            event_file.write_text(json.dumps(self.event_document))
 
         def caller_factory(**kwargs):
             caller = ApiRunRequestTransport(**kwargs)
@@ -353,6 +358,15 @@ class EntryFixture(LifecycleFixture):
             return http
 
         class Provider(tx.HostedAnalysisCliTests._Provider):
+            # Fake only completion HTTP, while preserving the selected adapter
+            # identity so independent successor context reconstruction is real.
+            name = "ollama"
+            model = (
+                "deepseek-v4.1-flash:cloud"
+                if fixture.owner_job == "hosted"
+                else "qwen3.5:4b"
+            )
+
             def complete(self, request):
                 fixture.provider_calls += 1
                 if fixture.before_provider:
@@ -372,6 +386,8 @@ class EntryFixture(LifecycleFixture):
                         }
                     ]
                 )
+                if fixture.provider_comments is not None:
+                    comments = fixture.provider_comments
                 return ProviderResponse(
                     text=json.dumps(
                         {"summary": "Complete review.", "comments": comments}
@@ -416,7 +432,12 @@ class EntryFixture(LifecycleFixture):
                         os.environ,
                         {
                             "GITHUB_RUN_ID": str(self.run_id),
-                            "GITHUB_EVENT_NAME": "pull_request",
+                            "REVIEW_SENSEI_WORKFLOW_REF": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+                            "REVIEW_SENSEI_WORKFLOW_SHA": "a" * 40,
+                            "GITHUB_EVENT_NAME": self.event_name,
+                            "GITHUB_EVENT_PATH": str(event_file),
+                            "GITHUB_ACTOR": "alice",
+                            "GITHUB_TRIGGERING_ACTOR": "alice",
                             "GITHUB_RUN_ATTEMPT": str(self.attempt),
                             "GITHUB_TOKEN": "synthetic-workflow-read",
                             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
@@ -480,6 +501,9 @@ class EntryFixture(LifecycleFixture):
                         "--review-mode",
                         "merge-focused",
                         "--no-learning-proposals",
+                        "--learning-root",
+                        str(self.root),
+                        *([self.review_intent] if self.review_intent else []),
                         "--configuration-context-output",
                         str(self.root / "configuration.json"),
                         "--admission-context-output",
@@ -493,6 +517,121 @@ class EntryFixture(LifecycleFixture):
 
 
 class ReviewRunEntryTests(unittest.TestCase):
+    def test_hard_killed_pending_result_has_one_proven_successor_and_no_reinference(
+        self,
+    ):
+        import json
+        import os
+        import subprocess
+        import sys
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.api_work import ApiRunAccounting
+
+        for active in (True, False):
+            with (
+                self.subTest(active=active),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = EntryFixture(directory, limit=512)
+                child_root = f.root / "child"
+                child_root.mkdir()
+                packet = f.root / "killed.json"
+                script = """
+import json, os, sys
+from pathlib import Path
+from tests.test_review_run import EntryFixture
+f = EntryFixture(sys.argv[1], limit=512)
+def killed():
+    Path(sys.argv[2]).write_text(json.dumps({"comment":f.comment,"extra":f.extra_comments,"policy":f.policy,"provider_calls":f.provider_calls}))
+    os._exit(91)
+f.before_publication = killed
+f.invoke()
+os._exit(92)
+"""
+                process = subprocess.run(
+                    [sys.executable, "-c", script, str(child_root), str(packet)],
+                    capture_output=True,
+                    timeout=20,
+                    env={
+                        k: v
+                        for k, v in os.environ.items()
+                        if k
+                        in {
+                            "PATH",
+                            "PYTHONPATH",
+                            "HOME",
+                            "TMP",
+                            "TMPDIR",
+                            "TEMP",
+                            "SYSTEMROOT",
+                            "LANG",
+                        }
+                    },
+                )
+                self.assertEqual(process.returncode, 91, process.stderr.decode())
+                saved = json.loads(packet.read_text())
+                f.root = child_root
+                f.policy = f.policy_ref = saved["policy"]
+                f.comment = saved["comment"]
+                f.extra_comments = {int(k): v for k, v in saved["extra"].items()}
+                f.provider_calls = saved["provider_calls"]
+                old = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertEqual(old.transaction.phase, "publication_pending")
+                predecessor = ApiRunAccounting.from_document(old.api_run_accounting)
+                f.attempt = 2
+                f.previous_active = active
+                self.assertEqual(f.invoke(), 1 if active else 0, f.error)
+                self.assertEqual(f.provider_calls, 1)
+                if active:
+                    self.assertEqual(
+                        parse_session_comment(
+                            f.comment["body"], identity=IDENTITY
+                        ).to_dict(),
+                        old.to_dict(),
+                    )
+                    self.assertFalse(
+                        any(
+                            m in {"POST", "PATCH"} and "/issues" in p
+                            for _, m, p in f.trace
+                        )
+                    )
+                else:
+                    self.assertEqual(
+                        f.accounted.accounting.blocks[: len(predecessor.blocks)],
+                        predecessor.blocks,
+                    )
+                    self.assertEqual(
+                        sum(r["state"] == "APPROVED" for r in f.reviews), 1
+                    )
+
+    def test_stopped_same_run_successor_publishes_retained_result_without_inference(
+        self,
+    ):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory, limit=512)
+
+            def interrupted():
+                raise KeyboardInterrupt()
+
+            f.before_publication = interrupted
+            self.assertEqual(f.invoke(), 130, f.error)
+            pending = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(pending.transaction.phase, "publication_pending")
+            f.attempt = 2
+            f.before_publication = None
+            self.assertEqual(f.invoke(), 0, f.error)
+            self.assertEqual(f.provider_calls, 1)
+            final = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(
+                final.transaction.transaction_id, pending.transaction.transaction_id
+            )
+            self.assertEqual(final.transaction.phase, "publication_succeeded")
+            self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
+
     def test_actual_package_entry_owns_analysis_and_publication(self):
         import json
 
@@ -516,6 +655,35 @@ class ReviewRunEntryTests(unittest.TestCase):
                 self.assertEqual(f.provider_calls, 1)
                 self.assertEqual(len(f.trace), 84 if human else 88)
                 self.assertEqual(caller_measurement(f)["startup_reservation"], 130)
+
+    def test_operation_app_identity_comes_from_worker_and_cannot_fall_back(self):
+        import os
+
+        for missing_broker_identity in (False, True):
+            with self.subTest(missing=missing_broker_identity), tempfile.TemporaryDirectory() as directory:
+                fixture = EntryFixture(directory)
+                if missing_broker_identity:
+                    original = fixture.broker_response
+
+                    def without_app_id(payload):
+                        response = original(payload)
+                        response.pop("app_id", None)
+                        return response
+
+                    fixture.broker_response = without_app_id
+                else:
+                    fixture.before_entry = lambda: os.environ.pop("REVIEWSENSEI_APP_ID", None)
+                self.assertEqual(fixture.invoke(), 1 if missing_broker_identity else 0, fixture.error)
+                self.assertEqual(fixture.provider_calls, 0 if missing_broker_identity else 1)
+                if missing_broker_identity:
+                    self.assertIsNone(fixture.comment)
+                    self.assertIn("authenticated App identity", fixture.error)
+                else:
+                    from review_sensei_github.session_ledger import parse_session_comment
+
+                    stored = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+                    self.assertEqual(fixture.accounted.accounting.terminal_transaction,
+                                     stored.transaction.transaction_id)
 
     def test_diagnostic_files_cannot_replace_in_memory_publication(self):
         with tempfile.TemporaryDirectory() as directory:

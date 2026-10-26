@@ -1,8 +1,7 @@
-"""Finite caller-run selection for the first offline hosted review integration.
+"""Finite caller-run policy shared by the current Actions lifecycle routes.
 
-The trusted host supplies the native, already authenticated startup result. This
-module is not selected by repository JSON, an incoming receipt, or the released
-workflow. It introduces no live activation or implicit old-phase fallback.
+The trusted bootstrap supplies authenticated startup state. Serialized records
+and incoming receipts cannot select a new allowance or an old phase fallback.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from typing import Any
 from review_sensei.api_work import StartupPlan, StartupSlot
 from review_sensei.configuration import MAX_CONFIG_BYTES
 from review_sensei.errors import ReviewInputError
+from review_sensei.rescan import AuthorizedRescan
 from review_sensei.session import SessionIdentity
 
 from .api_run_requests import ApiRunSessionLedger
@@ -37,7 +37,7 @@ _STARTUP_PREFIX = (
 
 
 def review_startup_plan(job: str) -> StartupPlan:
-    if job not in {"hosted", "local"}:
+    if job not in {"hosted", "local", "command"}:
         raise ReviewInputError("review startup job is unsupported")
     return StartupPlan(
         (
@@ -45,6 +45,7 @@ def review_startup_plan(job: str) -> StartupPlan:
                 job,
                 1,
                 _STARTUP_PREFIX
+                + (("source",) if job == "command" else ())
                 # Different-run rollover is the largest supported startup:
                 # initial discovery; old run/jobs twice; native replacement's
                 # discovery/latest/preactivation/readback; one archive POST,
@@ -60,6 +61,7 @@ def review_startup_plan(job: str) -> StartupPlan:
                 job,
                 2,
                 _STARTUP_PREFIX
+                + (("source",) if job == "command" else ())
                 + ("ceased-job",) * 2
                 + ("recovery-lists",) * (4 * MAX_PAGINATION_PAGES)
                 + ("head", "update"),
@@ -93,6 +95,7 @@ class ApiRunReviewHooks:
         base_sha: str,
         head_sha: str,
         oidc_token: str | None = None,
+        actions_token: str | None = None,
     ):
         if not isinstance(
             ledger, ApiRunSessionLedger
@@ -103,6 +106,9 @@ class ApiRunReviewHooks:
         self.ledger, self.identity = ledger, identity
         self.base_sha, self.head_sha = base_sha, head_sha
         self.oidc_token = oidc_token
+        self.actions_token = actions_token
+        self.rescan_request: AuthorizedRescan | None = None
+        self.prior_inventory_reference = None
         self.configuration = ledger.caller.accounting.configuration
         self._provider_started = self._completion_started = False
 
@@ -156,31 +162,27 @@ class ApiRunReviewHooks:
     def resolve_rescan(self, args, ledger):
         import os
 
-        from .broker_client import BrokerClient
-        from .broker_control import BrokerDispatchAccounting
         from .rescan import resolve_rescan
-        from .review_hooks import ANALYSIS_ACTION_INTERNAL_DISPATCHES
 
         if ledger is not self.ledger:
             raise ReviewInputError("rescan does not own the admitted caller ledger")
         actions_token = ""
         if os.environ.get("GITHUB_EVENT_NAME") != "issue_comment":
-            broker = BrokerClient(
-                opener=self.ledger.caller.open,
-                control=BrokerDispatchAccounting(
-                    self.ledger.caller.budget_view,
-                    hashlib.sha256(
-                        f"rescan:{self.identity}:{self.head_sha}".encode()
-                    ).hexdigest(),
-                    ANALYSIS_ACTION_INTERNAL_DISPATCHES,
-                    1,
-                ),
-            )
-            actions_token = broker.exchange(
-                self.oidc_token or broker.request_oidc_token(),
-                capability="review_actions",
-            )
-        return resolve_rescan(args, ledger, actions_token=actions_token)
+            if not isinstance(self.actions_token, str) or not self.actions_token:
+                raise ReviewInputError(
+                    "current dispatch Actions capability is unavailable"
+                )
+            # Reuse this process's startup capability, then independently read
+            # and authenticate the dispatch run/source in the same allowance.
+            actions_token = self.actions_token
+
+        def capture(request, reference):
+            self.rescan_request = request
+            self.prior_inventory_reference = reference
+
+        return resolve_rescan(
+            args, ledger, actions_token=actions_token, _source_observer=capture
+        )
 
     def begin_completion_phase(self, ledger):
         if ledger is not self.ledger or not self._provider_started:

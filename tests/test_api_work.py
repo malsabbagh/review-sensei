@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from review_sensei.api_work import (
     ACCOUNTING_VERSION,
+    MAX_API_REQUEST_LIMIT,
     ApiExecutionOwner,
     ApiRunAccounting,
     ApiRunIdentity,
@@ -43,7 +44,7 @@ def accounting(*, limit=128, prior=0, attempt=1):
 
 class ApiWorkConfigurationTests(unittest.TestCase):
     def test_single_root_knob_default_declared_value_and_strict_types(self):
-        self.assertEqual(parse_configuration_text("schema: 1\n").api_request_limit, 128)
+        self.assertEqual(parse_configuration_text("schema: 1\n").api_request_limit, 512)
         self.assertEqual(
             parse_configuration_text(
                 "schema: 1\napi_request_limit: 200\n"
@@ -53,6 +54,22 @@ class ApiWorkConfigurationTests(unittest.TestCase):
         for value in ("true", "0", "-1", "1.5", '"128"', "[128]"):
             with self.subTest(value=value), self.assertRaises(ConfigurationError):
                 parse_configuration_text(f"schema: 1\napi_request_limit: {value}\n")
+
+    def test_closed_integer_bound_and_explicit_1024_selection(self):
+        for value in (1, 512, 1024, MAX_API_REQUEST_LIMIT):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    parse_configuration_text(
+                        f"schema: 1\napi_request_limit: {value}\n"
+                    ).api_request_limit,
+                    value,
+                )
+                FrozenApiConfiguration("a" * 40, "b" * 64, value)
+        for value in (MAX_API_REQUEST_LIMIT + 1, 10**100, ".inf", ".nan"):
+            with self.subTest(value=value), self.assertRaises(ConfigurationError):
+                parse_configuration_text(f"schema: 1\napi_request_limit: {value}\n")
+        with self.assertRaises(ReviewInputError):
+            FrozenApiConfiguration("a" * 40, "b" * 64, MAX_API_REQUEST_LIMIT + 1)
 
     def test_admission_minimum_is_the_measured_plan_not_any_positive_integer(self):
         plan = fixture_plan()

@@ -29,7 +29,7 @@ describe("opt-in broker physical dispatch control", () => {
   it("counts actual production OIDC/GitHub dispatches and returns the original scoped receipt", async () => {
     const fixture = await consumingBroker();
     const request = fixture.configureFeedback();
-    const bound = { ...control(), operation_id: request.mutation.operation_id, deadline_unix_ms: request.mutation.read_accounting.deadline_unix_ms };
+    const bound = control();
     vi.stubGlobal("fetch", fixture.transport);
     const result = await fixture.broker.exchange({
       oidc_token: await fixture.oidcToken(), capability: "review_session",
@@ -37,7 +37,7 @@ describe("opt-in broker physical dispatch control", () => {
       session_attestation: request, control_budget: bound,
     });
     expect(result.control_receipt).toEqual({ ...bound, dispatched: fixture.transportRequests.length });
-    expect(result.control_receipt!.dispatched).toBe(13);
+    expect(result.control_receipt!.dispatched).toBe(11);
     expect(result.session_grant).toMatch(/^sg1\./);
   });
 
@@ -48,7 +48,7 @@ describe("opt-in broker physical dispatch control", () => {
     await expect(fixture.broker.exchange({
       oidc_token: await fixture.oidcToken(), capability: "review_session",
       session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
-      session_attestation: request, control_budget: { ...control(1), operation_id: request.mutation.operation_id, deadline_unix_ms: request.mutation.read_accounting.deadline_unix_ms },
+      session_attestation: request, control_budget: control(1),
     })).rejects.toThrow("broker_control_budget_exhausted");
     expect(fixture.transportRequests).toHaveLength(1);
   });
@@ -56,7 +56,7 @@ describe("opt-in broker physical dispatch control", () => {
   it("does not renew an absolute deadline while waiting for a response", async () => {
     const fixture = await consumingBroker();
     const request = fixture.configureFeedback();
-    const bound = { ...control(), operation_id: request.mutation.operation_id, deadline_unix_ms: request.mutation.read_accounting.deadline_unix_ms };
+    const bound = control();
     const origin = Date.now();
     let clock = origin;
     vi.spyOn(Date, "now").mockImplementation(() => clock);
@@ -81,25 +81,28 @@ describe("opt-in broker physical dispatch control", () => {
       oidc_token: await fixture.oidcToken(), capability: "review_session",
       session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, session_attestation: request,
     });
-    const budget = new BrokerDispatchControl({ ...control(1), operation_id: request.mutation.operation_id, deadline_unix_ms: request.mutation.read_accounting.deadline_unix_ms });
+    const budget = new BrokerDispatchControl(control(1));
     const before = fixture.transportRequests.length;
     expect(await fixture.broker.verifySessionGrant(issued.session_grant, issued.session_attestation, budget)).toEqual(issued.session_attestation);
     expect(budget.receipt().dispatched).toBe(1);
     expect(fixture.transportRequests.length - before).toBe(1);
   });
 
-  it("binds control operation/deadline to the exact signed mutation before network", async () => {
+  it("keeps downward service controls separate from signed caller authority", async () => {
     const fixture = await consumingBroker();
     const request = fixture.configureFeedback();
     vi.stubGlobal("fetch", fixture.transport);
-    for (const change of [{ operation_id: "f".repeat(64) }, { deadline_unix_ms: request.mutation.read_accounting.deadline_unix_ms - 1 }]) {
-      await expect(fixture.broker.exchange({
+    for (const change of [{ operation_id: "f".repeat(64) }, { deadline_unix_ms: Date.now() + 20_000 }]) {
+      const bound = { ...control(), ...change };
+      const result = await fixture.broker.exchange({
         oidc_token: await fixture.oidcToken(), capability: "review_session",
         session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, session_attestation: request,
-        control_budget: { ...control(), operation_id: request.mutation.operation_id, deadline_unix_ms: request.mutation.read_accounting.deadline_unix_ms, ...change },
-      })).rejects.toThrow("broker_control_binding_invalid");
+        control_budget: bound,
+      });
+      expect(result.control_receipt).toMatchObject(bound);
+      expect(result.session_attestation).not.toHaveProperty("mutation");
+      expect(result.session_attestation).not.toHaveProperty("read_accounting");
     }
-    expect(fixture.transportRequests).toHaveLength(0);
   });
 
   it("keeps concurrent request budgets separate while sharing only the existing JWKS cache", async () => {
@@ -109,7 +112,7 @@ describe("opt-in broker physical dispatch control", () => {
     const make = async (maximum: number) => fixture.broker.exchange({
       oidc_token: await fixture.oidcToken(), capability: "review_session",
       session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, session_attestation: request,
-      control_budget: { ...control(maximum), operation_id: request.mutation.operation_id, deadline_unix_ms: request.mutation.read_accounting.deadline_unix_ms },
+      control_budget: control(maximum),
     });
     const [narrow, wide] = await Promise.allSettled([make(1), make(20)]);
     expect(narrow.status).toBe("rejected");
@@ -124,7 +127,6 @@ describe("opt-in broker physical dispatch control", () => {
     let clock = Date.now();
     vi.spyOn(Date, "now").mockImplementation(() => clock);
     const deadline = clock + 30;
-    request.mutation.read_accounting.deadline_unix_ms = deadline;
     const oidcToken = await fixture.oidcToken();
     // Signing/setup can consume the entire window; this is a refusal oracle,
     // not evidence that an already waiting physical request was cancelled.
@@ -134,7 +136,7 @@ describe("opt-in broker physical dispatch control", () => {
     await expect(fixture.broker.exchange({
       oidc_token: oidcToken, capability: "review_session",
       session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, session_attestation: request,
-      control_budget: { ...control(), operation_id: request.mutation.operation_id, deadline_unix_ms: deadline },
+      control_budget: { ...control(), deadline_unix_ms: deadline },
     })).rejects.toThrow("broker_control_invalid");
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -147,7 +149,6 @@ describe("opt-in broker physical dispatch control", () => {
     vi.spyOn(Date, "now").mockImplementation(() => clock);
     const request = fixture.configureFeedback();
     const deadline = clock + 30;
-    request.mutation.read_accounting.deadline_unix_ms = deadline;
     const timeouts: { start: number; delay: number }[] = [];
     // Native AbortSignal.timeout uses Node's internal timers. Drive only its
     // timer wiring here, retaining real AbortController/AbortSignal delivery.
@@ -175,7 +176,7 @@ describe("opt-in broker physical dispatch control", () => {
     const outcome = fixture.broker.exchange({
       oidc_token: oidcToken, capability: "review_session",
       session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, session_attestation: request,
-      control_budget: { ...control(), operation_id: request.mutation.operation_id, deadline_unix_ms: deadline },
+      control_budget: { ...control(), deadline_unix_ms: deadline },
     }).then(value => { settled = true; return { status: "fulfilled" as const, value }; },
       error => { settled = true; return { status: "rejected" as const, error }; });
     await dispatchStarted;
@@ -191,7 +192,7 @@ describe("opt-in broker physical dispatch control", () => {
     expect(aborted).toBe(true);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(timeouts.every(({ start, delay }) => start + delay === deadline)).toBe(true);
-    expect(request.mutation.read_accounting.deadline_unix_ms).toBe(deadline);
+    expect(deadline).toBe(clock);
   });
 
   it("bounds each JWKS cache miss without canceling another request", async () => {
@@ -213,9 +214,8 @@ describe("opt-in broker physical dispatch control", () => {
       session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, session_attestation: request,
     };
     const original = fixture.broker.exchange(body);
-    const bound = { ...control(), operation_id: request.mutation.operation_id, deadline_unix_ms: Date.now() + 30 };
+    const bound = { ...control(), deadline_unix_ms: Date.now() + 30 };
     const selected = structuredClone(request);
-    selected.mutation.read_accounting.deadline_unix_ms = bound.deadline_unix_ms;
     try {
       await expect(fixture.broker.exchange({ ...body, oidc_token: await fixture.oidcToken(), session_attestation: selected, control_budget: bound })).rejects.toThrow("broker_control_deadline_exhausted");
       expect(fixture.transportRequests).toHaveLength(0);

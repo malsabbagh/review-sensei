@@ -26,6 +26,7 @@ from review_sensei.cli import _report_broker_failure, main
 from review_sensei.errors import ReviewInputError
 from review_sensei.outcomes import RunOutcome, render_actions_summary
 from review_sensei.schemas import validate_public_document
+from tests.test_github_broker_client import current_authority
 
 RAY = "0123456789abcdef-YYZ"
 SECRET = "ghs_synthetic_secret_do_not_log"
@@ -179,7 +180,7 @@ class BrokerDiagnosticTests(unittest.TestCase):
                 def opener(*args, **kwargs):
                     raise error
 
-                client = BrokerClient(opener=opener)
+                client = BrokerClient(opener=opener, authority=current_authority())
                 expected = (
                     GitHubBrokerClientError
                     if status == 403
@@ -252,7 +253,6 @@ class BrokerDiagnosticTests(unittest.TestCase):
             ):
                 status = github_main(
                     [
-                        "github",
                         "reply",
                         "--repository",
                         "owner/repo",

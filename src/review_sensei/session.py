@@ -90,7 +90,10 @@ MAX_SESSION_TTL = timedelta(days=90)
 # evidence, where eight does not. Keep the former 8 KiB record allowance for
 # surrounding state; allocate less history for larger retained/escaped fields.
 MAX_CONVERGENCE_HISTORY_BYTES = 12_288
-MAX_SESSION_RECORD_BYTES = MAX_CONVERGENCE_HISTORY_BYTES + 8192
+# New caller accounting and retained rescan receipts share this root with
+# decisions/history. Qualification covers the bounded 20-decision composition.
+# This does not enlarge evidence parts, retention, or physical request limits.
+MAX_SESSION_RECORD_BYTES = 32_768
 MAX_ASSESSMENT_QUEUE_ROOT_BYTES = 8192
 MAX_ASSESSMENT_QUEUE_SUMMARY_BYTES = 1024
 MAX_CONVERGENCE_PROGRESS_ENTRIES = 3
@@ -1559,8 +1562,10 @@ class SessionRecord:
             or ref["root_sha256"] != self.record_sha256
             or self.reservation_id is not None
             or self.reserved_slot is not None
+            or (previous.action is not None and previous.action["phase"] != "terminal")
             or (
-                previous.analysis_abort is None
+                previous.action is None
+                and previous.analysis_abort is None
                 and (
                     self.transaction is None
                     or self.transaction.phase
@@ -3116,7 +3121,15 @@ def _publication_state_mutation(
             configuration_digest=current.configuration_digest,
             evidence_digest=current.evidence_digest,
             reservation_id=current.reservation_id,
-            generation=next_generation,
+            # Caller ownership/accounting checkpoints advance the root without
+            # advancing this business transaction. Preserve its own next step,
+            # including the exact checkpoint-placeholder relationship checked
+            # by blocker admission after a stopped-owner recovery.
+            generation=(
+                current.generation + 1
+                if record.api_run_accounting is not None
+                else next_generation
+            ),
             phase=target,
             result_sha256=current.result_sha256,
         )

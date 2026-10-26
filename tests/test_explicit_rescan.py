@@ -1572,6 +1572,4 @@ class RescanPublicationTests(unittest.TestCase):
                 'if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then\n            review_args+=(--rescan)\n          fi',
                 step["run"],
             )
-            self.assertIn(
-                'review-sensei-github" review "${review_args[@]}"', step["run"]
-            )
+            self.assertIn('review-sensei-github" review-run', step["run"])

@@ -402,7 +402,7 @@ class CloudflarePackageTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertEqual(plan.files[0].content, _current_pre_recovery_v5_workflow("v5"))
         self.assertEqual(example, _prepared_recovery_workflow("v5"))
-        self.assertNotEqual(plan.files[0].content, example)
+        self.assertEqual(plan.files[0].content, example)
         self.assertEqual(plan.files[1].content, _current_uninstall_workflow())
 
     def test_user_guidance_describes_setup_v5_publication_contract(self):

@@ -12,9 +12,6 @@ from review_sensei.cli import (
     _run_evaluate_convergence_command,
     _sigterm_as_keyboard_interrupt,
 )
-from review_sensei.cli import (
-    main as engine_main,
-)
 from review_sensei.diagnostics import (
     DOCTOR_ACTION_REQUIRED,
     DOCTOR_UNKNOWN,
@@ -32,11 +29,12 @@ from review_sensei_github.commands import (
 from review_sensei_github.doctor import with_github_checks
 from review_sensei_github.observed import run_observed_review_sequence
 from review_sensei_github.openrouter_workflow import emit_hosted_openrouter_resolution
-from review_sensei_github.review_hooks import GitHubReviewHooks
 
 _PUBLIC = (
     "review",
     "review-run",
+    "command-run",
+    "reply-run",
     "publish",
     "reply",
     "command",
@@ -50,6 +48,8 @@ _PUBLIC = (
 _HELP = {
     "review": "engine review plus hosted hooks",
     "review-run": "one metered review lifecycle",
+    "command-run": "one metered maintainer command lifecycle",
+    "reply-run": "one metered mention reply lifecycle",
     "publish": "publish a prepared review",
     "reply": "publish a reply",
     "command": "run a maintainer command",
@@ -70,14 +70,8 @@ def _usage() -> str:
 
 
 def _normalize(argv: list[str]) -> list[str]:
-    """Accept the retired `github review` spelling as `publish`."""
-
-    args = list(argv)
-    if args and args[0] == "github":
-        args = args[1:]
-        if args and args[0] == "review":
-            args = ["publish", *args[1:]]
-    return args
+    """Current command spelling only; historical aliases confer no authority."""
+    return list(argv)
 
 
 def _publication(args: list[str]) -> int:
@@ -138,34 +132,11 @@ def _resolve_openrouter(arguments: list[str]) -> int:
 
 
 def _release_reservation(arguments: list[str]) -> int:
-    import argparse
-
-    from review_sensei_github.broker_client import BrokerClient
-    from review_sensei_github.http import GitHubHttp
-    from review_sensei_github.release_reservation import release_own_reservation
-
-    parser = argparse.ArgumentParser(prog="review-sensei-github release-reservation")
-    parser.add_argument("--repository", required=True)
-    parser.add_argument("--repository-id", required=True, type=int)
-    parser.add_argument("--pull-request", required=True, type=int)
-    parser.add_argument("--head-sha", required=True)
-    parser.add_argument("--run-id", required=True)
-    parsed = parser.parse_args(arguments)
-    try:
-        status = release_own_reservation(
-            broker=BrokerClient(),
-            http=GitHubHttp(),
-            repository=parsed.repository,
-            repository_id=parsed.repository_id,
-            pull_request=parsed.pull_request,
-            head_sha=parsed.head_sha,
-            run_id=parsed.run_id,
-        )
-    except (OSError, ValueError, ReviewSenseiError) as exc:
-        print(f"review-sensei: reservation release failed: {exc}", file=sys.stderr)
-        return 1
-    print(f"reservation release: {status}")
-    return 0
+    print(
+        "review-sensei: separate cleanup is retired; use the owning lifecycle",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def _setup(arguments: list[str]) -> int:
@@ -302,6 +273,14 @@ def _main(argv: list[str] | None = None) -> int:
         print(_usage(), file=sys.stderr)
         return 0 if args and args[0] in {"-h", "--help"} else 2
     command, rest = args[0], args[1:]
+    if command in {"command-run", "reply-run"}:
+        from .action_run import run_action
+
+        try:
+            return run_action(rest, purpose=command.removesuffix("-run"))
+        except (OSError, ValueError, ReviewSenseiError) as error:
+            print(f"review-sensei: {error}", file=sys.stderr)
+            return 1
     if command.startswith("-") or command in {"publish", "reply", "command"}:
         return _publication(args)
     if command == "review-run":
@@ -313,7 +292,11 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"review-sensei: {error}", file=sys.stderr)
             return 1
     if command == "review":
-        return engine_main(rest, hosted_hooks=GitHubReviewHooks())
+        print(
+            "review-sensei: hosted phase entry is retired; use review-run",
+            file=sys.stderr,
+        )
+        return 1
     if command == "host-plan":
         return run_host_plan(rest)
     if command == "resolve-hosted-openrouter":

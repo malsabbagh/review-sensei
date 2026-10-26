@@ -134,16 +134,37 @@ def validate_surface(root: Path):
             raise ValueError(
                 "runtime installation must use the exact source manifest version"
             )
-    publication = [
-        step
-        for step in steps
-        if step.get("name", "").startswith("Publish or promote validated")
-    ]
-    if len(publication) != 2 or any(
-        step.get("env", {}).get("GITHUB_TOKEN") != "${{ github.token }}"
-        for step in publication
-    ):
-        raise ValueError("publication metadata read token is missing")
+    publication = []
+    lifecycle_command = (
+        '"$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review-run'
+    )
+    for name in ("hosted", "local"):
+        runtime_steps = jobs.get(name, {}).get("steps", [])
+        owners = [step for step in runtime_steps if step.get("id") == "provider-review"]
+        if len(owners) != 1:
+            raise ValueError("expected one review lifecycle owner in each runtime lane")
+        owner = owners[0]
+        script = owner.get("run", "")
+        if (
+            owner.get("if") != "inputs.operation == 'review'"
+            or owner.get("env", {}).get("GITHUB_TOKEN") != "${{ github.token }}"
+            or owner.get("env", {}).get("POLICY_COMMIT")
+            != "${{ needs.bootstrap.outputs.policy_commit }}"
+            or script.count(lifecycle_command) != 1
+            or '--policy-commit "$POLICY_COMMIT"' not in script
+        ):
+            raise ValueError("review lifecycle metadata or frozen policy binding is missing")
+        if any(
+            step.get("id") == "publish-admission"
+            or step.get("name", "").startswith("Publish or promote validated")
+            or re.search(
+                r'review-sensei-github"\s+(?:publish|release-reservation)\b',
+                step.get("run", ""),
+            )
+            for step in runtime_steps
+        ):
+            raise ValueError("review lifecycle has a separate publication or cleanup owner")
+        publication.append(owner)
     identity = next(
         (
             step

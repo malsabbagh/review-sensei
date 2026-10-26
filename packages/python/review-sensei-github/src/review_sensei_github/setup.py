@@ -1667,9 +1667,9 @@ def _historical_prepared_recovery_v5_workflow(
 def _prepared_recovery_workflow(
     public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
 ) -> str:
-    """Explicit next caller; activate only after the selected runner is validated."""
+    """The new caller exposes only the supported single-process route."""
 
-    return _resolve_trigger_workflow(public_workflow_tag)
+    return _current_pre_recovery_v5_workflow(public_workflow_tag)
 
 
 def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
@@ -1820,6 +1820,9 @@ def _current_config_file() -> str:
         "# ReviewSensei setup version: 5\n"
         "# Configuration version. Leave this at 1.\n"
         "schema: 1\n"
+        "\n"
+        "# ReviewSensei caller HTTP attempts per authenticated Actions run.\n"
+        "api_request_limit: 512\n"
         "\n"
         "# Backend and model used for review.\n"
         "inference:\n"

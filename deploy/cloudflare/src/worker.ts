@@ -673,6 +673,15 @@ const worker = {
     if (url.pathname === "/healthz" && request.method === "GET") {
       return response({ ok: true });
     }
+    if (
+      (url.pathname === "/github/token" || url.pathname === "/github/session-grant") &&
+      env.BROKER_ADMISSION_MODE !== undefined && env.BROKER_ADMISSION_MODE !== "open"
+    ) {
+      // A sustained operator hold spans caller and Worker cutover. Refuse
+      // before parsing, OIDC, token/grant issuance or any queued continuation.
+      // Invalid configured modes fail held. This never revokes existing tokens.
+      return response({ error: "broker_admission_held", temporary: true }, 503, true);
+    }
     if (url.pathname === "/github/token") {
       if (request.method !== "POST") {
         return response({ error: "method_not_allowed" }, 405, true);

@@ -286,7 +286,7 @@ class _CommonFlows:
         transport = Transport(self.case, actions)
         return self.case.create(transport), transport
 
-    def _github_cli_fixture(self, directory, *, source_kind="issue"):
+    def _local_cli_fixture(self, directory, *, source_kind="issue"):
         from github_ingress_contract import CapturedGitHub
 
         config = Path(directory) / "config.yml"
@@ -297,9 +297,6 @@ class _CommonFlows:
         )
         environment = {
             "GITHUB_TOKEN": "synthetic-read-token",
-            "GITHUB_RUN_ID": "123",
-            "GITHUB_RUN_ATTEMPT": "1",
-            "REVIEWSENSEI_APP_ID": "7",
             "OLLAMA_API_KEY": "unselected-ollama-sentinel",
             "OPENAI_API_KEY": "unselected-openai-sentinel",
             "OPENROUTER_API_KEY": "unselected-openrouter-sentinel",
@@ -308,7 +305,9 @@ class _CommonFlows:
             environment[self.case.credential_env] = self.case.settings.api_key
         return CapturedGitHub(source_kind), config, environment
 
-    def test_github_cli_issue_and_inline_delivery_use_real_host_and_replay(self):
+    def test_local_cli_library_issue_and_inline_delivery_use_real_host_and_journal_replay(
+        self,
+    ):
         from github_ingress_contract import ANSWER
 
         for source_kind in ("issue", "inline"):
@@ -316,7 +315,7 @@ class _CommonFlows:
                 self.subTest(source_kind=source_kind),
                 tempfile.TemporaryDirectory() as tmp,
             ):
-                host, config, environment = self._github_cli_fixture(
+                host, config, environment = self._local_cli_fixture(
                     tmp, source_kind=source_kind
                 )
                 transport = Transport(self.case, [(0, json.dumps({"body": ANSWER}))])
@@ -356,10 +355,10 @@ class _CommonFlows:
                 )
                 self.assertTrue(
                     any(
-                        capability == "review_session"
-                        for _, capability in host.exchanges
+                        "<!-- review-sensei-operation -->" in value["body"]
+                        for value in host.comments.values()
                     ),
-                    "default operation entry must run, not fall back",
+                    "the explicit local operation journal must run, not fall back",
                 )
                 captured = (
                     json.dumps(host.calls) + json.dumps(host.exchanges) + output + error
@@ -373,10 +372,12 @@ class _CommonFlows:
                     if key:
                         self.assertNotIn(environment[key], captured)
 
-    def test_github_cli_unauthorized_stale_and_disabled_replies_never_dispatch(self):
+    def test_local_cli_library_unauthorized_stale_and_disabled_replies_never_dispatch(
+        self,
+    ):
         for refusal in ("unauthorized", "stale", "draft", "closed", "disabled"):
             with self.subTest(refusal=refusal), tempfile.TemporaryDirectory() as tmp:
-                host, config, environment = self._github_cli_fixture(tmp)
+                host, config, environment = self._local_cli_fixture(tmp)
                 if refusal == "unauthorized":
                     host.source["author_association"] = "NONE"
                 elif refusal == "stale":
@@ -405,7 +406,7 @@ class _CommonFlows:
         from review_sensei_github.cli import main as github_main
 
         with tempfile.TemporaryDirectory() as tmp:
-            _, config, environment = self._github_cli_fixture(tmp)
+            _, config, environment = self._local_cli_fixture(tmp)
             # Cross these six controls while omitted policy fields retain their
             # published defaults. This does not claim every external event ran.
             combinations = itertools.product(
@@ -481,7 +482,7 @@ class _CommonFlows:
         for enabled in (True, False):
             with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                _, config, environment = self._github_cli_fixture(tmp)
+                _, config, environment = self._local_cli_fixture(tmp)
                 # Analysis is local CLI execution, not an attested Actions job.
                 environment = {
                     k: v for k, v in environment.items() if not k.startswith("GITHUB_")
@@ -545,12 +546,14 @@ class _CommonFlows:
                 self.assertIn("approved-local-boundary", prompt)
                 self.assertIn("Retain the approved local-only guard.", prompt)
 
-    def test_github_cli_selected_credential_and_resource_refusals_do_not_publish(self):
+    def test_local_cli_library_selected_credential_and_resource_refusals_do_not_publish(
+        self,
+    ):
         from github_ingress_contract import ANSWER
 
         if self.case.credential_env:
             with tempfile.TemporaryDirectory() as tmp:
-                host, config, environment = self._github_cli_fixture(tmp)
+                host, config, environment = self._local_cli_fixture(tmp)
                 environment.pop(self.case.credential_env)
                 transport = Transport(self.case, [])
                 code, output, error = host.invoke(
@@ -563,7 +566,7 @@ class _CommonFlows:
                 self.assertEqual(host.calls, [])
         for action in ("call_limit", "cancel"):
             with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
-                host, config, environment = self._github_cli_fixture(tmp)
+                host, config, environment = self._local_cli_fixture(tmp)
                 config.write_text(
                     self.case.configuration()
                     + "  review_work:\n    mode: unified\n  resources:\n    max_provider_calls: 1\n"

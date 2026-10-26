@@ -77,6 +77,8 @@ class OperationDiagnostics:
     approval_request_attempted: bool
     transport_request_attempts: int
     next_action: str
+    call_limit: int | None = MAX_PART_READS
+    ordinary_call_limit: int | None = MAX_PART_READS - 4
 
     def to_dict(self) -> dict[str, object]:
         phases: dict[str, object] = {}
@@ -87,8 +89,8 @@ class OperationDiagnostics:
             "schema_version": "1.0",
             **phases,
             "budget_calls": self.budget_calls,
-            "call_limit": MAX_PART_READS,
-            "ordinary_call_limit": MAX_PART_READS - 4,
+            "call_limit": self.call_limit,
+            "ordinary_call_limit": self.ordinary_call_limit,
             "approval_request_attempted": self.approval_request_attempted,
             # An HTTP adapter invocation is not evidence of network dispatch:
             # a deeper original allowance may still reject it locally.
@@ -114,7 +116,25 @@ class OperationObserver:
 
     def _calls(self) -> int | None:
         calls = self.budget.calls if self.budget is not None else None
-        return calls if type(calls) is int and 0 <= calls <= MAX_PART_READS else None
+        maximum, _ = self._limits()
+        return (
+            calls
+            if type(calls) is int and maximum is not None and 0 <= calls <= maximum
+            else None
+        )
+
+    def _limits(self) -> tuple[int | None, int | None]:
+        from .api_run_budget import CallerRunBudget
+
+        if isinstance(self.budget, CallerRunBudget):
+            if self.budget.caller._state is None:
+                return None, None
+            state = self.budget.caller.accounting
+            return (
+                state.configuration.limit,
+                state.configuration.limit - state.startup.liability,
+            )
+        return MAX_PART_READS, MAX_PART_READS - 4
 
     def request(self, method: str, path: str) -> None:
         self.requests = min(self.requests + 1, 1000)
@@ -209,6 +229,7 @@ class OperationObserver:
     def report(self, *, completed: bool = False) -> OperationDiagnostics | None:
         if not self.failures:
             return None
+        call_limit, ordinary_call_limit = self._limits()
         return OperationDiagnostics(
             eligibility=self.failures.get("eligibility"),
             check=self.failures.get("check"),
@@ -218,4 +239,6 @@ class OperationObserver:
             approval_request_attempted=self.approval_request_attempted,
             transport_request_attempts=self.requests,
             next_action="none" if completed else "inspect_operation_failure",
+            call_limit=call_limit,
+            ordinary_call_limit=ordinary_call_limit,
         )

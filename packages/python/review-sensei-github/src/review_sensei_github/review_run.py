@@ -51,6 +51,7 @@ from .errors import GitHubPublicationTransientError
 from .http import GitHubHttp
 from .learning_pr import LearningPRPublisher
 from .publication import PublicationResult, ReviewPublisher
+from .run_authority import request_authority
 from .session_ledger import GitHubIssueCommentSessionLedger
 
 _SHA = re.compile(r"[a-f0-9]{40}\Z")
@@ -163,6 +164,27 @@ class ReviewRunLedger(ApiRunSessionLedger):
         return self.caller.close_analysis_abort(self, identity, confirmed)
 
 
+class ActionRunLedger(ApiRunSessionLedger):
+    """Current action mutations require their fresh source and head fence."""
+
+    business_guard: Any = None
+
+    def replace(self, identity, mutate, *, now=None):
+        if self.business_guard is not None:
+            self.business_guard()
+        try:
+            return super().replace(identity, mutate, now=now)
+        except GitHubPublicationTransientError:
+            operation = self.caller._checkpoint_operation
+            if (
+                self.caller._checkpoint is None
+                or operation is None
+                or not operation.write_attempted
+            ):
+                raise
+            return self.caller.reconcile_checkpoint(self, identity)
+
+
 @dataclass(frozen=True)
 class ReviewRun:
     caller: ApiRunRequestTransport
@@ -177,9 +199,75 @@ class ReviewRun:
     base_branch: str
     head_repository: str
     configuration_path: Path | None
+    session_authority: Mapping[str, object] | None = None
+    session_grant: str | None = field(default=None, repr=False)
+    title: str = ""
+    actions_token: str | None = field(default=None, repr=False)
+
+    def retained_analysis(self, argv: list[str]) -> CompletedAnalysis | None:
+        """Recover a stopped same-run owner's exact checkpoint, without inference."""
+        if self.caller.accounting.owner.run_attempt != 2:
+            return None
+        loaded = self.ledger.load(self.identity)
+        if loaded.status != "ok" or loaded.record is None:
+            raise ReviewInputError("successor checkpoint is unavailable")
+        transaction = loaded.record.transaction
+        if transaction is None or transaction.phase not in {
+            "publication_pending",
+            "publication_failed",
+        }:
+            return None
+        from review_sensei.convergence import resolve_review_convergence_policy
+        from review_sensei.diff import analyze_diff
+        from review_sensei.validation import read_bounded_utf8
+
+        from .publication_context_recovery import reconstruct_publication_contexts
+        from .publication_recovery import recover_retained_review_result
+
+        args = engine_parser(include_hosted=True).parse_args(argv)
+        if args.diff is None:
+            raise ReviewInputError("successor requires the exact original diff")
+        diff = read_bounded_utf8(args.diff, maximum=1_048_576, label="original diff")
+        policy = resolve_review_convergence_policy(mode=args.review_mode)
+        contexts = reconstruct_publication_contexts(
+            source_root=Path.cwd(),
+            diff=diff,
+            ledger=self.ledger,
+            identity=self.identity,
+            base_sha=self.base_sha,
+            head_sha=self.head_sha,
+            policy=policy,
+        )
+        assert self.identity.repository_id is not None
+        result = recover_retained_review_result(
+            http=self.http,
+            token=self.ledger.token,
+            repository=self.identity.repository,
+            repository_id=self.identity.repository_id,
+            pull_request=self.identity.pull_request,
+            base_sha=self.base_sha,
+            head_sha=self.head_sha,
+            app_slug="reviewsensei[bot]",
+            ledger=self.ledger,
+            configuration_context=contexts.configuration,
+            evidence_context=contexts.evidence,
+            convergence_policy=policy,
+            budget=self.caller.budget_view,
+        )
+        return CompletedAnalysis(
+            result,
+            contexts.baseline,
+            contexts.current_key,
+            contexts.configuration,
+            contexts.evidence,
+            policy,
+            diff,
+            tuple(analyze_diff(diff, allow_incomplete=True).changed_paths),
+        )
 
     def execute(self, argv: list[str], *, publication_output: Path) -> int:
-        if self.plan.runner_kind == "local":
+        retained = self.retained_analysis(argv)
+        if retained is None and self.plan.runner_kind == "local":
             # Provider discovery is caller API work; inference remains governed
             # by the independent provider budget. Never send a GitHub credential.
             request = Request(
@@ -207,10 +295,24 @@ class ReviewRun:
             base_sha=self.base_sha,
             head_sha=self.head_sha,
             oidc_token=self.oidc,
+            actions_token=self.actions_token,
         )
-        code = engine_main(argv, hosted_hooks=hooks)
-        if code != 0:
-            return code
+        if retained is None:
+            code = engine_main(argv, hosted_hooks=hooks)
+            if code != 0:
+                return code
+        else:
+            # All values came from independently reconstructed trusted policy
+            # and authenticated retained bytes. Diagnostic files confer no
+            # handoff authority, and the provider is never instantiated.
+            hooks.completed = retained
+            hooks._completion_started = True
+            self.caller.label_phase("completion")
+            from .prior_rescan_publication import admitted_rescan
+
+            loaded = self.ledger.load(self.identity)
+            if loaded.record is not None:
+                hooks.rescan_request = admitted_rescan(loaded.record)
         # A later diagnostic file cannot replace the validated result or context.
         raw = policy_bytes(self.configuration_path)
         if (
@@ -259,6 +361,17 @@ class ReviewRun:
             replier=ConversationPublisher(http=self.http),
             session_ledger=self.ledger,
         )
+        if hooks.rescan_request is not None:
+            from .prior_rescan_publication import prior_reader_factory
+
+            application.reviewer.finalizer.prior_publication_reader_factory = (
+                prior_reader_factory(
+                    self.ledger,
+                    self.http,
+                    hooks.rescan_request,
+                    original_reference=hooks.prior_inventory_reference,
+                )
+            )
         publication: PublicationResult = hooks.publish_review(
             application,
             options=GitHubWriteOptions(
@@ -399,13 +512,31 @@ def _configuration(
 
 
 def bootstrap(
-    args: argparse.Namespace, *, run_directory: Path, policy_commit: str
+    args: argparse.Namespace,
+    *,
+    run_directory: Path,
+    policy_commit: str,
+    purpose: str = "review",
+    source: Mapping[str, object] | None = None,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
     event = os.environ.get("GITHUB_EVENT_NAME", "")
-    if event not in {"pull_request", "workflow_dispatch"}:
+    allowed_events = {
+        "review": {"pull_request", "workflow_dispatch", "issue_comment"},
+        "command": {"issue_comment"},
+        "reply": {"issue_comment", "pull_request_review_comment"},
+    }
+    if purpose not in allowed_events or event not in allowed_events[purpose]:
         raise ReviewInputError(
             "this review route requires a fresh authenticated PR or dispatch event"
+        )
+    if (
+        purpose == "review"
+        and event == "issue_comment"
+        and not (args.rescan or args.review_remaining)
+    ):
+        raise ReviewInputError(
+            "issue-comment review requires authenticated explicit intent"
         )
     run_id = os.environ.get("GITHUB_RUN_ID", "")
     attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
@@ -470,13 +601,15 @@ def bootstrap(
     if (
         not plan.policy.writes
         or plan.policy.operation_entry != "enabled"
+        or purpose == "reply"
+        and not plan.policy.mentions
         or event == "pull_request"
         and not plan.policy.automatic_reviews
     ):
         raise ReviewInputError(
             "trusted policy does not enable the current review route"
         )
-    job = plan.runner_kind
+    job = "command" if purpose == "command" else plan.runner_kind
     startup = review_startup_plan(job)
     # Source-controlled startup and both execution owners must fit even before
     # authentication requests. A malformed/undersized local config cannot start
@@ -516,14 +649,16 @@ def bootstrap(
     if (
         not plan.policy.writes
         or plan.policy.operation_entry != "enabled"
-        or plan.runner_kind != job
+        or purpose == "reply"
+        and not plan.policy.mentions
+        or (purpose != "command" and plan.runner_kind != job)
         or event == "pull_request"
         and not plan.policy.automatic_reviews
     ):
         raise ReviewInputError(
             "authenticated policy does not enable this review process"
         )
-    if plan.policy.learning == "pull-requests":
+    if purpose == "review" and plan.policy.learning == "pull-requests":
         raise ReviewInputError(
             "learning publication is not qualified in this lifecycle"
         )
@@ -563,12 +698,29 @@ def bootstrap(
         or not isinstance(head.get("repo"), dict)
         or not isinstance(head["repo"].get("full_name"), str)
         or _REPOSITORY.fullmatch(head["repo"]["full_name"]) is None
+        or head["repo"]["full_name"] != args.repository
+        or head["repo"].get("fork") is not False
     ):
         raise ReviewInputError("live reviewed base or head conflicts")
+    title = pull.get("title", "")
+    if not isinstance(title, str) or len(title.encode("utf-8")) > 256:
+        raise ReviewInputError("live pull request title exceeds its 256-byte bound")
+    if getattr(args, "title", None) not in {None, "", title}:
+        raise ReviewInputError("review title differs from the live pull request")
     # Read-only authority/owner checks precede enrollment's durable witness.
+    authority = request_authority(
+        purpose=purpose,
+        repository=args.repository,
+        repository_id=args.repository_id,
+        pull_request=args.pull_request,
+        head_sha=args.head_sha,
+        job=job,
+        source=source,
+    )
     actions = BrokerClient(
         opener=caller.open,
-        control=BrokerDispatchAccounting(budget, operation_id, 12, 1),
+        control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
+        authority=authority,
     )
     oidc = actions.request_oidc_token()
     actions_token = actions.exchange(oidc, capability="review_actions")
@@ -588,7 +740,8 @@ def bootstrap(
     )
     broker = BrokerClient(
         opener=caller.open,
-        control=BrokerDispatchAccounting(budget, operation_id, 30, 1),
+        control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
+        authority=authority,
     )
     session = broker.open_session(
         oidc,
@@ -604,6 +757,7 @@ def bootstrap(
         app_slug="reviewsensei[bot]",
         reservation_owner=session.reservation_owner,
     )
+    native.authenticated_app_id = session.app_id
     loaded = native.load(identity)
     if int(attempt) == 1:
         try:
@@ -651,16 +805,22 @@ def bootstrap(
             raise ReviewInputError("original caller accounting cannot be established")
         previous = ApiRunAccounting.from_document(loaded.record.api_run_accounting)
         previous.require_binding(caller.run, frozen)
-        if previous.terminal_transaction is not None:
+        if (
+            previous.terminal_transaction is not None
+            or previous.action is not None
+            and previous.action["phase"] == "terminal"
+        ):
             raise ReviewInputError("caller run is already terminal")
         prior = loaded.record
         if (
-            prior.transaction is not None
+            purpose == "review"
+            and prior.transaction is not None
             and (
                 prior.transaction.base_sha != args.base_sha
                 or prior.transaction.head_sha != args.head_sha
             )
-            or prior.transaction is None
+            or purpose == "review"
+            and prior.transaction is None
             and prior.reservation_id is not None
         ):
             raise ReviewInputError(
@@ -689,10 +849,13 @@ def bootstrap(
             native, identity, recover, block_id="successor-review"
         )
         caller.bind_terminal_reservation("successor-terminal")
-    ledger = ReviewRunLedger(native, caller, identity)
+    ledger = (ReviewRunLedger if purpose == "review" else ActionRunLedger)(
+        native, caller, identity
+    )
     publication_broker = BrokerClient(
         opener=caller.open,
-        control=BrokerDispatchAccounting(budget, operation_id, 10, 1),
+        control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
+        authority=authority,
     )
     return ReviewRun(
         caller,
@@ -707,6 +870,10 @@ def bootstrap(
         base["ref"],
         head.get("repo", {}).get("full_name", args.repository),
         configuration_path,
+        session.attestation,
+        session.grant,
+        title,
+        actions_token,
     )
 
 
@@ -727,12 +894,7 @@ def run_review(argv: Sequence[str]) -> int:
     if _SHA.fullmatch(options.policy_commit) is None:
         raise ReviewInputError("trusted policy commit is invalid")
     args = engine_parser(include_hosted=True).parse_args(core)
-    if (
-        args.session_ledger is not None
-        or getattr(args, "local_session", False)
-        or getattr(args, "rescan", False)
-        or getattr(args, "review_remaining", False)
-    ):
+    if args.session_ledger is not None or getattr(args, "local_session", False):
         raise ReviewInputError("this review lifecycle requires a new hosted review")
     if any(
         value is not None
@@ -748,6 +910,8 @@ def run_review(argv: Sequence[str]) -> int:
         core.extend(["--base-sha", selected.base_sha])
     if not _has_option(core, "--head-sha"):
         core.extend(["--head-sha", selected.head_sha])
+    if not _has_option(core, "--title") and selected.title:
+        core.append("--title=" + selected.title)
     if args.config is None and selected.configuration_path is not None:
         core.extend(["--config", str(selected.configuration_path)])
     if args.diff is None:

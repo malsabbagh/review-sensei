@@ -133,7 +133,7 @@ for await (const line of lines) {
       case "set_source": Object.assign(fixture.githubInputs.source, request.source); result = null; break;
       case "set_inline_source": Object.assign(fixture.githubInputs.inlineSource, request.source); result = null; break;
       case "set_snapshot": {
-        for (const name of ["number", "state", "draft", "base", "head", "repository", "repositoryId"]) {
+        for (const name of ["number", "state", "draft", "base", "head", "repository", "repositoryId", "comments", "reviews"]) {
           if (Object.hasOwn(request.snapshot, name)) fixture.githubInputs[name] = request.snapshot[name];
         }
         result = null; break;

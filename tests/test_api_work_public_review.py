@@ -129,7 +129,7 @@ class PublicCallerRunTests(unittest.TestCase):
                 )
                 if remaining == 2:
                     with self.assertRaisesRegex(
-                        ReviewInputError, "comment write/readback tail"
+                        ReviewInputError, "business write/readback tail"
                     ):
                         fixture.accounted.open(request, timeout=30)
                     self.assertEqual(len(fixture.trace), before)

@@ -18,6 +18,10 @@ READ_OPERATION_REQUESTS = MAX_PAGINATION_PAGES
 NATIVE_OPERATION_REQUESTS = MAX_PAGINATION_PAGES
 WRITE_CONFIRMATION_REQUESTS = 2
 WRITE_CONFIRMATION_TAIL = 1 + WRITE_CONFIRMATION_REQUESTS
+# Attempt a complete owned review/prose readback and its final head fence.
+# These finite attempts do not promise that every allowed history will fit.
+COMMAND_UPDATE_CONFIRMATION_REQUESTS = 2 * READ_OPERATION_REQUESTS + 1
+COMMAND_RECEIPT_CONFIRMATION_REQUESTS = READ_OPERATION_REQUESTS + 2
 # One enumeration attempt plus the protected write/confirmation tail.
 MIN_OPERATION_REQUESTS = 1 + WRITE_CONFIRMATION_TAIL
 # Selected cleanup: two complete read attempts and three native mutations.

@@ -5,10 +5,9 @@ import type { WorkerEnv } from "./env";
 import { GitHubApi, type PublicWorkflowRuntimeShas } from "./github-api";
 import { type OidcClaims, verifyOidcAssertion } from "./oidc";
 import { issueSessionGrant, sessionGrantAuthentic } from "./signed-mac";
-import { authorizeFeedback, canonicalFeedback, FEEDBACK_GRANT_KEYS, parseFeedbackAttestation, type FeedbackAttestationRequest, type FeedbackAttestation } from "./feedback-attestation";
+import { RUN_AUTHORITY_AUDIENCE, authorizeRunCapability, authorizeRunSource, bindRunAuthority, canonicalRunAuthority, parseRunAuthority, type RunAuthority } from "./run-authority";
 import {
   PUBLIC_REPOSITORY,
-  PUBLIC_WORKFLOW_PATH,
   brokerAcceptedPublicWorkflowTags,
   publicWorkflowTagFromJobRef,
   validatePublicWorkflowTag,
@@ -41,13 +40,8 @@ const CAPABILITIES = {
   learning_write: { contents: "write", "pull_requests": "write" },
 } as const;
 const REPOSITORY_METADATA_PERMISSIONS = { metadata: "read" } as const;
-const SESSION_ATTESTATION_VERSION = 1;
-const SESSION_ATTESTATION_TTL_MS = 10 * 60 * 1000;
-const SESSION_ATTESTATION_SKEW_MS = 30 * 1000;
-const SESSION_GRANT_AUDIENCE = "reviewsensei-session-ledger";
+const SESSION_GRANT_AUDIENCE = RUN_AUTHORITY_AUDIENCE;
 const SHA_PATTERN = /^[a-f0-9]{40}$/;
-const RUN_ID_PATTERN = /^[1-9][0-9]{0,18}$/;
-const ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const MAX_COMMAND_REASON_BYTES = 512;
 const MAX_COMMAND_BODY_BYTES = 4096;
 // Keep this command grammar in lockstep with Python's parser. The explicit
@@ -128,71 +122,13 @@ interface SessionScope {
   head_sha: string;
 }
 
-interface LegacySessionAttestationRequest {
-  version: 1;
-  repository: string;
-  repository_id: number;
-  pull_request: number;
-  head_sha: string;
-  operation: "review" | "command";
-  source_comment_id: number | null;
-  run_id: string;
-  issued_at: number;
-  concurrency_group: string;
-  job_workflow_ref: string;
-  job_workflow_sha: string;
-}
-
-interface LegacySessionAttestation extends LegacySessionAttestationRequest {
-  actor: string | null;
-  actor_type: string | null;
-  association: string | null;
-  command_id: number | null;
-  command_digest: string | null;
-}
-type SessionAttestationRequest = LegacySessionAttestationRequest | FeedbackAttestationRequest;
-type SessionAttestation = LegacySessionAttestation | FeedbackAttestation;
-
-interface SessionGrant {
-  grant: string;
-  attestation: SessionAttestation;
-}
-
-const SESSION_ATTESTATION_REQUEST_KEYS = [
-  "version",
-  "repository",
-  "repository_id",
-  "pull_request",
-  "head_sha",
-  "operation",
-  "source_comment_id",
-  "run_id",
-  "issued_at",
-  "concurrency_group",
-  "job_workflow_ref",
-  "job_workflow_sha",
-] as const;
-const SESSION_ATTESTATION_GRANT_KEYS = [
-  ...SESSION_ATTESTATION_REQUEST_KEYS,
-  "actor",
-  "actor_type",
-  "association",
-  "command_id",
-  "command_digest",
-] as const;
+type SessionAttestation = RunAuthority;
+interface SessionGrant { grant: string; attestation: SessionAttestation; }
 
 type SessionState = "enrolled" | "known";
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(
-  value: Record<string, unknown>,
-  expected: readonly string[],
-): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function capability(value: unknown): Capability {
@@ -258,6 +194,18 @@ function signingKey(env: WorkerEnv): string {
   return secret;
 }
 
+function configuredAppId(env: WorkerEnv): number {
+  const value = env.GITHUB_APP_ID;
+  if (typeof value !== "string" || !/^[1-9][0-9]{0,15}$/.test(value)) {
+    throw new Error("configuration_unavailable");
+  }
+  const appId = Number(value);
+  if (!Number.isSafeInteger(appId) || appId <= 0) {
+    throw new Error("configuration_unavailable");
+  }
+  return appId;
+}
+
 async function digest(value: string): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(bytes)]
@@ -289,221 +237,6 @@ function sessionScope(value: unknown, repositoryId: number): SessionScope {
     repository_id: repositoryId,
     pull_request: pullRequest,
     head_sha: headSha,
-  };
-}
-
-function sessionAttestation(
-  value: unknown,
-  claims: OidcClaims,
-  scope: SessionScope,
-): SessionAttestationRequest {
-  if (isObject(value) && value.version === 2) {
-    const parsed = parseFeedbackAttestation(value);
-    validateFeedbackContext(parsed, scope, claims);
-    return parsed;
-  }
-  if (!isObject(value) || !hasExactKeys(value, SESSION_ATTESTATION_REQUEST_KEYS)) {
-    throw new Error("broker_session_attestation_invalid");
-  }
-  const attestation = value as Record<string, unknown>;
-  const operation = attestation.operation;
-  const sourceCommentId = attestation.source_comment_id;
-  const issuedAt = attestation.issued_at;
-  const now = Date.now();
-  const expectedGroup = `reviewsensei-session-${scope.repository_id}-${scope.pull_request}`;
-  if (
-    attestation.version !== SESSION_ATTESTATION_VERSION ||
-    attestation.repository !== claims.repository ||
-    attestation.repository_id !== scope.repository_id ||
-    attestation.pull_request !== scope.pull_request ||
-    attestation.head_sha !== scope.head_sha ||
-    (operation !== "review" && operation !== "command") ||
-    (sourceCommentId !== null &&
-      (typeof sourceCommentId !== "number" ||
-        !Number.isSafeInteger(sourceCommentId) || sourceCommentId <= 0)) ||
-    (operation === "command" && sourceCommentId === null) ||
-    typeof attestation.run_id !== "string" ||
-    !RUN_ID_PATTERN.test(attestation.run_id) ||
-    attestation.run_id !== claims.run_id ||
-    typeof issuedAt !== "number" ||
-    !Number.isSafeInteger(issuedAt) ||
-    issuedAt * 1000 > now + SESSION_ATTESTATION_SKEW_MS ||
-    now - issuedAt * 1000 > SESSION_ATTESTATION_TTL_MS + SESSION_ATTESTATION_SKEW_MS ||
-    attestation.concurrency_group !== expectedGroup ||
-    attestation.job_workflow_ref !== claims.job_workflow_ref ||
-    attestation.job_workflow_sha !== claims.job_workflow_sha
-  ) {
-    throw new Error("broker_session_attestation_invalid");
-  }
-  return {
-    version: SESSION_ATTESTATION_VERSION,
-    repository: claims.repository,
-    repository_id: scope.repository_id,
-    pull_request: scope.pull_request,
-    head_sha: scope.head_sha,
-    operation,
-    source_comment_id: sourceCommentId as number | null,
-    run_id: claims.run_id,
-    issued_at: issuedAt as number,
-    concurrency_group: expectedGroup,
-    job_workflow_ref: claims.job_workflow_ref,
-    job_workflow_sha: claims.job_workflow_sha,
-  };
-}
-
-/** Runtime and age checks shared by feedback issuance and verification.
- * Feedback authorization has its own live source checks; it is never a command.
- */
-function validateFeedbackContext(
-  value: FeedbackAttestationRequest,
-  scope: SessionScope,
-  claims?: OidcClaims,
-  runtime?: PublicWorkflowRuntimeShas,
-): void {
-  const now = Date.now();
-  if (
-    value.repository_id !== scope.repository_id ||
-    value.pull_request !== scope.pull_request ||
-    value.head_sha !== scope.head_sha ||
-    value.issued_at * 1000 > now + SESSION_ATTESTATION_SKEW_MS ||
-    now - value.issued_at * 1000 > SESSION_ATTESTATION_TTL_MS + SESSION_ATTESTATION_SKEW_MS ||
-    (claims !== undefined && (
-      value.repository !== claims.repository ||
-      value.run_id !== claims.run_id ||
-      value.job_workflow_ref !== claims.job_workflow_ref ||
-      value.job_workflow_sha !== claims.job_workflow_sha
-    ))
-  ) throw new Error("broker_session_attestation_invalid");
-  if (runtime !== undefined) authorizeWorkflowRuntimeSha(value.job_workflow_sha, runtime);
-}
-
-async function authorizeLiveSessionActor(
-  github: GitHubApi,
-  repository: string,
-  scope: SessionScope,
-  claims: OidcClaims,
-  attestation: SessionAttestationRequest,
-  token: string,
-): Promise<SessionAttestation> {
-  if (attestation.operation === "feedback") return authorizeFeedback(github, attestation, claims, token);
-  if (attestation.operation === "review") {
-    return {
-      ...attestation,
-      actor: null,
-      actor_type: null,
-      association: null,
-      command_id: null,
-      command_digest: null,
-    };
-  }
-  const comment = await github.issueComment(
-    repository,
-    scope.pull_request,
-    attestation.source_comment_id as number,
-    token,
-  );
-  if (
-    comment === null ||
-    comment.login.toLowerCase() !== claims.actor.toLowerCase() ||
-    comment.userType.toLowerCase() !== "user" ||
-    !ASSOCIATIONS.has(comment.association.toUpperCase()) ||
-    !recognizedCommand(comment.body)
-  ) {
-    throw new Error("broker_session_actor_rejected");
-  }
-  return {
-    ...attestation,
-    actor: comment.login,
-    actor_type: comment.userType,
-    association: comment.association.toUpperCase(),
-    command_id: comment.id,
-    command_digest: await digest(comment.body),
-  };
-}
-
-function canonicalAttestation(value: SessionAttestation): string {
-  return value.version === 2 ? canonicalFeedback(value) : JSON.stringify(value);
-}
-
-function sessionAttestationForVerification(
-  value: Record<string, unknown>,
-  scope: SessionScope,
-  runtime: PublicWorkflowRuntimeShas,
-): SessionAttestation {
-  if (value.version === 2) {
-    const parsed = parseFeedbackAttestation(value, true);
-    validateFeedbackContext(parsed, scope, undefined, runtime);
-    return parsed as FeedbackAttestation;
-  }
-  const operation = value.operation;
-  const sourceCommentId = value.source_comment_id;
-  const issuedAt = value.issued_at;
-  const now = Date.now();
-  if (typeof value.job_workflow_ref !== "string") {
-    throw new Error("broker_session_attestation_invalid");
-  }
-  if (
-    value.version !== SESSION_ATTESTATION_VERSION ||
-    typeof value.repository !== "string" ||
-    !REPOSITORY_PATTERN.test(value.repository) ||
-    value.repository_id !== scope.repository_id ||
-    value.pull_request !== scope.pull_request ||
-    value.head_sha !== scope.head_sha ||
-    (operation !== "review" && operation !== "command") ||
-    (sourceCommentId !== null &&
-      (typeof sourceCommentId !== "number" ||
-        !Number.isSafeInteger(sourceCommentId) || sourceCommentId <= 0)) ||
-    (operation === "command" && sourceCommentId === null) ||
-    typeof value.run_id !== "string" ||
-    !RUN_ID_PATTERN.test(value.run_id) ||
-    typeof issuedAt !== "number" ||
-    !Number.isSafeInteger(issuedAt) ||
-    issuedAt * 1000 > now + SESSION_ATTESTATION_SKEW_MS ||
-    now - issuedAt * 1000 > SESSION_ATTESTATION_TTL_MS + SESSION_ATTESTATION_SKEW_MS ||
-    typeof value.concurrency_group !== "string" ||
-    value.concurrency_group !== `reviewsensei-session-${scope.repository_id}-${scope.pull_request}` ||
-    typeof value.job_workflow_sha !== "string" ||
-    !SHA_PATTERN.test(value.job_workflow_sha) ||
-    (operation === "review" &&
-      (value.actor !== null ||
-        value.actor_type !== null ||
-        value.association !== null ||
-        value.command_id !== null ||
-        value.command_digest !== null)) ||
-    (operation === "command" &&
-      (typeof value.actor !== "string" ||
-        value.actor.length === 0 ||
-        typeof value.actor_type !== "string" ||
-        value.actor_type.toLowerCase() !== "user" ||
-        typeof value.association !== "string" ||
-        !ASSOCIATIONS.has(value.association) ||
-        typeof value.command_id !== "number" ||
-        !Number.isSafeInteger(value.command_id) ||
-        value.command_id <= 0 ||
-        typeof value.command_digest !== "string" ||
-        !/^[a-f0-9]{64}$/.test(value.command_digest)))
-  ) {
-    throw new Error("broker_session_attestation_invalid");
-  }
-  authorizeWorkflowRuntimeSha(value.job_workflow_sha as string, runtime);
-  return {
-    version: SESSION_ATTESTATION_VERSION,
-    repository: value.repository,
-    repository_id: scope.repository_id,
-    pull_request: scope.pull_request,
-    head_sha: scope.head_sha,
-    operation,
-    source_comment_id: sourceCommentId as number | null,
-    run_id: value.run_id,
-    issued_at: issuedAt as number,
-    concurrency_group: value.concurrency_group,
-    job_workflow_ref: value.job_workflow_ref,
-    job_workflow_sha: value.job_workflow_sha,
-    actor: value.actor as string | null,
-    actor_type: value.actor_type as string | null,
-    association: value.association as string | null,
-    command_id: value.command_id as number | null,
-    command_digest: value.command_digest as string | null,
   };
 }
 
@@ -569,6 +302,7 @@ export class TokenBroker {
     session_state?: SessionState;
     session_grant?: string;
     session_attestation?: SessionAttestation;
+    app_id?: number;
     release_only?: true;
     reservation_owner?: { run_id: string; head_sha: string };
   }> {
@@ -576,21 +310,23 @@ export class TokenBroker {
       throw new Error("broker_request_invalid");
     }
     const control = body.control_budget === undefined ? undefined : new BrokerDispatchControl(body.control_budget);
-    if (control !== undefined && isObject(body.session_attestation) && body.session_attestation.version === 2) {
-      const parsed = parseFeedbackAttestation(body.session_attestation);
-      if (parsed.mutation.operation_id !== control.request.operation_id ||
-        (parsed.mutation.read_accounting as Record<string, unknown>).deadline_unix_ms !== control.request.deadline_unix_ms) throw new Error("broker_control_binding_invalid");
-    }
     lifetime.constrain(control);
     const github = this.github.withRequestLifetime(lifetime, control);
     const receipt = () => control === undefined ? {} : { control_receipt: control.receipt() };
     const requested = capability(body.capability);
+    if (Object.hasOwn(body, "app_id") ||
+      (isObject(body.session) && Object.hasOwn(body.session, "app_id"))) {
+      throw new Error("broker_request_invalid");
+    }
+    // This identity belongs to the configured App, never an Actions event or
+    // caller assertion. Validate it before authentication or token issuance.
+    const appId = requested === "review_session" ? configuredAppId(this.env) : undefined;
     if (requested !== "review_session" && body.session !== undefined) {
       throw new Error("broker_session_invalid");
     }
     if (
       body.release_only !== undefined
-      && (requested !== "review_session" || body.release_only !== true || body.session_attestation !== undefined)
+      && (requested !== "review_session" || body.release_only !== true)
     ) {
       throw new Error("broker_session_invalid");
     }
@@ -600,6 +336,9 @@ export class TokenBroker {
       dispatchControl: control,
       requestLifetime: lifetime,
     });
+    // Reject obsolete or wrong-purpose authority before requesting installation tokens.
+    const requestedAuthority = bindRunAuthority(body.session_attestation, claims);
+    authorizeRunCapability(requestedAuthority, requested);
     const configuredTag = validatePublicWorkflowTag(this.env.PUBLIC_WORKFLOW_TAG ?? "");
     const observedTag = authorizeObservedWorkflowTag(
       configuredTag,
@@ -629,91 +368,57 @@ export class TokenBroker {
     const requestedSession = requested === "review_session"
       ? sessionScope(body.session, claims.repository_id)
       : undefined;
+    if (requestedSession !== undefined && (
+      requestedSession.pull_request !== requestedAuthority.pull_request ||
+      requestedSession.head_sha !== requestedAuthority.head_sha
+    )) throw new Error("broker_session_attestation_invalid");
     const token = await github.capabilityToken(
-      installationId,
-      claims.repository,
-      CAPABILITIES[requested],
+      installationId, claims.repository, CAPABILITIES[requested],
       CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ.has(requested),
     );
+    // Actions/check tokens deliberately have no PR scope. Use an independent
+    // internal read token for source validation, never broaden the returned token.
+    const hasPullScope = Object.hasOwn(CAPABILITIES[requested], "pull_requests");
+    const validationToken = hasPullScope ? token : await github.capabilityToken(
+      installationId, claims.repository, CAPABILITIES.review_status,
+    );
+    const currentHead = await github.pullRequestHead(
+      claims.repository, requestedAuthority.pull_request, validationToken,
+    );
+    if (currentHead !== requestedAuthority.head_sha && body.release_only !== true) {
+      throw new Error("broker_session_head_rejected");
+    }
+    const attestation = await authorizeRunSource(
+      github, requestedAuthority, claims, validationToken, recognizedCommand,
+    );
     if (requestedSession !== undefined) {
-      const currentHead = await github.pullRequestHead(
-        claims.repository,
-        requestedSession.pull_request,
-        token,
-      );
-      if (currentHead !== requestedSession.head_sha) {
-        // Narrow owner-only exception: a run releasing its own reservation
-        // publishes nothing, so a moved head cannot cause harm. The broker
-        // returns only the capability token and the verified owner identity;
-        // it records no enrollment witness and issues no mutation grant.
-        // The caller must still prove ledger ownership before releasing.
-        if (body.release_only === true) {
-          return {
-            ...receipt(), token,
-            capability: requested,
-            release_only: true,
-            reservation_owner: {
-              run_id: claims.run_id,
-              head_sha: requestedSession.head_sha,
-            },
-          };
-        }
-        throw new Error("broker_session_head_rejected");
-      }
       if (body.release_only === true) {
         return {
-          ...receipt(), token,
-          capability: requested,
-          release_only: true,
-          reservation_owner: {
-            run_id: claims.run_id,
-            head_sha: requestedSession.head_sha,
-          },
+          ...receipt(), token, capability: requested, release_only: true, app_id: appId,
+          reservation_owner: { run_id: claims.run_id, head_sha: requestedSession.head_sha },
         };
       }
-      // The enrollment witness is keyed by the current head, which the check
-      // above just verified against the live pull request. A new head is a new
-      // enrollment, so a legitimate re-review at an advanced head cannot be
-      // mistaken for a deleted marker; the same head keeps its witness, which
-      // is what makes a missing comment detectable as deletion.
-      const requestedAttestation = body.session_attestation === undefined
-        ? undefined
-        : sessionAttestation(body.session_attestation, claims, requestedSession);
-      const attestation = requestedAttestation === undefined
-        ? undefined
-        : await authorizeLiveSessionActor(
-          github,
-          claims.repository,
-          requestedSession,
-          claims,
-          requestedAttestation,
-          token,
-        );
       const enrollment = await enrollSession(
         github,
         claims.repository,
         requestedSession,
         token,
       );
-      if (attestation !== undefined) {
-        const scope = `${requestedSession.repository_id}:${requestedSession.pull_request}:${requestedSession.head_sha}`;
-        const grant = await issueSessionGrant(signingKey(this.env), {
+      const scope = `${requestedSession.repository_id}:${requestedSession.pull_request}:${requestedSession.head_sha}`;
+      const grant = await issueSessionGrant(signingKey(this.env), {
           scope,
-          attestationDigest: await digest(canonicalAttestation(attestation)),
+          attestationDigest: await digest(canonicalRunAuthority(attestation)),
           audience: SESSION_GRANT_AUDIENCE,
           runId: attestation.run_id,
-        });
-        return {
+      });
+      return {
           ...receipt(), token,
           capability: requested,
           session_state: enrollment,
           session_grant: grant,
           session_attestation: attestation,
-        };
-      }
-      return {
-        ...receipt(), token, capability: requested, session_state: enrollment,
-        reservation_owner: { run_id: claims.run_id, head_sha: requestedSession.head_sha },
+          app_id: appId,
+          reservation_owner: { run_id: claims.run_id, head_sha: requestedSession.head_sha },
       };
     }
     return { ...receipt(), token, capability: requested };
@@ -735,35 +440,16 @@ export class TokenBroker {
     if (typeof grant !== "string" || !/^sg1\.[1-9][0-9]{10,15}\.[A-Za-z0-9_-]{43}$/.test(grant)) {
       throw new Error("broker_session_grant_invalid");
     }
-    if (!isObject(attestation) || !hasExactKeys(attestation, attestation.version === 2 ? FEEDBACK_GRANT_KEYS : SESSION_ATTESTATION_GRANT_KEYS)) {
-      throw new Error("broker_session_attestation_invalid");
-    }
-    const value = attestation as Record<string, unknown>;
-    if (control !== undefined && value.version === 2) {
-      const parsed = parseFeedbackAttestation(value, true);
-      if (parsed.mutation.operation_id !== control.request.operation_id ||
-        (parsed.mutation.read_accounting as Record<string, unknown>).deadline_unix_ms !== control.request.deadline_unix_ms) throw new Error("broker_control_binding_invalid");
-    }
+    const parsed = parseRunAuthority(attestation, true);
     const github = this.github.withRequestLifetime(lifetime, control);
-    const repositoryId = value.repository_id;
-    if (
-      typeof repositoryId !== "number" ||
-      !Number.isSafeInteger(repositoryId) ||
-      repositoryId <= 0
-    ) {
-      throw new Error("broker_session_attestation_invalid");
-    }
-    const scope = sessionScope(value, repositoryId);
+    const scope = sessionScope(parsed, parsed.repository_id);
     const configuredTag = validatePublicWorkflowTag(this.env.PUBLIC_WORKFLOW_TAG ?? "");
-    if (typeof value.job_workflow_ref !== "string") {
-      throw new Error("broker_session_attestation_invalid");
-    }
-    const observedTag = authorizeObservedWorkflowTag(configuredTag, value.job_workflow_ref);
+    const observedTag = authorizeObservedWorkflowTag(configuredTag, parsed.job_workflow_ref);
     const runtime = await github.publicWorkflowRuntimeShas(observedTag);
-    const parsed = sessionAttestationForVerification(value, scope, runtime);
+    authorizeWorkflowRuntimeSha(parsed.job_workflow_sha, runtime);
     const authentic = await sessionGrantAuthentic(signingKey(this.env), grant, {
       scope: `${scope.repository_id}:${scope.pull_request}:${scope.head_sha}`,
-      attestationDigest: await digest(canonicalAttestation(parsed)),
+      attestationDigest: await digest(canonicalRunAuthority(parsed)),
       audience: SESSION_GRANT_AUDIENCE,
       runId: parsed.run_id,
     });

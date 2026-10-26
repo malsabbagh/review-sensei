@@ -62,10 +62,30 @@ class MediaCLIState(HostedMediaState):
         ]
         self.fail_check = False
         self.lose_review_response = False
+        self.refuse_read_after_receipt = False
+        self.confirmed_read_refusals = 0
         super().__init__(**kwargs)
 
     def open(self, request, timeout):
         path = urlsplit(request.full_url).path
+        if (
+            self.refuse_read_after_receipt
+            and request.method == "GET"
+            and path == REPO + "/pulls/2"
+            and any(
+                prefix in item["body"]
+                for item in self.comments.values()
+                for prefix in (RECEIPT_PREFIX, RECEIPT_GROUP_PREFIX)
+            )
+        ):
+            # Seed a real retained receipt, then stop at a confirmed read refusal
+            # before approval. Worker fanout no longer exhausts caller capacity.
+            self.physical.append(
+                (request.method, path, request.get_header("Authorization"), timeout)
+            )
+            self.refuse_read_after_receipt = False
+            self.confirmed_read_refusals += 1
+            return json_response({"message": "synthetic confirmed read refusal"}, 403)
         lookup = f"{REPO}/commits/{HEAD}/check-runs"
         if path == lookup or path.startswith(REPO + "/check-runs"):
             self.physical.append(
@@ -133,7 +153,7 @@ class SyntheticBrokerProtocol:
         payload = json.loads(request.data)
         self.requests.append(payload["capability"])
         control = payload["control_budget"]
-        self.admitted.append(control["max_dispatches"] + 1)
+        self.admitted.append(control["max_dispatches"])
         result = {
             "token": "synthetic-scoped",
             "capability": payload["capability"],
@@ -228,7 +248,7 @@ class ProductionMediaBrokerBridge(SyntheticBrokerProtocol):
         assert 0 < timeout <= 60
         payload = json.loads(request.data)
         self.requests.append(payload["capability"])
-        self.admitted.append(payload["control_budget"]["max_dispatches"] + 1)
+        self.admitted.append(payload["control_budget"]["max_dispatches"])
         self.attempts.append(
             {
                 "origin": "caller-broker",
@@ -239,6 +259,14 @@ class ProductionMediaBrokerBridge(SyntheticBrokerProtocol):
         reply = self.call(
             "exchange", body=payload, authority=self.owner.state.broker_authority()
         )
+        # Every fixture fetch is traced, including failures and cold auth. Keep
+        # the service ceiling independent from the one caller POST above.
+        self.owner.assertTrue(
+            all(item["origin"] == "broker-internal" for item in reply["attempts"])
+        )
+        self.owner.assertLessEqual(
+            len(reply["attempts"]), payload["control_budget"]["max_dispatches"]
+        )
         if reply["status"] != 200:
             raise HTTPError(
                 request.full_url,
@@ -248,6 +276,7 @@ class ProductionMediaBrokerBridge(SyntheticBrokerProtocol):
                 io.BytesIO(json.dumps(reply["result"]).encode()),
             )
         self.receipts.append(reply["result"]["control_receipt"])
+        self.owner.assertEqual(len(reply["attempts"]), self.receipts[-1]["dispatched"])
         return json_response(reply["result"])
 
     def close(self):
@@ -316,6 +345,7 @@ class MediaCLIActivationTests(unittest.TestCase):
         output, errors = io.StringIO(), io.StringIO()
         start_http = len(self.state.physical)
         start_admitted = len(self.broker.admitted)
+        start_broker = len(self.broker.requests)
         start_trace = len(getattr(self.broker, "attempts", ()))
         oidc = self.broker.oidc()
         with tempfile.TemporaryDirectory() as scratch:
@@ -374,9 +404,12 @@ class MediaCLIActivationTests(unittest.TestCase):
         self.last_output = output.getvalue() + errors.getvalue()
         self.last_http = len(self.state.physical) - start_http
         self.last_admitted = sum(self.broker.admitted[start_admitted:])
-        self.last_physical = (
-            self.last_http + len(getattr(self.broker, "attempts", ())) - start_trace
-        )
+        self.last_broker_attempts = len(self.broker.requests) - start_broker
+        trace = getattr(self.broker, "attempts", ())[start_trace:]
+        self.last_caller_trace = sum(x["origin"] == "caller-broker" for x in trace)
+        self.last_worker_trace = sum(x["origin"] == "broker-internal" for x in trace)
+        self.assertEqual(len(trace), self.last_caller_trace + self.last_worker_trace)
+        self.last_physical = self.last_http + self.last_broker_attempts
         return status
 
     def approvals(self):
@@ -400,7 +433,7 @@ class MediaCLIActivationTests(unittest.TestCase):
         self.assertEqual(self.receipt_count(), 1)
         budget = self.budgets[-1]
         self.assertLessEqual(budget.calls, 64)
-        self.assertEqual(budget.calls, self.last_http + self.last_admitted)
+        self.assert_caller_accounting()
         self.assertEqual(
             self.budget_starts[-1]["deadline_unix_ms"],
             budget.snapshot()["deadline_unix_ms"],
@@ -417,19 +450,42 @@ class MediaCLIActivationTests(unittest.TestCase):
             self.broker.receipts[-1]["operation_id"],
         )
         if self.production_broker:
-            self.assertLessEqual(self.last_physical, budget.calls)
+            self.assertEqual(self.last_physical, budget.calls)
         self.assertIn("media-approved", self.last_output)
+
+    def assert_caller_accounting(self):
+        self.assertEqual(
+            self.budgets[-1].calls, self.last_http + self.last_broker_attempts
+        )
+        if self.production_broker:
+            self.assertEqual(self.last_caller_trace, self.last_broker_attempts)
+            self.assertLessEqual(self.last_worker_trace, self.last_admitted)
 
     def retain_media_receipt_before_approval(self):
         self.broker.cold_invocation()
+        before = self.state.confirmed_read_refusals
+        review_posts = sum(
+            method == "POST" and path == REPO + "/pulls/2/reviews"
+            for method, path, _, _ in self.state.physical
+        )
+        self.state.refuse_read_after_receipt = True
         self.assertEqual(self.activate(), 1, self.last_output)
+        self.assertEqual(self.state.confirmed_read_refusals, before + 1)
+        self.assertFalse(self.state.refuse_read_after_receipt)
+        self.assertEqual(
+            sum(
+                method == "POST" and path == REPO + "/pulls/2/reviews"
+                for method, path, _, _ in self.state.physical
+            ),
+            review_posts,
+        )
         self.assertEqual(self.approvals(), [])
         self.assertEqual(self.receipt_count(), 1)
         self.assertEqual(self.state.check_runs[0]["conclusion"], "action_required")
         self.assertLessEqual(self.budgets[-1].calls, 60)
-        self.assertEqual(self.budgets[-1].calls, self.last_http + self.last_admitted)
+        self.assert_caller_accounting()
         if self.production_broker:
-            self.assertLessEqual(self.last_physical, self.budgets[-1].calls)
+            self.assertEqual(self.last_physical, self.budgets[-1].calls)
 
     def test_supported_command_loads_actual_retention_and_finishes_the_check(self):
         for media_count, text_count in ((2, 1), (41, 61)):
@@ -534,11 +590,9 @@ class MediaCLIActivationTests(unittest.TestCase):
                     )
                 )
                 self.assertLessEqual(self.budgets[-1].calls, 60)
-                self.assertEqual(
-                    self.budgets[-1].calls, self.last_http + self.last_admitted
-                )
+                self.assert_caller_accounting()
                 if self.production_broker:
-                    self.assertLessEqual(self.last_physical, self.budgets[-1].calls)
+                    self.assertEqual(self.last_physical, self.budgets[-1].calls)
 
     def test_explicit_retry_is_idempotent(self):
         self.retain_media_receipt_before_approval()
@@ -689,9 +743,8 @@ class ProductionMediaCLIActivationTests(MediaCLIActivationTests):
             return original_call(action, **arguments)
 
         self.broker.call = isolated_check_worker
-        self.broker.cold_invocation()
-        self.assertEqual(self.activate(), 1, self.last_output)
-        self.assertIn("receipt is retained", self.last_output)
+        self.retain_media_receipt_before_approval()
+        self.assertIn("approval finalization preflight failed", self.last_output)
         self.assertEqual(self.receipt_count(), 1)
         self.assertEqual(self.approvals(), [])
         self.assertLessEqual(self.budgets[-1].calls, 60)

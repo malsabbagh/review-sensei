@@ -1,3 +1,9 @@
+"""Canonical local reply CLI inference selection; publication is an explicit mock.
+
+Current Actions reply-run authorization and durable completion are qualified by
+its separate entry tests. These tests retain the local option/credential seam.
+"""
+
 import io
 import re
 import shlex
@@ -62,7 +68,6 @@ class ReplyInferenceTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 return SimpleNamespace(status="replied")
 
         argv = [
-            "github",
             *global_options,
             "reply",
             "--generate",

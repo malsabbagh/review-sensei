@@ -162,6 +162,15 @@ class GitHubBrokerClientError(ReviewSenseiError):
         self.broker_diagnostic = broker_diagnostic
 
 
+class GitHubBrokerAdmissionHeldError(GitHubBrokerClientError):
+    """Raised when the operator temporarily holds new broker admissions.
+
+    This is a named operator state, not an automatic retry instruction.
+    """
+
+    error_category = "github_broker_admission_held"
+
+
 class GitHubPublicationError(ReviewSenseiError):
     """Raised when a validated review cannot be published."""
 

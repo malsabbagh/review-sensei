@@ -15,7 +15,7 @@ from review_sensei_github.errors import GitHubBrokerClientError
 
 from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
-from tests.test_github_broker_client import FakeResponse
+from tests.test_github_broker_client import FakeResponse, current_authority
 
 
 class BrokerDispatchControlTests(unittest.TestCase):
@@ -60,13 +60,14 @@ class BrokerDispatchControlTests(unittest.TestCase):
 
         with self.assertRaises(ReviewInputError):
             self.client(budget, open_request).exchange(
-                "synthetic", capability="review_session"
+                "synthetic", capability="review_publish"
             )
         self.assertEqual(budget.calls, 1)
         self.assertEqual(budget.wall_deadline_ms, deadline)
 
     def client(self, budget, opener):
         return BrokerClient(
+            authority=current_authority(),
             opener=opener,
             control=BrokerDispatchAccounting(
                 budget=budget,
@@ -103,7 +104,7 @@ class BrokerDispatchControlTests(unittest.TestCase):
 
         self.assertEqual(
             self.client(budget, open_request).exchange(
-                "synthetic", capability="review_session"
+                "synthetic", capability="review_publish"
             ),
             "synthetic",
         )
@@ -146,7 +147,7 @@ class BrokerDispatchControlTests(unittest.TestCase):
 
                 with self.assertRaises(GitHubBrokerClientError):
                     self.client(budget, open_request).exchange(
-                        "synthetic", capability="review_session"
+                        "synthetic", capability="review_publish"
                     )
                 self.assertEqual(budget.calls, 1)
 
@@ -158,7 +159,7 @@ class BrokerDispatchControlTests(unittest.TestCase):
             self.client(
                 budget,
                 lambda *_args, **_kwargs: self.fail("unfunded request dispatched"),
-            ).exchange("synthetic", capability="review_session")
+            ).exchange("synthetic", capability="review_publish")
         self.assertEqual(budget.calls, 60)
 
     def test_ordinary_hold_narrows_the_phase_ceiling_without_spending_calls(self):
@@ -210,6 +211,7 @@ class BrokerDispatchControlTests(unittest.TestCase):
                     )
 
                 client = BrokerClient(
+                    authority=current_authority(),
                     opener=open_request,
                     control=BrokerDispatchAccounting(
                         budget,
@@ -218,7 +220,7 @@ class BrokerDispatchControlTests(unittest.TestCase):
                         1,
                     ),
                 )
-                client.exchange("synthetic", capability="review_session")
+                client.exchange("synthetic", capability="review_publish")
                 self.assertEqual(len(physical), 1)
                 self.assertEqual(budget.calls, 1)
                 self.assertEqual(budget.ordinary_remaining(), 59)

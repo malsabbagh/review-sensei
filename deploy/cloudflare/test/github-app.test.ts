@@ -781,22 +781,15 @@ describe("setup repository reconciliation", () => {
     }
   });
 
-  it.each([false, true])("recognizes only exact prepared recovery v5 caller with operator edit=%s", async (edited) => {
+  it.each([false, true])("recognizes current original-run recovery caller with operator edit=%s", async (edited) => {
     const fake = new FakeGitHub();
     fake.files = Object.fromEntries(buildSetupFiles(TAG).map(({ path, content }) => [path, content]));
     fake.files[SETUP_FILE_PATHS[0]] = preparedRecoveryWorkflowTemplate(TAG) + (edited ? "# operator-owned edit\n" : "");
     expect(await serviceWith(fake).process(delivery())).toEqual([
-      { repository: "acme/widgets", status: edited ? "skipped_unknown_setup" : "created", ...(edited ? {} : { pull_request_number: 42 }) },
+      { repository: "acme/widgets", status: edited ? "skipped_unknown_setup" : "skipped_current" },
     ]);
-    if (edited) {
-      expect(mutationRequests(fake)).toEqual([]);
-    } else {
-      const tree = fake.requests.find(({ path }) => path.endsWith("/git/trees"));
-      const entries = tree?.body?.tree as Array<{ path: string; content: string }>;
-      const caller = entries.find(({ path }) => path === SETUP_FILE_PATHS[0])?.content;
-      expect(caller).toEqual(buildSetupFiles(TAG)[0].content);
-      expect(caller).not.toContain("recover_publication:");
-    }
+    expect(mutationRequests(fake)).toEqual([]);
+    expect(preparedRecoveryWorkflowTemplate(TAG)).toEqual(buildSetupFiles(TAG)[0].content);
   });
 
   it("migrates a managed v5 setup following an older public tag", async () => {

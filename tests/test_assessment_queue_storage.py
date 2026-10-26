@@ -305,7 +305,11 @@ class QueueAdapterTests(unittest.TestCase):
                 )
                 record, _ = activate(local)
                 self.assertGreater(assessment_queue_manifest_capacity(record), 0)
-                self.assertLess(checkpoint_baseline_capacity(record), previous_capacity)
+                # A roomy root may leave both allocations at the independent
+                # history cap; a queue must never increase that allowance.
+                self.assertLessEqual(
+                    checkpoint_baseline_capacity(record), previous_capacity
+                )
                 grown = record.evolve(
                     assessment_queue=dict(
                         record.assessment_queue, active_operation=active_summary()

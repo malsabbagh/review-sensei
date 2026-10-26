@@ -38,7 +38,7 @@ on:
         default: review
         type: string
       recover_publication:
-        description: Explicit manual publication-only recovery; never infer
+        description: Retired; true is rejected before business HTTP
         required: false
         default: false
         type: boolean
@@ -222,13 +222,8 @@ jobs:
             review|reply|command) ;;
             *) echo '::error::operation must be review, reply, or command' >&2; exit 1 ;;
           esac
-          if [[ "${RECOVER_PUBLICATION:-false}" == "true" ]]; then
-            if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" || "$MODE" != "manual" || "$OPERATION" != "review" || ! "${RECOVERY_POLICY_COMMIT:-}" =~ ^[a-f0-9]{40}$ || ! "${RECOVERY_EXPECTED_HEAD:-}" =~ ^[a-f0-9]{40}$ || "$HEAD_SHA" != "$RECOVERY_EXPECTED_HEAD" || ! "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
-              echo '::error::publication recovery requires manual dispatch, original trusted policy commit, and the exact current original base/head' >&2
-              exit 1
-            fi
-          elif [[ "${RECOVER_PUBLICATION:-false}" != "false" || -n "${RECOVERY_POLICY_COMMIT:-}" || -n "${RECOVERY_EXPECTED_HEAD:-}" ]]; then
-            echo '::error::recovery selectors require explicit publication recovery' >&2
+          if [[ "${RECOVER_PUBLICATION:-false}" != "false" || -n "${RECOVERY_POLICY_COMMIT:-}" || -n "${RECOVERY_EXPECTED_HEAD:-}" ]]; then
+            echo '::error::new-run publication recovery is unsupported; rerun the original Actions run (one stopped-owner successor attempt)' >&2
             exit 1
           fi
           case "$MODE" in
@@ -513,13 +508,8 @@ jobs:
 
   authoritative-preflight:
     needs: bootstrap
-    # Validation is deliberately a dependency.  If the cheap input checks
-    # fail, do not make an unnecessary GitHub API request.  Every provider path
-    # in this workflow publishes through the broker, so a policy that does not
-    # authorize writes performs no host operation at all: it is skipped here,
-    # before any API request and before inference, instead of silently
-    # switching to stateless enforcement.  Explicit local analysis remains
-    # available through the local CLI.
+    # Routing only. The selected metered process authenticates live PR, source,
+    # policy and Actions writer before any business mutation or provider work.
     if: needs.bootstrap.outputs.writes == 'true'
     outputs:
       pull_request_title_b64: ${{ steps.fetch-pr.outputs.pull_request_title_b64 }}
@@ -546,110 +536,15 @@ jobs:
           RECOVER_PUBLICATION: ${{ inputs.recover_publication }}
         run: |
           set -euo pipefail
-          # Command mutations reuse the live head/branch checks below, so a
-          # stale or fabricated head SHA fails here rather than only at the
-          # broker. Reviews need the fetch for their base SHA and title.
-          if [[ "$OPERATION" != "command" && "$OPERATION" != "review" ]]; then
-            echo 'authoritative PR preflight not required for this operation'
-            exit 0
-          fi
           [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::pull request identity is invalid' >&2; exit 1; }
           [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::repository identity is invalid' >&2; exit 1; }
           [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::repository id must be a positive decimal integer' >&2; exit 1; }
-          if [[ "$OPERATION" == "review" && "$RECOVER_PUBLICATION" != "true" ]]; then
-            echo "pull_request_number=$PULL_REQUEST" >> "$GITHUB_OUTPUT"
-            echo 'Live review preflight belongs to the metered lifecycle.'
-            exit 0
-          fi
-          [[ -n "$BASE_REF" && "$BASE_REF" != -* && "$BASE_REF" != *--* && "$BASE_REF" != *- && "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo '::error::base ref identity is invalid' >&2; exit 1; }
-          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::head sha identity is invalid' >&2; exit 1; }
-          if [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
-            echo '::error::base sha identity is invalid' >&2
-            exit 1
-          fi
-          payload="$(mktemp "$RUNNER_TEMP/review-sensei-pr.XXXXXX")"
-          trap 'rm -f "$payload"' EXIT
-          umask 077
-          if ! gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" > "$payload"; then
-            echo '::error::authoritative GitHub pull-request preflight was unavailable; refusing provider execution' >&2
-            exit 1
-          fi
-          python - "$payload" <<'PY'
-          import base64
-          import json
-          import os
-          import re
-          import sys
-          path = sys.argv[1]
-          flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-          try:
-              descriptor = os.open(path, flags)
-          except OSError as error:
-              raise SystemExit(f"pull request metadata cannot be opened safely: {error}")
-          with os.fdopen(descriptor, "rb") as stream:
-              raw = stream.read(512 * 1024 + 1)
-          if len(raw) > 512 * 1024:
-              raise SystemExit("pull request metadata exceeds the configured response limit")
-          try:
-              data = json.loads(raw.decode("utf-8"))
-          except (UnicodeDecodeError, json.JSONDecodeError) as error:
-              raise SystemExit(f"pull request metadata is not valid JSON: {error}")
-          if not isinstance(data, dict) or data.get("state") != "open" or data.get("draft") is True:
-              raise SystemExit("pull request is not eligible for review")
-          requested_number = os.environ.get("PULL_REQUEST", "")
-          if (
-              isinstance(data.get("number"), bool)
-              or not isinstance(data.get("number"), int)
-              or data.get("number") != int(requested_number)
-          ):
-              raise SystemExit("pull request number identity does not match")
-          head = data.get("head")
-          base = data.get("base")
-          head_repo = head.get("repo") if isinstance(head, dict) else None
-          base_repo = base.get("repo") if isinstance(base, dict) else None
-          if not isinstance(head_repo, dict) or not isinstance(base_repo, dict):
-              raise SystemExit("pull request identity metadata is unavailable")
-          repository = os.environ.get("REPOSITORY", "")
-          repository_id = os.environ.get("REPOSITORY_ID", "")
-          if not re.fullmatch(r"[1-9][0-9]*", repository_id):
-              raise SystemExit("repository id must be a positive decimal integer")
-          if base_repo.get("full_name") != repository or base_repo.get("id") != int(repository_id):
-              raise SystemExit("pull request repository identity does not match")
-          if head_repo.get("full_name") != repository or head_repo.get("fork") is not False:
-              raise SystemExit("pull request head repository is not eligible")
-          if head.get("sha") != os.environ.get("HEAD_SHA", ""):
-              raise SystemExit("pull request head is stale")
-          if base.get("ref") != os.environ.get("BASE_REF", ""):
-              raise SystemExit("pull request base branch is stale")
-          supplied_base = os.environ.get("BASE_SHA", "")
-          if supplied_base and base.get("sha") != supplied_base:
-              raise SystemExit("pull request base is stale")
-          supplied_head_repo = os.environ.get("HEAD_REPOSITORY", "")
-          if supplied_head_repo and supplied_head_repo != head_repo.get("full_name"):
-              raise SystemExit("pull request head repository does not match")
-          if not re.fullmatch(r"[a-f0-9]{40}", str(head.get("sha", ""))):
-              raise SystemExit("pull request head identity is invalid")
-          if not re.fullmatch(r"[a-f0-9]{40}", str(base.get("sha", ""))):
-              raise SystemExit("pull request base identity is invalid")
-          title = data.get("title", "")
-          if not isinstance(title, str) or len(title.encode("utf-8")) > 256:
-              raise SystemExit("pull request title exceeds the 256-byte limit")
-          encoded = base64.b64encode(title.encode("utf-8")).decode("ascii")
-          if len(encoded) > 8192:
-              raise SystemExit("encoded pull request title exceeds the workflow output limit")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"pull_request_title_b64={encoded}\n")
-              output.write(f"base_sha={base['sha']}\n")
-              output.write(f"pull_request_number={data['number']}\n")
-          PY
+          echo "pull_request_number=$PULL_REQUEST" >> "$GITHUB_OUTPUT"
+          echo 'Live preflight belongs to the selected metered lifecycle.'
 
   command:
     needs: [bootstrap, authoritative-preflight]
-    # authoritative-preflight re-reads the live PR and rejects a head SHA that
-    # no longer matches, so the mutation only runs against the commit the
-    # maintainer addressed. Maintainer status/pause/resume/verify/disposition
-    # commands have their own authorization and do not depend on
-    # conversational replies being enabled.
+    # Commands share the same authenticated PR writer slot and run allowance.
     if: inputs.operation == 'command' && needs.bootstrap.outputs.writes == 'true'
     concurrency:
       group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}
@@ -663,6 +558,13 @@ jobs:
       pull-requests: read
       id-token: write
     steps:
+      - name: Check out the trusted policy commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.bootstrap.outputs.policy_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -747,6 +649,8 @@ jobs:
           # Metadata reads use the existing read-only token. Session writes
           # still require the separate OIDC broker grant below.
           GITHUB_TOKEN: ${{ github.token }}
+          POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
+          REVIEWSENSEI_APP_ID: ${{ github.event.installation.app_id }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number }}
@@ -756,54 +660,18 @@ jobs:
           COMMENT_ACTOR: ${{ inputs.comment_actor }}
           COMMENT_ACTOR_TYPE: ${{ inputs.comment_actor_type }}
           COMMENT_ASSOCIATION: ${{ inputs.comment_association }}
-          JOB_WORKFLOW_REF: ${{ job.workflow_ref }}
-          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
+          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
-          oidc_response="$(curl --fail --silent --show-error \
-            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.reviewsensei.dev")"
-          oidc_token="$(printf '%s' "$oidc_response" | "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'import json, sys; value = json.load(sys.stdin).get("value"); assert isinstance(value, str) and value; print(value)')"
-          attestation="$RUNNER_TEMP/review-sensei-command-attestation.json"
-          "$RUNNER_TEMP/review-sensei-venv/bin/python" - "$attestation" <<'PY'
-          import json
-          import os
-          import re
-          import sys
-          import time
-
-          repository = os.environ.get("REPOSITORY", "")
-          repository_id = os.environ.get("REPOSITORY_ID", "")
-          pull_request = os.environ.get("PULL_REQUEST", "")
-          head_sha = os.environ.get("HEAD_SHA", "")
-          source_comment_id = os.environ.get("SOURCE_COMMENT_ID", "")
-          run_id = os.environ.get("GITHUB_RUN_ID", "")
-          workflow_ref = os.environ.get("JOB_WORKFLOW_REF", "")
-          workflow_sha = os.environ.get("JOB_WORKFLOW_SHA", "")
-          if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repository) or not re.fullmatch(r"[1-9][0-9]*", repository_id) or not re.fullmatch(r"[1-9][0-9]*", pull_request) or not re.fullmatch(r"[a-f0-9]{40}", head_sha) or not re.fullmatch(r"[1-9][0-9]*", source_comment_id) or not re.fullmatch(r"[1-9][0-9]{0,18}", run_id) or not re.fullmatch(r"[a-f0-9]{40}", workflow_sha):
-              raise SystemExit("hosted command identity is invalid")
-          json.dump({
-              "version": 1,
-              "repository": repository,
-              "repository_id": int(repository_id),
-              "pull_request": int(pull_request),
-              "head_sha": head_sha,
-              "operation": "command",
-              "source_comment_id": int(source_comment_id),
-              "run_id": run_id,
-              "issued_at": int(time.time()),
-              "concurrency_group": f"reviewsensei-session-{repository_id}-{pull_request}",
-              "job_workflow_ref": workflow_ref,
-              "job_workflow_sha": workflow_sha,
-          }, open(sys.argv[1], "w", encoding="utf-8"), separators=(",", ":"))
-          PY
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" command \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" command-run \
+            --policy-commit "$POLICY_COMMIT" --run-directory "$RUNNER_TEMP" -- \
             --comment-body "$COMMENT_BODY" --actor "$COMMENT_ACTOR" \
             --actor-type "$COMMENT_ACTOR_TYPE" --association "$COMMENT_ASSOCIATION" \
             --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
             --pull-request "$PULL_REQUEST" --head-sha "$HEAD_SHA" \
-            --source-comment-id "$SOURCE_COMMENT_ID" --session-attestation "$attestation" \
-            --github-session-ledger --oidc-token "$oidc_token" --allow-write
+            --source-comment-id "$SOURCE_COMMENT_ID" \
+            --allow-write
 
   hosted:
     needs: [bootstrap, authoritative-preflight]
@@ -846,25 +714,6 @@ jobs:
           ref: ${{ needs.authoritative-preflight.outputs.base_sha || inputs.base_sha || inputs.base_ref }}
           path: trusted-base
           fetch-depth: 0
-
-      - name: Check out original trusted recovery policy
-        if: inputs.recover_publication
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.recovery_policy_commit }}
-          path: recovery-policy
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Authenticate original recovery policy ancestry
-        if: inputs.recover_publication
-        env:
-          RECOVERY_POLICY_COMMIT: ${{ inputs.recovery_policy_commit }}
-        run: |
-          set -euo pipefail
-          [[ "$RECOVERY_POLICY_COMMIT" =~ ^[a-f0-9]{40}$ ]] || exit 1
-          [[ "$(git -C recovery-policy rev-parse HEAD)" == "$RECOVERY_POLICY_COMMIT" ]] || exit 1
-          git merge-base --is-ancestor "$RECOVERY_POLICY_COMMIT" HEAD || { echo '::error::original recovery policy is not trusted default-branch history' >&2; exit 1; }
 
       - name: Resolve trusted base SHA
         id: trusted-base
@@ -1033,7 +882,6 @@ jobs:
 
       - name: Scope the selected backend credential
         id: credential
-        if: ${{ !inputs.recover_publication }}
         env:
           CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
           CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
@@ -1075,29 +923,14 @@ jobs:
           printf '%s=%s\n' "$CREDENTIAL_ENV" "$credential_value" >> "$GITHUB_ENV"
           echo "materialized secret $CREDENTIAL_ENV for the selected backend"
 
-      - name: Prepare bounded trusted-base diff
-        if: inputs.operation == 'review' && inputs.recover_publication
-        env:
-          BASE_REF: ${{ steps.trusted-base.outputs.sha }}
-          HEAD_REF: ${{ inputs.head_sha }}
-          HEAD_REPOSITORY: ${{ inputs.head_repository }}
-        run: |
-          args=()
-          if [[ -n "$HEAD_REPOSITORY" ]]; then
-            args+=(--head-repository "$HEAD_REPOSITORY")
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
-            --repository "$PWD/trusted-base" --base-ref "$BASE_REF" \
-            --head-ref "$HEAD_REF" \
-            "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
-            --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
-
       - name: Run hosted review
         id: provider-review
-        if: inputs.operation == 'review' && !inputs.recover_publication
+        if: inputs.operation == 'review'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
+          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
+          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
           RUNNER_KIND: ${{ needs.bootstrap.outputs.runner_kind }}
           BACKEND: ${{ needs.bootstrap.outputs.backend }}
           BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
@@ -1199,99 +1032,6 @@ jobs:
           fi
           exit "$review_status"
 
-      # Runs even after cancellation or a review-step timeout: release this
-      # run's own reservation if the killed Python process could not. The
-      # command is owner-only and never touches saved publication work.
-      - name: Confirm live pull-request head is still current
-        id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.recover_publication
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-        run: |
-          set -euo pipefail
-          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::pull request identity is invalid' >&2; exit 1; }
-          [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::repository identity is invalid' >&2; exit 1; }
-          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::head sha identity is invalid' >&2; exit 1; }
-          live_sha=""
-          for attempt in 1 2 3; do
-            err_file="$RUNNER_TEMP/rs-head-revalidate.$$"
-            if live_sha="$(gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" --jq '.head.sha' 2>"$err_file")"; then
-              rm -f "$err_file"
-              break
-            fi
-            err_text="$(tr -d '\000' <"$err_file" | tail -n 20)"
-            rm -f "$err_file"
-            if [[ "$err_text" =~ HTTP\ (401|403|404) ]]; then
-              echo '::error::live pull-request head revalidation was unauthorized or missing; refusing publish' >&2
-              exit 1
-            fi
-            if [[ "$attempt" -eq 3 ]]; then
-              echo '::error::live pull-request head revalidation was unavailable; refusing publish' >&2
-              exit 1
-            fi
-            delay=$((1 << (attempt - 1)))
-            if [[ "$err_text" =~ HTTP\ 429 ]]; then
-              delay=$((delay * 2))
-            fi
-            if [[ "$delay" -gt 8 ]]; then
-              delay=8
-            fi
-            jitter_hundredths=$((RANDOM % 50))
-            sleep "${delay}.${jitter_hundredths}"
-          done
-          if [[ ! "$live_sha" =~ ^[a-f0-9]{40}$ ]]; then
-            echo '::error::live pull-request head identity is invalid; refusing publish' >&2
-            exit 1
-          fi
-          if [[ "$live_sha" != "$HEAD_SHA" ]]; then
-            echo '::error::publish skipped_stale: reviewed head is no longer the live pull-request head' >&2
-            echo 'skipped_stale'
-            echo 'status=skipped_stale' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo 'publish admission current'
-          echo 'status=current' >> "$GITHUB_OUTPUT"
-
-      - name: Publish or promote validated review through the broker
-        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && inputs.recover_publication
-        env:
-          # Read trusted operation receipts with the existing metadata token.
-          GITHUB_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          BASE_REF: ${{ inputs.base_ref }}
-          BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
-          REVIEWS: ${{ needs.bootstrap.outputs.reviews }}
-          OPERATION_ENTRY: ${{ needs.bootstrap.outputs.operation_entry }}
-          PUBLICATION_INVENTORY: ${{ needs.bootstrap.outputs.publication_inventory }}
-          RECOVER_PUBLICATION: ${{ inputs.recover_publication }}
-          LEARNING: ${{ needs.bootstrap.outputs.learning }}
-        run: |
-          publish_args=(--enable-review --operation-entry "$OPERATION_ENTRY" --publication-inventory "$PUBLICATION_INVENTORY")
-          if [[ "$REVIEWS" == "auto-approve" ]]; then
-            publish_args+=(--enable-auto-approve)
-          else
-            publish_args+=(--no-auto-approve)
-          fi
-          if [[ "$LEARNING" == "pull-requests" && "$RECOVER_PUBLICATION" != "true" ]]; then
-            publish_args+=(--enable-learning-prs)
-          fi
-          source_args=(--result review.json --configuration-context configuration-context.json --admission-context admission-context.json)
-          if [[ "$RECOVER_PUBLICATION" == "true" ]]; then
-            source_args=(--recover-retained --reconstruct-contexts --trusted-context-root "$PWD/recovery-policy")
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" publish \
-            "${source_args[@]}" --diff pr.patch --repository "$REPOSITORY" \
-            --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
-            --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --outcome publication-outcome.json --github-session-ledger \
-            --allow-write "${publish_args[@]}"
-
       - name: Generate and publish hosted mention reply
         id: reply
         if: inputs.operation == 'reply'
@@ -1303,6 +1043,9 @@ jobs:
           CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
           CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
           GITHUB_TOKEN: ${{ github.token }}
+          POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
+          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
+          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           REVIEWSENSEI_APP_ID: ${{ github.event.installation.app_id }}
@@ -1325,7 +1068,8 @@ jobs:
             reply_args+=(--api-key-env "$CREDENTIAL_ENV")
           fi
           set +e
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" reply \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" reply-run \
+            --policy-commit "$POLICY_COMMIT" --run-directory "$RUNNER_TEMP" -- \
             "${reply_args[@]}" > "$reply_output"
           reply_exit=$?
           set -e
@@ -1409,25 +1153,6 @@ jobs:
           ref: ${{ needs.authoritative-preflight.outputs.base_sha || inputs.base_sha || inputs.base_ref }}
           path: trusted-base
           fetch-depth: 0
-
-      - name: Check out original trusted recovery policy
-        if: inputs.recover_publication
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.recovery_policy_commit }}
-          path: recovery-policy
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Authenticate original recovery policy ancestry
-        if: inputs.recover_publication
-        env:
-          RECOVERY_POLICY_COMMIT: ${{ inputs.recovery_policy_commit }}
-        run: |
-          set -euo pipefail
-          [[ "$RECOVERY_POLICY_COMMIT" =~ ^[a-f0-9]{40}$ ]] || exit 1
-          [[ "$(git -C recovery-policy rev-parse HEAD)" == "$RECOVERY_POLICY_COMMIT" ]] || exit 1
-          git merge-base --is-ancestor "$RECOVERY_POLICY_COMMIT" HEAD || { echo '::error::original recovery policy is not trusted default-branch history' >&2; exit 1; }
 
       - name: Resolve trusted base SHA
         id: trusted-base
@@ -1595,7 +1320,6 @@ jobs:
 
       - name: Scope the selected backend credential
         id: credential
-        if: ${{ !inputs.recover_publication }}
         env:
           CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
           CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
@@ -1637,26 +1361,14 @@ jobs:
           printf '%s=%s\n' "$CREDENTIAL_ENV" "$credential_value" >> "$GITHUB_ENV"
           echo "materialized secret $CREDENTIAL_ENV for the selected backend"
 
-      - name: Prepare bounded original recovery diff
-        if: inputs.operation == 'review' && inputs.recover_publication
-        env:
-          BASE_REF: ${{ steps.trusted-base.outputs.sha }}
-          HEAD_REF: ${{ inputs.head_sha }}
-          HEAD_REPOSITORY: ${{ inputs.head_repository }}
-        run: |
-          args=()
-          if [[ -n "$HEAD_REPOSITORY" ]]; then args+=(--head-repository "$HEAD_REPOSITORY"); fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
-            --repository "$PWD/trusted-base" --base-ref "$BASE_REF" --head-ref "$HEAD_REF" \
-            "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
-            --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
-
       - name: Run local review
         id: provider-review
-        if: inputs.operation == 'review' && !inputs.recover_publication
+        if: inputs.operation == 'review'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
+          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
+          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
           RUNNER_KIND: ${{ needs.bootstrap.outputs.runner_kind }}
           BACKEND: ${{ needs.bootstrap.outputs.backend }}
           BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
@@ -1754,99 +1466,6 @@ jobs:
           fi
           exit "$review_status"
 
-      # Runs even after cancellation or a review-step timeout: release this
-      # run's own reservation if the killed Python process could not. The
-      # command is owner-only and never touches saved publication work.
-      - name: Confirm live pull-request head is still current
-        id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review' && inputs.recover_publication
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ inputs.repository }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-        run: |
-          set -euo pipefail
-          [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::pull request identity is invalid' >&2; exit 1; }
-          [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::repository identity is invalid' >&2; exit 1; }
-          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::head sha identity is invalid' >&2; exit 1; }
-          live_sha=""
-          for attempt in 1 2 3; do
-            err_file="$RUNNER_TEMP/rs-head-revalidate.$$"
-            if live_sha="$(gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}" --jq '.head.sha' 2>"$err_file")"; then
-              rm -f "$err_file"
-              break
-            fi
-            err_text="$(tr -d '\000' <"$err_file" | tail -n 20)"
-            rm -f "$err_file"
-            if [[ "$err_text" =~ HTTP\ (401|403|404) ]]; then
-              echo '::error::live pull-request head revalidation was unauthorized or missing; refusing publish' >&2
-              exit 1
-            fi
-            if [[ "$attempt" -eq 3 ]]; then
-              echo '::error::live pull-request head revalidation was unavailable; refusing publish' >&2
-              exit 1
-            fi
-            delay=$((1 << (attempt - 1)))
-            if [[ "$err_text" =~ HTTP\ 429 ]]; then
-              delay=$((delay * 2))
-            fi
-            if [[ "$delay" -gt 8 ]]; then
-              delay=8
-            fi
-            jitter_hundredths=$((RANDOM % 50))
-            sleep "${delay}.${jitter_hundredths}"
-          done
-          if [[ ! "$live_sha" =~ ^[a-f0-9]{40}$ ]]; then
-            echo '::error::live pull-request head identity is invalid; refusing publish' >&2
-            exit 1
-          fi
-          if [[ "$live_sha" != "$HEAD_SHA" ]]; then
-            echo '::error::publish skipped_stale: reviewed head is no longer the live pull-request head' >&2
-            echo 'skipped_stale'
-            echo 'status=skipped_stale' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo 'publish admission current'
-          echo 'status=current' >> "$GITHUB_OUTPUT"
-
-      - name: Publish or promote validated local review and learnings
-        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && inputs.recover_publication
-        env:
-          # Read trusted operation receipts with the existing metadata token.
-          GITHUB_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          BASE_REF: ${{ inputs.base_ref }}
-          BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
-          REVIEWS: ${{ needs.bootstrap.outputs.reviews }}
-          OPERATION_ENTRY: ${{ needs.bootstrap.outputs.operation_entry }}
-          PUBLICATION_INVENTORY: ${{ needs.bootstrap.outputs.publication_inventory }}
-          RECOVER_PUBLICATION: ${{ inputs.recover_publication }}
-          LEARNING: ${{ needs.bootstrap.outputs.learning }}
-        run: |
-          publish_args=(--enable-review --operation-entry "$OPERATION_ENTRY" --publication-inventory "$PUBLICATION_INVENTORY")
-          if [[ "$REVIEWS" == "auto-approve" ]]; then
-            publish_args+=(--enable-auto-approve)
-          else
-            publish_args+=(--no-auto-approve)
-          fi
-          if [[ "$LEARNING" == "pull-requests" && "$RECOVER_PUBLICATION" != "true" ]]; then
-            publish_args+=(--enable-learning-prs)
-          fi
-          source_args=(--result review.json --configuration-context configuration-context.json --admission-context admission-context.json)
-          if [[ "$RECOVER_PUBLICATION" == "true" ]]; then
-            source_args=(--recover-retained --reconstruct-contexts --trusted-context-root "$PWD/recovery-policy")
-          fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" publish \
-            "${source_args[@]}" --diff pr.patch --repository "$REPOSITORY" \
-            --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
-            --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
-            --outcome publication-outcome.json --github-session-ledger \
-            --allow-write "${publish_args[@]}"
-
       - name: Generate and publish local mention reply
         id: reply
         if: inputs.operation == 'reply'
@@ -1856,6 +1475,9 @@ jobs:
           ALLOW_CUSTOM_ENDPOINT: ${{ needs.bootstrap.outputs.allow_custom_endpoint }}
           MODEL: ${{ needs.bootstrap.outputs.model }}
           GITHUB_TOKEN: ${{ github.token }}
+          POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
+          REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
+          REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           REVIEWSENSEI_APP_ID: ${{ github.event.installation.app_id }}
@@ -1868,8 +1490,6 @@ jobs:
         run: |
           # The same local prerequisite check the review path uses, so a reply
           # never reaches an unreachable server or a missing model.
-          curl --fail --silent --show-error --max-time 10 "$BASE_URL/tags" >/dev/null
-          ollama show "$MODEL" >/dev/null
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
           reply_args=(--generate --provider "$BACKEND" --base-url "$BASE_URL" \
             --model "$MODEL" --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
@@ -1882,7 +1502,8 @@ jobs:
             reply_args+=(--api-key-env "$CREDENTIAL_ENV")
           fi
           set +e
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" reply \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" reply-run \
+            --policy-commit "$POLICY_COMMIT" --run-directory "$RUNNER_TEMP" -- \
             "${reply_args[@]}" > "$reply_output"
           reply_exit=$?
           set -e

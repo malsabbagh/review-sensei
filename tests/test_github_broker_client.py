@@ -1,6 +1,7 @@
 import io
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError, URLError
 
@@ -12,6 +13,72 @@ from review_sensei_github import (
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
+
+
+# Synthetic caller-owned v3 input. These transport unit tests do not issue
+# real OIDC assertions or emulate the Worker's independent source admission.
+def current_authority(purpose="review", *, repository_id=99, head_sha="a" * 40):
+    return {
+        "version": 3,
+        "purpose": purpose,
+        "repository": "acme/widgets",
+        "repository_id": repository_id,
+        "pull_request": 7,
+        "head_sha": head_sha,
+        "run_id": "123",
+        "run_attempt": 1,
+        "job": "command" if purpose == "command" else "hosted",
+        "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+        "job_workflow_sha": "a" * 40,
+        "issued_at": 1_700_000_000,
+        "expires_at": 1_700_000_600,
+        "audience": "reviewsensei-run-action",
+        "source": (
+            {"kind": "pull_request", "id": 7, "updated_at": None, "body_sha256": None}
+            if purpose == "review"
+            else {
+                "kind": "issue_comment",
+                "id": 13579,
+                "updated_at": "2026-10-26T00:00:00Z",
+                "body_sha256": "b" * 64,
+            }
+        ),
+    }
+
+
+def current_grant(authority):
+    return {
+        **authority,
+        "actor": None
+        if authority["purpose"] == "review"
+        else {"login": "octocat", "type": "User", "association": "OWNER"},
+    }
+
+
+def session_response(authority, *, owner=None, **extra):
+    """Explicit synthetic response for the fixture's known request subject."""
+
+    def respond(payload):
+        expected = {
+            **authority,
+            "issued_at": payload["session_attestation"]["issued_at"],
+            "expires_at": payload["session_attestation"]["expires_at"],
+        }
+        assert payload["session_attestation"] == expected
+        return json.dumps(
+            {
+                "token": "ghs_session",
+                "capability": "review_session",
+                "session_state": "known",
+                "app_id": 12345,
+                "reservation_owner": owner,
+                "session_grant": "sg1.1780000000000." + "c" * 43,
+                "session_attestation": current_grant(expected),
+                **extra,
+            }
+        ).encode(), 200
+
+    return respond
 
 
 class FakeResponse(io.BytesIO):
@@ -39,7 +106,12 @@ class BrokerClientTests(unittest.TestCase):
                     dispatches.append(request)
                     return FakeResponse(b'{"value":"assertion","token":"scoped"}')
 
-                client = BrokerClient(opener=opener, timeout=1, before_request=admit)
+                client = BrokerClient(
+                    authority=current_authority(),
+                    opener=opener,
+                    timeout=1,
+                    before_request=admit,
+                )
                 with (
                     mock.patch.dict(
                         "os.environ",
@@ -81,7 +153,12 @@ class BrokerClientTests(unittest.TestCase):
                     dispatches.append((request, timeout))
                     return FakeResponse(b'{"value":"assertion","token":"scoped"}')
 
-                client = BrokerClient(opener=opener, timeout=1, before_request=admit)
+                client = BrokerClient(
+                    authority=current_authority(),
+                    opener=opener,
+                    timeout=1,
+                    before_request=admit,
+                )
                 with (
                     mock.patch.dict(
                         "os.environ",
@@ -115,12 +192,17 @@ class BrokerClientTests(unittest.TestCase):
                         "1001000",
                     )
                     self.assertEqual(
-                        json.loads(dispatches[0][0].data), {"oidc_token": "assertion"}
+                        json.loads(dispatches[0][0].data),
+                        {
+                            "oidc_token": "assertion",
+                            "session_attestation": client.authority,
+                        },
                     )
 
     def test_oidc_late_read_never_returns_assertion_after_transport_timeout(self):
         client = BrokerClient(
-            opener=lambda *args, **kwargs: FakeResponse(b'{"value":"secret"}')
+            authority=current_authority(),
+            opener=lambda *args, **kwargs: FakeResponse(b'{"value":"secret"}'),
         )
         with (
             mock.patch.dict(
@@ -152,7 +234,9 @@ class BrokerClientTests(unittest.TestCase):
             clock[0] = 60.0
             return FakeResponse(b'{"value":"secret"}')
 
-        client = BrokerClient(opener=opener, before_request=budget.consume)
+        client = BrokerClient(
+            authority=current_authority(), opener=opener, before_request=budget.consume
+        )
         with mock.patch.dict(
             "os.environ",
             {
@@ -188,7 +272,9 @@ class BrokerClientTests(unittest.TestCase):
             calls.append(timeout)
             raise TimeoutError("PRIVATE-TOKEN-AND-REPOSITORY-CONTENT")
 
-        client = BrokerClient(opener=opener, before_request=lambda: 1)
+        client = BrokerClient(
+            authority=current_authority(), opener=opener, before_request=lambda: 1
+        )
         with mock.patch(
             "review_sensei_github.broker_client.time.monotonic",
             side_effect=[0.25, 0.75, 1.0],
@@ -232,7 +318,7 @@ class BrokerClientTests(unittest.TestCase):
                         raise response
                     return response
 
-                client = BrokerClient(opener=opener)
+                client = BrokerClient(authority=current_authority(), opener=opener)
                 with mock.patch(
                     "review_sensei_github.broker_client.time.monotonic", return_value=0
                 ):
@@ -248,7 +334,9 @@ class BrokerClientTests(unittest.TestCase):
 
     def test_bootstrap_header_only_shortens_admitted_time_without_new_control(self):
         client, calls = self.make_client(
-            (b'{"token":"scoped"}', 200), before_request=lambda: 1.5
+            (b'{"token":"scoped"}', 200),
+            before_request=lambda: 1.5,
+            authority=current_authority("reply"),
         )
         with mock.patch(
             "review_sensei_github.broker_client.time.time", return_value=1000
@@ -259,7 +347,11 @@ class BrokerClientTests(unittest.TestCase):
         self.assertEqual(calls[0][2]["X-reviewsensei-deadline-unix-ms"], "1001500")
         self.assertEqual(
             json.loads(calls[0][3]),
-            {"oidc_token": "assertion", "capability": "issue_reply"},
+            {
+                "oidc_token": "assertion",
+                "capability": "issue_reply",
+                "session_attestation": client.authority,
+            },
         )
 
     def test_late_success_keeps_original_budget_and_never_returns_credential(self):
@@ -273,7 +365,9 @@ class BrokerClientTests(unittest.TestCase):
             clock[0] = 60.0
             return FakeResponse(b'{"token":"must-not-return"}')
 
-        client = BrokerClient(opener=opener, before_request=budget.consume)
+        client = BrokerClient(
+            authority=current_authority(), opener=opener, before_request=budget.consume
+        )
         with self.assertRaises(GitHubBrokerClientError) as caught:
             client.exchange("assertion")
         self.assertIsInstance(caught.exception.__cause__, ReviewInputError)
@@ -299,7 +393,9 @@ class BrokerClientTests(unittest.TestCase):
     def test_transport_time_fence_retains_only_valid_status_and_correlation(self):
         response = FakeResponse(b'{"token":"must-not-return"}')
         response.headers = {"cf-ray": "0123456789abcdef-YYZ", "authorization": "secret"}
-        client = BrokerClient(opener=lambda *args, **kwargs: response)
+        client = BrokerClient(
+            authority=current_authority(), opener=lambda *args, **kwargs: response
+        )
         with mock.patch(
             "review_sensei_github.broker_client.time.monotonic",
             side_effect=[0, 0, 31, 31],
@@ -326,8 +422,11 @@ class BrokerClientTests(unittest.TestCase):
                 response = responses
             if isinstance(response, Exception):
                 raise response
+            if callable(response):
+                response = response(json.loads(request.data))
             return FakeResponse(response[0], response[1])
 
+        kwargs.setdefault("authority", current_authority())
         return BrokerClient(
             broker_url="https://broker.reviewsensei.dev/api/github/token",
             opener=opener,
@@ -417,7 +516,9 @@ class BrokerClientTests(unittest.TestCase):
         token = client.exchange("oidc.token")
         self.assertEqual(token, "ghs_capability")
         body = json.loads(calls[0][3].decode("utf-8"))
-        self.assertEqual(body, {"oidc_token": "oidc.token"})
+        self.assertEqual(
+            body, {"oidc_token": "oidc.token", "session_attestation": client.authority}
+        )
 
     def test_exchange_posts_only_named_capability(self):
         client, calls = self.make_client((b'{"token":"ghs_capability"}', 200))
@@ -428,7 +529,11 @@ class BrokerClientTests(unittest.TestCase):
         body = json.loads(calls[0][3].decode("utf-8"))
         self.assertEqual(
             body,
-            {"oidc_token": "oidc.token", "capability": "review_publish"},
+            {
+                "oidc_token": "oidc.token",
+                "capability": "review_publish",
+                "session_attestation": client.authority,
+            },
         )
 
     def test_exchange_accepts_read_only_status_capability(self):
@@ -440,7 +545,11 @@ class BrokerClientTests(unittest.TestCase):
         body = json.loads(calls[0][3].decode("utf-8"))
         self.assertEqual(
             body,
-            {"oidc_token": "oidc.token", "capability": "review_status"},
+            {
+                "oidc_token": "oidc.token",
+                "capability": "review_status",
+                "session_attestation": client.authority,
+            },
         )
 
     def test_exchange_accepts_separate_read_only_actions_capability(self):
@@ -451,7 +560,11 @@ class BrokerClientTests(unittest.TestCase):
         )
         self.assertEqual(
             json.loads(calls[0][3].decode()),
-            {"oidc_token": "oidc.token", "capability": "review_actions"},
+            {
+                "oidc_token": "oidc.token",
+                "capability": "review_actions",
+                "session_attestation": client.authority,
+            },
         )
 
     def test_open_session_preserves_only_valid_broker_owner(self):
@@ -461,15 +574,9 @@ class BrokerClientTests(unittest.TestCase):
             {"run_id": "invalid", "head_sha": "a" * 40},
         ):
             with self.subTest(owner=owner):
-                response = json.dumps(
-                    {
-                        "token": "ghs_session",
-                        "capability": "review_session",
-                        "session_state": "known",
-                        "reservation_owner": owner,
-                    }
-                ).encode()
-                client, _ = self.make_client((response, 200))
+                client, _ = self.make_client(
+                    session_response(current_authority(), owner=owner)
+                )
                 if owner["run_id"] == "123" and owner["head_sha"] == "a" * 40:
                     self.assertEqual(
                         client.open_session(
@@ -495,6 +602,7 @@ class BrokerClientTests(unittest.TestCase):
                 "token": "ghs_session",
                 "capability": "review_session",
                 "release_only": True,
+                "app_id": 12345,
                 "reservation_owner": {"run_id": "123", "head_sha": "a" * 40},
             }
         ).encode()
@@ -521,6 +629,7 @@ class BrokerClientTests(unittest.TestCase):
                         "token": "ghs_session",
                         "capability": "review_session",
                         "release_only": True,
+                        "app_id": 12345,
                         "reservation_owner": {
                             "run_id": "123",
                             "head_sha": "a" * 40,
@@ -538,12 +647,9 @@ class BrokerClientTests(unittest.TestCase):
                     )
 
     def test_open_session_requires_a_broker_attested_scope(self):
+        authority = current_authority(repository_id=987654321)
         client, calls = self.make_client(
-            (
-                b'{"token":"ghs_session","capability":"review_session",'
-                b'"session_state":"enrolled"}',
-                200,
-            )
+            session_response(authority, session_state="enrolled"), authority=authority
         )
         session = client.open_session(
             "oidc.token",
@@ -559,6 +665,7 @@ class BrokerClientTests(unittest.TestCase):
             {
                 "oidc_token": "oidc.token",
                 "capability": "review_session",
+                "session_attestation": client.authority,
                 "session": {
                     "repository_id": 987654321,
                     "pull_request": 7,
@@ -573,7 +680,8 @@ class BrokerClientTests(unittest.TestCase):
                 b'{"token":"ghs_session","capability":"review_session",'
                 b'"session_state":"rate_limited"}',
                 200,
-            )
+            ),
+            authority=current_authority(repository_id=987654321),
         )
         with self.assertRaises(GitHubBrokerClientError):
             client.open_session(
@@ -584,38 +692,10 @@ class BrokerClientTests(unittest.TestCase):
             )
 
     def test_session_mutation_grant_requires_broker_derived_actor_fields(self):
-        request_attestation = {
-            "version": 1,
-            "repository": "acme/widgets",
-            "repository_id": 987654321,
-            "pull_request": 7,
-            "head_sha": "a" * 40,
-            "operation": "command",
-            "source_comment_id": 13579,
-            "run_id": "10000000001",
-            "issued_at": 1_700_000_000,
-            "concurrency_group": "reviewsensei-session-987654321-7",
-            "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
-            "job_workflow_sha": "a" * 40,
-        }
-        returned_attestation = {
-            **request_attestation,
-            "actor": "octocat",
-            "actor_type": "User",
-            "association": "OWNER",
-            "command_id": 13579,
-            "command_digest": "b" * 64,
-        }
-        response = json.dumps(
-            {
-                "token": "ghs_session",
-                "capability": "review_session",
-                "session_state": "known",
-                "session_grant": "sg1.1780000000000." + "c" * 43,
-                "session_attestation": returned_attestation,
-            }
-        ).encode("utf-8")
-        client, calls = self.make_client((response, 200))
+        request_attestation = current_authority("command", repository_id=987654321)
+        client, calls = self.make_client(
+            session_response(request_attestation), authority=request_attestation
+        )
         grant = client.authorize_session_mutation(
             "oidc.token",
             repository_id=987654321,
@@ -623,29 +703,25 @@ class BrokerClientTests(unittest.TestCase):
             head_sha="a" * 40,
             session_attestation=request_attestation,
         )
-        self.assertEqual(grant.attestation["actor"], "octocat")
-        self.assertEqual(grant.attestation["command_id"], 13579)
+        self.assertEqual(
+            grant.attestation["actor"],
+            {"login": "octocat", "type": "User", "association": "OWNER"},
+        )
+        self.assertEqual(grant.attestation["source"]["id"], 13579)
+        self.assertEqual(grant.app_id, 12345)
         self.assertNotIn("ghs_session", repr(grant))
         self.assertNotIn("sg1.1780000000000." + "c" * 43, repr(grant))
         payload = json.loads(calls[0][3].decode("utf-8"))
+        self.assertEqual(payload["session_attestation"], client.authority)
         self.assertNotIn("actor", payload["session_attestation"])
 
-        missing_actor = {**returned_attestation}
-        del missing_actor["actor"]
-        client, _ = self.make_client(
-            (
-                json.dumps(
-                    {
-                        "token": "ghs_session",
-                        "capability": "review_session",
-                        "session_state": "known",
-                        "session_grant": "sg1.1780000000000." + "c" * 43,
-                        "session_attestation": missing_actor,
-                    }
-                ).encode("utf-8"),
-                200,
-            )
-        )
+        def missing_actor(payload):
+            raw, status = session_response(request_attestation)(payload)
+            document = json.loads(raw)
+            del document["session_attestation"]["actor"]
+            return json.dumps(document).encode(), status
+
+        client, calls = self.make_client(missing_actor, authority=request_attestation)
         with self.assertRaises(GitHubBrokerClientError):
             client.authorize_session_mutation(
                 "oidc.token",
@@ -654,9 +730,10 @@ class BrokerClientTests(unittest.TestCase):
                 head_sha="a" * 40,
                 session_attestation=request_attestation,
             )
+        self.assertEqual(len(calls), 1)
 
-    def test_broker_requests_send_reviewsensei_user_agent(self):
-        attestation = {
+    def test_obsolete_mutation_grants_refuse_before_any_transport(self):
+        old_command = {
             "version": 1,
             "repository": "acme/widgets",
             "repository_id": 987654321,
@@ -667,14 +744,85 @@ class BrokerClientTests(unittest.TestCase):
             "run_id": "10000000001",
             "issued_at": 1_700_000_000,
             "concurrency_group": "reviewsensei-session-987654321-7",
-            "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+            "job_workflow_ref": current_authority()["job_workflow_ref"],
             "job_workflow_sha": "a" * 40,
-            "actor": "octocat",
-            "actor_type": "User",
-            "association": "OWNER",
-            "command_id": 13579,
-            "command_digest": "b" * 64,
         }
+        old_feedback = json.loads(
+            (
+                Path(__file__).parent / "fixtures" / "feedback-session-attestation.json"
+            ).read_text()
+        )["request"]
+        for document, actor in (
+            (
+                old_command,
+                {
+                    "actor": "octocat",
+                    "actor_type": "User",
+                    "association": "OWNER",
+                    "command_id": 13579,
+                    "command_digest": "b" * 64,
+                },
+            ),
+            (
+                old_feedback,
+                {
+                    "actor": "octocat",
+                    "actor_id": 12345678,
+                    "actor_type": "User",
+                    "association": "OWNER",
+                },
+            ),
+        ):
+            for operation in ("issue", "verify"):
+                with self.subTest(version=document["version"], operation=operation):
+                    client, calls = self.make_client((b"{}", 200))
+                    with self.assertRaises(GitHubBrokerClientError):
+                        if operation == "issue":
+                            client.authorize_session_mutation(
+                                "oidc.token",
+                                repository_id=document["repository_id"],
+                                pull_request=document["pull_request"],
+                                head_sha=document["head_sha"],
+                                session_attestation=document,
+                            )
+                        else:
+                            client.verify_session_grant(
+                                "sg1.1780000000000." + "c" * 43,
+                                {**document, **actor},
+                            )
+                    self.assertEqual(calls, [])
+
+    def test_missing_current_authority_refuses_before_budget_or_transport(self):
+        admissions, physical = [], []
+        client = BrokerClient(
+            opener=lambda *args, **kwargs: physical.append(True),
+            before_request=lambda: admissions.append(True),
+        )
+        with self.assertRaises(GitHubBrokerClientError):
+            client.exchange("synthetic-oidc")
+        self.assertEqual(admissions, [])
+        self.assertEqual(physical, [])
+
+    def test_session_app_identity_must_come_from_validated_broker_response(self):
+        authority = current_authority()
+        for app_id in (None, True, "12345", 0, -1):
+            with self.subTest(app_id=app_id):
+                client, calls = self.make_client(
+                    session_response(authority, app_id=app_id)
+                )
+                with self.assertRaises(GitHubBrokerClientError):
+                    client.open_session(
+                        "synthetic-oidc",
+                        repository_id=99,
+                        pull_request=7,
+                        head_sha="a" * 40,
+                    )
+                self.assertEqual(len(calls), 1)
+
+    def test_broker_requests_send_reviewsensei_user_agent(self):
+        attestation = current_grant(
+            current_authority("command", repository_id=987654321)
+        )
         grant = "sg1.1780000000000." + "c" * 43
         client, calls = self.make_client(
             [

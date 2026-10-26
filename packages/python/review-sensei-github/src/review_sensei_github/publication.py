@@ -8,9 +8,9 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 from urllib.parse import quote
 
 from review_sensei.baseline import ReviewBaseline
@@ -64,6 +64,16 @@ from review_sensei.verifier import (
     prepare_publishable_review,
 )
 
+from .action_completion import (
+    FinalizationCompletion,
+    FinalizationSubject,
+    _confirmed_approval,
+    _confirmed_cleanup,
+    _confirmed_finalization,
+    _confirmed_publication,
+    approval_confirmed,
+    finalization_confirmed,
+)
 from .approval import (
     ReviewApprovalEligibility,
     approval_eligibility_from_result,
@@ -1333,6 +1343,9 @@ class PublicationResult:
     transaction_id: str | None = None
     generation: int | None = None
     operation_diagnostics: OperationDiagnostics | None = None
+    finalization_completion: FinalizationCompletion | None = field(
+        default=None, compare=False, repr=False
+    )
 
 
 _PUBLICATION_TO_RUN_STATUS = {
@@ -1441,7 +1454,12 @@ class _BudgetedReviewPagination(GitHubHttp):
             page_size = re.search(r"[?&]per_page=(\d+)", path)
             if page_size is not None:
                 self.last_page_size = int(page_size.group(1))
-            if getattr(self.transport, "publication_budget", None) is self.budget:
+            original_budget = cast(EvidenceReadBudget, self.budget)
+            if (
+                self.budget is not None
+                and getattr(self.transport, "publication_budget", None)
+                is original_budget
+            ):
                 result = self.transport.request(
                     method,
                     path,
@@ -1449,7 +1467,7 @@ class _BudgetedReviewPagination(GitHubHttp):
                     body=body,
                     timeout_seconds=timeout_seconds,
                 )
-                self.budget.check()
+                cast(EvidenceReadBudget, original_budget).check()
                 return result
             # The explicit assessment transport already charges this exact
             # budget on every physical dispatch; do not charge it twice.
@@ -1606,6 +1624,7 @@ class ReviewApprovalFinalizer:
         self.evidence_budget = evidence_budget
         self.human_inventory_reader = human_inventory_reader
         self.human_inventory_reader_factory = human_inventory_reader_factory
+        self.prior_publication_reader_factory: Callable[[object], Any] | None = None
         # An explicitly supplied metadata credential is independent of the
         # capability used for review/check mutations. Never persist this value.
         self.human_inventory_read_token = human_inventory_read_token
@@ -1768,6 +1787,14 @@ class ReviewApprovalFinalizer:
         withholds.
         """
 
+        def known(result: PublicationResult) -> PublicationResult:
+            subject = FinalizationSubject(
+                repository, pull_request, head_sha, eligibility.result_digest
+            )
+            return replace(
+                result, finalization_completion=_confirmed_approval(result, subject)
+            )
+
         owns_operation_budget = (
             self.evidence_budget is None and self._operation_budget is None
         )
@@ -1799,11 +1826,13 @@ class ReviewApprovalFinalizer:
                 coverage_uncertainty_accepted=coverage_uncertainty_accepted,
             )
             if "auto-approval-disabled" in static.blockers:
-                return PublicationResult(status="auto_approval_disabled")
+                return known(PublicationResult(status="auto_approval_disabled"))
             if not static.approved:
-                return PublicationResult(
-                    status="approval_withheld",
-                    diagnostic=approval_withheld_diagnostic(static),
+                return known(
+                    PublicationResult(
+                        status="approval_withheld",
+                        diagnostic=approval_withheld_diagnostic(static),
+                    )
                 )
             if eligibility.facts.provider is None or (
                 eligibility.facts.provider == "openrouter"
@@ -1813,12 +1842,17 @@ class ReviewApprovalFinalizer:
                     or self.qualification_authority is None
                 )
             ):
-                return PublicationResult(
-                    status="approval_withheld", diagnostic="qualification_unverified"
+                return known(
+                    PublicationResult(
+                        status="approval_withheld",
+                        diagnostic="qualification_unverified",
+                    )
                 )
             if unresolved_inline:
-                return PublicationResult(
-                    status="approval_withheld", diagnostic="required_fixes_open"
+                return known(
+                    PublicationResult(
+                        status="approval_withheld", diagnostic="required_fixes_open"
+                    )
                 )
             if eligibility.partitioned_root is not None:
                 root = eligibility.partitioned_root
@@ -1881,8 +1915,11 @@ class ReviewApprovalFinalizer:
                 pull_request=pull_request,
                 base_sha=preflight.base_sha,
             ):
-                return PublicationResult(
-                    status="approval_withheld", diagnostic="qualification_unverified"
+                return known(
+                    PublicationResult(
+                        status="approval_withheld",
+                        diagnostic="qualification_unverified",
+                    )
                 )
             self._observe_stage("approval.thread-scan")
             open_blocking, resolved_instances = self._scan_blocking_threads(
@@ -1920,9 +1957,11 @@ class ReviewApprovalFinalizer:
                 coverage_uncertainty_accepted=coverage_uncertainty_accepted,
             )
             if not decision.approved:
-                return PublicationResult(
-                    status="approval_withheld",
-                    diagnostic=approval_withheld_diagnostic(decision),
+                return known(
+                    PublicationResult(
+                        status="approval_withheld",
+                        diagnostic=approval_withheld_diagnostic(decision),
+                    )
                 )
             self._observe_stage("approval.persisted-readback")
             reviews = self._load_head_reviews(
@@ -1998,8 +2037,11 @@ class ReviewApprovalFinalizer:
                 pull_request=pull_request,
                 base_sha=preflight.base_sha,
             ):
-                return PublicationResult(
-                    status="approval_withheld", diagnostic="qualification_unverified"
+                return known(
+                    PublicationResult(
+                        status="approval_withheld",
+                        diagnostic="qualification_unverified",
+                    )
                 )
             marker = approval_marker(
                 repository_id=preflight.repository_id,
@@ -2031,11 +2073,13 @@ class ReviewApprovalFinalizer:
                 body=approval_body,
             ):
                 if decision.outcome == "maintainer-coverage-exception":
-                    return PublicationResult(
-                        status="already_approved",
-                        diagnostic="maintainer_coverage_exception",
+                    return known(
+                        PublicationResult(
+                            status="already_approved",
+                            diagnostic="maintainer_coverage_exception",
+                        )
                     )
-                return PublicationResult(status="already_approved")
+                return known(PublicationResult(status="already_approved"))
 
             approved_base_sha = preflight.base_sha
 
@@ -2080,10 +2124,10 @@ class ReviewApprovalFinalizer:
                 decision.outcome == "maintainer-coverage-exception"
                 and approval_result.status in {"approved", "already_approved"}
             ):
-                return replace(
-                    approval_result, diagnostic="maintainer_coverage_exception"
+                return known(
+                    replace(approval_result, diagnostic="maintainer_coverage_exception")
                 )
-            return approval_result
+            return known(approval_result)
         finally:
             if owns_operation_budget:
                 self._operation_budget = None
@@ -2593,62 +2637,85 @@ class ReviewApprovalFinalizer:
                 status="gate_reevaluation_failed",
                 diagnostic="command_body_capacity_exceeded",
             )
-        if new_body != body:
-            try:
-                status, _payload = self.http.request(
-                    "PUT",
-                    self.http.repository_path(
-                        repository, f"/pulls/{pull_request}/reviews/{chosen['id']}"
-                    ),
-                    token=token,
-                    body={"body": new_body},
-                )
-            except (GitHubHTTPError, GitHubHTTPTransientError):
-                if not compacted:
+        from .api_run_plan import COMMAND_UPDATE_CONFIRMATION_REQUESTS
+        from .caller_operation import caller_for_http
+
+        caller = caller_for_http(self.http)
+        confirmation = nullcontext()
+        if caller is not None and new_body != body:
+            capacity = 1 + COMMAND_UPDATE_CONFIRMATION_REQUESTS
+            caller.budget_view.preflight(capacity)
+            confirmation = caller._operation(
+                "command-review-update:"
+                + str(chosen["id"])
+                + ":"
+                + hashlib.sha256(new_body.encode()).hexdigest(),
+                capacity,
+                write_tail=capacity,
+            )
+        with confirmation as allocation:
+            if new_body != body:
+                try:
+                    status, _payload = self.http.request(
+                        "PUT",
+                        self.http.repository_path(
+                            repository, f"/pulls/{pull_request}/reviews/{chosen['id']}"
+                        ),
+                        token=token,
+                        body={"body": new_body},
+                    )
+                except (GitHubHTTPError, GitHubHTTPTransientError):
+                    if not compacted:
+                        return PublicationResult(
+                            status="gate_reevaluation_failed",
+                            diagnostic="gate_reevaluation_failed",
+                        )
+                    # Do not reissue an uncertain PUT. The same complete owned
+                    # readback below must prove it committed before any gate write.
+                    status = 200
+                if status != 200:
                     return PublicationResult(
                         status="gate_reevaluation_failed",
                         diagnostic="gate_reevaluation_failed",
                     )
-                # Do not reissue an uncertain PUT. The same complete owned
-                # readback below must prove it committed before any gate write.
-                status = 200
-            if status != 200:
+            if compacted:
+                if not capacity_snapshot_matches(new_body, adjusted):
+                    return PublicationResult(
+                        status="gate_reevaluation_failed",
+                        diagnostic="command_body_capacity_unverifiable",
+                    )
+                # The post-PUT ownership/prose readback may itself take time. Fence
+                # the current PR again before check/thread/approval mutations.
+                live = self._preflight(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
+                if live.result is not None:
+                    return live.result
+                if (
+                    live.base_sha != index.base_sha
+                    or live.repository_id != repository_id
+                ):
+                    return PublicationResult(status="skipped_stale_base")
+            elif (
+                self.load_eligibility(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
+                != adjusted
+            ):
                 return PublicationResult(
                     status="gate_reevaluation_failed",
                     diagnostic="gate_reevaluation_failed",
                 )
-        if compacted:
-            if not capacity_snapshot_matches(new_body, adjusted):
-                return PublicationResult(
-                    status="gate_reevaluation_failed",
-                    diagnostic="command_body_capacity_unverifiable",
-                )
-            # The post-PUT ownership/prose readback may itself take time. Fence
-            # the current PR again before check/thread/approval mutations.
-            live = self._preflight(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
-            )
-            if live.result is not None:
-                return live.result
-            if live.base_sha != index.base_sha or live.repository_id != repository_id:
-                return PublicationResult(status="skipped_stale_base")
-        elif (
-            self.load_eligibility(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
-            )
-            != adjusted
-        ):
-            return PublicationResult(
-                status="gate_reevaluation_failed", diagnostic="gate_reevaluation_failed"
-            )
+            if allocation is not None:
+                allocation.confirmed = True
 
         def final_capacity_guard(current_reviews):
             # Finalize has already acquired this audited root snapshot after
@@ -3283,6 +3350,7 @@ class ReviewApprovalFinalizer:
                 reviews_policy == "auto-approve" and eligibility.facts.enabled
             )
             resolution = None
+            index = None
             has_open_inline_fixes = False
             try:
                 live = self._preflight(
@@ -3373,6 +3441,18 @@ class ReviewApprovalFinalizer:
                     )
                 if reviews_policy != "auto-approve":
                     result = PublicationResult(status="auto_approval_disabled")
+                    result = replace(
+                        result,
+                        finalization_completion=_confirmed_approval(
+                            result,
+                            FinalizationSubject(
+                                repository,
+                                pull_request,
+                                head_sha,
+                                eligibility.result_digest,
+                            ),
+                        ),
+                    )
                 else:
                     result = self.finalize(
                         token=token,
@@ -3392,6 +3472,7 @@ class ReviewApprovalFinalizer:
             if result.status.startswith("skipped_"):
                 return result
             check_failed = False
+            check_confirmed = False
             if check_token:
                 has_open_fixes = (
                     eligibility.facts.has_blocking_findings
@@ -3408,7 +3489,7 @@ class ReviewApprovalFinalizer:
                     )
                 )
                 try:
-                    ReviewCheckPublisher(http=self.http).complete(
+                    check_result = ReviewCheckPublisher(http=self.http).complete(
                         token=check_token,
                         repository=repository,
                         head_sha=head_sha,
@@ -3420,6 +3501,11 @@ class ReviewApprovalFinalizer:
                             required_decisions=has_open_decisions,
                         ),
                     )
+                    check_confirmed = (
+                        check_result.status in {"created", "updated"}
+                        and type(check_result.check_run_id) is int
+                        and check_result.check_run_id > 0
+                    )
                 except (
                     GitHubHTTPError,
                     GitHubHTTPTransientError,
@@ -3427,8 +3513,9 @@ class ReviewApprovalFinalizer:
                     ReviewInputError,
                 ):
                     check_failed = True
-            return replace(
+            completed = replace(
                 result,
+                finalization_completion=None,
                 diagnostic="check_reconciliation_failed"
                 if check_failed
                 else result.diagnostic,
@@ -3440,6 +3527,19 @@ class ReviewApprovalFinalizer:
                     else None
                 ),
             )
+            if (
+                approval_confirmed(result)
+                and check_confirmed
+                and not check_failed
+                and index is not None
+                and resolution is not None
+                and not resolution.unconfirmed
+            ):
+                completed = replace(
+                    completed,
+                    finalization_completion=_confirmed_finalization(result, completed),
+                )
+            return completed
 
     def _inline_obligations_resolved(
         self,
@@ -3832,7 +3932,14 @@ class ReviewApprovalFinalizer:
                 return None
             eligibility = approval_eligibility_from_body(
                 body,
-                human_inventory_reader=human_reader,
+                human_inventory_reader=(
+                    selected_reader := (
+                        self.prior_publication_reader_factory(review)
+                        if self.prior_publication_reader_factory is not None
+                        else None
+                    )
+                    or human_reader
+                ),
                 partition_reader=partition_reader,
                 expected_context=expected_context,
                 visible_reader=visible_reader,
@@ -3840,12 +3947,12 @@ class ReviewApprovalFinalizer:
             if eligibility is not None and eligibility.head_sha == head_sha:
                 if eligibility.human_inventory_reference is not None:
                     validate = (
-                        getattr(human_reader, "validate_metadata", None)
+                        getattr(selected_reader, "validate_metadata", None)
                         if not validate_visible_prose
                         else None
                     )
                     if not callable(validate):
-                        validate = getattr(human_reader, "validate_root", None)
+                        validate = getattr(selected_reader, "validate_root", None)
                     if callable(validate):
                         try:
                             validate(review, reviews)
@@ -3991,21 +4098,34 @@ class ReviewPublisher:
         self._confirmed_publication_only = False
         self._pending_thread_cleanup: Callable[[], str | None] | None = None
         self._confirmed_review_id: int | None = None
+        self._confirmed_check: tuple[str, str, int] | None = None
 
     def _finish_thread_cleanup(
         self, publication: PublicationResult
     ) -> PublicationResult:
         """Run optional work only after the caller's mandatory completion."""
         cleanup, self._pending_thread_cleanup = self._pending_thread_cleanup, None
-        if cleanup is None or publication.status not in {
+        if publication.status not in {
             "published",
             "already_published",
         }:
             return publication
-        diagnostic = cleanup()
-        return replace(
-            publication, thread_resolution="unconfirmed" if diagnostic else None
+        if cleanup is None and finalization_confirmed(publication):
+            return publication
+        # None here is the source's explicit no-replacement branch, rather than
+        # an absent result field being interpreted as evidence of completion.
+        diagnostic = cleanup() if cleanup is not None else None
+        completed = replace(
+            publication,
+            thread_resolution="unconfirmed" if diagnostic else None,
+            finalization_completion=None,
         )
+        if diagnostic is None:
+            completed = replace(
+                completed,
+                finalization_completion=_confirmed_cleanup(publication, completed),
+            )
+        return completed
 
     def _schedule_thread_cleanup(
         self,
@@ -4172,6 +4292,7 @@ class ReviewPublisher:
         if check_token is None:
             return "check_capability_unavailable"
         if outcome is None:
+            self._confirmed_check = None
             result = self.checks.start(
                 token=check_token,
                 repository=repository,
@@ -4192,8 +4313,14 @@ class ReviewPublisher:
                 if result.failure is not None
                 else "check_publication_failed"
             )
-        if result.status not in {"created", "updated"}:
+        if (
+            result.status not in {"created", "updated"}
+            or type(result.check_run_id) is not int
+            or result.check_run_id <= 0
+        ):
             return "check_publication_failed"
+        if outcome is not None:
+            self._confirmed_check = (repository, head_sha, result.check_run_id)
         return None
 
     def _check_state_or_diagnostic(
@@ -4344,7 +4471,19 @@ class ReviewPublisher:
         diagnostic = check_diagnostic
         if diagnostic is None and finalized.status == "approval_withheld":
             diagnostic = finalized.diagnostic
-        return PublicationResult(status="already_published", diagnostic=diagnostic)
+        publication = PublicationResult(
+            status="already_published", diagnostic=diagnostic
+        )
+        if (
+            check_diagnostic is None
+            and self._confirmed_check is not None
+            and self._confirmed_check[:2] == (repository, head_sha)
+        ):
+            publication = replace(
+                publication,
+                finalization_completion=_confirmed_publication(finalized, publication),
+            )
+        return publication
 
     def publish(
         self,
@@ -4390,6 +4529,7 @@ class ReviewPublisher:
     ) -> PublicationResult:
         self._pending_thread_cleanup = None
         self._confirmed_review_id = None
+        self._confirmed_check = None
         owns_operation_budget = (
             self.finalizer.evidence_budget is None
             and self.finalizer._operation_budget is None
@@ -5674,11 +5814,21 @@ class ReviewPublisher:
         diagnostic = check_diagnostic
         if diagnostic is None and finalized.status == "approval_withheld":
             diagnostic = finalized.diagnostic
-        return PublicationResult(
+        publication = PublicationResult(
             status=status,
             review_id=review_id,
             diagnostic=diagnostic,
         )
+        if (
+            check_diagnostic is None
+            and self._confirmed_check is not None
+            and self._confirmed_check[:2] == (repository, head_sha)
+        ):
+            publication = replace(
+                publication,
+                finalization_completion=_confirmed_publication(finalized, publication),
+            )
+        return publication
 
     def _inline_findings_persisted(
         self,
@@ -6470,6 +6620,7 @@ class ReviewPublisher:
                 raise GitHubPublicationError(
                     "complete publication inline prose is incomplete"
                 )
+            assert isinstance(instance, str)
             observed.add(instance)
         if observed != set(expected):
             raise GitHubPublicationError(

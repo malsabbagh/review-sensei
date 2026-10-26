@@ -32,6 +32,11 @@ from review_sensei_github.http import (
     MAX_PAGINATION_PAGES,
     GitHubHttp,
 )
+from review_sensei_github.run_authority import (
+    REQUEST_KEYS,
+    parse_authority,
+    request_authority,
+)
 from review_sensei_github.session_ledger import (
     GitHubIssueCommentSessionLedger,
     parse_session_comment,
@@ -112,6 +117,61 @@ class StartupFixture:
         self.list_requests = []
         self.write_modes = []
 
+    def review_authority(self):
+        """The fixture's trusted process constructs the current request format."""
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_RUN_ID": str(self.accounted.run.run_id),
+                "GITHUB_RUN_ATTEMPT": str(self.attempt),
+                "REVIEW_SENSEI_WORKFLOW_REF": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+                "REVIEW_SENSEI_WORKFLOW_SHA": "a" * 40,
+            },
+            clear=True,
+        ):
+            return request_authority(
+                purpose="review",
+                repository=IDENTITY.repository,
+                repository_id=IDENTITY.repository_id,
+                pull_request=IDENTITY.pull_request,
+                head_sha=getattr(self, "live_head", HEAD),
+                job=getattr(self, "owner_job", "hosted"),
+            )
+
+    def broker_response(self, payload):
+        authority = parse_authority(payload["session_attestation"])
+        expected = self.review_authority()
+        assert set(authority) == REQUEST_KEYS
+        differences = {
+            key: (authority[key], expected[key])
+            for key in REQUEST_KEYS - {"issued_at", "expires_at"}
+            if authority[key] != expected[key]
+        }
+        assert not differences, differences
+        capability = payload["capability"]
+        value = {
+            "token": "synthetic-" + capability,
+            "capability": capability,
+            "control_receipt": {
+                **payload["control_budget"],
+                "dispatched": min(
+                    self.fanout, payload["control_budget"]["max_dispatches"]
+                ),
+            },
+        }
+        if capability == "review_session":
+            value.update(
+                session_state="known" if self.comment else "enrolled",
+                app_id=999,
+                reservation_owner={
+                    "run_id": authority["run_id"],
+                    "head_sha": authority["head_sha"],
+                },
+                session_grant="sg1.9999999999999." + "A" * 43,
+                session_attestation={**authority, "actor": None},
+            )
+        return value
+
     def _external_open(self, request, timeout):
         target = urlsplit(request.full_url)
         path, method = target.path, request.method
@@ -125,23 +185,7 @@ class StartupFixture:
             return json_response({"value": "synthetic-oidc"})
         if target.hostname == "broker.github.test":
             payload = json.loads(request.data)
-            capability = payload["capability"]
-            value = {
-                "token": "synthetic-" + capability,
-                "capability": capability,
-                "control_receipt": {
-                    **payload["control_budget"],
-                    "dispatched": min(
-                        self.fanout, payload["control_budget"]["max_dispatches"]
-                    ),
-                },
-            }
-            if capability == "review_session":
-                value.update(
-                    session_state="known" if self.comment else "enrolled",
-                    reservation_owner={"run_id": "456", "head_sha": HEAD},
-                )
-            return json_response(value)
+            return json_response(self.broker_response(payload))
         if path.endswith("/pulls/7"):
             return json_response(
                 {
@@ -266,6 +310,7 @@ class StartupFixture:
             broker_url="https://broker.github.test/api/github/token",
             opener=self.accounted.open,
             control=BrokerDispatchAccounting(budget, "c" * 64, 30, 1),
+            authority=self.review_authority(),
         )
         with patch.dict(
             os.environ,
@@ -285,6 +330,7 @@ class StartupFixture:
             broker_url="https://broker.github.test/api/github/token",
             opener=self.accounted.open,
             control=BrokerDispatchAccounting(budget, "c" * 64, 12, 1),
+            authority=self.review_authority(),
         )
         actions_token = actions_client.exchange(oidc, capability="review_actions")
         _, pull = self.http.request(
@@ -312,6 +358,7 @@ class StartupFixture:
         ledger = GitHubIssueCommentSessionLedger(
             self.http, token=session.token, app_slug="reviewsensei[bot]"
         )
+        ledger.authenticated_app_id = session.app_id
         self.ledger = ledger
         return ledger, configuration, evidence, owner
 
@@ -612,7 +659,7 @@ class ApiPredispatchQualificationTests(unittest.TestCase):
         self,
     ):
         self.assertEqual(QUALIFICATION_LIMIT, 140)
-        self.assertEqual(parse_configuration_text("schema: 1\n").api_request_limit, 128)
+        self.assertEqual(parse_configuration_text("schema: 1\n").api_request_limit, 512)
         for fanout in (9, 12, 30):
             with (
                 self.subTest(fanout=fanout),

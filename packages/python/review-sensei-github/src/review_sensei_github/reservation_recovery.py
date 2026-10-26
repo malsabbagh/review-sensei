@@ -28,7 +28,6 @@ _TERMINAL_CONCLUSIONS = frozenset(
         "stale",
     }
 )
-_LEGACY_CALLER = ".github/workflows/review-sensei-review.yml"
 
 
 class ReservationOwnerActiveError(ReviewInputError):
@@ -129,92 +128,9 @@ class ActionsReservationEvidence:
                 raise ReviewInputError("a command cannot reclaim its own active run")
             run = self._completed_run(identity, run_id)
         else:
-            # A constrained compatibility proof for pre-owner pull_request
-            # runs: exact reviewed head, PR association, approved caller path,
-            # unique run interval, and one failed analysis job containing the
-            # ledger's write timestamp. Unknown/manual/ambiguous origins stay
-            # blocked and require investigation, never an age-based unlock.
-            if record.transaction is None:
-                raise ReviewInputError(
-                    "legacy reservation has no provable analysis origin"
-                )
-            if record.generation != record.transaction.generation:
-                # Only the unchanged analysis attachment identifies this
-                # legacy write timestamp. Later command/disposition writes
-                # can move updated_at into an unrelated run's interval.
-                raise ReviewInputError(
-                    "legacy reservation origin timestamp was changed by a later mutation"
-                )
-            head = record.transaction.head_sha
-            candidates = []
-            at = _stamp(record.updated_at)
-            for item in self._runs(identity, f"head_sha={head}"):
-                prs = item.get("pull_requests")
-                if (
-                    item.get("event") == "pull_request"
-                    and item.get("path") == _LEGACY_CALLER
-                    and item.get("head_sha") == head
-                    and isinstance(prs, list)
-                    and any(
-                        isinstance(pr, dict)
-                        and pr.get("number") == identity.pull_request
-                        for pr in prs
-                    )
-                    and _stamp(item.get("run_started_at"))
-                    <= at
-                    <= _stamp(item.get("updated_at"))
-                ):
-                    candidates.append(item)
-            if len(candidates) != 1:
-                raise ReviewInputError(
-                    "legacy reservation origin is missing or ambiguous"
-                )
-            run_id = str(candidates[0].get("id"))
-            if re.fullmatch(r"[1-9][0-9]{0,18}", run_id) is None:
-                raise ReviewInputError("legacy reservation origin is invalid")
-            run = self._completed_run(identity, run_id)
-            if (
-                run.get("head_sha") != head
-                or run.get("event") != "pull_request"
-                or run.get("path") != _LEGACY_CALLER
-                or run.get("conclusion") not in {"failure", "cancelled", "timed_out"}
-            ):
-                raise ReviewInputError("legacy reservation origin no longer matches")
-            jobs = self._get(
-                identity,
-                f"/actions/runs/{run_id}/attempts/{run['run_attempt']}/jobs?per_page=100&page=1",
+            raise ReviewInputError(
+                "reservation recovery requires an explicit authenticated owner"
             )
-            items, count = jobs.get("jobs"), jobs.get("total_count")
-            if (
-                not isinstance(items, list)
-                or isinstance(count, bool)
-                or not isinstance(count, int)
-                or count != len(items)
-                or count > 100
-            ):
-                raise ReviewInputError("legacy reservation job discovery is incomplete")
-            matching = []
-            for job in items:
-                if not isinstance(job, dict) or job.get("status") != "completed":
-                    raise ReviewInputError(
-                        "legacy reservation job is active or invalid"
-                    )
-                if (
-                    job.get("run_id") == int(run_id)
-                    and job.get("run_attempt") == run["run_attempt"]
-                    and job.get("head_sha") == head
-                    and isinstance(job.get("name"), str)
-                    and job["name"].endswith((" / hosted", " / local"))
-                    and job.get("conclusion") in {"failure", "cancelled", "timed_out"}
-                    and _stamp(job.get("started_at"))
-                    <= at
-                    <= _stamp(job.get("completed_at"))
-                ):
-                    matching.append(job)
-            if len(matching) != 1:
-                raise ReviewInputError(
-                    "legacy reservation analysis job is missing or ambiguous"
-                )
         # Re-read latest attempt. A rerun that started during proof collection
         # invalidates even a previously completed attempt.
         latest = self._completed_run(identity, run_id)

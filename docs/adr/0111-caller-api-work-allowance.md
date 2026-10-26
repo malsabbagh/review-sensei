@@ -1,459 +1,156 @@
 # ADR 0111: Caller API work and independent Worker bounds
 
-- Status: Proposed
+- Status: Proposed; implementation and qualification in progress
 - Date: 2026-10-25
 - Decision owner/reviewers: repository owner; Astra High
-- Related issue: user-directed API-work redesign (issue not created)
-- Pull request: not yet created
-
-## Context
-
-The current metadata windows prepay Worker-internal requests from the caller's
-allowance. Completion and publication can also construct new windows. Neither
-behavior represents one repository-configured caller allowance across an Actions
-run. A Worker POST with 9, 12 or 30 internal dispatches is one caller request.
+- Related issue: user-directed repository API-work redesign
+- Pull request: pending
 
 ## Decision
 
-Add one root `api_request_limit`. The offline candidate default is 128; the
-shipping default and supported maximum remain subject to complete measurements.
-It counts ReviewSensei caller HTTP attempts, including direct GitHub/evidence
-requests, OIDC and each Worker POST. Inference retains its separate limits.
-Worker-internal auth/history/token dispatches keep independent service bounds;
-receipt counts are observations, without caller predebits or refunds.
+One root `.reviewsensei.yml` setting, `api_request_limit`, bounds physical
+ReviewSensei caller HTTP attempts for one authenticated repository ID and Actions
+`run_id`. The default candidate is 512. The parser accepts integers from 1 through
+9,007,199,254,740,991, rejecting booleans, fractions, nonfinite values and larger
+integers. This upper bound is the common exact JSON/JavaScript representation,
+not a workload recommendation. Reservation arithmetic uses bounded integer inputs.
 
-Identify one allowance by immutable repository ID and Actions `run_id`.
-`run_attempt`, job and owner generation select execution owners, never budgets.
-Freeze trusted base/default-branch config commit, digest and limit at admission.
-Analyze and publish must use that same record.
+The allowance includes policy/configuration, authorization, PR/evidence, OIDC,
+Worker exchanges, publication and cleanup. Each Worker POST counts once;
+Worker-internal fanout is informational to the caller. The Worker independently
+limits an exchange to at most 60 external dispatches, a 25-second lifetime and
+bounded upstream deadlines. A lower source-selected exchange ceiling may tighten
+that limit. Neither dispatch receipts nor grants allocate caller capacity.
+Inference retains its separate resource limits. Checkout, package installation
+and artifact upload are infrastructure outside this ReviewSensei allowance.
 
-Reserve finite source-controlled startup envelopes for each supported job's
-initial attempt and one rerun from the same allowance. Envelopes include startup
-auth/discovery and the initial persistence/confirmation tail. Their capacity
-remains occupied after crashes and when unused. Later attempts and silent
-same-slot restarts refuse before ReviewSensei HTTP. The operational config
-minimum is the measured complete startup envelope, not merely a positive integer.
-The parser accepts an integer shape; admission must validate this stronger bound.
-No production envelope or shipping maximum has been selected in this first block.
+One lifecycle process owns the selected review, command or reply route. Shell
+steps do not obtain business credentials, check the live PR head, publish or
+clean up reservations in another process. Cancellation forwarding and artifact
+steps remain. Trusted policy commit **P**, its exact configuration digest and its
+limit are frozen independently of reviewed base **B** and head.
 
-Ordinary reservations must be authenticated and confirmed before consumption.
-Pay their write/readback from already authorized capacity, never from the block
-being acquired. Confirmed dispatches, reserved-undispatched requests, and pending
-or uncertain requests all occupy allowance. Dispatch/confirmation changes the
-category, without double-charging or refunding. Preserve pending request deadlines;
-new requests get separately bounded deadlines. Provider execution cannot reset
-caller accounting. Unknown prior consumption refuses instead of starting at zero.
-Retain completed request identities for the run lifetime and confirm the exact
-request/deadline, so delayed responses cannot settle a later request. Bind every
-ordinary block to its issuing owner. A crash successor retains its predecessor's
-charges but cannot consume the predecessor's undispatched remainder; explicit
-authenticated orderly transfer is a separate adapter action, never automatic.
-Conservative prior non-startup liability is separate from confirmed requests and
-excludes the already prefunded startup envelopes.
+## Finite allocations and recovery
 
-All writers require the existing authoritative PR concurrency serialization.
-Comment PATCH is not CAS; generation/readback only detect conflicts. Unsupported
-overlap refuses. Owner handoff requires prior-owner cessation and confirmed
-checkpoint ownership; timeout alone is insufficient.
+The current review/reply startup policy occupies 130 requests (77 initial and
+53 successor); commands occupy 132 because each attempt authenticates its source.
+These are conservative source-controlled reservations, not observed shipping
+minimums. Remaining capacity is divided between the initial owner and one
+successor, each with protected terminal capacity of 50 and minimum work capacity
+of 4. Consequently 238/240 are minimum admission funding for review/reply and
+commands, respectively. Admission never promises completion.
 
-Use one current authorization envelope for necessary identity/purpose/permissions,
-separate from accounting. Remove obsolete executable compatibility, while retaining
-historical bytes and rejecting incompatible in-flight authority explicitly.
+Ordinary reads and native mutations have finite operation allocations, with
+separate confirmation capacity protected before a write. A read may exhaust its
+allocation even when the repository allowance has unused capacity. Independent
+pagination, retained evidence, output and deadline limits remain enforced.
+Unknown or abandoned allocations are never refunded. An uncertain HTTP outcome
+remains charged even if exact readback later establishes its business effect.
+Uncertain writes are never replayed merely because their response was lost.
 
-## Scope
+A run attempt, job and owner generation identify an execution owner, not another
+allowance. Both startup slots remain occupied after crashes and when unused.
+Same-slot process restart and a third attempt refuse. Supported attempt 2 can
+recover only after authenticated predecessor-job cessation and exact native owner
+checks. It retains the predecessor's accounting and cannot consume abandoned
+capacity. A retained pending review may publish without repeating inference.
+Separate workflow-dispatch publication recovery is retired.
 
-This first implementation block adds config parsing/display, immutable accounting
-values/transitions, caller-only broker charging and caller-only terminal reserves.
-The values deliberately authenticate nothing and cannot themselves authorize HTTP.
-They do not implement a durable writer or certify that a reservation is confirmed.
+Authoritative PR concurrency serializes writers. Comment PATCH is not CAS;
+generation and exact readback detect conflicts but do not provide a distributed
+lock. Active, overlapping, ambiguous or changed owners refuse.
 
-The next bounded block embeds a closed accounting document inside the existing
-session record's digest/schema and App-author boundary. Existing ledger mutations
-preserve accounting charges, request history and foreign-owner reservations.
-Live Actions reads check the current finite hosted owner and predecessor cessation;
-a local exclusive startup claim rejects same-slot restarts before HTTP. The local
-claim is not a distributed lock. Existing authoritative PR serialization remains
-mandatory.
+A genuinely different Actions run may replace terminal accounting only after
+proving predecessor cessation and retaining its exact root in an authenticated
+one-part archive. Archives preserve their previous pointer, charges, decisions,
+baselines and convergence counters. They transfer no capacity. Archive, root and
+transition size boundaries refuse before an unfunded or unrepresentable write.
+The native root is bounded to 32 KiB and its rendered comment to 64 KiB; evidence
+and pagination ceilings are independent.
 
-**Not completed by these foundation blocks:** production bootstrap orchestration
-and all-job startup policy, authoritative workflow-owner wiring, full installed
-CLI/workflow integration, current-only grant/readers, historical run rollover,
-and service-owned Worker plan selection. Later offline CLI/application integration
-is described below. Unselected metadata-window constructors remain pending.
-This commit is a review checkpoint, not a qualified runtime feature or release.
+## Review and action terminal states
 
-## Consequences
+Review completion requires its exact transaction and confirmed publication or
+explicitly unnecessary publication. A narrowly typed pre-operation abort closure
+is allowed only for the original owner/reservation/transaction when operation
+entry never started, native cleanup is confirmed and no unresolved obligation
+remains. Entry is marked started before analysis. Missing fields are not proof.
+Provider failure, timeout, interruption after entry, unknown reservation and
+uncertain cleanup remain conservative blockers. Post-dispatch provider settlement
+is future work, outside this change.
 
-Worker fanout no longer consumes caller capacity. Failures still cost their
-attempted caller POST. Pending/abandoned work cannot mint a new allowance.
-Run-wide admission and complete-path minimum/default/max measurements are required
-before publishing operational claims. No new Worker aggregate allocator is added;
-existing external rate protection is not established by this change.
+Commands and replies admit a durable intent before effects. It binds purpose,
+source ID/version/body digest, run, owner, head, configuration, operation key and
+antecedent root. Execution entry is durable. Terminal closure requires a typed
+outcome bound to the exact retained result; an inherited review transaction
+cannot close a newer action. Unknown effects block rollover. Retained outcomes
+use the existing bounded compressed evidence codec.
 
-## Alternatives considered
+Reply finalizers produce process-issued completion evidence only after all
+selected effects are confirmed or explicitly unnecessary. Legitimate withholding
+may be terminal while approval remains blocked. Default, missing, serialized or
+independently supplied completion is unconfirmed. Masked check/thread failures
+cannot become success through a diagnostic string. Conversational replies require
+their exact publication identity. Broader reassessment must establish its own
+completion and cannot borrow an earlier reply's proof.
 
-- Larger coupled per-window profiles: rejected; they conflate two different pools
-  and do not provide a run-wide bound.
-- Caller allowance claims in Worker grants: unnecessary; Worker does not authorize
-  workflow spending.
-- Comment generation as a distributed lock: rejected; readback detects conflicts
-  but cannot serialize concurrent writers.
-- Automatic migration/refund on restart: rejected; unknown history is not capacity.
+## Current authority and retained rescans
 
-## Validation
+The Worker and caller use one closed version-3 authority envelope with purpose
+`review`, `command` or `reply`. It binds repository/PR/head, authenticated Actions
+run/attempt/workflow, bounded expiry and exact source identity. Purpose-specific
+capabilities are not interchangeable. The Worker authenticates these subjects
+against GitHub/OIDC; parsing a serialized document confers no authority. The
+Worker supplies its trusted numeric App ID; event hints cannot supply it.
+Obsolete grants and separate hosted phase entry points refuse before effects.
+Historical bytes remain evidence and cannot authorize new work.
 
-Focused tests cover strict config shape; a fixture-derived startup minimum; both
-startup attempts occupied before first persistence; owner changes without new
-capacity; same-slot/third-attempt refusal; category conservation; uncertain deadline
-retention; exact exhaustion; obsolete accounting versions; and 9/12/30 observed
-Worker dispatches at identical one-POST caller cost. The startup envelope in those
-value tests is explicitly synthetic, not a production cost measurement.
+Retained rescans use an explicit historical publication reader bound to the
+AuthorizedRescan source, exact review/reference/archive/producer and current
+run/owner/transaction. Fresh source and head checks remain. Issue-comment rescans
+skip the unused Actions-token exchange; workflow-dispatch rescans reuse startup's
+Actions capability while independently authenticating their dispatch source.
+Typed budget/deadline exhaustion is preserved rather than reported as malformed
+coverage. Original decisions and incomplete coverage remain authoritative.
 
-Full acceptance still requires physical startup/crash traces and real public
-approval, withheld and failure paths with fake HTTP, authenticated restart,
-unsupported-overlap refusal, real Worker enforcement and joint distribution gates.
-The four previously held socket tests remain excluded.
+## Qualification and limits
 
-The one-job persistence fixture now executes the real Python broker and ledger
-create/update/readback APIs with fake external HTTP: 10 startup requests, then
-14 recovery requests. Synthetic valid receipts reporting 9, 12 or 30 internal
-dispatches leave these caller counts unchanged. It does not qualify the real
-Worker or activate a public workflow path. Both startup slots remain prefunded:
-28 initial + 50 recovery = 78, derived from the actual seven-request prelude,
-existing ten-physical-request list bounds, native mutation/readback calls and
-two fresh predecessor-job observations. A separate 31-request native replacement
-block stays charged to its original owner, leaving 19 unallocated at 128. This is
-conservative liability, not 109 observed requests or a full workflow success.
-The successor cannot use the crashed owner's block; another conservative
-31-request block would exceed available capacity by 12. That is a next-operation
-admission constraint, not proof of an unavoidable 140-request physical minimum.
-No limit is raised or reservation shrunk to make it pass.
+The measured 512-workload sequence uses separate, genuinely different Actions
+runs: a 20-finding review, two ten-ID commands and verify. Observed caller counts
+were 84/109/114/55; all 20 decisions and one native approval remained. These
+measurements do not establish an allowance reset within a run. Current reply
+fixtures exercise the actual CLI/provider/journal/reader/check/thread path,
+including confirmed withholding. Actual Worker qualification uses fake external
+HTTP around production authentication, grant and service-ceiling code; synthetic
+receipts alone are insufficient.
 
-The next bounded control enforces every physical opener call before dispatch.
-Serialized owner changes must match exactly one supported startup claim. At128
-the fresh31 reservation still refuses. A test-only limit derived as78+31+31=140
-funds that reservation in the existing recovery mutation, confirms it, and then
-executes one native replacement from the new block. In the small-history control
-the physical counts are10+14+4. The earlier whole-walk control observed28+50+31
-at the ten-page boundary; current operation allocation instead refuses that later
-mutation before PATCH. The original31 remains charged. Redirects cannot hide extra physical requests;
-failed/expired/unknown requests retain their charges. This does not recommend a
-shipping default or complete all-phase integration; full useful-workflow
-measurement remains pending.
+Final acceptance requires immutable-head source and installed tests, platform
+qualification, production Worker contract tests, exact workflow recognition,
+required CI and independent review. Moving-source or earlier checkpoint counts
+are scoped evidence only. Four socket-dependent provider tests cannot execute in
+the current restricted local environment and still require the platform lane.
+Earlier rejected experiments and their measurements remain in Git history and
+external evidence; they are not shipping policy.
 
-An unknown initial POST with a retained owned record can recover without a
-replacement POST. If the record cannot be established, recovery refuses instead
-of recreating it. Lost PATCH responses use the planned readback slot to observe
-the exact retained root without repeating the write. Active/changed predecessor
-evidence, incomplete job inventories, same-slot restarts and third attempts
-refuse. All-phase integration waits for review of this bounded result.
+## Cutover and rollback
 
-## Rollout and rollback
+The required matrix is released caller/released Worker working; either mixed
+version refusing unsupported authority without fallback; new caller/new Worker
+qualified for review, command and reply. The new source does not retain an
+executable legacy-authority bridge.
 
-No deployment, credentials, package publication or activation. Preserve previous
-experiments separately. Review this bounded commit before full integration.
-Rollback this unshipped source block normally; never rewrite historical evidence
-or reinterpret old authority as a fresh allowance.
+Cutover needs a separately approved temporary admission interruption. Because
+the released Worker lacks a hold, the publisher first needs a narrowly qualified
+old-protocol hold-only bridge. The hold must fence token, grant, webhook and setup
+continuation issuance/writes on every reachable surface, including SELF, while
+keeping health available. Held requests return distinct temporary unavailability
+with no issuance, queued replay, automatic retry or false completed acknowledgement.
 
-## Follow-up work
-
-Measure source-controlled startup slots, including workflow OIDC/PR calls outside
-the CLI, then implement the authenticated serialized adapter with conservative
-restart bounds. Wire the same accounting through every phase; remove obsolete
-authority branches; qualify current Worker plans and full lifecycle failures.
-
-## Historical c8f563f public-command experiment (superseded)
-
-**This rejected experiment is retained as evidence; the finite plan below replaces its whole-remainder reservation.**
-
-The opt-in offline host hook supplied the same native ledger and confirmed
-caller tranche to the real core CLI admission, provider metadata and analysis
-completion. The source-selected one-job startup plan remains28+50=78; its
-fixture executes OIDC, broker, workflow PR/configuration and Actions reads outside
-the engine command. It is not the complete all-job reusable-workflow inventory.
-The first-run initializer confirms its native record before enabling the ordinary
-tranche. It rejects a rerun creating a new allowance; historical rollover remains
-unsupported. Native reserve/commit/abort use the same accounting-aware replace
-seam. No metadata phase budget factory runs in this selected command.
-
-At provisional128, the single ordinary tranche is50. The modest complete-review
-fixture runs one fake provider call through normal operation-entry metadata and
-retains its raw result. At the first completion-checkpoint preflight it has spent
-20 ordinary requests, leaving30 usable. Native replacement requires its existing
-three ten-request scans plus PATCH:31. It refuses before any request for that
-mutation, a conservative-plan deficit of 1. This is not a physical lower bound or
-permission to select129. Normal failure handling then spends four reads; both
-abort mutations also refuse before writes. Total actual caller requests are34
-(10 startup plus24 ordinary), with26 usable ordinary requests, no unallocated
-capacity, and the original analysis transaction still held. No review, approval
-or terminal-success check is published. Approval/withholding controls and the
-complete publication/failure tail remain unqualified, so integration stops here.
-
-A separate lost-initial-record-response control preserves the first owner's50
-reserved requests. Recovery reads the actual retained marker, but its successor
-reservation refuses before mutation; the predecessor's remainder is never made
-usable. A comment carrier also requires its bounded write/confirmation room
-before POST/PATCH; this does not replace the still-pending complete lifecycle
-preflight. No activation or release entry selects these new hooks.
-
-The accepted retained-rescan repair is independently ported. Its reader regression
-uses a Bot-authenticated synthetic historical seed and a real native reservation
-and readback before selecting the retained root. The actual full-rescan resolver
-and reader then charge every GET, including native ledger fences, to the same
-previously used caller transport, without another reader-budget constructor or a
-write to that retained root. All20 decisions remain. This proves the read seam,
-not production historical run-accounting rollover or an end-to-end hosted rescan.
-
-
-## Historical 4c35a3b finite attempted-work checkpoint
-
-The previous `bcd64fce` lifecycle evidence remains in Git and the frozen
-qualification packet. Astra accepted its public-path evidence but rejected its
-worst-case reservation plan as production admission. Its 492,992 test setting,
-5,005-request native walk bound and 20,021-request mutation bound are not admission
-minima or selected product limits. The current policy is in
-[api_run_plan.py](../../packages/python/review-sensei-github/src/review_sensei_github/api_run_plan.py).
-
-After the existing 78-unit startup reservation, divide the remaining allowance
-between the first owner (ceiling half) and its supported successor (floor half).
-Each owner's share protects 50 terminal attempts: two finite read operations and
-three finite mutation operations for the selected failure-cleanup route. These
-are attempted-work slots, not a promise to complete every history. The success
-route uses the same protected tail. The rest is that owner's work tranche. Both
-shares remain inside the original frozen allowance; neither is a new phase or
-rerun window. An abandoned owner's remainder stays unavailable.
-
-Every selected read operation gets at most ten physical requests from the live
-owner's already reserved tranche. Every native ledger mutation also gets at most
-ten requests **in total**, across discovery, rediscovery, preactivation, live
-fences, PATCH and readback. Nested readers share that operation. Every oversized
-response, fallback and terminal page consumes a physical attempt. Existing item,
-body, author, exact-root, duplicate and complete-enumeration checks remain.
-Enumeration stops before the next request would consume the protected tail of
-one write plus two confirmation requests. Incomplete enumeration cannot authorize
-a mutation, and a failed operation cannot obtain a fresh allocation to continue.
-
-The actual native PATCH/readback still authenticates exact canonical bytes and
-detects generation conflicts; it is not a distributed lock. Exhaustion before
-PATCH clears only locally prepared bytes and records no mutation. Exhaustion or
-failure after PATCH retains its original intent and allocation. Reconciliation
-can use only that allocation's remaining confirmation requests, on the same owner
-and block. A known HTTP response is distinct from a confirmed publication. Unknown
-request responses retain their pending charge; exhausted semantic confirmation
-can retain an unconfirmed publication even when all dispatched HTTP responses
-were known. Neither condition authorizes another PATCH/POST.
-
-Owned result-part comment writes similarly protect their finite confirmation
-room. A lost POST permits only the original confirmation allocation, never a
-new complete-list allowance or another POST. Publication admission uses the actual
-canonical retained payload's part count and selected mutation/capability minimum;
-part storage still validates its complete owned inventory. It does not reserve
-all alternative carriers or the theoretical pagination maximum before beginning.
-A larger history may refuse even under an otherwise qualified configuration.
-
-The normal provider hook checks the intact protected terminal reservation and
-attempts metadata with the existing work tranche. It no longer preflights every
-theoretical remaining branch. The application remains the sole terminal-completion
-owner. The pre-write unconfirmed-publication fence retains all transaction checks
-without claiming terminal completion. A failed/unknown abort remains one-shot;
-nested error handlers cannot repeatedly read or write cleanup.
-
-The real core CLI and public `GitHubApplication` controls retain one file, zero
-or one finding, an inline baseline and no decided threads. Only external HTTP
-and provider responses are synthetic. No released workflow selects this path.
-The smallest measured settings for these **fixed fixtures** are:
-
-| Control | Smallest fixture setting | Physical attempts | Result |
-| --- | ---: | ---: | --- |
-| Complete review, no findings |313|82| Native approval, success check, transaction completed once |
-| Complete review with pending human decision |305|78| No approval, action-required check, transaction completed once |
-| Interrupted owner followed by supported recovery |314|101| Predecessor capacity retained; successor completes normally |
-
-The common test configuration is derived from the measured 68 work requests:
-`78 + 2 * (50 + 68) = 314`. Initial admission can use the odd unit, explaining
-313 for initial approval; the successor cannot, explaining 314 for recovery.
-Work is admission 11 + provider metadata 4 + completion 8 + publication 45.
-Terminal completion adds four requests. This is a fixture regression bound,
-**not a shipping default/minimum/maximum**. Provisional 128 remains unqualified
-and refuses before creating a marker or calling a provider.
-
-At common 314, normal approval has 72 known ordinary attempts, zero pending
-requests, 46 reserved-undispatched and 118 unallocated for the successor; startup
-still occupies 78. Recovery has 74 retained known ordinary attempts, 162 reserved
-undispatched (116 belong to the predecessor), zero free capacity and one observed
-unknown response in the abandoned owner. That abandoned uncertainty remains
-covered by its opaque reservation, never converted into confirmed dispatches or
-refunded. Live/durable confirmed counts differ by already prepaid effects after
-sealing, as in the original authenticated checkpoint contract.
-
-One-less controls refuse honestly rather than claim a completed lifecycle.
-At 312 the approval control refuses its final request, records publication_failed
-and emits no native approval. A previously completed check can already say success;
-that check alone is not proof of completed publication or native approval. At 304
-the human control also records publication_failed. At 313 the recovered approval
-control refuses with the predecessor reservation unchanged. None is a new success
-or permission to replay a mutation. These partial outcomes remain visible evidence.
-
-Provider failure uses 36 physical calls and one cleanup owner. A lost cleanup
-PATCH uses 27, retains one explicit pending request and makes no subsequent HTTP
-request. History-growth controls stop after seven enumeration requests before
-PATCH; confirmation growth stops after two readback requests and keeps the write
-unconfirmed. An exact full page must still fund its final empty page. Oversized
-fallbacks are charged and can exhaust either the read or confirmation allocation.
-
-Synthetic valid receipts observing 9/12/30 session-internal dispatches preserve
-identical caller totals. Action exchanges retain their separate 12 service bound,
-publication exchanges their own service bound. No Worker-internal debit/refund or
-workflow-capacity claim is added. Actual service-owned Worker enforcement and
-aggregate rate protection remain separate qualification work.
-
-The exact PR377 receipt-review selector remains ported from `dc3b21a`. Its reader
-proof still charges 20 fresh GETs after one prior ordinary request, preserves the
-root and all20 synthetic decisions, and constructs no fallback allowance. This
-is not a complete retained-rescan lifecycle proof. Follow-on work separately needs
-the full pre-provider transaction writes, both trigger paths, typed exhaustion
-propagation and completion/approval/withholding controls.
-
-Before production selection or removal of authorization readers: independently
-review this allocation contract, qualify the full workflow startup/job inventory
-and real Worker limits, integrate current main, remove obsolete executable
-selectors/authority, and complete joint installed core/adapter/platform checks.
-The core pre-write helper requires coordinated versions and dependency pins.
-Arbitrary historical rollover, all publication crash/check/approval faults and
-TaskAlong's 40-file/70-finding workload remain unqualified. No live activation,
-provider request, credentials, rescan retry, package publication or release occurs.
-
-
-## Single-process review entry checkpoint
-
-Astra selected one package process for the review route, rather than a new
-same-job handoff authority. The new `review-sensei-github review-run` entry claims
-startup once, constructs one physical caller transport and accounting owner,
-and runs the engine review, completion, fresh-head validation and publication.
-The hosted and local plan use the same entry; local model discovery is one
-metered, credential-free request. Inference retains independent provider limits.
-The production reusable workflow has not selected this entry yet.
-
-The policy commit P is authenticated independently from the reviewed base B and
-head H. Startup checks the local checkout and policy-file object, authenticated
-repository/default-branch/configuration bytes, the exact PR revisions and the
-Actions run/job owner. Read-only owner checks precede the session enrollment
-exchange. A changed policy, head, configuration or overlapping writer refuses.
-The API allowance remains frozen; a changed working copy cannot authorize a new
-limit. Command/reply and retained-publication recovery remain separate,
-unqualified routes. Explicit rescan/remaining input is refused here pending its
-own complete lifecycle qualification.
-
-The actual nine-request startup prefix is repository policy metadata, default
-policy ref, configuration contents, PR metadata, OIDC, Actions capability, run,
-job inventory and session capability. Adding the two previously missing policy
-reads changes source-prefunded startup from 28+50 to **30+52=82**. The accepted
-operation policy is unchanged: ten requests per read/native operation, two write
-confirmation requests, fifty protected terminal attempts and equal owner shares.
-This is an inventory correction, not a larger ordinary allowance or a default
-selection. Checkout, package installation, Git transport and artifact upload are
-infrastructure outside the ReviewSensei API-work allowance. Business policy,
-authentication, PR/evidence, OIDC/Worker and publication calls are inside it.
-
-The engine passes its completed validated result, prior baseline, current key,
-configuration/evidence contexts and exact diff through an in-process callback
-after checkpointing. Publication revalidates the durable transaction normally.
-Diagnostic JSON is output only: overwriting it cannot replace these inputs or
-create authority. A lost marker POST or checkpoint PATCH can spend only its
-original funded exact readback; there is no repeat mutation or capacity refill.
-Handled provider failure/cancellation use the one protected cleanup owner. A
-cancel before publication preserves the saved pending result.
-
-The current fixed small-fixture input derives as `82+2*(50+68)=318`; local
-model discovery adds one work request per owner, yielding test input320. Neither
-value is a shipping default/minimum/maximum. The actual package entry measures
-**84 caller attempts for approval**, **80 for legitimate human withholding**,
-and **85 for local approval**. The fifteen focused tests also cover in-memory
-publication despite corrupted diagnostics, duplicate startup, stale head,
-configuration change, overlap, provider failure, cancellation, refused POST
-charging, insufficient publication capacity and successful funded lost-write
-readback. No replacement metadata-budget constructor runs. Default128 remains
-unqualified and now refuses before business HTTP in this entry.
-
-Still unqualified: the proposed workflow consolidation removing its separate
-release-reservation and shell live-head/publication business processes; actual
-hard-kill/recovery and multi-page/multi-part controls; real production Worker
-identity, service-owned ceilings, grant and receipt composition; current-main,
-installed and platform checks; obsolete authority removal; and the shipping
-range. This first entry qualifies fresh-session startup. A different run's
-existing session is refused rather than deleting its history, replacing its
-accounting or silently creating a new allowance. Run-record rollover requires a
-separate authenticated retention contract before claiming general operation.
-No package publication, live activation, credentials or release is performed.
-
-
-### Consecutive-run retention checkpoint
-
-The next offline slice retains one terminal PR root through the existing
-`evidence-part-v1` bounded codec before installing accounting for a genuinely
-different repository/Actions run identity. The active accounting contains the
-exact prior root digest and one-part manifest. That archived root retains its
-entire accounting, previous retention pointer, decisions, baseline, convergence
-history and counters. Retention is append-only; it transfers or refunds no old
-capacity and changes no approval or coverage rule. Ordinary `evolve()` still
-rejects an accounting identity change. The native serialized mutation has an
-explicit, narrowly checked rollover transition; generation/readback remain
-conflict detection, never a distributed lock.
-
-A new run authenticates the current owner/config/head and reads the stopped
-previous Actions run plus a complete predecessor job inventory twice. Active or
-ambiguous owners, changed roots, nonterminal transactions and unresolved
-business mutations refuse. A transaction-bound accounting close checkpoint is
-confirmed only after the normal publisher, transaction completion and applicable
-cleanup return. It is not another transaction-completion transition. Lost HTTP
-responses remain charged; authenticated exact readback can settle their effects
-without turning those charges into usable capacity. Known ambiguous write
-statuses also prevent closure unless their exact owned effect is reconciled.
-Missing or duplicated archive readback never authorizes a replacement POST.
-Same-head duplicates use an in-process typed admission observation plus fresh
-head/base checks; they close without inference or another approval.
-
-The source-selected initial slot now covers the larger of first initialization
-and terminal rollover: 9 prefix requests, 10 discovery requests, 4 predecessor
-run/job observations, 40 native replacement-list requests, 1 archive create,
-10 possible lost-response listing requests, 1 exact archive readback, 1 head
-fence and 1 root PATCH: **77**. The supported rerun needs 9 prefix, 2 predecessor
-job reads, 40 native recovery-list requests, 1 head fence and 1 PATCH: **53**.
-Both permanently reserve **130** startup units from the same run allowance.
-These are bounded caller envelopes, not observed physical calls or Worker
-fanout. The ordinary ten-request/two-confirmation policy, fifty terminal units
-and equal owner shares are unchanged. The fixed fixture uses
-`130+2*(50+68)=366`, not a shipping default/minimum. First approval performs
-89 physical attempts, including 13 startup and 76 ordinary requests; a second
-ordinary approval performs 96, including 20 startup and 76 ordinary requests.
-The second run's predecessor allowance remains in the authenticated carrier,
-unchanged. A child killed after accounting creation but before transaction
-attachment resumes only after authenticated job cessation; old blocks remain
-unavailable, and the original run identity/config/startup reservation survive.
-The withheld control preserves its existing human obligation into the next
-review; no synthetic disposition resolves it.
-
-This remains an offline source checkpoint. Production workflows do not yet
-select it. Workflow consolidation, full multi-page/multi-part entry controls,
-real Worker authentication/service-ceiling composition and the later shipping,
-platform, installed-distribution and obsolete-authority gates remain open.
-No default or repository setting is activated.
-
-### Confirmed pre-entry abort closure
-
-A confirmed native analysis cleanup alone does not settle provider or operation
-entry obligations. The lifecycle records a trusted in-process boundary only
-after confirming the original owned analysis transaction and reservation. It
-marks operation entry started before invoking the hosted provider path. A local
-failure or cancellation before that boundary is crossed may close accounting
-only after exact cleanup confirmation and when no unresolved mutation remains.
-The closed marker binds the original run ID, execution owner, source and cleanup
-roots and analysis transaction. It does not fabricate a published transaction,
-refund charges, change convergence counters or override operation-store refusal.
-
-Any error after operation entry starts, including a local-looking exception from
-`Provider.complete`, timeout, interruption or an unknown reservation, conservatively
-prevents automatic rollover. A diagnostic is not proof of settlement. A future
-supported post-dispatch terminal-rejection path requires an executor-owned typed
-settlement contract; it is outside this correction. Lost cleanup/closure responses
-receive only the original funded exact readback, with no mutation replay.
+The sole publisher must derive a drain from the latest possible issuance after
+hold propagation, actual token/grant/cursor lifetimes and bounded in-flight work;
+elapsed time alone cannot settle unknown effects. After approval: enable and
+verify hold, drain and identify unresolved work, deploy the new Worker with hold,
+promote signed v5, verify exact identities, reopen, then run bounded post-release
+tests. On failure retain the hold. Do not roll back to old readers after new state
+has been written without a separately proven rollback path. Source qualification
+and release authorization do not themselves authorize activating the hold.

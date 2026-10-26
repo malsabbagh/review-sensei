@@ -142,16 +142,11 @@ describe("setup-v4 public boundary", () => {
     }
   });
 
-  it("keeps the next recovery caller explicitly prepared for later activation", () => {
+  it("emits only the supported single-process caller", () => {
     const workflow = preparedRecoveryWorkflowTemplate("v5");
-    expect(workflow).toContain("recover_publication: ${{ inputs.recover_publication || false }}");
-    expect(workflow).toContain("recovery_policy_commit:");
-    expect(workflow).toContain("recovery_expected_head:");
-    expect(workflow).not.toBe(buildSetupFiles("v5")[0].content);
-    expect(workflow).toBe(readFileSync(
-      new URL("../../../examples/github-actions/review-sensei-review.yml", import.meta.url),
-      "utf8",
-    ));
+    expect(workflow).not.toContain("      recover_publication:");
+    expect(workflow).toBe(buildSetupFiles("v5")[0].content);
+    expect(workflow).toBe(readFileSync(new URL("../../../examples/github-actions/review-sensei-review.yml",import.meta.url),"utf8"));
   });
 
   it("generates the thin caller at the supplied public workflow tag", () => {

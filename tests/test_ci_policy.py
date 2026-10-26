@@ -674,22 +674,11 @@ class ActionPinPolicyTests(unittest.TestCase):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, text)
 
-        # github.reviews and github.learning travel to the package as explicit
-        # invocation flags instead of being re-derived from a variable.
-        self.assertIn('if [[ "$REVIEWS" == "auto-approve" ]]; then', text)
-        # Only the publish steps carry the approval boolean: reply finalization
-        # re-reads the persisted eligibility of the review published for this
-        # head instead of trusting a caller flag.
+        # The lifecycle reads approval/learning policy from the frozen plan.
+        self.assertNotIn("publish_args", text)
         self.assertNotIn("auto_approve_args", text)
-        self.assertIn("publish_args+=(--enable-auto-approve)", text)
-        self.assertIn("publish_args+=(--no-auto-approve)", text)
         self.assertIn('if [[ "$LEARNING" == "disabled" ]]; then', text)
         self.assertIn("review_args+=(--no-learning-proposals)", text)
-        self.assertIn(
-            'if [[ "$LEARNING" == "pull-requests" && "$RECOVER_PUBLICATION" != "true" ]]; then',
-            text,
-        )
-        self.assertIn("publish_args+=(--enable-learning-prs)", text)
         self.assertIn('if [[ "$ARTIFACTS" == "diagnostics" ]]; then', text)
         self.assertIn("review_args+=(--recovery-artifact recovery-artifact.json)", text)
 
@@ -697,12 +686,14 @@ class ActionPinPolicyTests(unittest.TestCase):
             "if: github.event_name != 'pull_request' || github.event.pull_request.draft != true",
             text,
         )
-        self.assertEqual(text.count('review-sensei-github" reply \\\n'), 2)
-        self.assertEqual(text.count('review-sensei-github" publish \\\n'), 2)
+        self.assertEqual(text.count('review-sensei-github" reply-run \\\n'), 2)
+        self.assertEqual(text.count('review-sensei-github" review-run \\\n'), 2)
         self.assertEqual(text.count("--outcome outcome.json"), 2)
-        self.assertEqual(text.count("--outcome publication-outcome.json"), 2)
+        self.assertEqual(
+            text.count("--publication-outcome publication-outcome.json"), 2
+        )
         self.assertEqual(text.count("recovery-artifact.json"), 6)
-        self.assertEqual(text.count("Publish or promote"), 2)
+        self.assertEqual(text.count("Publish or promote"), 0)
         self.assertEqual(text.count("reply_exit=$?"), 2)
         self.assertEqual(text.count("grep -E '^(replied_and_resolved|"), 2)
         self.assertEqual(
@@ -749,7 +740,7 @@ class ActionPinPolicyTests(unittest.TestCase):
     def test_custom_endpoint_permission_is_frozen_plan_authority(self):
         text = _reusable_workflow_text()
         self.assertEqual(
-            text.count("ref: ${{ needs.bootstrap.outputs.policy_commit }}"), 2
+            text.count("ref: ${{ needs.bootstrap.outputs.policy_commit }}"), 3
         )
         inputs = text.split("jobs:", 1)[0]
         self.assertNotRegex(inputs, r"(?m)^      (allow_custom_endpoint|base_url):")
@@ -917,8 +908,8 @@ class ActionPinPolicyTests(unittest.TestCase):
                 self.assertIn("--format json", review_step)
                 self.assertIn("--exit-semantics operational", review_step)
                 self.assertIn("--output review.json", review_step)
-                publish_step = _step_block(job, publish_step_name)
-                self.assertIn("--result review.json", publish_step)
+                self.assertNotIn(publish_step_name, job)
+                self.assertIn('" review-run ', review_step)
                 upload_step = _step_block(job, "Upload diagnostics artifact")
                 self.assertIn("\n            review.json\n", upload_step)
                 self.assertIn(
@@ -972,7 +963,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             job = _job_section(workflow, job_id)
             # The review process owns cleanup and ordinary publication. The
             # remaining publication and head-check shell steps are recovery-only.
-            self.assertEqual(job.count(pull_request_env), 4)
+            self.assertEqual(job.count(pull_request_env), 2)
             self.assertNotIn("release-reservation", job)
             review = _step_block(
                 job, "Run hosted review" if job_id == "hosted" else "Run local review"
@@ -996,7 +987,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             self.assertNotIn("auto_approve_args", reply)
             self.assertNotIn("--enable-auto-approve", reply)
             self.assertNotIn("--no-auto-approve", reply)
-            self.assertIn('review-sensei-github" reply \\', reply)
+            self.assertIn('review-sensei-github" reply-run \\', reply)
             self.assertIn("reply_exit=$?", reply)
             self.assertIn("grep -E '^(replied_and_resolved|", reply)
             self.assertIn("Verify mention reply completed", job)
@@ -1007,11 +998,11 @@ class ActionPinPolicyTests(unittest.TestCase):
         # Each provider job publishes through exactly one promotion step.
         self.assertEqual(
             workflow.count("Publish or promote validated review through the broker"),
-            1,
+            0,
         )
         self.assertEqual(
             workflow.count("Publish or promote validated local review and learnings"),
-            1,
+            0,
         )
 
     def test_reusable_prepare_diff_binds_immutable_heads_and_reply_groups(self):
@@ -1022,11 +1013,16 @@ class ActionPinPolicyTests(unittest.TestCase):
             / "review-sensei-run.yml"
         )
         text = workflow.read_text(encoding="utf-8")
-        self.assertEqual(
-            text.count("BASE_REF: ${{ steps.trusted-base.outputs.sha }}"),
-            3,
-        )
-        self.assertEqual(text.count("HEAD_REF: ${{ inputs.head_sha }}"), 3)
+        for lane, name in (
+            ("hosted", "Run hosted review"),
+            ("local", "Run local review"),
+        ):
+            step = _step_block(_job_section(text, lane), name)
+            self.assertIn("HEAD_SHA: ${{ inputs.head_sha }}", step)
+            self.assertIn("BASE_SHA: ${{ inputs.base_sha }}", step)
+            self.assertIn('--policy-commit "$POLICY_COMMIT"', step)
+            self.assertNotIn('" prepare-diff ', step)
+            self.assertNotIn("--diff pr.patch", step)
         self.assertIn(
             "github.event.pull_request.number || github.run_id",
             text,
@@ -1152,14 +1148,12 @@ class ActionPinPolicyTests(unittest.TestCase):
             "repository id must be a positive decimal integer",
             text,
         )
+        preflight = _job_section(text, "authoritative-preflight")
         self.assertIn(
-            "authoritative GitHub pull-request preflight was unavailable; refusing provider execution",
-            text,
+            "Live preflight belongs to the selected metered lifecycle.", preflight
         )
-        self.assertIn(
-            "encoded pull request title exceeds the workflow output limit",
-            text,
-        )
+        self.assertNotIn("gh api", preflight)
+        self.assertNotIn("curl ", preflight)
         self.assertIn(
             "authoritative pull-request title output could not be decoded",
             text,
@@ -1177,18 +1171,18 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count(gate), 2)
         # Recovery regenerates its exact diff but cannot enter either inference
         # step. Normal review/reply operation gates stay explicit.
-        self.assertEqual(text.count("if: inputs.operation == 'review'\n"), 0)
+        self.assertEqual(text.count("if: inputs.operation == 'review'\n"), 2)
         self.assertEqual(
             text.count(
                 "if: inputs.operation == 'review' && !inputs.recover_publication\n"
             ),
-            2,
+            0,
         )
         self.assertEqual(
             text.count(
                 "if: inputs.operation == 'review' && inputs.recover_publication\n"
             ),
-            2,
+            0,
         )
         self.assertEqual(text.count("if: inputs.operation == 'reply'\n"), 2)
         # Command operations are never selected by the plan's review policy:
@@ -1202,12 +1196,12 @@ class ActionPinPolicyTests(unittest.TestCase):
             command,
         )
         self.assertIn(
-            '--github-session-ledger --oidc-token "$oidc_token" --allow-write',
+            'review-sensei-github" command-run',
             command,
         )
         self.assertIn("PULL_REQUEST: ${{ inputs.pull_request_number }}", command)
-        self.assertIn("job_workflow_ref", command)
-        self.assertIn("source_comment_id", command)
+        self.assertIn("REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}", command)
+        self.assertIn('--source-comment-id "$SOURCE_COMMENT_ID"', command)
         # The session-comment mutation is broker-authorized; GITHUB_TOKEN must
         # keep no write scope for the command job.
         self.assertNotIn("issues: write", command)
@@ -1241,7 +1235,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         # the mutation is attempted.
         self.assertIn("needs: [bootstrap, authoritative-preflight]", command)
         preflight = _job_section(text, "authoritative-preflight")
-        self.assertIn('"$OPERATION" != "command"', preflight)
+        self.assertNotIn("gh api", preflight)
+        self.assertIn('--policy-commit "$POLICY_COMMIT"', command)
+        self.assertIn("ref: ${{ needs.bootstrap.outputs.policy_commit }}", command)
         self.assertIn("needs: bootstrap", preflight)
 
     def test_command_metadata_token_is_scoped_to_application_step(self):
@@ -1261,7 +1257,11 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(command.count("GITHUB_TOKEN:"), 1)
         self.assertNotIn("GH_TOKEN:", command)
         self.assertNotIn("GITHUB_TOKEN:", command.split("    steps:\n", 1)[0])
-        self.assertIn('--oidc-token "$oidc_token" --allow-write', step)
+        self.assertIn('review-sensei-github" command-run', step)
+        self.assertIn('--policy-commit "$POLICY_COMMIT"', step)
+        self.assertNotIn("curl ", step)
+        self.assertNotIn("--session-attestation", step)
+        self.assertNotIn("--oidc-token", step)
         self.assertNotIn('--oidc-token "$GITHUB_TOKEN"', step)
 
     def test_hosted_review_invocations_supply_the_broker_attested_session_ledger(
@@ -1279,7 +1279,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             job = _job_section(text, job_id)
             for name in _named_steps(job):
                 for run in _run_blocks(_step_block(job, name)):
-                    if 'review-sensei-github" publish \\' not in run:
+                    if 'review-sensei-github" review-run \\' not in run:
                         continue
                     sites.add((job_id, name))
                     self.assertIn("--github-session-ledger", run)
@@ -1289,8 +1289,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(
             sites,
             {
-                ("hosted", "Publish or promote validated review through the broker"),
-                ("local", "Publish or promote validated local review and learnings"),
+                ("hosted", "Run hosted review"),
+                ("local", "Run local review"),
             },
         )
 
@@ -1337,40 +1337,28 @@ class ActionPinPolicyTests(unittest.TestCase):
             },
         )
 
-    def test_hosted_publication_consumes_the_analysis_artifacts(self):
-        # The publication boundary must read the same transaction context the
-        # analysis lane admitted with. A publish step that omits either
-        # artifact falls back to a durable-baseline handoff on every later
-        # round of a pull request.
+    def test_hosted_publication_uses_in_process_contexts_and_outputs_diagnostics(self):
         text = _reusable_workflow_text()
-        sites: set[tuple[str, str]] = set()
-        for job_id in _job_ids(text):
-            job = _job_section(text, job_id)
-            for name in _named_steps(job):
-                for run in _run_blocks(_step_block(job, name)):
-                    if "--outcome publication-outcome.json" not in run:
-                        continue
-                    sites.add((job_id, name))
-                    self.assertIn("--github-session-ledger", run)
-                    self.assertIn(
-                        "--configuration-context configuration-context.json", run
-                    )
-                    self.assertIn("--admission-context admission-context.json", run)
-        self.assertEqual(
-            sites,
-            {
-                ("hosted", "Publish or promote validated review through the broker"),
-                ("local", "Publish or promote validated local review and learnings"),
-            },
-        )
+        for lane, name in (
+            ("hosted", "Run hosted review"),
+            ("local", "Run local review"),
+        ):
+            step = _step_block(_job_section(text, lane), name)
+            self.assertIn('" review-run ', step)
+            self.assertNotIn("--result review.json", step)
+            self.assertNotIn("--configuration-context configuration-context.json", step)
+            self.assertIn(
+                "--configuration-context-output configuration-context.json", step
+            )
+            self.assertIn("--admission-context-output admission-context.json", step)
 
     def test_publication_reads_operations_with_existing_metadata_token(self):
         text = _reusable_workflow_text()
-        for job_id, name in (
-            ("hosted", "Publish or promote validated review through the broker"),
-            ("local", "Publish or promote validated local review and learnings"),
+        for lane, name in (
+            ("hosted", "Run hosted review"),
+            ("local", "Run local review"),
         ):
-            job = _job_section(text, job_id)
+            job = _job_section(text, lane)
             step = _step_block(job, name)
             self.assertIn("GITHUB_TOKEN: ${{ github.token }}", step)
             self.assertIn("issues: read", job)
@@ -1427,11 +1415,13 @@ class ActionPinPolicyTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("--fail-under=80", ci_text)
         self.assertNotIn("--fail-under=75", ci_text)
-        self.assertIn('len(title.encode("utf-8")) > 256', workflow_text)
+        lifecycle = (
+            root
+            / "packages/python/review-sensei-github/src/review_sensei_github/review_run.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('len(title.encode("utf-8")) > 256', lifecycle)
         self.assertIn('"$BASE_REF" == *--*', workflow_text)
         self.assertIn('"$BASE_REF" == *-', workflow_text)
-        self.assertIn('"$BASE_REF" != *--*', workflow_text)
-        self.assertIn('"$BASE_REF" != *-', workflow_text)
         self.assertIn('"--" not in value', workflow_text)
         self.assertIn('not value.endswith("-")', workflow_text)
 
@@ -1617,7 +1607,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             repo_root / "examples" / "github-actions" / "review-sensei-review.yml"
         ).read_text(encoding="utf-8")
         self.assertEqual(example, _prepared_recovery_workflow("v5"))
-        self.assertNotEqual(example, dogfood)
+        self.assertEqual(example, dogfood)
         self.assertEqual(dogfood, _tagged_workflow("v5"))
         self.assertIn(
             "uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
@@ -1735,65 +1725,95 @@ class ActionPinPolicyTests(unittest.TestCase):
         hosted = textwrap.dedent(re.split(r"\n\s*PY\s*\n?$", hosted, maxsplit=1)[0])
         self.assertEqual(hosted.replace("hosted", "local"), block)
 
-    def test_authoritative_preflight_caps_pull_request_title_bytes(self):
-        root = Path(__file__).resolve().parents[1]
-        workflow_text = (
-            root / ".github" / "workflows" / "review-sensei-run.yml"
-        ).read_text(encoding="utf-8")
-        block = _run_block_containing(
-            workflow_text, "pull request title exceeds the 256-byte limit"
-        )
-        script = block.split("python - \"$payload\" <<'PY'\n", 1)[1]
-        script = textwrap.dedent(re.split(r"\n\s*PY\s*\n?$", script, maxsplit=1)[0])
-        metadata = {
-            "state": "open",
-            "draft": False,
-            "number": 1,
-            "title": "x" * 257,
-            "head": {
-                "sha": "b" * 40,
-                "repo": {"full_name": "owner/repo", "id": 42, "fork": False},
-            },
-            "base": {
-                "ref": "main",
-                "sha": "a" * 40,
-                "repo": {"full_name": "owner/repo", "id": 42},
-            },
-        }
-        with tempfile.TemporaryDirectory() as temporary:
-            payload = Path(temporary) / "pull-request.json"
-            output = Path(temporary) / "github-output"
-            payload.write_text(json.dumps(metadata), encoding="utf-8")
-            environment = {
-                "PULL_REQUEST": "1",
-                "REPOSITORY": "owner/repo",
-                "REPOSITORY_ID": "42",
-                "HEAD_SHA": "b" * 40,
-                "BASE_REF": "main",
-                "BASE_SHA": "",
-                "HEAD_REPOSITORY": "owner/repo",
-                "GITHUB_OUTPUT": str(output),
-            }
-            rejected = subprocess.run(
-                ["python3", "-c", script, str(payload)],
-                env={**os.environ, **environment},
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("256-byte limit", rejected.stderr)
+    def test_metered_lifecycle_caps_and_forwards_the_authoritative_title(self):
+        from unittest.mock import patch
+        from urllib.parse import urlsplit
 
-            metadata["title"] = "x" * 256
-            payload.write_text(json.dumps(metadata), encoding="utf-8")
-            accepted = subprocess.run(
-                ["python3", "-c", script, str(payload)],
-                env={**os.environ, **environment},
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        from review_sensei_github import review_run
+
+        from tests.fake_github_http import json_response
+        from tests.test_review_run import EntryFixture
+
+        for title, accepted in (
+            ("x" * 256, True),
+            ("x" * 257, False),
+            ("é" * 128, True),
+            ("é" * 129, False),
+            (None, False),
+            (17, False),
+            ("--help", True),
+        ):
+            with (
+                self.subTest(title=title, accepted=accepted),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture = EntryFixture(directory)
+                external = fixture.external
+
+                def current_pull(request, timeout):
+                    response = external(request, timeout)
+                    if urlsplit(request.full_url).path == "/repos/owner/repo/pulls/7":
+                        document = json.loads(response.read(524288))
+                        document["title"] = title
+                        return json_response(document)
+                    return response
+
+                fixture.external = current_pull
+                with patch.object(
+                    review_run, "engine_main", wraps=review_run.engine_main
+                ) as engine:
+                    status = fixture.invoke()
+                self.assertEqual(status, 0 if accepted else 1, fixture.error)
+                self.assertEqual(fixture.provider_calls, 1 if accepted else 0)
+                if accepted:
+                    engine.assert_called_once()
+                    arguments = engine.call_args.args[0]
+                    self.assertIn("--title=" + title, arguments)
+                else:
+                    engine.assert_not_called()
+                    self.assertIn("256-byte bound", fixture.error)
+                    self.assertIsNone(fixture.comment)
+                    self.assertFalse(
+                        any(
+                            path.endswith("/github/token")
+                            for _, _, path in fixture.trace
+                        )
+                    )
+
+    def test_metered_lifecycle_rejects_foreign_or_fork_heads_before_broker_entry(self):
+        from urllib.parse import urlsplit
+
+        from tests.fake_github_http import json_response
+        from tests.test_review_run import EntryFixture
+
+        for repository, fork in (
+            ("owner/repo", True),
+            ("other/repo", False),
+            ("owner/repo", None),
+        ):
+            with (
+                self.subTest(repository=repository, fork=fork),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture = EntryFixture(directory)
+                external = fixture.external
+
+                def current_pull(request, timeout):
+                    response = external(request, timeout)
+                    if urlsplit(request.full_url).path == "/repos/owner/repo/pulls/7":
+                        document = json.loads(response.read(524288))
+                        document["head"]["repo"].update(full_name=repository, fork=fork)
+                        return json_response(document)
+                    return response
+
+                fixture.external = current_pull
+                self.assertEqual(fixture.invoke(), 1, fixture.error)
+                self.assertEqual(fixture.provider_calls, 0)
+                self.assertIsNone(fixture.comment)
+                self.assertIn("live reviewed base or head conflicts", fixture.error)
+                self.assertFalse(
+                    any(path.endswith("/github/token") for _, _, path in fixture.trace)
+                )
 
     def test_reusable_workflow_requires_registry_core_and_pins_hosted_fallback(self):
         workflow = (
@@ -1812,10 +1832,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         # run actually executes, and every install step consumes that one
         # identity instead of re-deriving it.
         self.assertEqual(
-            text.count("REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}"), 1
+            text.count("REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}"), 6
         )
         self.assertEqual(
-            text.count("REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}"), 1
+            text.count("REVIEW_SENSEI_WORKFLOW_SHA: ${{ job.workflow_sha }}"), 6
         )
         release = _run_block_containing(text, "must run from a public git tag")
         self.assertIn("@refs/tags/[A-Za-z0-9]", release)
@@ -2180,91 +2200,31 @@ class ReusablePublishGuardTests(unittest.TestCase):
                             (root / "checkpoint-diagnostics.json").exists()
                         )
 
-    def test_provider_jobs_publish_only_a_current_head_after_a_successful_review(
-        self,
-    ):
+    def test_provider_jobs_use_one_lifecycle_with_artifact_only_followup(self):
         text = _reusable_workflow_text()
-        admission_if = "if: success() && !cancelled() && inputs.operation == 'review'"
-        publish_if = (
-            admission_if + " && steps.publish-admission.outputs.status == 'current'"
-            " && inputs.recover_publication"
-        )
-        upload_if = (
-            "if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts"
-            " == 'diagnostics' && ((steps.provider-review.outcome == 'success'"
-            " && steps.provider-review.outputs.result_ready == 'true'"
-        )
-        confirm_name = "Confirm live pull-request head is still current"
-        upload_name = "Upload diagnostics artifact"
-        self.assertEqual(text.count(confirm_name), 2)
-        self.assertEqual(text.count(publish_if), 2)
-        self.assertEqual(text.count(upload_if), 2)
-        self.assertEqual(text.count("id: publish-admission"), 2)
-        # The engine controls budget admission. Failed publication still retains
-        # an opted-in result/context bundle; an inference skip has no result.
-        for token in (
-            "budget-admission",
-            "outcome_status",
-            "inputs.enable_github_writes",
-            "inputs.enable_review",
-            "inputs.enable_mention_replies",
-            "inputs.upload_artifacts",
+        self.assertNotIn("id: publish-admission", text)
+        self.assertNotIn('review-sensei-github" publish', text)
+        self.assertNotIn('review-sensei-github" release-reservation', text)
+        for job_id, step_name in (
+            ("hosted", "Run hosted review"),
+            ("local", "Run local review"),
         ):
-            self.assertNotIn(token, text)
-
-        for job_id, publish_name in (
-            ("hosted", "Publish or promote validated review through the broker"),
-            ("local", "Publish or promote validated local review and learnings"),
-        ):
-            with self.subTest(job=job_id):
-                job = _job_section(text, job_id)
-                names = _named_steps(job)
-                publish_index = names.index(publish_name)
-                self.assertEqual(names[publish_index - 1], confirm_name)
-                revalidate = _step_block(job, confirm_name)
-                publish = _step_block(job, publish_name)
-                self.assertIn(admission_if, revalidate)
-                self.assertNotIn("steps.publish-admission.outputs.status", revalidate)
-                self.assertIn(publish_if, publish)
-                upload = _step_block(job, upload_name)
-                for artifact in (
-                    "review.json",
-                    "configuration-context.json",
-                    "admission-context.json",
-                    "pr.patch",
-                    "publication-outcome.json",
-                ):
-                    self.assertIn(artifact, upload)
-                self.assertIn("GH_TOKEN: ${{ github.token }}", revalidate)
-                self.assertIn(
-                    'gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}"',
-                    revalidate,
-                )
-                self.assertIn("--jq '.head.sha'", revalidate)
-                self.assertIn("for attempt in 1 2 3", revalidate)
-                self.assertIn("HTTP\\ (401|403|404)", revalidate)
-                self.assertIn("jitter_hundredths", revalidate)
-                self.assertIn('sleep "${delay}.${jitter_hundredths}"', revalidate)
-                self.assertNotIn("2>/dev/null", revalidate)
-                self.assertNotIn('sleep "$attempt"', revalidate)
-                self.assertEqual(revalidate.count("echo 'skipped_stale'"), 1)
-                self.assertIn("status=skipped_stale", revalidate)
-                self.assertIn("status=current", revalidate)
-                self.assertIn("refusing publish", revalidate)
-                self.assertNotIn("--allow-write", revalidate)
-                self.assertNotIn("github review", revalidate)
-                self.assertNotIn("/github/token", revalidate)
-                self.assertNotIn("id-token", revalidate)
-                self.assertNotIn("OLLAMA_API_KEY", revalidate)
-                self.assertIn('review-sensei-github" publish', publish)
-                upload = _step_block(job, upload_name)
-                self.assertIn(upload_if, upload)
-                self.assertIn("if-no-files-found: error", upload)
-                self.assertIn("retention-days: 7", upload)
-
-        hosted_confirm = _step_block(_job_section(text, "hosted"), confirm_name)
-        local_confirm = _step_block(_job_section(text, "local"), confirm_name)
-        self.assertEqual(hosted_confirm, local_confirm)
+            job = _job_section(text, job_id)
+            review = _step_block(job, step_name)
+            self.assertIn('" review-run ', review)
+            self.assertNotIn("gh api", review)
+            self.assertIn("--publication-outcome publication-outcome.json", review)
+            self.assertIn('kill -TERM "$review_pid"', review)
+            upload = _step_block(job, "Upload diagnostics artifact")
+            self.assertIn("if-no-files-found: error", upload)
+            self.assertIn("retention-days: 7", upload)
+            for artifact in (
+                "review.json",
+                "publication-outcome.json",
+                "configuration-context.json",
+                "admission-context.json",
+            ):
+                self.assertIn(artifact, upload)
 
     def test_provider_jobs_hold_no_credential_and_no_write_scope_by_default(self):
         # Publication is a broker exchange: provider jobs read the repository

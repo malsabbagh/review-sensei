@@ -14,15 +14,30 @@ from typing import Any, Mapping, cast
 
 from .errors import ReviewInputError
 
-DEFAULT_API_REQUEST_LIMIT = 128  # Provisional until full public-path measurement.
+DEFAULT_API_REQUEST_LIMIT = 512
+# Closed JSON/JavaScript integer representation, not an operational workload cap.
+MAX_API_REQUEST_LIMIT = (1 << 53) - 1
 ACCOUNTING_VERSION = "caller-requests-v1"
 _HEX40 = re.compile(r"[a-f0-9]{40}")
 _HEX64 = re.compile(r"[a-f0-9]{64}")
 _NAME = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+ACTION_NOOP_REASONS = frozenset(
+    {
+        "status",
+        "already_handled",
+        "policy_disabled",
+        "not_a_command",
+        "unauthorized",
+        "writes_disabled",
+        "not_mentioned",
+        "source_already_handled",
+        "no_change",
+    }
+)
 
 
 def _natural(value: object, *, positive: bool = False) -> bool:
-    return type(value) is int and value >= int(positive)
+    return type(value) is int and int(positive) <= value <= MAX_API_REQUEST_LIMIT
 
 
 @dataclass(frozen=True)
@@ -188,6 +203,7 @@ class ApiRunAccounting:
     previous_record: Mapping[str, object] | None = None
     terminal_transaction: str | None = None
     analysis_abort: Mapping[str, object] | None = None
+    action: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -254,6 +270,8 @@ class ApiRunAccounting:
             or _HEX64.fullmatch(self.terminal_transaction) is None
         ):
             raise ReviewInputError("caller terminal transaction identity is invalid")
+        if self.action is not None:
+            self._validate_action()
         if self.previous_record is not None:
             from .bounded_evidence import validate_manifest
 
@@ -293,6 +311,111 @@ class ApiRunAccounting:
     @property
     def reserved_undispatched(self) -> int:
         return sum(b.undispatched for b in self.blocks)
+
+    def _validate_action(self) -> None:
+        """Closed values only; the native adapter authenticates source and result."""
+        from .bounded_evidence import canonical_bytes, read_inline_evidence
+
+        action = self.action
+        if (
+            not isinstance(action, Mapping)
+            or set(action)
+            != {"intent", "phase", "execution_started", "result", "outcome"}
+            or self.terminal_transaction is not None
+            or self.analysis_abort is not None
+            or not isinstance(action["phase"], str)
+            or action["phase"] not in {"pending", "terminal"}
+            or type(action["execution_started"]) is not bool
+        ):
+            raise ReviewInputError("caller action completion variant is invalid")
+        intent = action["intent"]
+        if (
+            not isinstance(intent, Mapping)
+            or set(intent)
+            != {
+                "purpose",
+                "source",
+                "run_id",
+                "owner",
+                "head_sha",
+                "configuration_digest",
+                "operation_key",
+                "source_root",
+            }
+            or not isinstance(intent["purpose"], str)
+            or intent["purpose"] not in {"command", "reply"}
+            or type(intent["run_id"]) is not int
+            or intent["run_id"] != self.identity.run_id
+            or intent["configuration_digest"] != self.configuration.digest
+            or not isinstance(intent["owner"], dict)
+            or set(intent["owner"]) != {"run_attempt", "job", "generation"}
+            or not isinstance(intent["head_sha"], str)
+            or _HEX40.fullmatch(intent["head_sha"]) is None
+            or any(
+                not isinstance(intent[key], str)
+                or _HEX64.fullmatch(intent[key]) is None
+                for key in ("operation_key", "source_root")
+            )
+        ):
+            raise ReviewInputError("caller action intent is malformed")
+        original_owner = ApiExecutionOwner(**intent["owner"])
+        if (
+            original_owner.job != self.owner.job
+            or original_owner.run_attempt > self.owner.run_attempt
+            or original_owner.generation > self.owner.generation
+        ):
+            raise ReviewInputError("caller action intent owner conflicts")
+        source = intent["source"]
+        if (
+            not isinstance(source, Mapping)
+            or set(source) != {"kind", "id", "updated_at", "body_sha256"}
+            or not isinstance(source["kind"], str)
+            or source["kind"] not in {"issue_comment", "review_comment"}
+            or intent["purpose"] == "command"
+            and source["kind"] != "issue_comment"
+            or not _natural(source["id"], positive=True)
+            or not isinstance(source["updated_at"], str)
+            or not re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z",
+                source["updated_at"],
+            )
+            or not isinstance(source["body_sha256"], str)
+            or _HEX64.fullmatch(source["body_sha256"]) is None
+        ):
+            raise ReviewInputError("caller action source is malformed")
+        if action["phase"] == "pending":
+            if action["result"] is not None or action["outcome"] is not None:
+                raise ReviewInputError(
+                    "pending action cannot carry a completion result"
+                )
+        else:
+            if not action["execution_started"]:
+                raise ReviewInputError("terminal action has no execution entry")
+            outcome = action["outcome"]
+            if (
+                not isinstance(outcome, Mapping)
+                or set(outcome) != {"kind", "reason"}
+                or not isinstance(outcome["kind"], str)
+                or outcome["kind"]
+                not in {"applied", "already_applied", "explicit_noop"}
+                or outcome["kind"] == "explicit_noop"
+                and (
+                    not isinstance(outcome["reason"], str)
+                    or outcome["reason"] not in ACTION_NOOP_REASONS
+                )
+                or outcome["kind"] != "explicit_noop"
+                and outcome["reason"] is not None
+            ):
+                raise ReviewInputError("caller action outcome is invalid")
+            manifest = action["result"]
+            if not isinstance(manifest, dict) or not isinstance(
+                manifest.get("binding"), dict
+            ):
+                raise ReviewInputError("caller action retained result is malformed")
+            read_inline_evidence(manifest, expected_binding=manifest["binding"])
+        # Copy values so a caller retaining a mutable mapping cannot change an
+        # admitted source while the accounting object is reused for dispatch.
+        object.__setattr__(self, "action", json.loads(canonical_bytes(action)))
 
     @property
     def confirmed(self) -> int:
@@ -426,6 +549,19 @@ class ApiRunAccounting:
             raise ReviewInputError("analysis abort closure cannot be replaced")
         if self.previous_record != candidate.previous_record:
             raise ReviewInputError("retained caller history cannot change within a run")
+        if self.action is not None:
+            if (
+                candidate.action is None
+                or self.action["intent"] != candidate.action["intent"]
+            ):
+                raise ReviewInputError("caller action intent cannot be replaced")
+            if (
+                self.action["execution_started"]
+                and not candidate.action["execution_started"]
+            ):
+                raise ReviewInputError("caller action entry cannot be reset")
+            if self.action["phase"] == "terminal" and self.action != candidate.action:
+                raise ReviewInputError("caller action completion cannot be replaced")
         claimed = (
             self
             if candidate.owner == self.owner
@@ -502,6 +638,7 @@ class ApiRunAccounting:
             previous_record=document.get("previous_record"),
             terminal_transaction=document.get("terminal_transaction"),
             analysis_abort=document.get("analysis_abort"),
+            action=document.get("action"),
         )
 
 

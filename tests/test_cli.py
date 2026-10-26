@@ -27,7 +27,6 @@ from review_sensei.cli import (
     main,
     resolve_review_inference,
 )
-from review_sensei.disposition import MaintainerCommandResult
 from review_sensei.errors import ReviewInputError
 from review_sensei.outcomes import RunOutcome
 
@@ -240,8 +239,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             ):
                 status = github_main(
                     [
-                        "github",
-                        "review",
+                        "publish",
                         "--result",
                         str(result_path),
                         "--diff",
@@ -389,8 +387,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 ):
                     status = github_main(
                         [
-                            "github",
-                            "review",
+                            "publish",
                             "--diff",
                             str(diff_path),
                             "--repository",
@@ -470,8 +467,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                     with redirect_stderr(stderr):
                         status = github_main(
                             [
-                                "github",
-                                "review",
+                                "publish",
                                 "--result",
                                 str(result_path),
                                 "--diff",
@@ -531,7 +527,6 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 with patch.dict("os.environ", {REVIEW_MODE_ENV: "legacy"}):
                     status = github_main(
                         [
-                            "github",
                             "reply",
                             "--reply",
                             str(reply_path),
@@ -622,7 +617,6 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 ):
                     status = github_main(
                         [
-                            "github",
                             "reply",
                             "--generate",
                             "--repository",
@@ -695,7 +689,6 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 ):
                     status = github_main(
                         [
-                            "github",
                             "reply",
                             "--generate",
                             "--repository",
@@ -724,7 +717,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         self.assertEqual(FakeApplication.instance.calls[0]["read_token"], "read-token")
         self.assertEqual(registry.settings.api_key, None)
 
-    def test_github_legacy_reply_cli_reads_reply_file(self):
+    def test_github_prepared_reply_cli_reads_reply_file(self):
         import review_sensei_github as github_module
 
         class FakeApplication:
@@ -749,7 +742,6 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             ):
                 status = github_main(
                     [
-                        "github",
                         "reply",
                         "--reply",
                         str(reply_path),
@@ -905,7 +897,6 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             with redirect_stderr(stderr):
                 status = github_main(
                     [
-                        "github",
                         "reply",
                         "--generate",
                         "--repository",
@@ -1536,7 +1527,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             status = main(
                 [
                     "github",
-                    "review",
+                    "publish",
                     "--result",
                     "result.json",
                     "--diff",
@@ -1558,232 +1549,67 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             [sys.executable, "-m", "review_sensei_github"],
         )
 
-    def test_github_command_uses_the_broker_backed_session_ledger(self):
-        import review_sensei_github as github_module
-
-        class FakeApplication:
-            instances = []
-
-            def __init__(self, **kwargs):
-                self.kwargs = kwargs
-                self.calls = []
-                self.__class__.instances.append(self)
-
-            def apply_maintainer_command(self, **kwargs):
-                self.calls.append(kwargs)
-                return MaintainerCommandResult(
-                    action="pause",
-                    applied=True,
-                    operator_paused=True,
-                    summary="paused",
-                )
-
-        attestation = {
-            "version": 1,
-            "repository": "owner/repo",
-            "repository_id": 1,
-            "pull_request": 2,
-            "head_sha": "b" * 40,
-            "operation": "command",
-            "source_comment_id": 10,
-            "run_id": "123",
-            "issued_at": 1,
-            "concurrency_group": "reviewsensei-session-1-2",
-            "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
-            "job_workflow_sha": "a" * 40,
-        }
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "attestation.json"
-            path.write_text(json.dumps(attestation), encoding="utf-8")
-            with patch.object(github_module, "GitHubApplication", FakeApplication):
-                status = github_main(
-                    [
-                        "github",
-                        "command",
-                        "--comment-body",
-                        "@sensei review pause",
-                        "--actor",
-                        "alice",
-                        "--association",
-                        "OWNER",
-                        "--repository",
-                        "owner/repo",
-                        "--repository-id",
-                        "1",
-                        "--pull-request",
-                        "2",
-                        "--head-sha",
-                        "b" * 40,
-                        "--source-comment-id",
-                        "10",
-                        "--session-attestation",
-                        str(path),
-                        "--github-session-ledger",
-                        "--allow-write",
-                    ]
-                )
-        self.assertEqual(status, 0)
-        call = FakeApplication.instances[0].calls[0]
-        self.assertTrue(call["options"].github_session_ledger)
-        self.assertTrue(call["options"].github_writes)
-        self.assertEqual(call["session_attestation"], attestation)
-        self.assertEqual(call["source_comment_id"], 10)
-
-    def test_github_command_rejects_an_attestation_that_disagrees_with_the_cli(self):
-        import review_sensei_github as github_module
-
-        class FakeApplication:
-            instances = []
-
-            def __init__(self, **kwargs):
-                self.__class__.instances.append(self)
-
-        attestation = {
-            "version": 1,
-            "repository": "owner/repo",
-            "repository_id": 1,
-            "pull_request": 2,
-            "head_sha": "a" * 40,
-            "operation": "command",
-            "source_comment_id": 10,
-            "run_id": "123",
-            "issued_at": 1,
-            "concurrency_group": "reviewsensei-session-1-2",
-            "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
-            "job_workflow_sha": "b" * 40,
-        }
-        stderr = io.StringIO()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "attestation.json"
-            path.write_text(json.dumps(attestation), encoding="utf-8")
-            with (
-                patch.object(github_module, "GitHubApplication", FakeApplication),
-                redirect_stderr(stderr),
-            ):
-                status = github_main(
-                    [
-                        "github",
-                        "command",
-                        "--comment-body",
-                        "@sensei review pause",
-                        "--actor",
-                        "alice",
-                        "--association",
-                        "OWNER",
-                        "--repository",
-                        "owner/repo",
-                        "--repository-id",
-                        "1",
-                        "--pull-request",
-                        "2",
-                        "--head-sha",
-                        "c" * 40,
-                        "--source-comment-id",
-                        "10",
-                        "--session-attestation",
-                        str(path),
-                        "--github-session-ledger",
-                        "--allow-write",
-                    ]
-                )
-        self.assertEqual(status, 1)
-        self.assertIn("does not match the hosted command identity", stderr.getvalue())
-        self.assertEqual(FakeApplication.instances, [])
-
-    def test_github_command_reaches_the_real_application_with_an_injected_transport(
+    def test_retired_hosted_command_entry_refuses_before_construction_or_transport(
         self,
     ):
         import review_sensei_github as github_module
 
-        constructed = []
-
-        from review_sensei_github.http import GitHubHttp
-
-        class RecordingHttp(GitHubHttp):
-            def __init__(self):
-                super().__init__()
-                constructed.append(self)
-
-        broker_calls = []
-
-        class FakeBroker:
-            def __init__(self, *, control=None):
-                self.control = control
-                broker_calls.append(self)
-
-            def authorize_session_mutation(self, token, **kwargs):
-                broker_calls.append((token, kwargs))
-                # A grant without a session grant id must stop the mutation
-                # before any write, in the real application code.
-                return type(
-                    "Grant",
-                    (),
-                    {"token": "capability-token", "grant": None, "attestation": {}},
-                )()
-
-        attestation = {
-            "version": 1,
-            "repository": "owner/repo",
-            "repository_id": 1,
-            "pull_request": 2,
-            "head_sha": "b" * 40,
-            "operation": "command",
-            "source_comment_id": 10,
-            "run_id": "123",
-            "issued_at": 1,
-            "concurrency_group": "reviewsensei-session-1-2",
-            "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
-            "job_workflow_sha": "c" * 40,
-        }
-        stderr = io.StringIO()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "attestation.json"
-            path.write_text(json.dumps(attestation), encoding="utf-8")
+        for version in (1, 2, 3):
             with (
-                patch.object(github_module, "GitHubHttp", RecordingHttp),
-                patch.object(github_module, "BrokerClient", FakeBroker),
-                redirect_stderr(stderr),
+                self.subTest(version=version),
+                tempfile.TemporaryDirectory() as directory,
             ):
-                status = github_main(
-                    [
-                        "github",
-                        "command",
-                        "--comment-body",
-                        "@sensei review pause",
-                        "--actor",
-                        "alice",
-                        "--association",
-                        "OWNER",
-                        "--repository",
-                        "owner/repo",
-                        "--repository-id",
-                        "1",
-                        "--pull-request",
-                        "2",
-                        "--head-sha",
-                        "b" * 40,
-                        "--source-comment-id",
-                        "10",
-                        "--session-attestation",
-                        str(path),
-                        "--github-session-ledger",
-                        "--oidc-token",
-                        "caller-oidc",
-                        "--allow-write",
-                    ]
+                path = Path(directory) / "attestation.json"
+                path.write_text(json.dumps({"version": version}), encoding="utf-8")
+                stderr = io.StringIO()
+                with (
+                    patch.object(github_module, "GitHubHttp") as http,
+                    patch.object(github_module, "BrokerClient") as broker,
+                    patch.object(github_module, "GitHubApplication") as application,
+                    redirect_stderr(stderr),
+                ):
+                    status = github_main(
+                        [
+                            "command",
+                            "--comment-body",
+                            "@sensei review pause",
+                            "--actor",
+                            "alice",
+                            "--association",
+                            "OWNER",
+                            "--repository",
+                            "owner/repo",
+                            "--repository-id",
+                            "1",
+                            "--pull-request",
+                            "2",
+                            "--head-sha",
+                            "b" * 40,
+                            "--source-comment-id",
+                            "10",
+                            "--session-attestation",
+                            str(path),
+                            "--github-session-ledger",
+                            "--oidc-token",
+                            "caller-oidc",
+                            "--allow-write",
+                        ]
+                    )
+                self.assertEqual(status, 1)
+                self.assertIn(
+                    "hosted command phase entry is retired; use command-run",
+                    stderr.getvalue(),
                 )
-        self.assertEqual(status, 1)
-        self.assertIn(
-            "broker command authorization returned an invalid grant",
-            stderr.getvalue(),
-        )
-        self.assertEqual(len(constructed), 1)
-        token, kwargs = broker_calls[1]
-        self.assertEqual(token, "caller-oidc")
-        self.assertEqual(kwargs["repository_id"], 1)
-        self.assertEqual(kwargs["pull_request"], 2)
-        self.assertEqual(kwargs["head_sha"], "b" * 40)
-        self.assertEqual(kwargs["session_attestation"], attestation)
+                http.assert_not_called()
+                broker.assert_not_called()
+                application.assert_not_called()
+
+    def test_retired_hosted_aliases_never_invoke_publication_or_provider(self):
+        for command in ("review", "reply", "command"):
+            with self.subTest(command=command), redirect_stderr(io.StringIO()):
+                with patch("review_sensei_github.cli.run_github") as run:
+                    self.assertEqual(github_main(["github", command]), 2)
+                run.assert_not_called()
 
     def test_github_command_local_ledger_rejects_hosted_only_flags(self):
         from review_sensei.session import LocalSessionLedger, SessionIdentity
@@ -1800,7 +1626,6 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 with redirect_stderr(stderr):
                     status = github_main(
                         [
-                            "github",
                             "command",
                             "--comment-body",
                             "@sensei review pause",
@@ -3430,8 +3255,7 @@ class HostedPublicationCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase
         ):
             return github_main(
                 [
-                    "github",
-                    "review",
+                    "publish",
                     "--result",
                     str(result_path),
                     "--diff",
@@ -3659,11 +3483,8 @@ class HostedSessionLedgerFlagTests(IsolatedWorkingDirectoryMixin, unittest.TestC
             diff_path = root / "diff.patch"
             diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             with redirect_stderr(stderr):
-                from review_sensei_github.cli import main as github_main
-
-                status = github_main(
+                status = main(
                     [
-                        "review",
                         "--diff",
                         str(diff_path),
                         "--provider",
@@ -3680,7 +3501,8 @@ class HostedSessionLedgerFlagTests(IsolatedWorkingDirectoryMixin, unittest.TestC
                         "merge-focused",
                         "--no-learning-proposals",
                         *extra,
-                    ]
+                    ],
+                    hosted_hooks=object(),
                 )
         return status, stderr.getvalue()
 

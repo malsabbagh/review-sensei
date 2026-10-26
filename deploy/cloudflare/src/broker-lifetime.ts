@@ -5,6 +5,7 @@ import type { BrokerDispatchControl } from "./broker-dispatch-control";
 // five seconds below the ordinary client's unchanged thirty-second timeout.
 export const BROKER_EXCHANGE_MS = 25_000;
 export const BROKER_UPSTREAM_MS = 10_000;
+export const BROKER_MAX_DISPATCHES = 60;
 
 export class BrokerLifetime {
   private deadline = Date.now() + BROKER_EXCHANGE_MS;
@@ -13,6 +14,7 @@ export class BrokerLifetime {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private control: BrokerDispatchControl | undefined;
   private deadlineCode = "broker_request_deadline_exhausted";
+  private dispatched = 0;
 
   constructor(deadlineUnixMs?: number, private readonly observation?: BrokerObservation) {
     if (deadlineUnixMs !== undefined) {
@@ -59,7 +61,11 @@ export class BrokerLifetime {
     const span = this.observation?.start(stage);
     try {
       this.constrain(control);
+      if (this.dispatched >= BROKER_MAX_DISPATCHES) throw new Error("broker_request_budget_exhausted");
       const paidSignal = control?.beforeDispatch(); // Exactly one existing debit.
+      // Admission is permanent even when the upstream throws or its outcome
+      // cannot be observed. Optional client controls can only reduce this cap.
+      this.dispatched += 1;
       span?.admitted();
       const scope = new BrokerUpstream(this, this.controller.signal, paidSignal, control, span);
       try { return await scope.wait(operation(scope)); }

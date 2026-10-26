@@ -41,8 +41,10 @@ from tests.test_api_work_persistence import BASE, HEAD, IDENTITY
 # Fixed modest fixture: measured work attempts, not a shipping default/minimum.
 # Admission 11 + provider metadata 4 + completion 8 + publication 45.
 QUALIFIED_WORK_CALLS = 11 + 4 + 8 + 45
+# The final selected write keeps two undispatched confirmation attempts.
+QUALIFIED_CONFIRMATION_HEADROOM = 2
 QUALIFICATION_LIMIT = HOSTED_API_STARTUP_PLAN.liability + 2 * (
-    TERMINAL_REQUESTS + QUALIFIED_WORK_CALLS
+    TERMINAL_REQUESTS + QUALIFIED_WORK_CALLS + QUALIFIED_CONFIRMATION_HEADROOM
 )
 
 
@@ -159,22 +161,7 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
                         ),
                     }
                 )
-                value = {
-                    "token": "synthetic-" + payload["capability"],
-                    "capability": payload["capability"],
-                    "control_receipt": {
-                        **payload["control_budget"],
-                        "dispatched": min(
-                            self.fanout, payload["control_budget"]["max_dispatches"]
-                        ),
-                    },
-                }
-                if payload["capability"] == "review_session":
-                    value.update(
-                        session_state="known" if self.comment else "enrolled",
-                        reservation_owner={"run_id": "456", "head_sha": HEAD},
-                    )
-                return json_response(value)
+                return json_response(self.broker_response(payload))
             if files:
                 return json_response(
                     [
@@ -414,6 +401,7 @@ class CallerLifecycleTests(unittest.TestCase):
                 control=BrokerDispatchAccounting(
                     fixture.accounted.budget_view, "c" * 64, 10, 1
                 ),
+                authority=fixture.review_authority(),
             )
             app = GitHubApplication(
                 broker=broker,
@@ -570,7 +558,8 @@ class CallerLifecycleTests(unittest.TestCase):
             # Initial owner receives the odd unit; the successor must work with
             # floor(remaining/2). These are fixed fixture measurements only.
             minimum = (
-                HOSTED_API_STARTUP_PLAN.liability + 2 * (TERMINAL_REQUESTS + work) - 1
+                HOSTED_API_STARTUP_PLAN.liability
+                + 2 * (TERMINAL_REQUESTS + work + QUALIFIED_CONFIRMATION_HEADROOM) - 1
             )
             for limit in (minimum - 1, minimum):
                 with (
@@ -583,7 +572,7 @@ class CallerLifecycleTests(unittest.TestCase):
                         native, IDENTITY, config, owner
                     )
                     if limit < minimum:
-                        with self.assertRaisesRegex(ReviewInputError, "cannot fund"):
+                        with self.assertRaisesRegex(ReviewInputError, "cannot fund|write/readback tail"):
                             self.journey(
                                 directory, prepared=(fixture, native), human=human
                             )
@@ -623,7 +612,7 @@ class CallerLifecycleTests(unittest.TestCase):
             fixture.interrupt_engine_read = True
             self.journey(directory, prepared=(fixture, native), expected_analysis=130)
             native = fixture.recover_lifecycle()
-            with self.assertRaisesRegex(ReviewInputError, "cannot fund"):
+            with self.assertRaisesRegex(ReviewInputError, "cannot fund|write/readback tail"):
                 self.journey(directory, prepared=(fixture, native))
             self.assertEqual(fixture.accounted.accounting.blocks[:2], original.blocks)
             self.assertEqual(fixture.accounted.accounting.remaining, 0)

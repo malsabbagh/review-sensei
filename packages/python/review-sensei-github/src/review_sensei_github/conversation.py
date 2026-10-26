@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Sequence
 from urllib.parse import quote
 
@@ -31,6 +31,14 @@ from review_sensei.models import (
 from review_sensei.presentation import append_response_instructions
 from review_sensei.validation import validate_repository_path
 
+from .action_completion import (
+    ReplyFinalizationCompletion,
+    _confirmed_finalization,
+    _reply_unnecessary,
+    rebind_reply_completion,
+    reply_completion_from_finalization,
+    reply_source,
+)
 from .approval import ReviewApprovalEligibility
 from .errors import (
     GitHubConversationError,
@@ -246,6 +254,15 @@ class ReplyResult:
     assessment_status: str | None = None
     assessment_diagnostic: str | None = None
     resolution_status: str | None = None
+    finalization_completion: ReplyFinalizationCompletion | None = field(
+        default=None, compare=False, repr=False
+    )
+
+
+def _carry_finalization(previous: ReplyResult, result: ReplyResult) -> ReplyResult:
+    return replace(
+        result, finalization_completion=rebind_reply_completion(previous, result)
+    )
 
 
 @dataclass(frozen=True)
@@ -1520,15 +1537,18 @@ class ConversationPublisher:
                     evidence_sha256=resolution_evidence,
                     base_sha=resolution_base_sha,
                 )
-                return ReplyResult(
-                    status="already_replied_and_resolved"
-                    if resolution.resolved
-                    else "already_replied",
-                    comment_id=existing,
-                    resolved=resolution.resolved,
-                    resolution_status=resolution.resolution_status,
-                    approval_status=resolution.approval_status,
-                    approval_diagnostic=resolution.approval_diagnostic,
+                return _carry_finalization(
+                    resolution,
+                    ReplyResult(
+                        status="already_replied_and_resolved"
+                        if resolution.resolved
+                        else "already_replied",
+                        comment_id=existing,
+                        resolved=resolution.resolved,
+                        resolution_status=resolution.resolution_status,
+                        approval_status=resolution.approval_status,
+                        approval_diagnostic=resolution.approval_diagnostic,
+                    ),
                 )
             return ReplyResult(status="already_replied", comment_id=existing)
 
@@ -1649,15 +1669,18 @@ class ConversationPublisher:
                         evidence_sha256=resolution_evidence,
                         base_sha=resolution_base_sha,
                     )
-                    return ReplyResult(
-                        status="replied_and_resolved"
-                        if resolution.resolved
-                        else "replied",
-                        comment_id=comment_id,
-                        resolved=resolution.resolved,
-                        resolution_status=resolution.resolution_status,
-                        approval_status=resolution.approval_status,
-                        approval_diagnostic=resolution.approval_diagnostic,
+                    return _carry_finalization(
+                        resolution,
+                        ReplyResult(
+                            status="replied_and_resolved"
+                            if resolution.resolved
+                            else "replied",
+                            comment_id=comment_id,
+                            resolved=resolution.resolved,
+                            resolution_status=resolution.resolution_status,
+                            approval_status=resolution.approval_status,
+                            approval_diagnostic=resolution.approval_diagnostic,
+                        ),
                     )
                 return ReplyResult(status="replied", comment_id=comment_id)
         if _pending_stage is not None and (
@@ -1696,15 +1719,18 @@ class ConversationPublisher:
                         evidence_sha256=resolution_evidence,
                         base_sha=resolution_base_sha,
                     )
-                    return ReplyResult(
-                        status="already_replied_and_resolved"
-                        if resolution.resolved
-                        else "already_replied",
-                        comment_id=existing_after,
-                        resolved=resolution.resolved,
-                        resolution_status=resolution.resolution_status,
-                        approval_status=resolution.approval_status,
-                        approval_diagnostic=resolution.approval_diagnostic,
+                    return _carry_finalization(
+                        resolution,
+                        ReplyResult(
+                            status="already_replied_and_resolved"
+                            if resolution.resolved
+                            else "already_replied",
+                            comment_id=existing_after,
+                            resolved=resolution.resolved,
+                            resolution_status=resolution.resolution_status,
+                            approval_status=resolution.approval_status,
+                            approval_diagnostic=resolution.approval_diagnostic,
+                        ),
                     )
                 return ReplyResult(status="already_replied", comment_id=existing_after)
             if status == 422:
@@ -2123,7 +2149,10 @@ class ConversationPublisher:
             app_slug=arguments["app_slug"],
         )
 
+        last_source: dict[str, Any] | None = None
+
         def fence() -> str | None:
+            nonlocal last_source
             source_kind = arguments.get("source_kind", "inline")
             suffix = "pulls" if source_kind == "inline" else "issues"
             status, source = self.http.request(
@@ -2166,7 +2195,10 @@ class ConversationPublisher:
                 head_sha=arguments["head_sha"],
                 app_slug=arguments["app_slug"],
             )
-            return preflight.result.status if preflight.result is not None else None
+            if preflight.result is not None:
+                return preflight.result.status
+            last_source = source
+            return None
 
         outcome = self.publish_pending(
             eligibility=eligibility, fence=fence, **arguments
@@ -2184,6 +2216,26 @@ class ConversationPublisher:
             )[-1]
             resolved = self.publish(**arguments, pending_page=last_page)
             return resolved
+        if (
+            not arguments["reply"].resolve
+            and outcome.status in {"replied", "already_replied"}
+            and outcome.assessment_status is None
+            and fence() is None
+            and last_source is not None
+            and isinstance(last_source.get("body"), str)
+        ):
+            source = reply_source(
+                repository=arguments["repository"],
+                pull_request=arguments["pull_request"],
+                head_sha=arguments["head_sha"],
+                kind=arguments.get("source_kind", "inline"),
+                source_id=arguments["source_comment_id"],
+                updated_at=arguments["source_updated_at"],
+                body=last_source["body"],
+            )
+            return replace(
+                outcome, finalization_completion=_reply_unnecessary(outcome, source)
+            )
         return outcome
 
     def _resolve_and_finalize(
@@ -2388,13 +2440,47 @@ class ConversationPublisher:
                 eligibility=eligibility,
                 require_persisted=True,
             )
-            return ReplyResult(
+            completed = ReplyResult(
                 status="replied",
                 resolved=resolved,
                 resolution_status=result.resolution_status,
                 approval_status=finalized.status,
                 approval_diagnostic=finalized.diagnostic,
             )
+            # This generic resolution route selects no check publication. Its
+            # thread operation still has to establish every selected target.
+            if not resolution.unconfirmed and resolved:
+                native = replace(
+                    finalized,
+                    thread_resolution="resolved",
+                    finalization_completion=None,
+                )
+                native = replace(
+                    native,
+                    finalization_completion=_confirmed_finalization(finalized, native),
+                )
+                if isinstance(source_updated_at, str) and isinstance(
+                    source.get("body"), str
+                ):
+                    bound = reply_source(
+                        repository=repository,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        kind="inline",
+                        source_id=source_comment_id,
+                        updated_at=source_updated_at,
+                        body=source["body"],
+                    )
+                    completed = replace(
+                        completed,
+                        finalization_completion=reply_completion_from_finalization(
+                            native,
+                            completed,
+                            bound,
+                            result_digest=eligibility.result_digest,
+                        ),
+                    )
+            return completed
         except (
             GitHubHTTPError,
             GitHubPublicationError,

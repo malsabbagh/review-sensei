@@ -9,8 +9,9 @@ providers later.
 > primary usage path is running ReviewSensei in your own GitHub Actions
 > workflow. Setup-v4 callers follow the operator-managed public `v5` tag; the
 > Worker validates that tag before creating the setup PR and the broker resolves
-> it again when issuing a capability. The broker still accepts `v4` during
-> migration. The example workflow installs exact versioned packages; its
+> it again when issuing a capability. Current callers and Worker use the same
+> purpose-bound authority format; obsolete authority is refused. The example
+> workflow installs exact versioned packages; its
 > [version-specific installation contract](docs/installation.md#github-workflow-example)
 > defines registry requirements and source fallback. Supported paths prove the intended
 > release identity against a compatibility manifest; live canary and `v5`
@@ -66,9 +67,27 @@ and a repository without that file uses the packaged defaults:
 ```yaml
 schema: 1
 
+api_request_limit: 512
+
 inference:
   backend: local-ollama
 ```
+
+`api_request_limit` bounds ReviewSensei caller HTTP attempts for one authenticated
+Actions run, across startup, review or conversation work, publication and cleanup.
+OIDC, GitHub reads and writes, and each Worker POST count; a Worker POST counts
+once regardless of its internal fanout. Inference keeps its separate resource
+limits. Checkout, package installation and artifact upload are infrastructure
+outside this allowance.
+
+The default is 512. Positive integers through 9,007,199,254,740,991 are accepted;
+admission requires at least 238 for review/reply or 240 for commands under the
+current finite reservation policy. These minimums do not promise completion.
+Independent pagination, retained-state, output and deadline limits still apply.
+Failed, uncertain and abandoned allocations stay charged. A supported successor
+attempt shares the original run's allowance and must prove predecessor cessation.
+See [the accounting decision](docs/adr/0111-caller-api-work-allowance.md) for the
+recovery and deployment contract.
 
 Select a backend on the command line when one run needs a different one:
 

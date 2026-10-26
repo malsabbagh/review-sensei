@@ -500,7 +500,7 @@ class EvidenceReadBudget:
     def preflight(self, calls: int) -> None:
         self.check()
         if calls > self.ordinary_remaining():
-            raise ReviewInputError(
+            raise EvidenceBudgetExhausted(
                 "partition shared request budget cannot stage complete inventory"
             )
 

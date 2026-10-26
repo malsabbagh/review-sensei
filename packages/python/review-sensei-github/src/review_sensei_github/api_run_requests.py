@@ -8,14 +8,16 @@ never by loading a caller-supplied accounting document into a transport.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, cast
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
@@ -29,7 +31,7 @@ from review_sensei.api_work import (
     StartupPlan,
     initial_accounting,
 )
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
 from review_sensei.models import ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
 
@@ -37,6 +39,13 @@ from .api_run_owner import claim_review_startup
 from .caller_operation import CallerOperation
 from .http import Opener
 from .session_ledger import GitHubIssueCommentSessionLedger
+
+
+def json_copy(value: Any) -> Any:
+    """Detach source-owned values from mutable caller references."""
+    from review_sensei.bounded_evidence import canonical_bytes
+
+    return json.loads(canonical_bytes(value))
 
 
 class _RefuseCallerRedirects(HTTPRedirectHandler):
@@ -79,6 +88,23 @@ class AnalysisAbortBoundary:
     transaction: ReviewTransaction
 
 
+@dataclass(frozen=True)
+class ActionEffectBoundary:
+    """An in-process execution entry, issued after the durable entry marker."""
+
+    intent_sha256: str
+    owner: ApiExecutionOwner
+
+
+@dataclass(frozen=True)
+class ActionResultProof:
+    """Validated small result; only the owning settlement method issues it."""
+
+    boundary: ActionEffectBoundary
+    manifest: dict[str, object]
+    outcome: dict[str, object]
+
+
 class ApiRunRequestTransport:
     """One source-controlled startup slot, then one confirmed owned block.
 
@@ -101,7 +127,7 @@ class ApiRunRequestTransport:
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
     ):
-        if job not in {"hosted", "local"}:
+        if job not in {"hosted", "local", "command"}:
             raise ReviewInputError("review startup job is unsupported")
         self.job = job
         slots = [s for s in plan.slots if s.job == job and s.attempt == attempt]
@@ -143,6 +169,9 @@ class ApiRunRequestTransport:
         self._checkpoint_operation: CallerOperation | None = None
         self._failed_operations: set[tuple[str | None, str]] = set()
         self._issued_operations: list[tuple[CallerOperation, str | None]] = []
+        self._action_effect_boundary: ActionEffectBoundary | None = None
+        self._action_result_proof: ActionResultProof | None = None
+        self._action_result_fingerprint: str | None = None
 
     def label_phase(self, phase: str) -> None:
         if phase not in {
@@ -258,7 +287,7 @@ class ApiRunRequestTransport:
         if retained is None:
             self._issued_operations.append((operation, self._block))
         if operation.remaining < (write_tail or 1):
-            raise ReviewInputError("caller operation allocation is unfunded")
+            raise EvidenceBudgetExhausted("caller operation allocation is unfunded")
         self._active_operation = operation
         try:
             yield operation
@@ -266,6 +295,8 @@ class ApiRunRequestTransport:
             self._failed_operations.add(identity)
             raise
         finally:
+            if operation.write_attempted and not operation.confirmed:
+                self._failed_operations.add(identity)
             self._active_operation = None
 
     def mutation_operation(self, key: str) -> Any:
@@ -293,44 +324,50 @@ class ApiRunRequestTransport:
         pending: PendingApiRequest | None = None
         if self._state is None:
             if self.startup_dispatches >= len(self._slot.requests):
-                raise ReviewInputError("startup caller allowance is exhausted")
+                raise EvidenceBudgetExhausted("startup caller allowance is exhausted")
             if (
                 request.get_method() in {"POST", "PATCH"}
                 and self._activation is not None
                 and len(self._slot.requests) - self.startup_dispatches
                 < WRITE_CONFIRMATION_TAIL
             ):
-                raise ReviewInputError("startup caller write/readback tail is unfunded")
+                raise EvidenceBudgetExhausted(
+                    "startup caller write/readback tail is unfunded"
+                )
             self.startup_dispatches += 1
             phase = "startup"
             request_id = f"startup-{self.run.repository_id}-{self.run.run_id}-{self.attempt}-{self._sequence}"
         else:
             if self._active_operation is not None:
                 self._active_operation.consume(
-                    mutation=request.get_method() in {"POST", "PATCH", "DELETE"}
+                    mutation=request.get_method() in {"POST", "PUT", "PATCH", "DELETE"}
                 )
             if (
                 request.get_method() == "PATCH"
                 and self._checkpoint is not None
                 and self.usable < WRITE_CONFIRMATION_TAIL
             ):
-                raise ReviewInputError(
+                raise EvidenceBudgetExhausted(
                     "caller checkpoint write/readback tail is unfunded"
                 )
             path = urlsplit(request.full_url).path
             if (
-                request.get_method() in {"POST", "PATCH"}
-                and ("/issues/comments/" in path or path.endswith("/comments"))
+                request.get_method() in {"POST", "PUT", "PATCH", "DELETE"}
+                and (path.startswith("/repos/") or path == "/graphql")
                 and self.usable < WRITE_CONFIRMATION_TAIL
             ):
                 # Protect finite confirmation room without promising that the
                 # complete owned listing will fit. No internal Worker liability
                 # is debited and no replacement allowance is created.
-                raise ReviewInputError("caller comment write/readback tail is unfunded")
+                raise EvidenceBudgetExhausted(
+                    "caller business write/readback tail is unfunded"
+                )
             phase = "ordinary"
             request_id = f"caller-{self.run.repository_id}-{self.run.run_id}-{self._state.owner.generation}-{self._sequence}"
             pending = PendingApiRequest(request_id, deadline)
             assert self._block is not None
+            if self.usable <= 0:
+                raise EvidenceBudgetExhausted("caller request allocation is exhausted")
             self._state = self._state.dispatch(self._block, pending)
         observation = {
             "phase": phase,
@@ -339,7 +376,12 @@ class ApiRunRequestTransport:
             "deadline_unix_ms": deadline,
             "outcome": "unknown",
         }
-        observation["mutation"] = request.get_method() in {"POST", "PATCH", "DELETE"}
+        observation["mutation"] = request.get_method() in {
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+        }
         self.observations.append(observation)
         if observation["mutation"]:
             if self._checkpoint is not None and request.get_method() == "PATCH":
@@ -352,7 +394,7 @@ class ApiRunRequestTransport:
 
         def confirmed() -> None:
             if observation["outcome"] == "expired":
-                raise ReviewInputError(
+                raise EvidenceBudgetExhausted(
                     "caller response exceeded its original request deadline"
                 )
             if observation["outcome"] != "unknown":
@@ -371,7 +413,7 @@ class ApiRunRequestTransport:
                 or self._monotonic() > request_deadline
             ):
                 observation["outcome"] = "expired"
-                raise ReviewInputError(
+                raise EvidenceBudgetExhausted(
                     "caller response exceeded its original request deadline"
                 )
 
@@ -571,8 +613,10 @@ class ApiRunRequestTransport:
             if (
                 record.reservation_id is not None
                 or record.reserved_slot is not None
+                or (old.action is not None and old.action["phase"] != "terminal")
                 or (
-                    old.analysis_abort is None
+                    old.action is None
+                    and old.analysis_abort is None
                     and (
                         record.transaction is None
                         or record.transaction.phase
@@ -583,6 +627,10 @@ class ApiRunRequestTransport:
                 or (old.analysis_abort is not None and record.transaction is not None)
             ):
                 raise ReviewInputError("previous caller run is not terminal")
+            if old.action is not None:
+                from .api_run_history import read_action_result
+
+                read_action_result(ledger, identity, record)
             before_archive = len(self.observations)
             reference = retain_previous_run(ledger, identity, record)
             # The issuer authenticated the exact immutable part readback.
@@ -685,6 +733,297 @@ class ApiRunRequestTransport:
             return record.evolve(generation=record.generation + 1)
 
         return ledger.replace(identity, close)
+
+    def _action_unresolved(self) -> bool:
+        return (
+            self._provider_effect_unresolved
+            or self._checkpoint is not None
+            or any(
+                (
+                    item["outcome"] in {"unknown", "expired"}
+                    or item.get("uncertain_effect")
+                )
+                and item.get("mutation")
+                and item["request_id"] not in self._reconciled_mutations
+                for item in self.observations
+            )
+        )
+
+    def _action_checkpoint(self, ledger, identity, mutate):
+        from .errors import GitHubPublicationTransientError
+
+        try:
+            return self.replace_checkpoint(ledger, identity, mutate)
+        except GitHubPublicationTransientError:
+            # The original protected readback tail is the only recovery here.
+            # A missing or changed exact echo never authorizes another PATCH.
+            if self._checkpoint is None:
+                raise
+            return self.reconcile_checkpoint(ledger, identity)
+
+    def admit_action(
+        self, ledger, identity, *, purpose, source, head_sha, operation_key
+    ) -> dict[str, Any]:
+        """Confirm durable source-owned action intent before any business effect.
+
+        The adapter must authenticate the current-purpose grant and exact live
+        source first. These arguments are never a public document authority.
+        A same-run successor may retain an unstarted identical intent; a started
+        action requires exact operation-result recovery, never ordinary replay.
+        """
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        self._require_ledger(ledger, identity)
+        if self._action_unresolved():
+            raise ReviewInputError("caller action admission has unresolved work")
+        intent = {
+            "purpose": purpose,
+            "source": source,
+            "run_id": self.run.run_id,
+            "owner": asdict(self.accounting.owner),
+            "head_sha": head_sha,
+            "configuration_digest": self.accounting.configuration.digest,
+            "operation_key": operation_key,
+            "source_root": self._root,
+        }
+        existing = self.accounting.action
+        if existing is not None:
+            original = existing["intent"]
+            if any(
+                original[key] != intent[key]
+                for key in (
+                    "purpose",
+                    "source",
+                    "run_id",
+                    "head_sha",
+                    "configuration_digest",
+                    "operation_key",
+                )
+            ):
+                raise ReviewInputError("caller action source or operation conflicts")
+            if existing["phase"] != "pending" or existing["execution_started"]:
+                raise ReviewInputError(
+                    "caller action is complete or requires exact result recovery"
+                )
+            # Fresh native discovery authenticates the actual current owner and
+            # retains the original antecedent root across accounting-only writes.
+            loaded = ledger.load(identity)
+            if (
+                loaded.status != "ok"
+                or loaded.record is None
+                or loaded.record.record_sha256 != self._root
+                or ApiRunAccounting.from_document(
+                    loaded.record.api_run_accounting
+                ).action
+                != existing
+            ):
+                raise ReviewInputError("caller action admission root changed")
+            return json_copy(original)
+        action = {
+            "intent": intent,
+            "phase": "pending",
+            "execution_started": False,
+            "result": None,
+            "outcome": None,
+        }
+        candidate = replace(self.accounting, action=action)
+
+        def prepare(record):
+            if record.reservation_id is not None or record.reserved_slot is not None:
+                raise ReviewInputError(
+                    "caller action conflicts with a review reservation"
+                )
+            if record.transaction is not None and record.transaction.phase not in {
+                "publication_succeeded",
+                "publication_suppressed",
+            }:
+                raise ReviewInputError(
+                    "caller action conflicts with an unfinished review"
+                )
+            # Validate pure admission before changing any live accounting value.
+            canonical_bytes(candidate.to_document())
+            self._state = replace(self.accounting, action=action)
+            return record.evolve(generation=record.generation + 1)
+
+        confirmed = self._action_checkpoint(ledger, identity, prepare)
+        retained = ApiRunAccounting.from_document(confirmed.api_run_accounting).action
+        if retained is None or retained["intent"] != intent:
+            raise ReviewInputError("caller action intent publication is unconfirmed")
+        return json_copy(intent)
+
+    def begin_action_effect(self, ledger, identity, intent) -> ActionEffectBoundary:
+        """Durably mark entry before executing the selected command or reply."""
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        action = self.accounting.action
+        if (
+            action is None
+            or action["intent"] != intent
+            or action["phase"] != "pending"
+            or action["execution_started"]
+            or self._action_effect_boundary is not None
+            or self._action_unresolved()
+        ):
+            raise ReviewInputError(
+                "caller action execution is unavailable or may have started"
+            )
+
+        def prepare(record):
+            self._state = replace(
+                self.accounting, action={**action, "execution_started": True}
+            )
+            return record.evolve(generation=record.generation + 1)
+
+        self._action_checkpoint(ledger, identity, prepare)
+        boundary = ActionEffectBoundary(
+            hashlib.sha256(canonical_bytes(intent)).hexdigest(), self.accounting.owner
+        )
+        self._action_effect_boundary = boundary
+        return boundary
+
+    def settle_action_effect(
+        self,
+        ledger,
+        identity,
+        boundary: ActionEffectBoundary,
+        *,
+        outcome,
+        result_document,
+    ) -> ActionResultProof:
+        """Validate a completed in-process result, never infer it from absence.
+
+        Call only after all selected business/journal/publication obligations
+        have confirmed success. Provider errors or unknown outcomes must escape
+        the adapter without calling this method. A predecessor's boundary is
+        deliberately not reconstructible from its serialized intent.
+        """
+        from review_sensei.bounded_evidence import (
+            MAX_PARTITION_DECODED_BYTES,
+            encode_evidence,
+            inline_manifest,
+            read_inline_evidence,
+        )
+
+        from .api_run_history import action_result_binding, decode_action_result_carrier
+
+        self._require_ledger(ledger, identity)
+        action = self.accounting.action
+        if (
+            not isinstance(boundary, ActionEffectBoundary)
+            or boundary is not self._action_effect_boundary
+            or boundary.owner != self.accounting.owner
+            or action is None
+            or action["phase"] != "pending"
+            or not action["execution_started"]
+            or self._action_unresolved()
+            or not isinstance(result_document, dict)
+        ):
+            raise ReviewInputError(
+                "caller action result is not an owned confirmed outcome"
+            )
+        envelope = {
+            "schema_version": "caller-action-result-v1",
+            "intent_sha256": boundary.intent_sha256,
+            "outcome": outcome,
+            "result": json_copy(result_document),
+        }
+        carrier = {
+            "schema_version": "caller-action-result-v1",
+            "payload": encode_evidence(
+                envelope, max_decoded_bytes=MAX_PARTITION_DECODED_BYTES
+            ),
+        }
+        manifest = inline_manifest(
+            carrier,
+            binding=action_result_binding(
+                identity, self.accounting, ledger.evidence_producer()
+            ),
+            item_count=1,
+        )
+        if manifest is None:
+            raise ReviewInputError(
+                "caller action result exceeds its inline retention bound"
+            )
+        if (
+            decode_action_result_carrier(
+                read_inline_evidence(
+                    manifest,
+                    expected_binding=cast(Mapping[str, object], manifest["binding"]),
+                )
+            )
+            != envelope
+        ):
+            raise ReviewInputError("caller action result codec differs")
+        # The accounting constructor validates the closed outcome as well as
+        # the evidence manifest before any terminal mutation is prepared.
+        replace(
+            self.accounting,
+            action={
+                **action,
+                "phase": "terminal",
+                "result": manifest,
+                "outcome": outcome,
+            },
+        )
+        proof = ActionResultProof(boundary, json_copy(manifest), json_copy(outcome))
+        self._action_result_proof = proof
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        self._action_result_fingerprint = hashlib.sha256(
+            canonical_bytes({"manifest": proof.manifest, "outcome": proof.outcome})
+        ).hexdigest()
+        return proof
+
+    def close_action(self, ledger, identity, proof: ActionResultProof):
+        """Persist one immutable terminal receipt for the admitted action."""
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .api_run_history import read_action_result
+
+        self._require_ledger(ledger, identity)
+        if (
+            not isinstance(proof, ActionResultProof)
+            or proof is not self._action_result_proof
+            or self._action_unresolved()
+            or hashlib.sha256(
+                canonical_bytes({"manifest": proof.manifest, "outcome": proof.outcome})
+            ).hexdigest()
+            != self._action_result_fingerprint
+        ):
+            raise ReviewInputError("caller action has no settled result proof")
+        action = self.accounting.action
+        if action is None or proof.boundary is not self._action_effect_boundary:
+            raise ReviewInputError("caller action completion binding conflicts")
+        if action["phase"] == "terminal":
+            if action["result"] != proof.manifest or action["outcome"] != proof.outcome:
+                raise ReviewInputError("caller action terminal receipt changed")
+            loaded = ledger.load(identity)
+            if (
+                loaded.status != "ok"
+                or loaded.record is None
+                or loaded.record.record_sha256 != self._root
+            ):
+                raise ReviewInputError("caller action terminal root changed")
+            read_action_result(ledger, identity, loaded.record)
+            return loaded.record
+        if self._terminal_reason is None:
+            self.begin_terminal("action-completion")
+
+        def prepare(record):
+            self._state = replace(
+                self.accounting,
+                action={
+                    **action,
+                    "phase": "terminal",
+                    "result": proof.manifest,
+                    "outcome": proof.outcome,
+                },
+            )
+            return record.evolve(generation=record.generation + 1)
+
+        confirmed = self._action_checkpoint(ledger, identity, prepare)
+        read_action_result(ledger, identity, confirmed)
+        return confirmed
 
     def finish_review_run(self, ledger, identity, transaction):
         """Confirm one close marker after normal publication and its full tail.

@@ -58,7 +58,7 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
     """
 
     def __init__(self, http, *, token: str, command_run_id: str, job: str = "hosted"):
-        if job not in {"hosted", "local"}:
+        if job not in {"hosted", "local", "command"}:
             raise ReviewInputError("review owner job is unsupported")
         super().__init__(http, token=token, command_run_id=command_run_id)
         self.job = job

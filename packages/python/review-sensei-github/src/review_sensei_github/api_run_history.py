@@ -7,17 +7,22 @@ owned readback once, never another POST. History pointers never confer authority
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any, Mapping, cast
 
 from review_sensei.api_work import ApiRunAccounting
 from review_sensei.bounded_evidence import (
+    MAX_MANIFEST_BYTES,
     MAX_PART_BYTES,
+    MAX_PARTITION_DECODED_BYTES,
     MAX_STORED_PART_BYTES,
     MAX_STORED_PARTS,
     canonical_bytes,
+    decode_evidence,
     evidence_manifest,
     partition_evidence,
+    read_inline_evidence,
     read_partitioned_evidence,
 )
 from review_sensei.errors import ReviewInputError
@@ -28,8 +33,86 @@ from .http import MAX_PAGINATION_PAGES
 from .session_ledger import GitHubIssueCommentSessionLedger
 
 
+def action_result_binding(
+    identity: SessionIdentity, state: ApiRunAccounting, producer: str
+) -> dict[str, object]:
+    """Stable binding for one action, including its authenticated antecedent."""
+    action = state.action
+    if action is None:
+        raise ReviewInputError("caller action intent is unavailable")
+    intent = action["intent"]
+    return {
+        "repository": identity.repository,
+        "repository_id": identity.repository_id,
+        "pull_request": identity.pull_request,
+        # An action has no new reviewed base. P identifies its frozen policy;
+        # this value does not construct or replace any review transaction.
+        "base_sha": state.configuration.commit,
+        "head_sha": intent["head_sha"],
+        "policy_digest": hashlib.sha256(canonical_bytes(intent)).hexdigest(),
+        "configuration_digest": state.configuration.digest,
+        "generation": intent["owner"]["generation"],
+        "producer": producer,
+        "purpose": "evidence",
+        "schema_version": "1.0",
+    }
+
+
+def decode_action_result_carrier(value: object) -> dict[str, Any]:
+    """Bound lossless action-result expansion; this does not authenticate it."""
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "payload"}
+        or value["schema_version"] != "caller-action-result-v1"
+    ):
+        raise ReviewInputError("caller action result carrier is unsupported")
+    document = decode_evidence(
+        value["payload"],
+        max_encoded_bytes=MAX_MANIFEST_BYTES,
+        max_decoded_bytes=MAX_PARTITION_DECODED_BYTES,
+    )
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema_version", "intent_sha256", "outcome", "result"}
+        or document["schema_version"] != "caller-action-result-v1"
+        or not isinstance(document["intent_sha256"], str)
+        or re.fullmatch(r"[a-f0-9]{64}", document["intent_sha256"]) is None
+        or not isinstance(document["outcome"], dict)
+        or not isinstance(document["result"], dict)
+    ):
+        raise ReviewInputError("caller action result envelope is unsupported")
+    return document
+
+
+def read_action_result(ledger, identity, record) -> dict[str, Any]:
+    """Authenticate an exact retained action outcome from a native root."""
+    state = ApiRunAccounting.from_document(record.api_run_accounting)
+    action = state.action
+    if record.identity() != identity or action is None or action["phase"] != "terminal":
+        raise ReviewInputError("caller action has no terminal retained result")
+    binding = action_result_binding(identity, state, ledger.evidence_producer())
+    value = decode_action_result_carrier(
+        read_inline_evidence(action["result"], expected_binding=binding)
+    )
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "intent_sha256", "outcome", "result"}
+        or value["schema_version"] != "caller-action-result-v1"
+        or value["intent_sha256"] != binding["policy_digest"]
+        or value["outcome"] != action["outcome"]
+        or not isinstance(value["result"], dict)
+    ):
+        raise ReviewInputError("caller action retained result conflicts")
+    return value
+
+
 def retained_binding(record: SessionRecord, producer: str) -> dict[str, object]:
     state = ApiRunAccounting.from_document(record.api_run_accounting)
+    if state.action is not None:
+        if state.action["phase"] != "terminal":
+            raise ReviewInputError("previous run has an unfinished action")
+        binding = action_result_binding(record.identity(), state, producer)
+        return {**binding, "generation": record.generation}
     transaction = record.transaction
     if transaction is None and state.analysis_abort is not None:
         from review_sensei.models import ReviewTransaction
@@ -67,8 +150,8 @@ def retain_previous_run(
     binding = retained_binding(previous, producer)
     document = {"schema_version": "caller-run-root-v1", "record": previous.to_dict()}
     parts = partition_evidence(document, binding=binding, item_count=1)
-    # SessionRecord's existing byte bound fits one codec part. Do not grow this
-    # into a general history staging protocol if that bound ever changes.
+    # The root's independent byte bound does not guarantee a one-part archive.
+    # Refuse before POST when actual prepared bytes need multiple carriers.
     if len(parts) != 1:
         raise ReviewInputError("retained run exceeds its one-part carrier")
     body = (

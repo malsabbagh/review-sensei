@@ -2590,8 +2590,6 @@ def _delegate_moved_command(args_list: list[str]) -> int:
     forwarded = list(args_list)
     if forwarded and forwarded[0] == "github":
         forwarded = forwarded[1:]
-        if forwarded and forwarded[0] == "review":
-            forwarded = ["publish", *forwarded[1:]]
     if not forwarded:
         forwarded = ["--help"]
     # Always a subprocess. An in-process call would depend on whether some

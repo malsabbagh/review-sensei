@@ -1,991 +1,207 @@
-import { BrokerLifetime } from "../src/broker-lifetime";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
+import { createHash } from "node:crypto";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const oidc = vi.hoisted(() => ({ verify: vi.fn() }));
-
 vi.mock("../src/oidc", () => ({ verifyOidcAssertion: oidc.verify }));
-
 import type { WorkerEnv } from "../src/env";
-import { GitHubApi } from "../src/github-api";
 import { TokenBroker } from "../src/token-broker";
+import { BrokerLifetime } from "../src/broker-lifetime";
+import type { RunAuthorityRequest } from "../src/run-authority";
 import commandParityCases from "../../../tests/fixtures/maintainer-command-parity.json";
 import feedbackFixture from "../../../tests/fixtures/feedback-session-attestation.json";
-import { canonicalFeedback, feedbackDigest, parseFeedbackAttestation } from "../src/feedback-attestation";
 
 const SHA = "a".repeat(40);
 const TAG_OBJECT_SHA = "b".repeat(40);
-const TAG = "v5";
-
+const WORKFLOW = "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5";
+const BODY = "@sensei review continue";
+const hash = (body: string) => createHash("sha256").update(body).digest("hex");
 function claims(overrides: Record<string, unknown> = {}) {
-  return {
-    iss: "https://token.actions.githubusercontent.com",
-    aud: "sts.reviewsensei.dev",
-    exp: 1_800_000_000,
-    iat: 1_700_000_000,
-    sub: "repo:acme/widgets:pull_request",
-    jti: "assertion-1",
-    repository: "acme/widgets",
-    repository_owner: "acme",
-    repository_id: 987654321,
-    actor: "octocat",
-    actor_id: 12345678,
-    event_name: "pull_request",
-    workflow: "ReviewSensei review",
-    workflow_ref: "acme/widgets/.github/workflows/review-sensei-review.yml@refs/heads/main",
-    workflow_sha: SHA,
-    job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
-    job_workflow_sha: SHA,
-    ref: "refs/pull/7/merge",
-    sha: SHA,
-    run_id: "10000000001",
-    run_number: "42",
-    run_attempt: "1",
-    runner_environment: "github-hosted",
-    ...overrides,
-  };
+  return { repository: "acme/widgets", repository_owner: "acme", repository_id: 987654321,
+    actor: "octocat", actor_id: 12345678, event_name: "pull_request", run_id: "10000000001", run_attempt: "1",
+    job_workflow_ref: WORKFLOW, job_workflow_sha: SHA, runner_environment: "github-hosted", ...overrides };
 }
-
-function commandAttestation(overrides: Record<string, unknown> = {}) {
-  return {
-    version: 1,
-    repository: "acme/widgets",
-    repository_id: 987654321,
-    pull_request: 7,
-    head_sha: SHA,
-    operation: "command",
-    source_comment_id: 13579,
-    run_id: "10000000001",
-    issued_at: Math.floor(Date.now() / 1000),
-    concurrency_group: "reviewsensei-session-987654321-7",
-    job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
-    job_workflow_sha: SHA,
-    ...overrides,
-  };
+function request(purpose: "review" | "command" | "reply" = "review", overrides: Record<string, unknown> = {}, identity = claims()): RunAuthorityRequest {
+  const now = Math.floor(Date.now() / 1000);
+  return { version: 3, purpose, repository: identity.repository, repository_id: identity.repository_id,
+    pull_request: 7, head_sha: SHA, run_id: identity.run_id, run_attempt: Number(identity.run_attempt),
+    job: purpose === "command" ? "command" : "hosted", job_workflow_ref: identity.job_workflow_ref,
+    job_workflow_sha: identity.job_workflow_sha, issued_at: now, expires_at: now + 600,
+    audience: "reviewsensei-run-action", source: purpose === "review"
+      ? { kind: "pull_request", id: 7, updated_at: null, body_sha256: null }
+      : { kind: "issue_comment", id: 13579, updated_at: "2026-10-09T00:00:00Z", body_sha256: hash(BODY) },
+    ...overrides } as RunAuthorityRequest;
 }
-
-function harness(publicWorkflowTag: string = TAG) {
-  const env = {
-    PUBLIC_WORKFLOW_TAG: publicWorkflowTag,
-    REVIEWSENSEI_SIGNING_KEY: "test-signing-key",
-  } as unknown as WorkerEnv;
+function harness(tag = "v5") {
+  const env = { PUBLIC_WORKFLOW_TAG: tag, REVIEWSENSEI_SIGNING_KEY: "test-signing-key", GITHUB_APP_ID: "12345" } as WorkerEnv;
   const github = {
-    publicWorkflowRuntimeShas: vi.fn(async () => ({
-      commitSha: SHA,
-      refSha: SHA,
-    })),
-    publicWorkflowSha: vi.fn(async () => SHA),
-    repositoryInfo: vi.fn(async () => ({ id: 987654321, fork: false })),
-    pullRequestHead: vi.fn(async () => SHA),
-    issueComment: vi.fn(async () => ({
-      id: 13579,
-      body: "@sensei review continue",
-      login: "octocat",
-      userType: "User",
-      association: "OWNER",
-    })),
+    publicWorkflowRuntimeShas: vi.fn(async () => ({ commitSha: SHA, refSha: SHA })),
     installationFor: vi.fn(async () => 2468),
-    installationToken: vi.fn(async () => ({
-      token: "ghs_metadata_token",
-      expiresAt: Date.now() + 60_000,
-      permissions: { metadata: "read" },
-    })),
-    capabilityToken: vi.fn(async () => "ghs_scoped_token"),
+    installationToken: vi.fn(async () => ({ token: "metadata-token" })),
+    repositoryInfo: vi.fn(async () => ({ id: 987654321, fork: false })),
+    capabilityToken: vi.fn(async () => "scoped-token"),
+    pullRequestHead: vi.fn(async () => SHA),
     sessionAlreadyKnown: vi.fn(async () => false),
+    feedbackComment: vi.fn(async () => ({ kind: "issue", comment_id: 13579, updated_at: "2026-10-09T00:00:00Z",
+      author: "octocat", author_id: 12345678, association: "OWNER", body: BODY, body_sha256: hash(BODY) })),
   };
   Object.assign(github, { withRequestLifetime: vi.fn(() => github) });
-  const broker = new TokenBroker(env, github as never);
-  return { broker, github, env };
+  return { broker: new TokenBroker(env, github as never), github, env };
 }
+function sessionBody(authority = request()) {
+  return { oidc_token: "signed-jwt", capability: "review_session", session_attestation: authority,
+    session: { repository_id: authority.repository_id, pull_request: authority.pull_request, head_sha: authority.head_sha } };
+}
+beforeEach(() => { oidc.verify.mockReset(); oidc.verify.mockResolvedValue(claims()); });
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
-beforeEach(() => {
-  oidc.verify.mockReset();
-  oidc.verify.mockResolvedValue(claims());
-});
-
-describe("token broker authorization", () => {
-  it("bounds an uncontrolled exchange and refuses late continuation before minting", async () => {
+describe("current token broker authorization", () => {
+  it("bounds an uncontrolled exchange and refuses late OIDC continuation before minting", async () => {
     vi.useFakeTimers();
-    const {env}=harness();
-    const broker=new TokenBroker({...env,GITHUB_APP_ID:"123",GITHUB_APP_PRIVATE_KEY:"unused"});
-    const fetchMock=vi.spyOn(globalThis,"fetch").mockRejectedValue(new Error("must not dispatch"));
-    let release!: (value: ReturnType<typeof claims>) => void;
-    oidc.verify.mockImplementationOnce(() => new Promise(resolve => {release=resolve;}));
-    const result=broker.exchange({oidc_token:"signed",capability:"issue_reply"}).then(() => "accepted",error => error.message);
-    try {
-      await vi.advanceTimersByTimeAsync(25_000);
-      await expect(result).resolves.toBe("broker_request_deadline_exhausted");
-      expect(fetchMock).not.toHaveBeenCalled();
-      release(claims()); await vi.advanceTimersByTimeAsync(0);
-      expect(fetchMock).not.toHaveBeenCalled();
-    } finally {fetchMock.mockRestore();vi.useRealTimers();}
-  });
-
-  it("accepts only a downward client deadline and never mints after expiry", async () => {
-    vi.useFakeTimers();
-    const {broker,github}=harness();
-    const past=Date.now()-1;
-    await expect(broker.exchange({oidc_token:"signed"},undefined,past)).rejects.toThrow("broker_request_deadline_exhausted");
-    expect(oidc.verify).not.toHaveBeenCalled();
-    expect(github.capabilityToken).not.toHaveBeenCalled();
-    for (const deadline of [Date.now()+30,Date.now()+60_000]) {
-      oidc.verify.mockImplementationOnce(() => new Promise(() => {}));
-      const result=broker.exchange({oidc_token:"signed"},undefined,deadline).then(() => "accepted",error=>error.message);
-      await vi.advanceTimersByTimeAsync(deadline-Date.now() > 25_000 ? 25_000 : 30);
-      await expect(result).resolves.toBe("broker_request_deadline_exhausted");
-      expect(github.capabilityToken).not.toHaveBeenCalled();
-    }
-    vi.useRealTimers();
-  });
-
-  it("binds a full Unicode feedback selection to live canonical sources and OIDC numeric actor", async () => {
-    const { broker, github } = harness();
-    const live = feedbackFixture.selection.sources;
-    Object.assign(github, {
-      feedbackPullRequest: vi.fn(async () => ({ base_sha: "c".repeat(40), head_sha: SHA })),
-      feedbackComment: vi.fn(async (_repo: string, _pr: number, kind: string, id: number) => live.find(source => source.kind === kind && source.comment_id === id)),
-    });
-    oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment" }));
-    const request = { ...feedbackFixture.request, issued_at: Math.floor(Date.now() / 1000) };
-    const result = await broker.exchange({ oidc_token: "feedback-assertion", capability: "review_session", session: { repository_id: request.repository_id, pull_request: 7, head_sha: SHA }, session_attestation: request });
-    expect(result.session_attestation).toEqual({ ...request, actor: "octocat", actor_id: 12345678, actor_type: "User", association: "OWNER" });
-    expect(canonicalFeedback(result.session_attestation)).not.toContain(live[0].body);
-    expect(await feedbackDigest(feedbackFixture.selection)).toBe(request.feedback.selection_digest);
-    const verified = await broker.verifySessionGrant(result.session_grant, result.session_attestation);
-    expect(verified).toEqual(result.session_attestation);
-    await expect(broker.verifySessionGrant(result.session_grant, result.session_attestation)).resolves.toEqual(verified);
-  });
-
-  it("refuses changed feedback actors, source bodies and missing trigger mentions before issuing a grant", async () => {
-    for (const mutation of ["numeric-actor", "body", "missing", "snapshot"]) {
-      const { broker, github } = harness();
-      const sources = structuredClone(feedbackFixture.selection.sources);
-      Object.assign(github, {
-        feedbackPullRequest: vi.fn(async () => ({ base_sha: mutation === "snapshot" ? "e".repeat(40) : "c".repeat(40), head_sha: SHA })),
-        feedbackComment: vi.fn(async (_repo: string, _pr: number, kind: string, id: number) => {
-          const value = sources.find(source => source.kind === kind && source.comment_id === id);
-          return mutation === "missing" ? null : mutation === "body" ? { ...value, body: "edited" } : value;
-        }),
-      });
-      oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment", actor_id: mutation === "numeric-actor" ? 999 : 12345678 }));
-      const request = { ...feedbackFixture.request, issued_at: Math.floor(Date.now() / 1000) };
-      await expect(broker.exchange({ oidc_token: "feedback-assertion", capability: "review_session", session: { repository_id: request.repository_id, pull_request: 7, head_sha: SHA }, session_attestation: request })).rejects.toThrow();
-      expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
-    }
-  });
-
-  it("keeps feedback-v2 closed and never treats it as command or unauthenticated review", () => {
-    for (const patch of [{ operation: "command" }, { version: 1 }, { extra: true }, { source_comment_id: 999 }]) {
-      expect(() => parseFeedbackAttestation({ ...feedbackFixture.request, ...patch })).toThrow("broker_feedback_attestation_invalid");
-    }
-    const request = structuredClone(feedbackFixture.request);
-    request.mutation.read_accounting.calls = 65;
-    expect(() => parseFeedbackAttestation(request)).toThrow("broker_feedback_attestation_invalid");
-  });
-
-  it("binds combined admission and dispatch to both exact request digests", async () => {
-    const { broker, github } = harness();
-    const live = feedbackFixture.selection.sources;
-    Object.assign(github, {
-      feedbackPullRequest: vi.fn(async () => ({ base_sha: "c".repeat(40), head_sha: SHA })),
-      feedbackComment: vi.fn(async (_repo: string, _pr: number, kind: string, id: number) => live.find(source => source.kind === kind && source.comment_id === id)),
-    });
-    oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment" }));
-    const request = {
-      ...feedbackFixture.request, issued_at: Math.floor(Date.now() / 1000),
-      mutation: { ...feedbackFixture.request.mutation, reason: "admission-dispatch", request_digest: "1".repeat(64), dispatch_digest: "2".repeat(64) },
-    };
-    expect(parseFeedbackAttestation(request)).toEqual(request);
-    for (const key of ["request_digest", "dispatch_digest"]) {
-      expect(() => parseFeedbackAttestation({ ...request, mutation: { ...request.mutation, [key]: null } })).toThrow("broker_feedback_attestation_invalid");
-    }
-    expect(() => parseFeedbackAttestation({ ...request, mutation: { ...request.mutation, reason: ["admission-dispatch"] } })).toThrow("broker_feedback_attestation_invalid");
-    const grant = await broker.exchange({ oidc_token: "feedback-assertion", capability: "review_session", session: { repository_id: request.repository_id, pull_request: 7, head_sha: SHA }, session_attestation: request });
-    expect(grant.session_attestation?.mutation).toEqual(request.mutation);
-    expect(await broker.verifySessionGrant(grant.session_grant, grant.session_attestation)).toEqual(grant.session_attestation);
-  });
-
-  it("rejects array coercion in every closed feedback enum", () => {
-    const request = feedbackFixture.request;
-    const invalid = [
-      { ...request, mutation: { ...request.mutation, reason: ["dispatch"] } },
-      { ...request, feedback: { ...request.feedback, trigger: { ...request.feedback.trigger, kind: ["issue"] } } },
-      ...["kind", "association"].map(key => ({ ...request, feedback: { ...request.feedback, sources: request.feedback.sources.map((source, index) => index === 0 ? { ...source, [key]: [source[key as "kind" | "association"]] } : source) } })),
-    ];
-    for (const value of invalid) expect(() => parseFeedbackAttestation(value)).toThrow("broker_feedback_attestation_invalid");
-    const metadata = structuredClone(request);
-    metadata.feedback.sources[1].author = "\ufeffcollaborator";
-    expect(parseFeedbackAttestation(metadata)).toEqual(metadata);
-  });
-
-  it("refuses a coerced mutation reason before live authorization can issue a grant", async () => {
-    const { broker, github } = harness();
-    const live = feedbackFixture.selection.sources;
-    Object.assign(github, {
-      feedbackPullRequest: vi.fn(async () => ({ base_sha: "c".repeat(40), head_sha: SHA })),
-      feedbackComment: vi.fn(async (_repo: string, _pr: number, kind: string, id: number) => live.find(source => source.kind === kind && source.comment_id === id)),
-    });
-    oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment" }));
-    const request = { ...feedbackFixture.request, issued_at: Math.floor(Date.now() / 1000), mutation: { ...feedbackFixture.request.mutation, reason: ["dispatch"] } };
-    await expect(broker.exchange({ oidc_token: "feedback-assertion", capability: "review_session", session: { repository_id: request.repository_id, pull_request: 7, head_sha: SHA }, session_attestation: request })).rejects.toThrow("broker_feedback_attestation_invalid");
-    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
-  });
-  it("issues recovery evidence authority with Actions read only", async () => {
-    const { broker, github } = harness();
-    const result = await broker.exchange({ oidc_token: "oidc.token", capability: "review_actions" });
-    expect(result).toEqual({ token: "ghs_scoped_token", capability: "review_actions" });
-    expect(github.capabilityToken).toHaveBeenCalledWith(2468, "acme/widgets", { actions: "read" }, false);
-  });
-
-  it("exchanges check_publish through the real GitHub adapter with exact Checks write scope", async () => {
     const { env } = harness();
-    const github = new GitHubApi({
-      ...env,
-      GITHUB_APP_ID: "12345",
-      GITHUB_APP_PRIVATE_KEY: "unused-by-test",
-      GITHUB_API_URL: "https://api.example.test",
-    });
-    vi.spyOn(GitHubApi.prototype as never, "appJwt" as never).mockResolvedValue("app-jwt");
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const path = new URL(String(input)).pathname;
-      let data: unknown;
-      if (path === `/repos/malsabbagh/review-sensei/git/ref/tags/${TAG}`) {
-        data = { object: { type: "commit", sha: SHA } };
-      } else if (path === "/repos/acme/widgets/installation") {
-        data = { id: 2468 };
-      } else if (path === "/repos/acme/widgets") {
-        data = { id: 987654321, fork: false };
-      } else if (path === "/app/installations/2468/access_tokens") {
-        const body = JSON.parse(String(init?.body));
-        const metadataOnly = body.permissions.metadata === "read";
-        data = {
-          token: metadataOnly ? "ghs_metadata_token" : "ghs_check_token",
-          expires_at: new Date(Date.now() + 60_000).toISOString(),
-          permissions: metadataOnly
-            ? { metadata: "read" }
-            : { checks: "write", metadata: "read" },
-        };
-      } else {
-        throw new Error(`unexpected_test_request:${path}`);
-      }
-      return new Response(JSON.stringify(data), {
-        status: init?.method === "POST" ? 201 : 200,
-        headers: { "content-type": "application/json" },
-      });
-    });
-
-    try {
-      const broker = new TokenBroker(env, github);
-      await expect(broker.exchange({
-        oidc_token: "signed-jwt",
-        capability: "check_publish",
-      })).resolves.toEqual({ token: "ghs_check_token", capability: "check_publish" });
-
-      const tokenRequests = fetchMock.mock.calls.filter(
-        ([input]) => new URL(String(input)).pathname === "/app/installations/2468/access_tokens",
-      );
-      expect(tokenRequests.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
-        { repositories: ["widgets"], permissions: { metadata: "read" } },
-        { repositories: ["widgets"], permissions: { checks: "write" } },
-      ]);
-      const metadataRequest = fetchMock.mock.calls.find(
-        ([input]) => new URL(String(input)).pathname === "/repos/acme/widgets",
-      );
-      expect(new Headers(metadataRequest?.[1]?.headers).get("authorization")).toBe(
-        "Bearer ghs_metadata_token",
-      );
-      expect(oidc.verify).toHaveBeenCalledWith("signed-jwt", {
-        audience: "sts.reviewsensei.dev",
-        issuer: "https://token.actions.githubusercontent.com",
-        dispatchControl: undefined, requestLifetime: expect.any(BrokerLifetime),
-      });
-      expect(fetchMock).toHaveBeenCalledTimes(5);
-    } finally {
-      fetchMock.mockRestore();
-    }
+    const broker = new TokenBroker({ ...env, GITHUB_APP_ID: "123", GITHUB_APP_PRIVATE_KEY: "unused" });
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("must not dispatch"));
+    let release!: (value: ReturnType<typeof claims>) => void;
+    oidc.verify.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const outcome = broker.exchange({ oidc_token: "signed", session_attestation: request() }).then(() => "accepted", error => error.message);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(await outcome).toBe("broker_request_deadline_exhausted");
+    release(claims()); await vi.advanceTimersByTimeAsync(0);
+    expect(fetch).not.toHaveBeenCalled();
   });
-
-  it.each([
-    [undefined, "review_publish", { pull_requests: "write" }, true],
-    ["review_publish", "review_publish", { pull_requests: "write" }, true],
-    ["thread_resolve", "thread_resolve", { contents: "write", pull_requests: "write" }, false],
-    ["check_publish", "check_publish", { checks: "write" }, false],
-    ["review_status", "review_status", { pull_requests: "read" }, false],
-    ["inline_reply", "inline_reply", { pull_requests: "write" }, false],
-    ["issue_reply", "issue_reply", { pull_requests: "write" }, false],
-    ["learning_write", "learning_write", { contents: "write", pull_requests: "write" }, false],
-  ])("maps %s to the least-privilege installation capability", async (requested, returned, permissions, acceptReturnedContentsRead) => {
+  it("accepts only downward request deadlines before any OIDC effects", async () => {
     const { broker, github } = harness();
-    const result = await broker.exchange({ oidc_token: "signed-jwt", capability: requested });
-
-    expect(result).toEqual({ token: "ghs_scoped_token", capability: returned });
-    expect(github.installationToken).toHaveBeenCalledWith(2468, "acme/widgets", {
-      metadata: "read",
-    });
-    expect(github.repositoryInfo).toHaveBeenCalledWith(
-      "acme/widgets",
-      "ghs_metadata_token",
-    );
-    expect(github.capabilityToken).toHaveBeenCalledWith(
-      2468,
-      "acme/widgets",
-      permissions,
-      acceptReturnedContentsRead,
-    );
+    await expect(broker.exchange({ oidc_token: "signed", session_attestation: request() }, undefined, Date.now() - 1)).rejects.toThrow("broker_request_deadline_exhausted");
+    expect(oidc.verify).not.toHaveBeenCalled(); expect(github.capabilityToken).not.toHaveBeenCalled();
   });
-
-  it("issues a session capability only for the authenticated repository and current PR head", async () => {
+  it.each([undefined, "constructor", "toString", "__proto__", "hasOwnProperty"])("refuses missing authority or inherited capability %s", async capability => {
     const { broker, github } = harness();
-
-    const result = await broker.exchange({
-      oidc_token: "signed-jwt",
-      capability: "review_session",
-      session: {
-        repository_id: 987654321,
-        pull_request: 7,
-        head_sha: SHA,
-      },
-    });
-
-    expect(result).toEqual({
-      token: "ghs_scoped_token",
-      capability: "review_session",
-      session_state: "enrolled",
-      reservation_owner: { run_id: "10000000001", head_sha: SHA },
-    });
-    expect(github.pullRequestHead).toHaveBeenCalledWith(
-      "acme/widgets",
-      7,
-      "ghs_scoped_token",
-    );
-    expect(github.capabilityToken).toHaveBeenCalledWith(
-      2468,
-      "acme/widgets",
-      { pull_requests: "write" },
-      false,
-    );
-    expect(github.sessionAlreadyKnown).toHaveBeenCalledWith(
-      "acme/widgets",
-      7,
-      SHA,
-      "ghs_scoped_token",
-    );
-  });
-
-  it.each([
-    ["acme/widgets", "acme", 987654321, 2468],
-    ["other-org/another-repository", "other-org", 1234567, 9753],
-  ])("binds cleanup to OIDC repository %s and its looked-up installation", async (repository, owner, id, installation) => {
-    oidc.verify.mockResolvedValue(claims({repository, repository_owner: owner, repository_id: id}));
-    const {broker, github} = harness();
-    github.installationFor.mockResolvedValue(installation);
-    github.repositoryInfo.mockResolvedValue({id, fork:false});
-    await expect(broker.exchange({oidc_token:"signed-jwt",capability:"thread_resolve"})).resolves.toMatchObject({capability:"thread_resolve"});
-    expect(github.installationFor).toHaveBeenCalledWith(repository);
-    expect(github.capabilityToken).toHaveBeenCalledWith(installation, repository, {contents:"write",pull_requests:"write"}, false);
-  });
-
-  it.each(["fork", "wrong-id", "no-installation", "stale-runtime", "wrong-workflow", "wrong-owner", "wrong-event"])("rejects cleanup admission: %s", async fault => {
-    const {broker, github} = harness();
-    if (fault === "fork") github.repositoryInfo.mockResolvedValue({id:987654321,fork:true});
-    if (fault === "wrong-id") github.repositoryInfo.mockResolvedValue({id:987654322,fork:false});
-    if (fault === "no-installation") github.installationFor.mockResolvedValue(null as never);
-    if (fault === "stale-runtime") oidc.verify.mockResolvedValue(claims({job_workflow_sha:"c".repeat(40)}));
-    if (fault === "wrong-workflow") oidc.verify.mockResolvedValue(claims({job_workflow_ref:`attacker/repo/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`}));
-    if (fault === "wrong-owner") oidc.verify.mockResolvedValue(claims({repository_owner:"attacker"}));
-    if (fault === "wrong-event") oidc.verify.mockResolvedValue(claims({event_name:"push"}));
-    await expect(broker.exchange({oidc_token:"signed-jwt",capability:"thread_resolve"})).rejects.toThrow();
+    await expect(broker.exchange({ oidc_token: "signed", capability })).rejects.toThrow();
     expect(github.capabilityToken).not.toHaveBeenCalled();
   });
-
-  it("refuses a stale session head before recording a new enrollment witness", async () => {
+  it.each([1, 2])("rejects obsolete executable version%i before token minting", async version => {
     const { broker, github } = harness();
-    github.pullRequestHead.mockResolvedValue("c".repeat(40));
-
-    let rejection: unknown;
-    await broker
-      .exchange({
-        oidc_token: "signed-jwt",
-        capability: "review_session",
-        session: {
-          repository_id: 987654321,
-          pull_request: 7,
-          head_sha: SHA,
-        },
-      })
-      .catch((error: unknown) => {
-        rejection = error;
-      });
-
-    expect(rejection).toBeInstanceOf(Error);
-    expect((rejection as Error).message).toBe("broker_session_head_rejected");
-    // The failure must not surface a capability token, and it must not reach
-    // the enroll endpoint at all: the head check is what makes recording the
-    // witness safe.
-    expect((rejection as Error).message).not.toContain("ghs_");
-    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
+    await expect(broker.exchange({ ...sessionBody(), session_attestation: version === 2 ? feedbackFixture.request : { ...request(), version: 1 } })).rejects.toThrow("broker_session_attestation_invalid");
+    expect(github.capabilityToken).not.toHaveBeenCalled(); expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
   });
-
-  it.each([SHA, "c".repeat(40)])("issues a release-only token without reading history (head=%s)", async head => {
-    const { broker, github } = harness();
-    github.pullRequestHead.mockResolvedValue(head);
-    github.sessionAlreadyKnown.mockRejectedValue(new Error("github_response_too_large"));
-
-    const result = await broker.exchange({
-      oidc_token: "signed-jwt",
-      capability: "review_session",
-      release_only: true,
-      session: {
-        repository_id: 987654321,
-        pull_request: 7,
-        head_sha: SHA,
-      },
-    });
-
-    const { token: releaseToken, ...releaseRest } = result;
-    expect(releaseToken).toBeTruthy();
-    expect(releaseRest).toEqual({
-      capability: "review_session",
-      release_only: true,
-      reservation_owner: { run_id: "10000000001", head_sha: SHA },
-    });
-    // No mutation grant and no enrollment state: a release-only token
-    // cannot be replayed into authorize_session_mutation, which requires
-    // a signed session grant this exchange never issues.
-    expect(result.session_grant).toBeUndefined();
-    expect(result.session_state).toBeUndefined();
-    // No enrollment witness and no grant: releasing publishes nothing.
-    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
-  });
-
-  it("rejects malformed release-only exchanges instead of widening authorization", async () => {
-    const { broker, github } = harness();
-    github.pullRequestHead.mockResolvedValue("c".repeat(40));
-    const session = {
-      repository_id: 987654321,
-      pull_request: 7,
-      head_sha: SHA,
-    };
-    for (const body of [
-      { oidc_token: "signed-jwt", capability: "review_session", release_only: false, session },
-      { oidc_token: "signed-jwt", capability: "review_session", release_only: "true", session },
-      {
-        oidc_token: "signed-jwt",
-        capability: "review_session",
-        release_only: true,
-        session,
-        session_attestation: { operation: "review" },
-      },
-      { oidc_token: "signed-jwt", capability: "review_publish", release_only: true },
-    ]) {
-      await expect(broker.exchange(body as never)).rejects.toThrow(
-        "broker_session_invalid",
-      );
-    }
-    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
-  });
-
-  it("issues an opaque grant only after deriving command actor authority from a live comment", async () => {
-    const { broker, github } = harness();
-    const attestation = {
-      version: 1,
-      repository: "acme/widgets",
-      repository_id: 987654321,
-      pull_request: 7,
-      head_sha: SHA,
-      operation: "command",
-      source_comment_id: 13579,
-      run_id: "10000000001",
-      issued_at: Math.floor(Date.now() / 1000),
-      concurrency_group: "reviewsensei-session-987654321-7",
-      job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
-      job_workflow_sha: SHA,
-    };
-
-    const result = await broker.exchange({
-      oidc_token: "signed-jwt",
-      capability: "review_session",
-      session: {
-        repository_id: 987654321,
-        pull_request: 7,
-        head_sha: SHA,
-      },
-      session_attestation: attestation,
-    });
-
-    expect(result.session_grant).toMatch(/^sg1\.[0-9]+\.[A-Za-z0-9_-]{43}$/);
-    expect(result.session_attestation).toMatchObject({
-      ...attestation,
-      actor: "octocat",
-      actor_type: "User",
-      association: "OWNER",
-      command_id: 13579,
-      command_digest: expect.stringMatching(/^[a-f0-9]{64}$/),
-    });
-    expect(github.issueComment).toHaveBeenCalledWith(
-      "acme/widgets", 7, 13579, "ghs_scoped_token",
-    );
-
-    await expect(
-      broker.verifySessionGrant(result.session_grant, result.session_attestation),
-    ).resolves.toMatchObject({ actor: "octocat", association: "OWNER" });
-    await expect(
-      broker.verifySessionGrant(result.session_grant, result.session_attestation),
-    ).resolves.toMatchObject({ actor: "octocat" });
-  });
-
   it.each([
-    ["review reenroll", true],
-    ["I reviewed the media files and I approve", true],
-    ["I reviewed the media files", false],
-    [`dismiss ${"a".repeat(15)} --reason accepted`, false],
-    ["dismiss abcd1234abcd1234 --reason accepted", true],
-    [`dismiss ${"a".repeat(64)} --reason accepted`, true],
-    [`dismiss ${"a".repeat(65)} --reason accepted`, false],
-    ["dismiss abcd1234abcd1234 accepted --reason", false],
-    ['dismiss abcd1234abcd1234 --reason ""', false],
-    [`dismiss abcd1234abcd1234 --reason ${"x".repeat(513)}`, false],
-    ["dismiss abcd1234abcd1234 --reason accepted\ncontrol", false],
-  ])("keeps the broker command grammar aligned with Python for %s", async (command, accepted) => {
+    [undefined, "review_publish", { pull_requests: "write" }, true, "review"],
+    ["review_publish", "review_publish", { pull_requests: "write" }, true, "review"],
+    ["thread_resolve", "thread_resolve", { contents: "write", pull_requests: "write" }, false, "command"],
+    ["check_publish", "check_publish", { checks: "write" }, false, "reply"],
+    ["review_actions", "review_actions", { actions: "read" }, false, "review"],
+    ["review_status", "review_status", { pull_requests: "read" }, false, "review"],
+    ["inline_reply", "inline_reply", { pull_requests: "write" }, false, "reply"],
+    ["issue_reply", "issue_reply", { pull_requests: "write" }, false, "command"],
+    ["learning_write", "learning_write", { contents: "write", pull_requests: "write" }, false, "review"],
+  ] as const)("maps %s to exact returned scope with current purpose", async (capability, returned, permissions, contents, purpose) => {
     const { broker, github } = harness();
-    github.issueComment.mockResolvedValue({
-      id: 13579,
-      body: `@sensei ${command}`,
-      login: "octocat",
-      userType: "User",
-      association: "OWNER",
-    });
-    const exchange = broker.exchange({
-      oidc_token: "signed-jwt",
-      capability: "review_session",
-      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
-      session_attestation: {
-        version: 1,
-        repository: "acme/widgets",
-        repository_id: 987654321,
-        pull_request: 7,
-        head_sha: SHA,
-        operation: "command",
-        source_comment_id: 13579,
-        run_id: "10000000001",
-        issued_at: Math.floor(Date.now() / 1000),
-        concurrency_group: "reviewsensei-session-987654321-7",
-        job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
-        job_workflow_sha: SHA,
-      },
-    });
-    if (accepted) {
-      await expect(exchange).resolves.toMatchObject({
-        session_grant: expect.stringMatching(/^sg1\.[0-9]+\.[A-Za-z0-9_-]{43}$/),
-      });
-    } else {
-      await expect(exchange).rejects.toThrow("broker_session_actor_rejected");
-    }
+    const identity = claims({ event_name: capability === "inline_reply" ? "pull_request_review_comment" : purpose === "review" ? "pull_request" : "issue_comment" });
+    oidc.verify.mockResolvedValue(identity);
+    const authority = request(purpose, {}, identity);
+    if (capability === "inline_reply") authority.source.kind = "review_comment";
+    expect(await broker.exchange({ oidc_token: "signed", capability, session_attestation: authority })).toEqual({ token: "scoped-token", capability: returned });
+    expect(github.installationToken).toHaveBeenCalledWith(2468, "acme/widgets", { metadata: "read" });
+    expect(github.capabilityToken).toHaveBeenCalledWith(2468, "acme/widgets", permissions, contents);
+    expect(github.pullRequestHead).toHaveBeenCalledWith("acme/widgets", 7, "scoped-token");
   });
-
-  it.each(commandParityCases)(
-    "matches the shared command grammar fixture for $body",
-    async ({ body, accepted }) => {
-      const { broker, github } = harness();
-      github.issueComment.mockResolvedValue({
-        id: 13579,
-        body,
-        login: "octocat",
-        userType: "User",
-        association: "OWNER",
-      });
-      const exchange = broker.exchange({
-        oidc_token: "signed-jwt",
-        capability: "review_session",
-        session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
-        session_attestation: {
-          version: 1,
-          repository: "acme/widgets",
-          repository_id: 987654321,
-          pull_request: 7,
-          head_sha: SHA,
-          operation: "command",
-          source_comment_id: 13579,
-          run_id: "10000000001",
-          issued_at: Math.floor(Date.now() / 1000),
-          concurrency_group: "reviewsensei-session-987654321-7",
-          job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
-          job_workflow_sha: SHA,
-        },
-      });
-      if (accepted) {
-        await expect(exchange).resolves.toMatchObject({
-          session_grant: expect.stringMatching(/^sg1\.[0-9]+\.[A-Za-z0-9_-]{43}$/),
-        });
-      } else {
-        await expect(exchange).rejects.toThrow("broker_session_actor_rejected");
-      }
-    },
-  );
-
-  it("binds grant verification to the attestation operation", async () => {
+  it.each([
+    ["wrong workflow", { job_workflow_ref: "attacker/repo/.github/workflows/review-sensei-run.yml@refs/tags/v5" }, "broker_workflow_rejected"],
+    ["unqualified workflow ref", { job_workflow_ref: "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5" }, "broker_workflow_rejected"],
+    ["wrong runtime", { job_workflow_sha: "c".repeat(40) }, "broker_workflow_rejected"],
+    ["wrong runner", { runner_environment: "private-cloud" }, "broker_runner_rejected"],
+    ["wrong event", { event_name: "push" }, "broker_event_rejected"],
+    ["wrong owner", { repository_owner: "attacker" }, "broker_repository_rejected"],
+  ])("preserves %s refusal independently of current envelope binding", async (_name, overrides, error) => {
+    const identity = claims(overrides); oidc.verify.mockResolvedValue(identity);
+    const { broker, github } = harness();
+    await expect(broker.exchange({ oidc_token: "signed", session_attestation: request("review", {}, identity) })).rejects.toThrow(error);
+    expect(github.capabilityToken).not.toHaveBeenCalled();
+  });
+  it("accepts an annotated tag object only while it matches resolved runtime", async () => {
+    const identity = claims({ job_workflow_sha: TAG_OBJECT_SHA }); oidc.verify.mockResolvedValue(identity);
+    const { broker, github } = harness();
+    github.publicWorkflowRuntimeShas.mockResolvedValue({ commitSha: SHA, refSha: TAG_OBJECT_SHA });
+    await expect(broker.exchange({ oidc_token: "signed", session_attestation: request("review", {}, identity) })).resolves.toMatchObject({ capability: "review_publish" });
+    github.publicWorkflowRuntimeShas.mockResolvedValue({ commitSha: "c".repeat(40), refSha: "d".repeat(40) });
+    await expect(broker.exchange({ oidc_token: "signed", session_attestation: request("review", {}, identity) })).rejects.toThrow("broker_workflow_rejected");
+  });
+  it("rejects public tags outside the configured migration window before installation lookup", async () => {
+    const identity = claims({ job_workflow_ref: "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v3" });
+    oidc.verify.mockResolvedValue(identity);
+    const { broker, github } = harness();
+    await expect(broker.exchange({ oidc_token: "signed", session_attestation: request("review", {}, identity) })).rejects.toThrow("broker_workflow_rejected");
+    expect(github.publicWorkflowRuntimeShas).not.toHaveBeenCalled(); expect(github.installationFor).not.toHaveBeenCalled();
+  });
+  it("binds another repository and installation exclusively to the verified OIDC identity", async () => {
+    const identity = claims({ repository: "other-org/another-repository", repository_owner: "other-org", repository_id: 1234567 });
+    oidc.verify.mockResolvedValue(identity);
+    const { broker, github } = harness();
+    github.installationFor.mockResolvedValue(9753); github.repositoryInfo.mockResolvedValue({ id: 1234567, fork: false });
+    await expect(broker.exchange({ oidc_token: "signed", capability: "thread_resolve", session_attestation: request("review", {}, identity) })).resolves.toMatchObject({ capability: "thread_resolve" });
+    expect(github.installationFor).toHaveBeenCalledWith("other-org/another-repository");
+    expect(github.capabilityToken).toHaveBeenCalledWith(9753, "other-org/another-repository", { contents: "write", pull_requests: "write" }, false);
+  });
+  it("accepts only the exact authenticated successor attempt", async () => {
+    const identity = claims({ run_attempt: "2" }); oidc.verify.mockResolvedValue(identity);
     const { broker } = harness();
-    const commandAttestation = {
-      version: 1,
-      repository: "acme/widgets",
-      repository_id: 987654321,
-      pull_request: 7,
-      head_sha: SHA,
-      operation: "command",
-      source_comment_id: 13579,
-      run_id: "10000000001",
-      issued_at: Math.floor(Date.now() / 1000),
-      concurrency_group: "reviewsensei-session-987654321-7",
-      job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
-      job_workflow_sha: SHA,
-    };
-
-    const result = await broker.exchange({
-      oidc_token: "signed-jwt",
-      capability: "review_session",
-      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
-      session_attestation: commandAttestation,
-    });
-
-    const mismatchedOperation = {
-      ...result.session_attestation!,
-      operation: "review" as const,
-      source_comment_id: null,
-      actor: null,
-      actor_type: null,
-      association: null,
-      command_id: null,
-      command_digest: null,
-    };
-    await expect(
-      broker.verifySessionGrant(result.session_grant, mismatchedOperation),
-    ).rejects.toThrow("broker_session_grant_invalid");
+    await expect(broker.exchange(sessionBody(request("review", {}, identity)))).resolves.toMatchObject({ session_attestation: { run_attempt: 2 } });
+    await expect(broker.exchange(sessionBody(request("review")))).rejects.toThrow("broker_session_attestation_invalid");
   });
-
-  it("rejects a grant attestation whose workflow ref is not an accepted public workflow", async () => {
+  it.each(["workflow_dispatch", "issue_comment", "pull_request_review_comment", "pull_request"])("retains authenticated %s source workflow event", async event => {
+    const identity = claims({ event_name: event, runner_environment: "self-hosted" }); oidc.verify.mockResolvedValue(identity);
     const { broker } = harness();
-    const result = await broker.exchange({
-      oidc_token: "signed-jwt",
-      capability: "review_session",
-      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
-      session_attestation: {
-        version: 1,
-        repository: "acme/widgets",
-        repository_id: 987654321,
-        pull_request: 7,
-        head_sha: SHA,
-        operation: "command",
-        source_comment_id: 13579,
-        run_id: "10000000001",
-        issued_at: Math.floor(Date.now() / 1000),
-        concurrency_group: "reviewsensei-session-987654321-7",
-        job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
-        job_workflow_sha: SHA,
-      },
-    });
-    const forgedAttestation = {
-      ...result.session_attestation!,
-      job_workflow_ref:
-        `attacker/repo/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
-    };
-
-    await expect(
-      broker.verifySessionGrant(result.session_grant, forgedAttestation),
-    ).rejects.toThrow("broker_workflow_rejected");
+    await expect(broker.exchange({ oidc_token: "signed", session_attestation: request("review", {}, identity) })).resolves.toMatchObject({ capability: "review_publish" });
   });
-
-  it("revalidates the attested workflow SHA before consuming a grant", async () => {
-    const { broker, github } = harness();
-    const result = await broker.exchange({
-      oidc_token: "signed-jwt",
-      capability: "review_session",
-      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
-      session_attestation: commandAttestation(),
-    });
-    github.publicWorkflowRuntimeShas.mockResolvedValue({
-      commitSha: "c".repeat(40),
-      refSha: "d".repeat(40),
-    });
-
-    await expect(
-      broker.verifySessionGrant(result.session_grant, result.session_attestation),
-    ).rejects.toThrow("broker_workflow_rejected");
-  });
-
-  it("rejects an expired attestation before consuming a grant", async () => {
-    const { broker } = harness();
-    const result = await broker.exchange({
-      oidc_token: "signed-jwt",
-      capability: "review_session",
-      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
-      session_attestation: commandAttestation(),
-    });
-    const expired = {
-      ...result.session_attestation!,
-      issued_at: Math.floor(Date.now() / 1000) - 631,
-    };
-
-    await expect(
-      broker.verifySessionGrant(result.session_grant, expired),
-    ).rejects.toThrow("broker_session_attestation_invalid");
-  });
-
-  it.each([
-    [
-      "string repository id",
-      (attestation: Record<string, unknown>) => ({
-        ...attestation,
-        repository_id: "987654321",
-      }),
-    ],
-    [
-      "boolean repository id",
-      (attestation: Record<string, unknown>) => ({
-        ...attestation,
-        repository_id: true,
-      }),
-    ],
-    [
-      "missing required key",
-      ({ repository_id: _repositoryId, ...attestation }: Record<string, unknown>) => attestation,
-    ],
-    [
-      "unknown extra key",
-      (attestation: Record<string, unknown>) => ({
-        ...attestation,
-        unexpected: true,
-      }),
-    ],
-  ])("rejects malformed session-grant attestation: %s", async (_label, mutate) => {
-    const { broker } = harness();
-    const result = await broker.exchange({
-      oidc_token: "signed-jwt",
-      capability: "review_session",
-      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
-      session_attestation: {
-        version: 1,
-        repository: "acme/widgets",
-        repository_id: 987654321,
-        pull_request: 7,
-        head_sha: SHA,
-        operation: "command",
-        source_comment_id: 13579,
-        run_id: "10000000001",
-        issued_at: Math.floor(Date.now() / 1000),
-        concurrency_group: "reviewsensei-session-987654321-7",
-        job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
-        job_workflow_sha: SHA,
-      },
-    });
-    const attestation = mutate(result.session_attestation as Record<string, unknown>);
-    await expect(
-      broker.verifySessionGrant(result.session_grant, attestation),
-    ).rejects.toThrow(/broker_session_(?:attestation_invalid|grant_invalid)/);
-  });
-
-  it("refuses command authority when the current GitHub comment actor is not the OIDC actor", async () => {
-    const { broker, github } = harness();
-    github.issueComment.mockResolvedValue({
-      id: 13579,
-      body: "@sensei review pause",
-      login: "someone-else",
-      userType: "User",
-      association: "OWNER",
-    });
-    await expect(broker.exchange({
-      oidc_token: "signed-jwt",
-      capability: "review_session",
-      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
-      session_attestation: {
-        version: 1,
-        repository: "acme/widgets",
-        repository_id: 987654321,
-        pull_request: 7,
-        head_sha: SHA,
-        operation: "command",
-        source_comment_id: 13579,
-        run_id: "10000000001",
-        issued_at: Math.floor(Date.now() / 1000),
-        concurrency_group: "reviewsensei-session-987654321-7",
-        job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`,
-        job_workflow_sha: SHA,
-      },
-    })).rejects.toThrow("broker_session_actor_rejected");
-  });
-
-  it.each([
-    ["different reusable workflow", { job_workflow_ref: `attacker/repo/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}` }, "broker_workflow_rejected"],
-    ["non-canonical public workflow tag ref", { job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${TAG}` }, "broker_workflow_rejected"],
-    ["different reusable workflow SHA", { job_workflow_sha: "b".repeat(40) }, "broker_workflow_rejected"],
-    ["unsupported runner environment", { runner_environment: "private-cloud" }, "broker_runner_rejected"],
-    ["unsupported event", { event_name: "push" }, "broker_event_rejected"],
-    ["repository owner mismatch", { repository_owner: "someone-else" }, "broker_repository_rejected"],
-  ])("rejects %s", async (_name, override, message) => {
-    oidc.verify.mockResolvedValue(claims(override));
-    const { broker, github } = harness();
-    await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(message);
+  it.each([null, { id: 987654321, fork: true }, { id: 999, fork: false }])("rejects unavailable, fork or different repository %#", async info => {
+    const { broker, github } = harness(); github.repositoryInfo.mockResolvedValue(info as never);
+    await expect(broker.exchange({ oidc_token: "signed", session_attestation: request() })).rejects.toThrow("broker_repository_rejected");
     expect(github.capabilityToken).not.toHaveBeenCalled();
   });
-
-  it.each(["constructor", "toString", "__proto__", "hasOwnProperty"])(
-    "rejects inherited capability name %s",
-    async (inheritedCapability) => {
-      const { broker, github } = harness();
-      await expect(
-        broker.exchange({ oidc_token: "signed-jwt", capability: inheritedCapability }),
-      ).rejects.toThrow("broker_capability_invalid");
-      expect(github.capabilityToken).not.toHaveBeenCalled();
-    },
-  );
-
-  it("resolves the observed public tag before authorizing the runtime SHA", async () => {
-    const { broker, github } = harness();
-    await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
-      capability: "review_publish",
-    });
-    expect(github.publicWorkflowRuntimeShas).toHaveBeenCalledWith(TAG);
-  });
-
-  it.each([
-    ["v4", "v5"],
-    ["v5", "v4"],
-  ])(
-    "accepts migration tag %s while PUBLIC_WORKFLOW_TAG is %s",
-    async (configuredTag, observedTag) => {
-      oidc.verify.mockResolvedValue(
-        claims({
-          job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${observedTag}`,
-        }),
-      );
-      const { broker, github } = harness(configuredTag);
-      await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
-        capability: "review_publish",
-      });
-      expect(github.publicWorkflowRuntimeShas).toHaveBeenCalledWith(observedTag);
-    },
-  );
-
-  it("rejects public workflow tags outside the migration window", async () => {
-    oidc.verify.mockResolvedValue(
-      claims({
-        job_workflow_ref:
-          "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v3",
-      }),
-    );
-    const { broker, github } = harness();
-    await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(
-      "broker_workflow_rejected",
-    );
-    expect(github.publicWorkflowRuntimeShas).not.toHaveBeenCalled();
-    expect(github.capabilityToken).not.toHaveBeenCalled();
-  });
-
-  it("does not resolve the public tag for an invalid OIDC assertion", async () => {
-    oidc.verify.mockRejectedValue(new Error("invalid OIDC assertion"));
-    const { broker, github } = harness();
-
-    await expect(broker.exchange({ oidc_token: "forged-jwt" })).rejects.toThrow(
-      "invalid OIDC assertion",
-    );
-    expect(github.publicWorkflowRuntimeShas).not.toHaveBeenCalled();
-  });
-
-  it("accepts the annotated tag object SHA emitted by GitHub Actions", async () => {
-    oidc.verify.mockResolvedValue(claims({ job_workflow_sha: TAG_OBJECT_SHA }));
-    const { broker, github } = harness();
-    github.publicWorkflowRuntimeShas.mockResolvedValue({
-      commitSha: SHA,
-      refSha: TAG_OBJECT_SHA,
-    });
-    await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
-      capability: "review_publish",
-    });
-  });
-
-  it("rejects when the runtime SHA does not match the current tag", async () => {
-    const { broker, github } = harness();
-    github.publicWorkflowRuntimeShas.mockResolvedValue({
-      commitSha: "c".repeat(40),
-      refSha: "d".repeat(40),
-    });
-    await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(
-      "broker_workflow_rejected",
-    );
-    expect(github.capabilityToken).not.toHaveBeenCalled();
-  });
-
-  it.each(["workflow_dispatch", "issue_comment", "pull_request_review_comment"])(
-    "allows the trusted manual %s event on a self-hosted runner",
-    async (eventName) => {
-      oidc.verify.mockResolvedValue(claims({ event_name: eventName, runner_environment: "self-hosted" }));
-      const { broker } = harness();
-      await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
-        capability: "review_publish",
-      });
-    },
-  );
-
-  it.each(["github-hosted", "self-hosted"])(
-    "allows pull_request capabilities on a %s runner",
-    async (runnerEnvironment) => {
-      oidc.verify.mockResolvedValue(
-        claims({ event_name: "pull_request", runner_environment: runnerEnvironment }),
-      );
-      const { broker } = harness();
-      await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
-        capability: "review_publish",
-      });
-    },
-  );
-
-  it.each([
-    ["missing repository", null],
-    ["fork repository", { id: 987654321, fork: true }],
-    ["repository id mismatch", { id: 111, fork: false }],
-  ])("rejects a %s", async (_name, repositoryInfo) => {
-    const { broker, github } = harness();
-    github.repositoryInfo.mockResolvedValue(repositoryInfo);
-    await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(
-      "broker_repository_rejected",
-    );
-    expect(github.capabilityToken).not.toHaveBeenCalled();
-  });
-
-  it("rejects a repository without an App installation", async () => {
-    const { broker, github } = harness();
-    github.installationFor.mockResolvedValue(null);
-    await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(
-      "broker_installation_unavailable",
-    );
+  it("rejects missing installation and invalid OIDC before target effects", async () => {
+    const { broker, github } = harness(); github.installationFor.mockResolvedValue(null as never);
+    await expect(broker.exchange({ oidc_token: "signed", session_attestation: request() })).rejects.toThrow("broker_installation_unavailable");
     expect(github.installationToken).not.toHaveBeenCalled();
-    expect(github.repositoryInfo).not.toHaveBeenCalled();
+    oidc.verify.mockRejectedValue(new Error("invalid OIDC"));
+    await expect(broker.exchange({ oidc_token: "signed", session_attestation: request() })).rejects.toThrow("invalid OIDC");
+  });
+  it("refuses stale head before enrollment and keeps release-only owner cleanup finite", async () => {
+    const { broker, github } = harness(); github.pullRequestHead.mockResolvedValue("c".repeat(40));
+    await expect(broker.exchange(sessionBody())).rejects.toThrow("broker_session_head_rejected");
+    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
+    const result = await broker.exchange({ ...sessionBody(), release_only: true });
+    expect(result).toEqual({ token: "scoped-token", capability: "review_session", release_only: true, app_id: 12345, reservation_owner: { run_id: "10000000001", head_sha: SHA } });
+    expect(result.session_grant).toBeUndefined(); expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
+  });
+  it("requires signing key only for current grant issuance", async () => {
+    const { broker, env } = harness(); env.REVIEWSENSEI_SIGNING_KEY = "";
+    await expect(broker.exchange(sessionBody())).rejects.toThrow("configuration_unavailable");
+  });
+  it.each([undefined, null, "", "0", "-1", "1.5", " 12345", "12345 ", "0012345", "9007199254740992", true, 12345])("refuses invalid configured App ID%j before authentication or token issuance", async value => {
+    const { broker, env, github } = harness();
+    env.GITHUB_APP_ID = value as string;
+    await expect(broker.exchange(sessionBody())).rejects.toThrow("configuration_unavailable");
+    expect(oidc.verify).not.toHaveBeenCalled();
+    expect(github.installationFor).not.toHaveBeenCalled();
     expect(github.capabilityToken).not.toHaveBeenCalled();
+    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
   });
-
-  it("exchanges the same assertion again within the token age window", async () => {
-    const { broker } = harness();
-    const first = await broker.exchange({ oidc_token: "signed-jwt", capability: "issue_reply" });
-    const second = await broker.exchange({ oidc_token: "signed-jwt", capability: "issue_reply" });
-    expect(first.token).toBe("ghs_scoped_token");
-    expect(second.capability).toBe("issue_reply");
-  });
-
-  it("refuses a session grant when the signing key is missing", async () => {
-    const { broker, env } = harness();
-    env.REVIEWSENSEI_SIGNING_KEY = "";
-    await expect(broker.exchange({
-      oidc_token: "signed-jwt",
-      capability: "review_session",
-      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
-      session_attestation: commandAttestation(),
-    })).rejects.toThrow("configuration_unavailable");
-  });
-
-  it("does not rate-limit before OIDC verification", async () => {
+  it.each(commandParityCases)("matches current Python command grammar for $body", async ({ body, accepted }) => {
     const { broker, github } = harness();
-    await expect(broker.exchange({ oidc_token: "forged-jwt" }, "203.0.113.7")).resolves.toMatchObject({
-      capability: "review_publish",
-    });
-    expect(oidc.verify).toHaveBeenCalled();
-    expect(github.repositoryInfo).toHaveBeenCalled();
+    const identity = claims({ event_name: "issue_comment" }); oidc.verify.mockResolvedValue(identity);
+    github.feedbackComment.mockResolvedValue({ kind: "issue", comment_id: 13579, updated_at: "2026-10-09T00:00:00Z",
+      author: "octocat", author_id: 12345678, association: "OWNER", body, body_sha256: hash(body) });
+    const authority = request("command", {}, identity); authority.source.body_sha256 = hash(body);
+    const result = broker.exchange(sessionBody(authority));
+    if (accepted) await expect(result).resolves.toMatchObject({ session_grant: expect.stringMatching(/^sg1\./), session_attestation: { purpose: "command", actor: { login: "octocat", type: "User", association: "OWNER" } } });
+    else await expect(result).rejects.toThrow("broker_session_actor_rejected");
+  });
+  it("does not store or rate limit exact current grants within the assertion window", async () => {
+    const { broker } = harness();
+    const first = await broker.exchange(sessionBody());
+    for (let index = 0; index < 11; index++) expect(await broker.verifySessionGrant(first.session_grant, first.session_attestation)).toEqual(first.session_attestation);
+  });
+  it("revalidates current runtime on grant verification and preserves opaque grant secrecy", async () => {
+    const { broker, github } = harness(); const result = await broker.exchange(sessionBody());
+    github.publicWorkflowRuntimeShas.mockResolvedValue({ commitSha: "c".repeat(40), refSha: "c".repeat(40) });
+    await expect(broker.verifySessionGrant(result.session_grant, result.session_attestation)).rejects.toThrow("broker_workflow_rejected");
   });
 });
