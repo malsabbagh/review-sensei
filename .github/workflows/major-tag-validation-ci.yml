@@ -67,6 +67,7 @@ jobs:
           --expected-wheel-sha256 e3966ccc999fad1cfdc0b278f22e43b570d8c3f809acd3a507ad075517f2bf37
           --github-version 0.1.1
           --expected-github-wheel-sha256 139f40dc5778af743e868616a1eb9a3cd2d8ab4eda564ab514f35720edaed0ba
+          --historical-baseline
           --suite qualify --suite transports --suite seam_boundaries
           --suite operations --suite operation_state
           --output "$RUNNER_TEMP/major-validator-regression"

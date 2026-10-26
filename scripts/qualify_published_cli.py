@@ -29,6 +29,29 @@ SUITES = (
     "lifecycle",
 )
 
+HISTORICAL_PAIR = ("0.6.23", "0.1.1")
+HISTORICAL_DIGESTS = (
+    "e3966ccc999fad1cfdc0b278f22e43b570d8c3f809acd3a507ad075517f2bf37",
+    "139f40dc5778af743e868616a1eb9a3cd2d8ab4eda564ab514f35720edaed0ba",
+)
+HISTORICAL_SUITES = SUITES[:-1]
+
+
+def qualification_mode(args, suites):
+    """An explicit pinned regression is never a fallback for a current release."""
+    if not args.historical_baseline:
+        return "current-lifecycle", "operations.py"
+    if (
+        (args.version, args.github_version) != HISTORICAL_PAIR
+        or (args.expected_wheel_sha256, args.expected_github_wheel_sha256)
+        != HISTORICAL_DIGESTS
+        or suites != HISTORICAL_SUITES
+    ):
+        raise ValueError(
+            "historical baseline requires exactly 0.6.23 / 0.1.1, both pinned wheel digests and all five explicit historical suites"
+        )
+    return "historical-regression", "historical_operations.py"
+
 
 def selected_suites(requested):
     """Default to every contract; explicit subsets remain visible in receipts."""
@@ -213,9 +236,11 @@ def main():
     )
     parser.add_argument("--expected-wheel-sha256", type=wheel_sha256)
     parser.add_argument("--expected-github-wheel-sha256", type=wheel_sha256)
+    parser.add_argument("--historical-baseline", action="store_true")
     args = parser.parse_args()
     try:
         suites = selected_suites(args.suite)
+        mode, operation_script = qualification_mode(args, suites)
     except ValueError as error:
         parser.error(str(error))
     root = args.output.resolve()
@@ -225,10 +250,13 @@ def main():
     home = root / "isolated-home"
     home.mkdir()
     env = clean_environment(home)
+    scripts = Path(__file__).resolve().parents[1] / "tests/published_cli"
     report = {
         "requested_version": args.version,
         "requested_github_version": args.github_version,
         "source": "exact PyPI wheels",
+        "mode": mode,
+        "operation_fixture": None,
         "credential_free": True,
         "status": "NOT_EXECUTED",
         "suites": [],
@@ -244,6 +272,24 @@ def main():
     }
     exit_code = 1
     try:
+        child = "operation_child.py" if args.historical_baseline else "run_child.py"
+        fixtures = (operation_script, child)
+        if not args.historical_baseline:
+            fixtures += ("run_fixture.py", "entry_child.py")
+        for name in fixtures:
+            if not (scripts / name).is_file():
+                raise ValueError("qualification fixture is missing: " + name)
+        digests = {
+            name: hashlib.sha256((scripts / name).read_bytes()).hexdigest()
+            for name in fixtures
+        }
+        report["operation_fixture"] = {
+            "file": operation_script,
+            "sha256": digests[operation_script],
+            "child_file": child,
+            "child_sha256": digests[child],
+            "support_sha256": {name: digests[name] for name in fixtures[2:]},
+        }
         environment = root / "environment"
         venv.EnvBuilder(with_pip=True).create(environment)
         python = environment / (
@@ -321,12 +367,14 @@ def main():
             report["installed_github"], args.github_version, environment
         )
         require_hosted_pin(report["installed_github"].get("requires"), args.version)
-        scripts = Path(__file__).resolve().parents[1] / "tests/published_cli"
         for name in suites:
             destination = root / name
             command = [
                 str(python),
-                str(scripts / (name + ".py")),
+                str(
+                    scripts
+                    / (operation_script if name == "operations" else name + ".py")
+                ),
                 "--expected-version",
                 args.version,
                 "--report",
