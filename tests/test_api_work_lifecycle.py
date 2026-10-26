@@ -18,10 +18,9 @@ from urllib.parse import urlsplit
 from review_sensei_github import GitHubApplication, GitHubWriteOptions, ReviewPublisher
 from review_sensei_github.api_run_host import HOSTED_API_STARTUP_PLAN, ApiRunReviewHooks
 from review_sensei_github.api_run_plan import (
-    OWNER_REQUESTS,
+    MIN_OPERATION_REQUESTS,
     TERMINAL_REQUESTS,
-    WORK_REQUESTS,
-    qualification_limit,
+    owner_allocations,
 )
 from review_sensei_github.api_run_requests import ApiRunSessionLedger
 from review_sensei_github.broker_client import BrokerClient
@@ -39,7 +38,12 @@ from tests import test_review_transaction as tx
 from tests.fake_github_http import json_response
 from tests.test_api_work_persistence import BASE, HEAD, IDENTITY
 
-QUALIFICATION_LIMIT = qualification_limit(HOSTED_API_STARTUP_PLAN.liability)
+# Fixed modest fixture: measured work attempts, not a shipping default/minimum.
+# Admission 11 + provider metadata 4 + completion 8 + publication 45.
+QUALIFIED_WORK_CALLS = 11 + 4 + 8 + 45
+QUALIFICATION_LIMIT = HOSTED_API_STARTUP_PLAN.liability + 2 * (
+    TERMINAL_REQUESTS + QUALIFIED_WORK_CALLS
+)
 
 
 def caller_measurement(fixture):
@@ -69,6 +73,7 @@ def caller_measurement(fixture):
         "startup_reservation": state.startup.liability,
         "live_known_confirmed_ordinary": state.confirmed,
         "live_explicit_pending_ordinary": state.uncertain,
+        "unconfirmed_native_mutation": fixture.accounted._checkpoint is not None,
         "durable_known_confirmed_ordinary": durable.confirmed,
         "reserved_undispatched": state.reserved_undispatched,
         "predecessor_reserved_opaque": sum(
@@ -89,18 +94,21 @@ def caller_measurement(fixture):
         "native_approvals": sum(r["state"] == "APPROVED" for r in fixture.reviews),
         "check_conclusions": [r.get("conclusion") for r in fixture.check_runs],
         "native_walks_current_owner": dict(fixture.accounted.native_walks),
+        "worker_internal_observations": list(fixture.worker_observations),
     }
 
 
 class LifecycleFixture(fixture_module.HostedRunFixture):
-    def __init__(self, directory, *, fanout=30):
-        super().__init__(directory, limit=QUALIFICATION_LIMIT, fanout=fanout)
+    def __init__(self, directory, *, fanout=30, limit=QUALIFICATION_LIMIT):
+        super().__init__(directory, limit=limit, fanout=fanout)
+        self.limit = limit
         self.reviews = []
         self.inline = []
         self.check_runs = []
         self.interrupt_engine_read = False
         self.fail_terminal_patch = False
         self.terminal_fault_trace_index = None
+        self.worker_observations = []
 
     def _external_open(self, request, timeout):
         path = urlsplit(request.full_url).path
@@ -141,6 +149,15 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
             )
             self.trace.append((self.attempt, method, path))
             if broker:
+                self.worker_observations.append(
+                    {
+                        "capability": payload["capability"],
+                        "service_ceiling": payload["control_budget"]["max_dispatches"],
+                        "observed_dispatches": min(
+                            self.fanout, payload["control_budget"]["max_dispatches"]
+                        ),
+                    }
+                )
                 value = {
                     "token": "synthetic-" + payload["capability"],
                     "capability": payload["capability"],
@@ -261,7 +278,12 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
                 raise ReviewInputError("recovery ownership changed")
             state = (
                 previous.claim_startup(owner)
-                .reserve("successor-review", WORK_REQUESTS)
+                .reserve(
+                    "successor-review",
+                    owner_allocations(
+                        configuration.limit, HOSTED_API_STARTUP_PLAN.liability
+                    ).successor_work,
+                )
                 .reserve("successor-terminal", TERMINAL_REQUESTS)
             )
             return record.evolve(
@@ -285,9 +307,10 @@ class CallerLifecycleTests(unittest.TestCase):
         prepared=None,
         expected_analysis=0,
         provider_error=False,
+        limit=QUALIFICATION_LIMIT,
     ):
         if prepared is None:
-            fixture = LifecycleFixture(directory, fanout=fanout)
+            fixture = LifecycleFixture(directory, fanout=fanout, limit=limit)
             native, configuration, _evidence, owner = fixture.prelude()
             fixture.accounted.initialize_and_activate(
                 native, IDENTITY, configuration, owner
@@ -427,7 +450,12 @@ class CallerLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             fixture, publication, calls = self.journey(directory)
             self.assertEqual(len(calls), 1)
-            self.assertEqual(fixture.accounted.accounting.remaining, OWNER_REQUESTS)
+            self.assertEqual(
+                fixture.accounted.accounting.remaining,
+                owner_allocations(
+                    fixture.limit, HOSTED_API_STARTUP_PLAN.liability
+                ).successor_total,
+            )
             self.assertTrue(
                 any(r["state"] == "APPROVED" for r in fixture.reviews), publication
             )
@@ -520,13 +548,102 @@ class CallerLifecycleTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertIsNone(publication)
             self.assertEqual(fixture.accounted._terminal_reason, "analysis-abort")
-            self.assertEqual(fixture.accounted.accounting.remaining, OWNER_REQUESTS)
+            self.assertEqual(
+                fixture.accounted.accounting.remaining,
+                owner_allocations(
+                    fixture.limit, HOSTED_API_STARTUP_PLAN.liability
+                ).successor_total,
+            )
+
+    def test_measured_approval_and_withholding_boundaries_are_not_default_selection(
+        self,
+    ):
+        for human, work in (
+            (False, QUALIFIED_WORK_CALLS),
+            (True, QUALIFIED_WORK_CALLS - 4),
+        ):
+            # Initial owner receives the odd unit; the successor must work with
+            # floor(remaining/2). These are fixed fixture measurements only.
+            minimum = (
+                HOSTED_API_STARTUP_PLAN.liability + 2 * (TERMINAL_REQUESTS + work) - 1
+            )
+            for limit in (minimum - 1, minimum):
+                with (
+                    self.subTest(human=human, limit=limit),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    fixture = LifecycleFixture(directory, limit=limit)
+                    native, config, _, owner = fixture.prelude()
+                    fixture.accounted.initialize_and_activate(
+                        native, IDENTITY, config, owner
+                    )
+                    if limit < minimum:
+                        with self.assertRaisesRegex(ReviewInputError, "cannot fund"):
+                            self.journey(
+                                directory, prepared=(fixture, native), human=human
+                            )
+                        self.assertFalse(
+                            any(r["state"] == "APPROVED" for r in fixture.reviews)
+                        )
+                        self.assertEqual(
+                            parse_session_comment(
+                                fixture.comment["body"], identity=IDENTITY
+                            ).transaction.phase,
+                            "publication_failed",
+                        )
+                    else:
+                        fixture, publication, _ = self.journey(
+                            directory, prepared=(fixture, native), human=human
+                        )
+                        self.assertEqual(publication.status, "published")
+                        self.assertEqual(len(fixture.trace), 78 if human else 82)
+                        self.assertEqual(
+                            fixture.accounted.accounting.confirmed, 68 if human else 72
+                        )
+                        self.assertEqual(
+                            fixture.accounted.usable, TERMINAL_REQUESTS - 4
+                        )
+
+    def test_successor_one_short_keeps_predecessor_capacity_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = LifecycleFixture(directory, limit=QUALIFICATION_LIMIT - 1)
+            native, config, _, owner = fixture.prelude()
+            fixture.accounted.initialize_and_activate(native, IDENTITY, config, owner)
+            fixture.accounted.replace_checkpoint(native, IDENTITY)
+            original = ApiRunAccounting.from_document(
+                parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                ).api_run_accounting
+            )
+            fixture.interrupt_engine_read = True
+            self.journey(directory, prepared=(fixture, native), expected_analysis=130)
+            native = fixture.recover_lifecycle()
+            with self.assertRaisesRegex(ReviewInputError, "cannot fund"):
+                self.journey(directory, prepared=(fixture, native))
+            self.assertEqual(fixture.accounted.accounting.blocks[:2], original.blocks)
+            self.assertEqual(fixture.accounted.accounting.remaining, 0)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
+            self.assertEqual(len(fixture.trace), 100)
 
     def test_worker_internal_fanout_does_not_change_public_caller_cost(self):
         observed = []
         for fanout in (9, 12, 30):
             with tempfile.TemporaryDirectory() as directory:
                 fixture, publication, calls = self.journey(directory, fanout=fanout)
+                self.assertEqual(
+                    next(
+                        o["observed_dispatches"]
+                        for o in fixture.worker_observations
+                        if o["capability"] == "review_session"
+                    ),
+                    fanout,
+                )
+                self.assertTrue(
+                    all(
+                        o["observed_dispatches"] <= o["service_ceiling"]
+                        for o in fixture.worker_observations
+                    )
+                )
                 observed.append(
                     (
                         len(fixture.trace),
@@ -570,17 +687,16 @@ class CallerLifecycleTests(unittest.TestCase):
             )
 
     def test_finite_initial_tranche_and_successor_headroom_at_plan_boundary(self):
-        for limit in (
-            QUALIFICATION_LIMIT - 1,
-            QUALIFICATION_LIMIT,
-            QUALIFICATION_LIMIT + 1,
-        ):
+        minimum = HOSTED_API_STARTUP_PLAN.liability + 2 * (
+            TERMINAL_REQUESTS + MIN_OPERATION_REQUESTS
+        )
+        for limit in (minimum - 1, minimum, minimum + 1):
             with self.subTest(limit=limit), tempfile.TemporaryDirectory() as directory:
                 fixture = fixture_module.HostedRunFixture(directory, limit=limit)
                 native, configuration, _evidence, owner = fixture.prelude()
-                if limit < QUALIFICATION_LIMIT:
+                if limit < minimum:
                     with self.assertRaisesRegex(
-                        ReviewInputError, "lifecycle plan is unfunded"
+                        ReviewInputError, "operation allocation is unfunded"
                     ):
                         fixture.accounted.initialize_and_activate(
                             native, IDENTITY, configuration, owner
@@ -590,15 +706,15 @@ class CallerLifecycleTests(unittest.TestCase):
                 state = fixture.accounted.initialize_and_activate(
                     native, IDENTITY, configuration, owner
                 )
+                allocations = owner_allocations(
+                    limit, HOSTED_API_STARTUP_PLAN.liability
+                )
                 self.assertEqual(
                     [b.undispatched for b in state.blocks],
-                    [WORK_REQUESTS, TERMINAL_REQUESTS],
+                    [allocations.first_work, allocations.first_terminal],
                 )
-                self.assertEqual(
-                    state.remaining,
-                    limit - HOSTED_API_STARTUP_PLAN.liability - OWNER_REQUESTS,
-                )
-                self.assertGreaterEqual(state.remaining, OWNER_REQUESTS)
+                self.assertEqual(state.remaining, allocations.successor_total)
+                self.assertEqual(state.configuration.limit, limit)
 
     def test_missing_terminal_binding_refuses_before_provider_and_stays_one_shot(self):
         with tempfile.TemporaryDirectory() as directory:

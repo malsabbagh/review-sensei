@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -31,11 +32,9 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionIdentity, SessionRecord
 
 from .api_run_owner import claim_hosted_startup
-from .http import MAX_PAGINATION_PAGES, Opener
+from .caller_operation import CallerOperation
+from .http import Opener
 from .session_ledger import GitHubIssueCommentSessionLedger
-
-NATIVE_REPLACE_CALLER_REQUESTS = 3 * MAX_PAGINATION_PAGES + 1
-_WRITE_AND_READBACK = 1 + MAX_PAGINATION_PAGES
 
 
 class _RefuseCallerRedirects(HTTPRedirectHandler):
@@ -117,6 +116,10 @@ class ApiRunRequestTransport:
         self._budget_view: Any = None
         self._logical_phase = "startup"
         self.native_walks: dict[str, int] = {}
+        self._active_operation: CallerOperation | None = None
+        self._checkpoint_operation: CallerOperation | None = None
+        self._failed_operations: set[tuple[str | None, str]] = set()
+        self._issued_operations: list[tuple[CallerOperation, str | None]] = []
 
     def label_phase(self, phase: str) -> None:
         if phase not in {
@@ -183,7 +186,75 @@ class ApiRunRequestTransport:
             b.undispatched for b in self._state.blocks if b.block_id == self._block
         )
 
+    @contextmanager
+    def read_operation(
+        self, key: str, *, retained: CallerOperation | None = None
+    ) -> Iterator[CallerOperation | None]:
+        # Nested pagination/freshness reads share the enclosing operation. A new
+        # pagination wrapper cannot replenish its counter or confirmation tail.
+        if self._state is None or self._active_operation is not None:
+            if retained is not None and retained is not self._active_operation:
+                raise ReviewInputError("caller confirmation operation conflicts")
+            yield self._active_operation
+            return
+        from .api_run_plan import READ_OPERATION_REQUESTS
+
+        with self._operation(
+            key, READ_OPERATION_REQUESTS, retained=retained
+        ) as operation:
+            yield operation
+
+    @contextmanager
+    def _operation(
+        self,
+        key: str,
+        capacity: int,
+        *,
+        write_tail: int = 0,
+        retained: CallerOperation | None = None,
+    ) -> Iterator[CallerOperation]:
+        if self._active_operation is not None:
+            raise ReviewInputError("caller mutation cannot nest another operation")
+        identity = (self._root, key)
+        if retained is None and identity in self._failed_operations:
+            raise ReviewInputError("caller failed operation cannot be replenished")
+        if retained is not None and (
+            retained.confirmed
+            or not retained.write_attempted
+            or not any(
+                retained is issued and block == self._block
+                for issued, block in self._issued_operations
+            )
+        ):
+            raise ReviewInputError(
+                "caller operation is foreign, settled or reconstructed"
+            )
+        operation = retained or CallerOperation(
+            min(capacity, self.usable), write_tail, key
+        )
+        if retained is None:
+            self._issued_operations.append((operation, self._block))
+        if operation.remaining < (write_tail or 1):
+            raise ReviewInputError("caller operation allocation is unfunded")
+        self._active_operation = operation
+        try:
+            yield operation
+        except BaseException:
+            self._failed_operations.add(identity)
+            raise
+        finally:
+            self._active_operation = None
+
+    def mutation_operation(self, key: str) -> Any:
+        from .api_run_plan import WRITE_CONFIRMATION_TAIL
+
+        return self._operation(
+            key, WRITE_CONFIRMATION_TAIL, write_tail=WRITE_CONFIRMATION_TAIL
+        )
+
     def open(self, request: Request, *, timeout: float) -> _AccountedResponse:
+        from .api_run_plan import WRITE_CONFIRMATION_TAIL
+
         if not isinstance(request, Request):
             raise ReviewInputError("caller request is invalid")
         if (
@@ -204,17 +275,21 @@ class ApiRunRequestTransport:
                 request.get_method() in {"POST", "PATCH"}
                 and self._activation is not None
                 and len(self._slot.requests) - self.startup_dispatches
-                < _WRITE_AND_READBACK
+                < WRITE_CONFIRMATION_TAIL
             ):
                 raise ReviewInputError("startup caller write/readback tail is unfunded")
             self.startup_dispatches += 1
             phase = "startup"
             request_id = f"startup-{self.run.repository_id}-{self.run.run_id}-{self.attempt}-{self._sequence}"
         else:
+            if self._active_operation is not None:
+                self._active_operation.consume(
+                    mutation=request.get_method() in {"POST", "PATCH", "DELETE"}
+                )
             if (
                 request.get_method() == "PATCH"
                 and self._checkpoint is not None
-                and self.usable < _WRITE_AND_READBACK
+                and self.usable < WRITE_CONFIRMATION_TAIL
             ):
                 raise ReviewInputError(
                     "caller checkpoint write/readback tail is unfunded"
@@ -223,11 +298,11 @@ class ApiRunRequestTransport:
             if (
                 request.get_method() in {"POST", "PATCH"}
                 and ("/issues/comments/" in path or path.endswith("/comments"))
-                and self.usable < _WRITE_AND_READBACK
+                and self.usable < WRITE_CONFIRMATION_TAIL
             ):
-                # Comment carriers can require a complete bounded listing to
-                # confirm their owned write. This checks room; it does not
-                # debit an internal liability or create a second allowance.
+                # Protect finite confirmation room without promising that the
+                # complete owned listing will fit. No internal Worker liability
+                # is debited and no replacement allowance is created.
                 raise ReviewInputError("caller comment write/readback tail is unfunded")
             phase = "ordinary"
             request_id = f"caller-{self.run.repository_id}-{self.run.run_id}-{self._state.owner.generation}-{self._sequence}"
@@ -392,7 +467,7 @@ class ApiRunRequestTransport:
         self._reservation_started = True
 
         def prepare(record: SessionRecord) -> SessionRecord:
-            from .api_run_plan import OWNER_REQUESTS, TERMINAL_REQUESTS, WORK_REQUESTS
+            from .api_run_plan import owner_allocations
 
             state = initial_accounting(
                 self.run,
@@ -401,12 +476,9 @@ class ApiRunRequestTransport:
                 self.plan,
                 prior_nonstartup_liability_upper_bound=0,
             )
-            if state.remaining < 2 * OWNER_REQUESTS:
-                raise ReviewInputError(
-                    "initial and successor lifecycle plan is unfunded"
-                )
-            state = state.reserve("hosted-review", WORK_REQUESTS).reserve(
-                "hosted-terminal", TERMINAL_REQUESTS
+            allocation = owner_allocations(configuration.limit, self.plan.liability)
+            state = state.reserve("hosted-review", allocation.first_work).reserve(
+                "hosted-terminal", allocation.first_terminal
             )
             updated = record.evolve(api_run_accounting=state.to_document())
             self._activation = updated, "hosted-review"
@@ -449,15 +521,8 @@ class ApiRunRequestTransport:
         if self._checkpoint is not None:
             raise ReviewInputError("caller checkpoint has unresolved publication")
         self.accounting
-        from .api_run_plan import NATIVE_BOUND_REPLACE_CALLS
+        from .api_run_plan import NATIVE_OPERATION_REQUESTS, WRITE_CONFIRMATION_TAIL
 
-        required = (
-            NATIVE_BOUND_REPLACE_CALLS
-            if ledger.evidence_budget is not None
-            else NATIVE_REPLACE_CALLER_REQUESTS
-        )
-        if self.usable < required:
-            raise ReviewInputError("caller checkpoint operation is unfunded")
         self._checkpoint_readback_attempted = False
 
         def prepare(record: SessionRecord) -> SessionRecord:
@@ -475,13 +540,29 @@ class ApiRunRequestTransport:
             self._checkpoint = updated
             return updated
 
-        # Bypass only this accounting adapter's override, retaining the actual
-        # native mutation, fresh rediscovery and authenticated exact readback.
-        confirmed = GitHubIssueCommentSessionLedger.replace(
-            ledger, identity, prepare, now=now
-        )
-        self._accept_checkpoint(ledger, confirmed)
-        return confirmed
+        # All discovery/rediscovery/activation scans and the terminal page share
+        # this finite allocation. Complete enumeration remains mandatory; the
+        # write and its confirmation remain protected before every read.
+        key = "native:" + getattr(mutate, "__qualname__", "checkpoint")
+        with self._operation(
+            key, NATIVE_OPERATION_REQUESTS, write_tail=WRITE_CONFIRMATION_TAIL
+        ) as operation:
+            self._checkpoint_operation = operation
+            try:
+                confirmed = GitHubIssueCommentSessionLedger.replace(
+                    ledger, identity, prepare, now=now
+                )
+                self._accept_checkpoint(ledger, confirmed)
+                operation.confirmed = True
+                self._checkpoint_operation = None
+                return confirmed
+            except BaseException:
+                if not operation.write_attempted:
+                    # Preparing pure bytes conveys no mutation authority. A
+                    # failed enumeration made no write and needs no readback.
+                    self._checkpoint = None
+                    self._checkpoint_operation = None
+                raise
 
     def _accept_checkpoint(
         self, ledger: GitHubIssueCommentSessionLedger, record: SessionRecord
@@ -503,16 +584,22 @@ class ApiRunRequestTransport:
         self._require_ledger(ledger, identity)
         if (
             self._checkpoint is None
-            or self._last_method != "PATCH"
+            or self._checkpoint_operation is None
+            or not self._checkpoint_operation.write_attempted
             or self._checkpoint_readback_attempted
         ):
             raise ReviewInputError("caller checkpoint has no funded reconciliation")
         self._checkpoint_readback_attempted = True
-        loaded = ledger.load(identity)
-        if loaded.status != "ok" or loaded.record is None:
-            raise ReviewInputError("caller checkpoint publication is unconfirmed")
-        self._accept_checkpoint(ledger, loaded.record)
-        return loaded.record
+        operation = self._checkpoint_operation
+        assert operation is not None
+        with self._operation(operation.key, 0, retained=operation):
+            loaded = ledger.load(identity)
+            if loaded.status != "ok" or loaded.record is None:
+                raise ReviewInputError("caller checkpoint publication is unconfirmed")
+            self._accept_checkpoint(ledger, loaded.record)
+            operation.confirmed = True
+            self._checkpoint_operation = None
+            return loaded.record
 
 
 class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
@@ -534,6 +621,10 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         self.caller = caller
         self.evidence_budget = caller.budget_view
         self._terminal_claimed = False
+
+    def load(self, identity: SessionIdentity, **kwargs: Any) -> Any:
+        with self.caller.read_operation("native-load"):
+            return super().load(identity, **kwargs)
 
     def _fetch_pages(
         self, identity: SessionIdentity, *, since: str | None

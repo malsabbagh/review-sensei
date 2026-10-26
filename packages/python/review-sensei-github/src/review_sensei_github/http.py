@@ -259,6 +259,32 @@ class GitHubHttp:
         expected_items: int | None = None,
         before_read: Callable[[], float] | None = None,
     ) -> list[Any]:
+        from .caller_operation import http_read_operation
+
+        with http_read_operation(self, "pagination:" + path):
+            return self._paginate(
+                path=path,
+                token=token,
+                page_sizes=page_sizes,
+                max_requests=max_requests,
+                timeout_seconds=timeout_seconds,
+                monotonic=monotonic,
+                expected_items=expected_items,
+                before_read=before_read,
+            )
+
+    def _paginate(
+        self,
+        *,
+        path: str,
+        token: str,
+        page_sizes: tuple[int, ...] | None = None,
+        max_requests: int | None = None,
+        timeout_seconds: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        expected_items: int | None = None,
+        before_read: Callable[[], float] | None = None,
+    ) -> list[Any]:
         """Return at most ``MAX_PAGINATION_ITEMS`` list entries.
 
         Callers that handle large, untrusted list entries may provide strictly

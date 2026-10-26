@@ -742,7 +742,15 @@ def retain_checkpoint_review_result(
         if available is None:
             budget = getattr(http, "publication_budget", None)
             if isinstance(budget, EvidenceReadBudget):
-                liability = 2 * ensure_result_part_capacity(len(payload)) + 30
+                from .api_run_budget import CallerRunBudget
+                from .api_run_plan import READ_OPERATION_REQUESTS
+
+                parts = ensure_result_part_capacity(len(payload))
+                liability = 2 * parts + (
+                    READ_OPERATION_REQUESTS
+                    if isinstance(budget, CallerRunBudget)
+                    else 30
+                )
                 if liability > budget.ordinary_remaining():
                     raise ReviewInputError(
                         "retention request liability exceeds the original budget"
@@ -836,7 +844,15 @@ def retain_review_result(
             if isinstance(budget, EvidenceReadBudget):
                 # Before any part POST, admit every bounded listing/readback
                 # and a possible lost-response reconciliation, without refill.
-                liability = 2 * ensure_result_part_capacity(len(payload)) + 30
+                from .api_run_budget import CallerRunBudget
+                from .api_run_plan import READ_OPERATION_REQUESTS
+
+                parts = ensure_result_part_capacity(len(payload))
+                liability = 2 * parts + (
+                    READ_OPERATION_REQUESTS
+                    if isinstance(budget, CallerRunBudget)
+                    else 30
+                )
                 if liability > budget.ordinary_remaining():
                     raise ReviewInputError(
                         "retention request liability exceeds the original budget"

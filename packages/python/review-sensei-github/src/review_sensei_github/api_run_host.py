@@ -99,12 +99,7 @@ class ApiRunReviewHooks:
             raise ReviewInputError(
                 "caller provider phase does not own the admitted run"
             )
-        from .api_run_plan import (
-            COMPLETION,
-            PROVIDER_METADATA,
-            PUBLICATION,
-            TERMINAL_REQUESTS,
-        )
+        from .api_run_plan import TERMINAL_REQUESTS
 
         terminal = next(
             (
@@ -120,9 +115,9 @@ class ApiRunReviewHooks:
             or terminal.undispatched != TERMINAL_REQUESTS
         ):
             raise ReviewInputError("provider has no original protected terminal tail")
-        self.ledger.caller.budget_view.preflight(
-            sum(row.requests for row in (*PROVIDER_METADATA, *COMPLETION, *PUBLICATION))
-        )
+        # Attempt metadata within the existing work tranche; terminal cleanup is
+        # already protected. There is no promise that all histories will fit.
+        self.ledger.caller.budget_view.preflight(1)
         self._provider_started = True
         self.ledger.caller.label_phase("provider")
         return self.ledger
@@ -151,7 +146,8 @@ class ApiRunReviewHooks:
         return GitHubReviewHooks().report_failure(error, args)
 
     def publish_review(self, application: Any, **kwargs: Any) -> Any:
-        from .api_run_plan import PUBLICATION
+        from .api_run_plan import publication_attempt_plan
+        from .publication_recovery import _payload
 
         if (
             application.session_ledger is not self.ledger
@@ -159,9 +155,13 @@ class ApiRunReviewHooks:
         ):
             raise ReviewInputError("publication does not own the analyzed caller run")
         self.ledger.caller.label_phase("publication")
-        self.ledger.caller.budget_view.preflight(
-            sum(row.requests for row in PUBLICATION)
+        options = kwargs["options"]
+        plan = publication_attempt_plan(
+            _payload(kwargs["result"]),
+            inventory=options.complete_inventory,
+            approve=options.auto_approve,
         )
+        self.ledger.caller.budget_view.preflight(plan.minimum_requests)
         # The workflow's pre-publication current-head read is also caller work.
         status, pull = self.ledger.http.request(
             "GET",

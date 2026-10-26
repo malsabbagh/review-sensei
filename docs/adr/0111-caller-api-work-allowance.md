@@ -75,10 +75,11 @@ a local exclusive startup claim rejects same-slot restarts before HTTP. The loca
 claim is not a distributed lock. Existing authoritative PR serialization remains
 mandatory.
 
-**Not completed by these blocks:** production bootstrap orchestration and all-job
-startup policy, authoritative workflow-owner wiring, one-counter CLI/workflow
-integration, current-only grant/readers, historical run rollover, and service-owned
-Worker plan selection. Existing metadata-window constructors remain pending.
+**Not completed by these foundation blocks:** production bootstrap orchestration
+and all-job startup policy, authoritative workflow-owner wiring, full installed
+CLI/workflow integration, current-only grant/readers, historical run rollover,
+and service-owned Worker plan selection. Later offline CLI/application integration
+is described below. Unselected metadata-window constructors remain pending.
 This commit is a review checkpoint, not a qualified runtime feature or release.
 
 ## Consequences
@@ -133,8 +134,9 @@ Serialized owner changes must match exactly one supported startup claim. At128
 the fresh31 reservation still refuses. A test-only limit derived as78+31+31=140
 funds that reservation in the existing recovery mutation, confirms it, and then
 executes one native replacement from the new block. In the small-history control
-the physical counts are10+14+4; at the ten-page boundary they are28+50+31. The old31
-remains charged in both cases. Redirects cannot hide extra physical requests;
+the physical counts are10+14+4. The earlier whole-walk control observed28+50+31
+at the ten-page boundary; current operation allocation instead refuses that later
+mutation before PATCH. The original31 remains charged. Redirects cannot hide extra physical requests;
 failed/expired/unknown requests retain their charges. This does not recommend a
 shipping default or complete all-phase integration; full useful-workflow
 measurement remains pending.
@@ -203,99 +205,120 @@ write to that retained root. All20 decisions remain. This proves the read seam,
 not production historical run-accounting rollover or an end-to-end hosted rescan.
 
 
-## Finite complete-lifecycle qualification checkpoint
+## Finite attempted-work qualification checkpoint
 
-The current source-selected plan is in
+The previous `bcd64fce` lifecycle evidence remains in Git and the frozen
+qualification packet. Astra accepted its public-path evidence but rejected its
+worst-case reservation plan as production admission. Its 492,992 test setting,
+5,005-request native walk bound and 20,021-request mutation bound are not admission
+minima or selected product limits. The current policy is in
 [api_run_plan.py](../../packages/python/review-sensei-github/src/review_sensei_github/api_run_plan.py).
-It covers the qualified fresh-review template: one changed file, at most one
-finding, an inline baseline, and no preexisting decided threads. It does not
-activate a workflow, establish arbitrary-input support, or choose a shipping
-minimum/default/maximum.
 
-The native evidence reader differs from ordinary HTTP pagination. Its existing
-`_fetch_pages` loop can step up the five-size ladder after positive pages and
-allows 1,000 items. A complete conservative walk bound is
-`(1,000 + terminal 1) * ladder 5 = 5,005`; ordinary operation-comment walks retain
-their ten-request ceiling. Four native discovery/rediscovery/preactivation/
-readback walks plus PATCH bound an evidence-fenced mutation at 20,021 caller
-requests. No scan, fallback, item, byte or timeout bound is removed to fit.
-The twelve named publication authority stages and thirteen named history stages
-are explicit in the plan. Their source invocations and all 32-part carrier
-ceilings remain visible for independent review.
+After the existing 78-unit startup reservation, divide the remaining allowance
+between the first owner (ceiling half) and its supported successor (floor half).
+Each owner's share protects 50 terminal attempts: two finite read operations and
+three finite mutation operations for the selected failure-cleanup route. These
+are attempted-work slots, not a promise to complete every history. The success
+route uses the same protected tail. The rest is that owner's work tranche. Both
+shares remain inside the original frozen allowance; neither is a new phase or
+rerun window. An abandoned owner's remainder stays unavailable.
 
-| Planned work | Reserved caller liability |
-| --- | ---: |
-| Admission observations, reservation and transaction attachment |55,057|
-| Provider operation metadata and bounded result parts |91|
-| Retention and analysis completion |20,117|
-| Publication, inventory, check and normal approval |101,111|
-| First-owner ordinary work total |176,376|
-| Protected terminal/failure tail |70,081|
-| One owner total |246,457|
-| Initial plus one recovery startup |78|
-| **Test-only qualification: startup plus two owners** |**492,992**|
+Every selected read operation gets at most ten physical requests from the live
+owner's already reserved tranche. Every native ledger mutation also gets at most
+ten requests **in total**, across discovery, rediscovery, preactivation, live
+fences, PATCH and readback. Nested readers share that operation. Every oversized
+response, fallback and terminal page consumes a physical attempt. Existing item,
+body, author, exact-root, duplicate and complete-enumeration checks remain.
+Enumeration stops before the next request would consume the protected tail of
+one write plus two confirmation requests. Incomplete enumeration cannot authorize
+a mutation, and a failed operation cannot obtain a fresh allocation to continue.
 
-These are conservative reservations, not physical requests or a recommended
-product limit. The parser's provisional default remains 128. At128 the complete
-initial/successor/terminal plan refuses before creating a marker or calling a
-provider. Increasing the test configuration is not a proposal to ship that value.
-The qualification value is computed from the declared plan, not increased until
-a fixture passes.
+The actual native PATCH/readback still authenticates exact canonical bytes and
+detects generation conflicts; it is not a distributed lock. Exhaustion before
+PATCH clears only locally prepared bytes and records no mutation. Exhaustion or
+failure after PATCH retains its original intent and allocation. Reconciliation
+can use only that allocation's remaining confirmation requests, on the same owner
+and block. A known HTTP response is distinct from a confirmed publication. Unknown
+request responses retain their pending charge; exhausted semantic confirmation
+can retain an unconfirmed publication even when all dispatched HTTP responses
+were known. Neither condition authorizes another PATCH/POST.
 
-`initialize_and_activate` now reserves the finite work and terminal tranches,
-leaving one owner total free inside the original allowance. A larger configured
-limit does not enlarge the first owner's tranche. Before inference, hooks verify
-the intact owner-bound terminal tranche and preflight all remaining planned work.
-A single caller-budget facade checks the already authenticated physical meter;
-it creates no60/64 phase window and cannot serialize an old metadata snapshot.
-Its known ordinary counter carries retained request IDs across restoration;
-startup and opaque predecessor reservations are not relabeled as confirmed calls.
-Every new physical request retains its own bounded deadline.
+Owned result-part comment writes similarly protect their finite confirmation
+room. A lost POST permits only the original confirmation allocation, never a
+new complete-list allowance or another POST. Publication admission uses the actual
+canonical retained payload's part count and selected mutation/capability minimum;
+part storage still validates its complete owned inventory. It does not reserve
+all alternative carriers or the theoretical pagination maximum before beginning.
+A larger history may refuse even under an otherwise qualified configuration.
 
-Terminal completion belongs to the application. Retention's existing pre-write
-`publication_failed` uncertainty fence now uses a separately named mutation with
-the same transaction/result/generation checks. It does not claim terminal
-completion or add a write. Analysis cleanup claims its protected tail once before
-its first read; nested error paths cannot retry an uncertain or unfunded abort.
-The terminal selection is one-way and gives no access to another owner's blocks.
+The normal provider hook checks the intact protected terminal reservation and
+attempts metadata with the existing work tranche. It no longer preflights every
+theoretical remaining branch. The application remains the sole terminal-completion
+owner. The pre-write unconfirmed-publication fence retains all transaction checks
+without claiming terminal completion. A failed/unknown abort remains one-shot;
+nested error handlers cannot repeatedly read or write cleanup.
 
-The actual core CLI plus public `GitHubApplication` controls use synthetic
-external HTTP/provider responses and real admission, provider metadata,
-retention, inventory, checks, approval and transaction mutations:
+The real core CLI and public `GitHubApplication` controls retain one file, zero
+or one finding, an inline baseline and no decided threads. Only external HTTP
+and provider responses are synthetic. No released workflow selects this path.
+The smallest measured settings for these **fixed fixtures** are:
 
-| Control | Physical attempts | Result |
-| --- | ---: | --- |
-| Complete review, no findings |82| One native approval, successful check, transaction completed once |
-| Complete review with human decision pending |78| No approval, action-required check, transaction completed once |
-| Provider failure |36| One cleanup owner; failed attempt recorded once |
-| Interrupted first owner followed by supported recovery |101| Old capacity stays unavailable; successor completes normally |
-| Unknown cleanup PATCH response |27| One pending request; no subsequent HTTP or repeated cleanup |
+| Control | Smallest fixture setting | Physical attempts | Result |
+| --- | ---: | ---: | --- |
+| Complete review, no findings |313|82| Native approval, success check, transaction completed once |
+| Complete review with pending human decision |305|78| No approval, action-required check, transaction completed once |
+| Interrupted owner followed by supported recovery |314|101| Predecessor capacity retained; successor completes normally |
 
-At normal approval,72 ordinary requests are confirmed, 246,385 remain reserved
-undispatched, 78 startup units remain occupied, and 246,457 remain free for the
-successor. On recovery, the authenticated predecessor's 246,455 remaining reserved
-units stay opaque and unusable. Retained known request IDs survive; the observed
-unknown response is not converted to a success or refunded. Live versus durable
-confirmed counters differ by prepaid write/readback effects after sealing, as
-in the accepted native checkpoint contract; the retained reservation covers that
-uncertainty without minting capacity.
+The common test configuration is derived from the measured 68 work requests:
+`78 + 2 * (50 + 68) = 314`. Initial admission can use the odd unit, explaining
+313 for initial approval; the successor cannot, explaining 314 for recovery.
+Work is admission 11 + provider metadata 4 + completion 8 + publication 45.
+Terminal completion adds four requests. This is a fixture regression bound,
+**not a shipping default/minimum/maximum**. Provisional 128 remains unqualified
+and refuses before creating a marker or calling a provider.
 
-Worker receipts observing 9/12/30 session-internal requests yield identical
-public-path caller counts. Action exchanges retain their independent 12 bound,
-and publication exchanges retain their own service bound. No Workflow allowance
-is sent as a Worker grant claim and no aggregate Worker allocator is introduced.
-Real Worker qualification remains a separate gate.
+At common 314, normal approval has 72 known ordinary attempts, zero pending
+requests, 46 reserved-undispatched and 118 unallocated for the successor; startup
+still occupies 78. Recovery has 74 retained known ordinary attempts, 162 reserved
+undispatched (116 belong to the predecessor), zero free capacity and one observed
+unknown response in the abandoned owner. That abandoned uncertainty remains
+covered by its opaque reservation, never converted into confirmed dispatches or
+refunded. Live/durable confirmed counts differ by already prepaid effects after
+sealing, as in the original authenticated checkpoint contract.
 
-The PR377 final exact-review selector is ported from tree `dc3b21a`. Its new
-regression first reproduced the old incorrect prose selection, then passed. The
-same-budget read proof again charges 20 GETs after a prior ordinary request,
-preserves the ledger root and 20 decisions, and constructs no fallback window.
+One-less controls refuse honestly rather than claim a completed lifecycle.
+At 312 the approval control refuses its final request, records publication_failed
+and emits no native approval. A previously completed check can already say success;
+that check alone is not proof of completed publication or native approval. At 304
+the human control also records publication_failed. At 313 the recovered approval
+control refuses with the predecessor reservation unchanged. None is a new success
+or permission to replay a mutation. These partial outcomes remain visible evidence.
 
-Before production/PR/release qualification, independently review this plan,
-wire and qualify the full source-owned workflow bootstrap/job inventory, remove
-remaining obsolete executable authorization/selector routes, integrate actual
-main, and run joint installed core/adapter and platform gates. The adapter now
-uses the core's named pre-write mutation, so coordinated versions/dependency pins
-are required. No installed-wheel, deployment, release, live rescan or TaskAlong
-approval is established by these offline controls. Full publication crash/CAS/
-check/approval fault coverage and arbitrary-history run rollover remain pending.
+Provider failure uses 36 physical calls and one cleanup owner. A lost cleanup
+PATCH uses 27, retains one explicit pending request and makes no subsequent HTTP
+request. History-growth controls stop after seven enumeration requests before
+PATCH; confirmation growth stops after two readback requests and keeps the write
+unconfirmed. An exact full page must still fund its final empty page. Oversized
+fallbacks are charged and can exhaust either the read or confirmation allocation.
+
+Synthetic valid receipts observing 9/12/30 session-internal dispatches preserve
+identical caller totals. Action exchanges retain their separate 12 service bound,
+publication exchanges their own service bound. No Worker-internal debit/refund or
+workflow-capacity claim is added. Actual service-owned Worker enforcement and
+aggregate rate protection remain separate qualification work.
+
+The exact PR377 receipt-review selector remains ported from `dc3b21a`. Its reader
+proof still charges 20 fresh GETs after one prior ordinary request, preserves the
+root and all20 synthetic decisions, and constructs no fallback allowance. This
+is not a complete retained-rescan lifecycle proof. Follow-on work separately needs
+the full pre-provider transaction writes, both trigger paths, typed exhaustion
+propagation and completion/approval/withholding controls.
+
+Before production selection or removal of authorization readers: independently
+review this allocation contract, qualify the full workflow startup/job inventory
+and real Worker limits, integrate current main, remove obsolete executable
+selectors/authority, and complete joint installed core/adapter/platform checks.
+The core pre-write helper requires coordinated versions and dependency pins.
+Arbitrary historical rollover, all publication crash/check/approval faults and
+TaskAlong's 40-file/70-finding workload remain unqualified. No live activation,
+provider request, credentials, rescan retry, package publication or release occurs.

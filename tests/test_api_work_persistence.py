@@ -22,7 +22,6 @@ from review_sensei_github.api_run_owner import (
     ApiRunActionsEvidence,
 )
 from review_sensei_github.api_run_requests import (
-    NATIVE_REPLACE_CALLER_REQUESTS,
     ApiRunRequestTransport,
 )
 from review_sensei_github.broker_client import BrokerClient
@@ -84,7 +83,8 @@ PLAN = StartupPlan(
     )
 )
 # One later native replace: discovery, prewrite rediscovery, PATCH, readback.
-NEXT_REPLACE_LIABILITY = NATIVE_REPLACE_CALLER_REQUESTS
+# Historical foundation fixture reservation, not current operation admission.
+NEXT_REPLACE_LIABILITY = 3 * MAX_PAGINATION_PAGES + 1
 # Qualification input only. This does not change DEFAULT_API_REQUEST_LIMIT.
 QUALIFICATION_LIMIT = PLAN.liability + 2 * NEXT_REPLACE_LIABILITY
 
@@ -652,15 +652,20 @@ class ApiPredispatchQualificationTests(unittest.TestCase):
                     ),
                     4,
                 )
+                # A later *different*, confirmed native mutation can use the
+                # still prepaid owner block. It does not need a theoretical
+                # maximum scan reservation or a replacement phase allowance.
+                fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
+                self.assertEqual(len(fixture.trace), 32)
+                self.assertEqual(fixture.accounted.usable, 23)
                 before = len(fixture.trace)
-                with self.assertRaisesRegex(ReviewInputError, "unfunded"):
-                    fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
-                self.assertEqual(len(fixture.trace), before)
                 with self.assertRaises(ReviewInputError):
                     fixture.accounted.reconcile_activation(fixture.ledger, IDENTITY)
                 self.assertEqual(len(fixture.trace), before)
 
-    def test_tenth_terminal_page_and_last_prepaid_request_complete_exactly(self):
+    def test_startup_tenth_terminal_page_does_not_authorize_unbounded_later_mutation(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             fixture = StartupFixture(directory, limit=QUALIFICATION_LIMIT)
             fixture.history_count = 998
@@ -668,19 +673,21 @@ class ApiPredispatchQualificationTests(unittest.TestCase):
             self.assertEqual(len(fixture.trace), len(PLAN.slots[0].requests))
             fixture.recover(reserve_successor=True)
             self.assertEqual(len(fixture.trace), PLAN.liability)
-            fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
-            self.assertEqual(
-                len(fixture.trace), PLAN.liability + NEXT_REPLACE_LIABILITY
-            )
-            self.assertEqual(fixture.accounted.usable, 0)
-            self.assertEqual(fixture.accounted.accounting.confirmed, 31)
-            self.assertEqual(fixture.accounted.accounting.blocks[0], first.blocks[0])
             before = len(fixture.trace)
-            with self.assertRaises(ReviewInputError):
-                fixture.http.request(
-                    "GET", "/repos/owner/repo/pulls/7", token="synthetic"
-                )
-            self.assertEqual(len(fixture.trace), before)
+            body = fixture.comment["body"]
+            with self.assertRaisesRegex(
+                ReviewInputError, "preserve write confirmation"
+            ):
+                fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
+            self.assertEqual(len(fixture.trace) - before, 7)
+            self.assertEqual(fixture.accounted.accounting.confirmed, 7)
+            self.assertEqual(fixture.accounted.accounting.blocks[0], first.blocks[0])
+            self.assertEqual(fixture.comment["body"], body)
+            self.assertIsNone(fixture.accounted._checkpoint)
+            self.assertTrue(all(m == "GET" for _, m, _ in fixture.trace[before:]))
+            with self.assertRaisesRegex(ReviewInputError, "cannot be replenished"):
+                fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
+            self.assertEqual(len(fixture.trace) - before, 7)
 
     def test_full_tenth_page_refuses_and_startup_limit_blocks_any_eleventh_tail_request(
         self,
@@ -720,10 +727,22 @@ class ApiPredispatchQualificationTests(unittest.TestCase):
             )
             fixture.recover(reserve_successor=True)
             before = len(fixture.trace)
-            fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
-            self.assertEqual(len(fixture.trace) - before, 10)
-            self.assertEqual(fixture.accounted.accounting.confirmed, 10)
-            self.assertEqual(fixture.accounted.usable, 21)
+            with self.assertRaisesRegex(
+                ReviewInputError, "confirmation allocation exhausted"
+            ):
+                fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
+            # Both oversized responses, both smaller enumerations, the PATCH
+            # and two confirmation requests are charged. A third confirmation
+            # request cannot take a new operation allocation.
+            self.assertEqual(len(fixture.trace) - before, 9)
+            self.assertEqual(fixture.accounted.accounting.confirmed, 9)
+            self.assertEqual(fixture.accounted.usable, 22)
+            self.assertIsNotNone(fixture.accounted._checkpoint)
+            with self.assertRaisesRegex(
+                ReviewInputError, "confirmation allocation exhausted"
+            ):
+                fixture.accounted.reconcile_checkpoint(fixture.ledger, IDENTITY)
+            self.assertEqual(len(fixture.trace) - before, 9)
 
     def test_unknown_reservation_write_activates_only_matching_readback_once(self):
         for fault in ("unknown-stored", "unknown-absent"):
@@ -756,6 +775,10 @@ class ApiPredispatchQualificationTests(unittest.TestCase):
                 fixture.fault = fault
                 with self.assertRaises(GitHubPublicationTransientError):
                     fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
+                before_reconciliation = len(fixture.trace)
+                with self.assertRaisesRegex(ReviewInputError, "unresolved publication"):
+                    fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
+                self.assertEqual(len(fixture.trace), before_reconciliation)
                 if fault == "unknown-stored":
                     fixture.accounted.reconcile_checkpoint(fixture.ledger, IDENTITY)
                 else:
@@ -768,8 +791,9 @@ class ApiPredispatchQualificationTests(unittest.TestCase):
                 self.assertEqual(live.blocks[0], first.blocks[0])
                 self.assertEqual(live.remaining, 0)
                 self.assertEqual(fixture.accounted.usable, 27)
-                with self.assertRaises(ReviewInputError):
-                    fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
+                if fault == "unknown-absent":
+                    with self.assertRaises(ReviewInputError):
+                        fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
                 with self.assertRaises(ReviewInputError):
                     fixture.accounted.reconcile_checkpoint(fixture.ledger, IDENTITY)
                 self.assertEqual(len(fixture.trace), 28)

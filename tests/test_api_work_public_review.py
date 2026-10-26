@@ -91,7 +91,9 @@ class PublicCallerRunTests(unittest.TestCase):
             fixture = HostedRunFixture(directory)
             native, config, _evidence, owner = fixture.prelude()
             before = len(fixture.trace)
-            with self.assertRaisesRegex(ReviewInputError, "lifecycle plan is unfunded"):
+            with self.assertRaisesRegex(
+                ReviewInputError, "operation allocation is unfunded"
+            ):
                 fixture.accounted.initialize_and_activate(
                     native, IDENTITY, config, owner
                 )
@@ -107,7 +109,7 @@ class PublicCallerRunTests(unittest.TestCase):
 
         from tests.test_api_work_persistence import QUALIFICATION_LIMIT
 
-        for remaining in (10, 11):
+        for remaining in (2, 3):
             with (
                 self.subTest(remaining=remaining),
                 tempfile.TemporaryDirectory() as directory,
@@ -125,7 +127,7 @@ class PublicCallerRunTests(unittest.TestCase):
                     data=b'{"body":"synthetic carrier"}',
                     method="POST",
                 )
-                if remaining == 10:
+                if remaining == 2:
                     with self.assertRaisesRegex(
                         ReviewInputError, "comment write/readback tail"
                     ):
@@ -135,4 +137,4 @@ class PublicCallerRunTests(unittest.TestCase):
                     with fixture.accounted.open(request, timeout=30) as response:
                         response.read(524288)
                     self.assertEqual(len(fixture.trace), before + 1)
-                    self.assertEqual(fixture.accounted.usable, 10)
+                    self.assertEqual(fixture.accounted.usable, 2)

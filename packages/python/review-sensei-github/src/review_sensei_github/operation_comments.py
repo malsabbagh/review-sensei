@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import time
+from typing import Any
 
 from .errors import GitHubHTTPResponseTooLargeError
 from .http import GitHubHttp
@@ -88,6 +89,7 @@ class GitHubIssueCommentOperationPort:
             or app_user_id <= 0
         ):
             raise ValueError("invalid app user id")
+        self._unconfirmed_write: Any = None
         self._http = http
         self._token = token
         self._list_path = http.repository_path(
@@ -111,6 +113,14 @@ class GitHubIssueCommentOperationPort:
         self._primed = comments
 
     def list_comments(self) -> tuple[OperationComment, ...]:
+        from .caller_operation import http_read_operation
+
+        with http_read_operation(
+            self._http, "operation-comments", retained=self._unconfirmed_write
+        ):
+            return self._list_comments()
+
+    def _list_comments(self) -> tuple[OperationComment, ...]:
         primed = self._primed
         if primed is not None:
             self._primed = None
@@ -171,6 +181,26 @@ class GitHubIssueCommentOperationPort:
         raise ValueError("operation comment listing exceeded 10 pages or requests")
 
     def create(self, body: str) -> OperationComment:
+        return self._write("create", body, lambda: self._create(body))
+
+    def _write(self, kind: str, body: str, write: Any) -> OperationComment:
+        from .caller_operation import http_write_operation
+
+        if self._unconfirmed_write is not None:
+            raise OperationWriteUnconfirmed("operation comment write is unresolved")
+        bounded_comment(body)
+        key = kind + ":" + hashlib.sha256(body.encode("utf-8")).hexdigest()
+        with http_write_operation(self._http, key) as allocation:
+            try:
+                viewed = write()
+            except BaseException:
+                self._unconfirmed_write = allocation
+                raise
+            if allocation is not None:
+                allocation.confirmed = True
+            return viewed
+
+    def _create(self, body: str) -> OperationComment:
         bounded_comment(body)
         status, payload = self._request("POST", self._list_path, body={"body": body})
         accepted = self._accepted_write(status, payload, body, created=True)
@@ -184,6 +214,9 @@ class GitHubIssueCommentOperationPort:
         return self._readback(comment_id, body)
 
     def update(self, comment_id: int, body: str) -> OperationComment:
+        return self._write("update", body, lambda: self._update(comment_id, body))
+
+    def _update(self, comment_id: int, body: str) -> OperationComment:
         bounded_comment(body)
         if (
             isinstance(comment_id, bool)
