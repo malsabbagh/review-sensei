@@ -385,3 +385,56 @@ existing session is refused rather than deleting its history, replacing its
 accounting or silently creating a new allowance. Run-record rollover requires a
 separate authenticated retention contract before claiming general operation.
 No package publication, live activation, credentials or release is performed.
+
+
+### Consecutive-run retention checkpoint
+
+The next offline slice retains one terminal PR root through the existing
+`evidence-part-v1` bounded codec before installing accounting for a genuinely
+different repository/Actions run identity. The active accounting contains the
+exact prior root digest and one-part manifest. That archived root retains its
+entire accounting, previous retention pointer, decisions, baseline, convergence
+history and counters. Retention is append-only; it transfers or refunds no old
+capacity and changes no approval or coverage rule. Ordinary `evolve()` still
+rejects an accounting identity change. The native serialized mutation has an
+explicit, narrowly checked rollover transition; generation/readback remain
+conflict detection, never a distributed lock.
+
+A new run authenticates the current owner/config/head and reads the stopped
+previous Actions run plus a complete predecessor job inventory twice. Active or
+ambiguous owners, changed roots, nonterminal transactions and unresolved
+business mutations refuse. A transaction-bound accounting close checkpoint is
+confirmed only after the normal publisher, transaction completion and applicable
+cleanup return. It is not another transaction-completion transition. Lost HTTP
+responses remain charged; authenticated exact readback can settle their effects
+without turning those charges into usable capacity. Known ambiguous write
+statuses also prevent closure unless their exact owned effect is reconciled.
+Missing or duplicated archive readback never authorizes a replacement POST.
+Same-head duplicates use an in-process typed admission observation plus fresh
+head/base checks; they close without inference or another approval.
+
+The source-selected initial slot now covers the larger of first initialization
+and terminal rollover: 9 prefix requests, 10 discovery requests, 4 predecessor
+run/job observations, 40 native replacement-list requests, 1 archive create,
+10 possible lost-response listing requests, 1 exact archive readback, 1 head
+fence and 1 root PATCH: **77**. The supported rerun needs 9 prefix, 2 predecessor
+job reads, 40 native recovery-list requests, 1 head fence and 1 PATCH: **53**.
+Both permanently reserve **130** startup units from the same run allowance.
+These are bounded caller envelopes, not observed physical calls or Worker
+fanout. The ordinary ten-request/two-confirmation policy, fifty terminal units
+and equal owner shares are unchanged. The fixed fixture uses
+`130+2*(50+68)=366`, not a shipping default/minimum. First approval performs
+89 physical attempts, including 13 startup and 76 ordinary requests; a second
+ordinary approval performs 96, including 20 startup and 76 ordinary requests.
+The second run's predecessor allowance remains in the authenticated carrier,
+unchanged. A child killed after accounting creation but before transaction
+attachment resumes only after authenticated job cessation; old blocks remain
+unavailable, and the original run identity/config/startup reservation survive.
+The withheld control preserves its existing human obligation into the next
+review; no synthetic disposition resolves it.
+
+This remains an offline source checkpoint. Production workflows do not yet
+select it. Workflow consolidation, full multi-page/multi-part entry controls,
+real Worker authentication/service-ceiling composition and the later shipping,
+platform, installed-distribution and obsolete-authority gates remain open.
+No default or repository setting is activated.

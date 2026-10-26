@@ -132,6 +132,32 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             raise ReviewInputError("API writer ownership is ambiguous or overlapping")
         return owner
 
+    def ceased_run_owner(
+        self, identity: SessionIdentity, run_id: int, predecessor: ApiExecutionOwner
+    ) -> tuple[object, ...]:
+        if type(run_id) is not int or run_id < 1 or str(run_id) == self.command_run_id:
+            raise ReviewInputError("previous Actions run identity conflicts")
+        previous = ApiRunActionsEvidence(
+            self.http, token=self.token, command_run_id=str(run_id), job=predecessor.job
+        )
+        run = previous._get(identity, f"/actions/runs/{run_id}")
+        repository = run.get("repository")
+        if (
+            type(run.get("id")) is not int
+            or run["id"] != run_id
+            or not isinstance(repository, dict)
+            or repository.get("id") != identity.repository_id
+            or type(repository.get("id")) is not int
+            or repository.get("full_name") != identity.repository
+            or run.get("status") != "completed"
+            or type(run.get("run_attempt")) is not int
+            or run["run_attempt"] != predecessor.run_attempt
+        ):
+            raise ReviewInputError(
+                "previous Actions run has not ceased or its identity conflicts"
+            )
+        return run_id, *previous.ceased_owner(identity, predecessor)
+
     def ceased_owner(
         self, identity: SessionIdentity, predecessor: ApiExecutionOwner
     ) -> tuple[int, str, str]:

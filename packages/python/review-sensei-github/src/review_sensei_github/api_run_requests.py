@@ -115,6 +115,9 @@ class ApiRunRequestTransport:
         self._checkpoint_readback_attempted = False
         self._producer: str | None = None
         self._reservation_started = False
+        self._reconciled_mutations: set[str] = set()
+        self._checkpoint_write_request_id: str | None = None
+        self._activation_write_request_id: str | None = None
         self._terminal_block: str | None = None
         self._terminal_reason: str | None = None
         self._budget_view: Any = None
@@ -320,8 +323,16 @@ class ApiRunRequestTransport:
             "deadline_unix_ms": deadline,
             "outcome": "unknown",
         }
+        observation["mutation"] = request.get_method() in {"POST", "PATCH", "DELETE"}
         self.observations.append(observation)
+        if observation["mutation"]:
+            if self._checkpoint is not None and request.get_method() == "PATCH":
+                self._checkpoint_write_request_id = request_id
+            elif self._state is None and self._activation is not None:
+                self._activation_write_request_id = request_id
         self._last_method = request.get_method()
+
+        observed_status = None
 
         def confirmed() -> None:
             if observation["outcome"] == "expired":
@@ -334,6 +345,11 @@ class ApiRunRequestTransport:
                 assert self._state is not None
                 self._state = self._state.confirm(pending)
             observation["outcome"] = "response"
+            observation["uncertain_effect"] = bool(observation.get("mutation")) and (
+                observed_status in {202, 409, 422, 429}
+                or isinstance(observed_status, int)
+                and observed_status >= 500
+            )
             if (
                 int(self._clock() * 1000) > deadline
                 or self._monotonic() > request_deadline
@@ -347,9 +363,11 @@ class ApiRunRequestTransport:
         # preserve the charge; read/parse/status failures never refund it.
         try:
             response = self._opener(request, timeout=timeout)
-        except HTTPError:
+        except HTTPError as error:
+            observed_status = error.code
             confirmed()
             raise
+        observed_status = getattr(response, "status", None)
         return _AccountedResponse(response, confirmed)
 
     def _require_ledger(
@@ -396,6 +414,8 @@ class ApiRunRequestTransport:
         if block is None or block.issued_by != state.owner:
             raise ReviewInputError("confirmed caller reservation owner conflicts")
         self._state, self._block, self._root = state, block_id, record.record_sha256
+        if self._activation_write_request_id is not None:
+            self._reconciled_mutations.add(self._activation_write_request_id)
         return state
 
     def reserve_and_activate(
@@ -496,6 +516,84 @@ class ApiRunRequestTransport:
         self.bind_terminal_reservation("hosted-terminal")
         return accepted
 
+    def rollover_and_activate(
+        self, ledger, identity, configuration, owner, previous, cessation
+    ):
+        """New run only: archive exact terminal root before replacing accounting."""
+        from dataclasses import replace
+
+        from .api_run_history import retain_previous_run
+        from .api_run_plan import owner_allocations
+
+        self._require_ledger(ledger, identity)
+        if (
+            self._state is not None
+            or self._reservation_started
+            or owner.run_attempt != 1
+            or owner.job != self.job
+            or owner.generation != 0
+        ):
+            raise ReviewInputError(
+                "new caller run startup was already attempted or conflicts"
+            )
+        old = ApiRunAccounting.from_document(previous.api_run_accounting)
+        if (
+            old.identity == self.run
+            or old.identity.repository_id != self.run.repository_id
+        ):
+            raise ReviewInputError("new caller run identity conflicts")
+        self._reservation_started = True
+        self._producer = ledger.evidence_producer()
+        ledger.evidence_budget = self.budget_view
+
+        def prepare(record):
+            if record.record_sha256 != previous.record_sha256:
+                raise ReviewInputError("previous caller root changed")
+            if ledger.evidence_producer() != self._producer:
+                raise ReviewInputError("previous caller root producer changed")
+            cessation()
+            if (
+                record.reservation_id is not None
+                or record.reserved_slot is not None
+                or record.transaction is None
+                or record.transaction.phase
+                not in {"publication_succeeded", "publication_suppressed"}
+                or old.terminal_transaction != record.transaction.transaction_id
+            ):
+                raise ReviewInputError("previous caller run is not terminal")
+            before_archive = len(self.observations)
+            reference = retain_previous_run(ledger, identity, record)
+            # The issuer authenticated the exact immutable part readback.
+            # Charge the lost response permanently; only its effect is settled.
+            self._reconciled_mutations.update(
+                str(o["request_id"])
+                for o in self.observations[before_archive:]
+                if o.get("mutation")
+                and (o["outcome"] == "unknown" or o.get("uncertain_effect"))
+            )
+            allocation = owner_allocations(configuration.limit, self.plan.liability)
+            state = replace(
+                initial_accounting(
+                    self.run,
+                    configuration,
+                    owner,
+                    self.plan,
+                    prior_nonstartup_liability_upper_bound=0,
+                ),
+                previous_record=reference,
+            )
+            state = state.reserve("hosted-review", allocation.first_work).reserve(
+                "hosted-terminal", allocation.first_terminal
+            )
+            updated = record.rollover_api_accounting(state.to_document())
+            self._activation = updated, "hosted-review"
+            return updated
+
+        confirmed = ledger.replace(identity, prepare)
+        result = self._accept_activation(ledger, confirmed)
+        self.bind_terminal_reservation("hosted-terminal")
+        return result
+
     def reconcile_activation(
         self, ledger: GitHubIssueCommentSessionLedger, identity: SessionIdentity
     ) -> ApiRunAccounting:
@@ -522,7 +620,50 @@ class ApiRunRequestTransport:
             # its numeric producer identity can first be observed. No absence
             # or caller document can authorize another POST.
             self._producer = ledger.evidence_producer()
-        return self._accept_activation(ledger, loaded.record)
+        result = self._accept_activation(ledger, loaded.record)
+        if self._activation_write_request_id is not None:
+            self._reconciled_mutations.add(self._activation_write_request_id)
+        return result
+
+    def finish_review_run(self, ledger, identity, transaction):
+        """Confirm one close marker after normal publication and its full tail.
+
+        This does not complete the review transaction a second time. It binds
+        the finished run to that already terminal transaction before rollover.
+        Unknown HTTP charges remain; unresolved mutations cannot close a run.
+        """
+        from dataclasses import replace
+
+        if (
+            self._terminal_reason not in {"publication-completion", "already-published"}
+            or self._checkpoint is not None
+            or self.accounting.terminal_transaction is not None
+            or any(
+                (o["outcome"] in {"unknown", "expired"} or o.get("uncertain_effect"))
+                and o.get("mutation")
+                and o["request_id"] not in self._reconciled_mutations
+                for o in self.observations
+            )
+        ):
+            raise ReviewInputError("caller run has unresolved terminal work")
+
+        def close(record):
+            current = record.transaction
+            if (
+                current is None
+                or current.transaction_id != transaction.transaction_id
+                or current.phase
+                not in {"publication_succeeded", "publication_suppressed"}
+                or current.result_sha256 != transaction.result_sha256
+                or record.reservation_id is not None
+            ):
+                raise ReviewInputError("caller run terminal transaction conflicts")
+            self._state = replace(
+                self.accounting, terminal_transaction=current.transaction_id
+            )
+            return record.evolve(generation=record.generation + 1)
+
+        return ledger.replace(identity, close)
 
     def replace_checkpoint(
         self,
@@ -592,6 +733,8 @@ class ApiRunRequestTransport:
         persisted = ApiRunAccounting.from_document(record.api_run_accounting)
         persisted.require_successor(self.accounting)
         self._root, self._checkpoint = record.record_sha256, None
+        if self._checkpoint_write_request_id is not None:
+            self._reconciled_mutations.add(self._checkpoint_write_request_id)
 
     def reconcile_checkpoint(
         self, ledger: GitHubIssueCommentSessionLedger, identity: SessionIdentity
@@ -612,6 +755,8 @@ class ApiRunRequestTransport:
             if loaded.status != "ok" or loaded.record is None:
                 raise ReviewInputError("caller checkpoint publication is unconfirmed")
             self._accept_checkpoint(ledger, loaded.record)
+            if self._checkpoint_write_request_id is not None:
+                self._reconciled_mutations.add(self._checkpoint_write_request_id)
             operation.confirmed = True
             self._checkpoint_operation = None
             return loaded.record

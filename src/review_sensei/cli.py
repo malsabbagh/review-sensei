@@ -3100,6 +3100,9 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 # The later atomic reservation repeats these fences after
                 # context construction; refusal never constructs a provider.
                 if should_skip_automation(preflight_decision, inference=True):
+                    skipped = getattr(hosted_hooks, "skip_completed_analysis", None)
+                    if callable(skipped):
+                        skipped(ledger, preflight.record, preflight_decision)
                     outcome = RunOutcome(
                         "action_required"
                         if preflight_decision.handoff
@@ -3436,6 +3439,9 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 prepared_round.reservation_id if prepared_round.decision.admit else None
             )
             if should_skip_automation(prepared_round.decision, inference=True):
+                skipped = getattr(hosted_hooks, "skip_completed_analysis", None)
+                if callable(skipped):
+                    skipped(ledger, prepared_round.record, prepared_round.decision)
                 from .rescan import (
                     PUBLICATION_RECOVERY_PHASES,
                     rescan_publication_recovery,

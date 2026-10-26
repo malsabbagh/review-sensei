@@ -169,6 +169,46 @@
     },
     "version": {
       "const": "caller-requests-v1"
+    },
+    "previous_record": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_id",
+            "root_sha256",
+            "manifest"
+          ],
+          "properties": {
+            "run_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "root_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "manifest": {
+              "$ref": "evidence-manifest.schema.json"
+            }
+          }
+        }
+      ]
+    },
+    "terminal_transaction": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      ]
     }
   },
   "$defs": {

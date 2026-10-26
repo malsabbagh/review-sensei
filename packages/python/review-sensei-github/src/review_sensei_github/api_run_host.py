@@ -45,9 +45,16 @@ def review_startup_plan(job: str) -> StartupPlan:
                 job,
                 1,
                 _STARTUP_PREFIX
+                # Different-run rollover is the largest supported startup:
+                # initial discovery; old run/jobs twice; native replacement's
+                # discovery/latest/preactivation/readback; one archive POST,
+                # lost-response listing plus exact part readback; head + PATCH.
                 + ("initial-discovery",) * MAX_PAGINATION_PAGES
-                + ("create",)
-                + ("initial-readback",) * MAX_PAGINATION_PAGES,
+                + ("previous-owner",) * 4
+                + ("rollover-lists",) * (4 * MAX_PAGINATION_PAGES)
+                + ("retained-create",)
+                + ("retained-reconcile",) * MAX_PAGINATION_PAGES
+                + ("retained-readback", "head", "update"),
             ),
             StartupSlot(
                 job,
@@ -55,7 +62,7 @@ def review_startup_plan(job: str) -> StartupPlan:
                 _STARTUP_PREFIX
                 + ("ceased-job",) * 2
                 + ("recovery-lists",) * (4 * MAX_PAGINATION_PAGES)
-                + ("update",),
+                + ("head", "update"),
             ),
         )
     )

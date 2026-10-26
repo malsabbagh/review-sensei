@@ -76,6 +76,28 @@ class ReviewRunHooks(ApiRunReviewHooks):
     """Capture validated in-process engine values after durable checkpointing."""
 
     completed: CompletedAnalysis | None = None
+    skipped_transaction: ReviewTransaction | None = None
+
+    def skip_completed_analysis(self, ledger, record, decision):
+        from review_sensei.convergence import RoundAdmissionDecision
+        from review_sensei.session import SessionRecord
+
+        if (
+            ledger is not self.ledger
+            or not isinstance(record, SessionRecord)
+            or not isinstance(decision, RoundAdmissionDecision)
+            or decision.handoff
+            or decision.admit
+            or decision.handoff_reason is not None
+            or record.record_sha256 != self.ledger.caller._root
+            or record.transaction is None
+            or record.transaction.phase != "publication_succeeded"
+            or record.transaction.base_sha != self.base_sha
+            or record.transaction.head_sha != self.head_sha
+            or record.reservation_id is not None
+        ):
+            return
+        self.skipped_transaction = record.transaction
 
     def complete_analysis(
         self,
@@ -184,9 +206,6 @@ class ReviewRun:
         code = engine_main(argv, hosted_hooks=hooks)
         if code != 0:
             return code
-        analysis = hooks.completed
-        if analysis is None:
-            raise ReviewInputError("review produced no completed in-process analysis")
         # A later diagnostic file cannot replace the validated result or context.
         raw = policy_bytes(self.configuration_path)
         if (
@@ -194,6 +213,39 @@ class ReviewRun:
             != self.caller.accounting.configuration.digest
         ):
             raise ReviewInputError("frozen policy configuration changed during review")
+        analysis = hooks.completed
+        if analysis is None:
+            if hooks.skipped_transaction is None:
+                raise ReviewInputError(
+                    "review produced no completed in-process analysis"
+                )
+            current = _get(
+                self.http,
+                self.http.repository_path(
+                    self.identity.repository, f"/pulls/{self.identity.pull_request}"
+                ),
+                self.ledger.token,
+            )
+            if (
+                current.get("head", {}).get("sha") != self.head_sha
+                or current.get("base", {}).get("sha") != self.base_sha
+            ):
+                raise ReviewInputError("already published review head or base changed")
+            self.caller.begin_terminal("already-published")
+            self.caller.finish_review_run(
+                self.ledger, self.identity, hooks.skipped_transaction
+            )
+            publication_output.write_text(
+                json.dumps(
+                    {
+                        "status": "already_published",
+                        "review_id": None,
+                        "diagnostic": None,
+                    }
+                )
+                + "\n"
+            )
+            return 0
         application = GitHubApplication(
             broker=self.broker,
             http=self.http,
@@ -227,6 +279,21 @@ class ReviewRun:
             current_key=analysis.current_key,
             changed_paths=analysis.changed_paths,
         )
+        if (
+            publication.status
+            in {"published", "already_published", "auto_approval_disabled"}
+            and publication.diagnostic
+            in {
+                None,
+                "human_adjudication_open",
+                "approval_withheld",
+                "review_incomplete",
+            }
+            and publication.thread_resolution != "unconfirmed"
+        ):
+            self.caller.finish_review_run(
+                self.ledger, self.identity, analysis.result.transaction
+            )
         publication_output.write_text(
             json.dumps(
                 {
@@ -530,16 +597,45 @@ def bootstrap(
         app_slug="reviewsensei[bot]",
         reservation_owner=session.reservation_owner,
     )
+    loaded = native.load(identity)
     if int(attempt) == 1:
         try:
-            caller.initialize_and_activate(native, identity, frozen, owner)
+            if loaded.status == "missing":
+                caller.initialize_and_activate(native, identity, frozen, owner)
+            elif loaded.status == "ok" and loaded.record is not None:
+                previous_root = loaded.record
+                previous = ApiRunAccounting.from_document(
+                    previous_root.api_run_accounting
+                )
+                if previous.identity == caller.run:
+                    raise ReviewInputError("caller run already started")
+                stopped = evidence.ceased_run_owner(
+                    identity, previous.identity.run_id, previous.owner
+                )
+
+                def require_cessation():
+                    if (
+                        evidence.ceased_run_owner(
+                            identity, previous.identity.run_id, previous.owner
+                        )
+                        != stopped
+                    ):
+                        raise ReviewInputError("previous caller cessation changed")
+
+                caller.rollover_and_activate(
+                    native, identity, frozen, owner, previous_root, require_cessation
+                )
+            else:
+                raise ReviewInputError("previous caller root cannot be authenticated")
         except GitHubPublicationTransientError:
-            if caller._activation is None or caller._last_method != "POST":
+            if caller._activation is None or caller._last_method not in {
+                "POST",
+                "PATCH",
+            }:
                 raise
             caller.reconcile_activation(native, identity)
             caller.bind_terminal_reservation("hosted-terminal")
     else:
-        loaded = native.load(identity)
         if (
             loaded.status != "ok"
             or loaded.record is None
@@ -548,11 +644,17 @@ def bootstrap(
             raise ReviewInputError("original caller accounting cannot be established")
         previous = ApiRunAccounting.from_document(loaded.record.api_run_accounting)
         previous.require_binding(caller.run, frozen)
+        if previous.terminal_transaction is not None:
+            raise ReviewInputError("caller run is already terminal")
         prior = loaded.record
         if (
-            prior.transaction is None
-            or prior.transaction.base_sha != args.base_sha
-            or prior.transaction.head_sha != args.head_sha
+            prior.transaction is not None
+            and (
+                prior.transaction.base_sha != args.base_sha
+                or prior.transaction.head_sha != args.head_sha
+            )
+            or prior.transaction is None
+            and prior.reservation_id is not None
         ):
             raise ReviewInputError(
                 "original reviewed transaction cannot be established"

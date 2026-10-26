@@ -185,6 +185,8 @@ class ApiRunAccounting:
     blocks: tuple[CallerRequestBlock, ...] = ()
     completed: tuple[PendingApiRequest, ...] = ()
     version: str = ACCOUNTING_VERSION
+    previous_record: Mapping[str, object] | None = None
+    terminal_transaction: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -210,6 +212,31 @@ class ApiRunAccounting:
             )
         ):
             raise ReviewInputError("caller accounting record is invalid or obsolete")
+        if self.terminal_transaction is not None and (
+            not isinstance(self.terminal_transaction, str)
+            or _HEX64.fullmatch(self.terminal_transaction) is None
+        ):
+            raise ReviewInputError("caller terminal transaction identity is invalid")
+        if self.previous_record is not None:
+            from .bounded_evidence import validate_manifest
+
+            ref = self.previous_record
+            if (
+                not isinstance(ref, Mapping)
+                or set(ref) != {"run_id", "root_sha256", "manifest"}
+                or not _natural(ref["run_id"], positive=True)
+                or ref["run_id"] == self.identity.run_id
+                or not isinstance(ref["root_sha256"], str)
+                or _HEX64.fullmatch(ref["root_sha256"]) is None
+            ):
+                raise ReviewInputError("retained caller run reference is invalid")
+            object.__setattr__(self, "previous_record", json.loads(json.dumps(ref)))
+            manifest = cast(dict[str, Any], validate_manifest(ref["manifest"]))
+            if (
+                len(manifest["parts"]) != 1
+                or manifest["binding"]["purpose"] != "evidence"
+            ):
+                raise ReviewInputError("retained caller run carrier is unsupported")
         keys = {(s.job, s.attempt) for s in self.startup.slots}
         if (
             len(set(self.startup_used)) != len(self.startup_used)
@@ -350,6 +377,13 @@ class ApiRunAccounting:
         resetting counters or moving a crashed owner's remainder into new work.
         """
         self.require_binding(candidate.identity, candidate.configuration)
+        if (
+            self.terminal_transaction is not None
+            and self.terminal_transaction != candidate.terminal_transaction
+        ):
+            raise ReviewInputError("caller terminal transaction cannot be replaced")
+        if self.previous_record != candidate.previous_record:
+            raise ReviewInputError("retained caller history cannot change within a run")
         claimed = (
             self
             if candidate.owner == self.owner
@@ -423,6 +457,8 @@ class ApiRunAccounting:
             blocks=tuple(block(b) for b in document["blocks"]),
             completed=tuple(PendingApiRequest(**p) for p in document["completed"]),
             version=document["version"],
+            previous_record=document.get("previous_record"),
+            terminal_transaction=document.get("terminal_transaction"),
         )
 
 

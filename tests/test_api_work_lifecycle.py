@@ -248,7 +248,11 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
                     }
                     self.check_runs.append(item)
                     return json_response(copy.deepcopy(item), 201)
-                item = self.check_runs[0]
+                item = next(
+                    item
+                    for item in self.check_runs
+                    if item["id"] == int(path.rsplit("/", 1)[1])
+                )
                 item.update(payload)
                 return json_response(copy.deepcopy(item))
         response = super()._external_open(request, timeout)

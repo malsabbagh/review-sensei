@@ -994,6 +994,18 @@ class SessionRecord:
                 != self.repository_id
             ):
                 raise ReviewInputError("API accounting repository identity conflicts")
+            from .api_work import ApiRunAccounting
+
+            terminal = ApiRunAccounting.from_document(
+                self.api_run_accounting
+            ).terminal_transaction
+            if terminal is not None and (
+                self.transaction is None
+                or self.transaction.transaction_id != terminal
+                or self.transaction.phase
+                not in {"publication_succeeded", "publication_suppressed"}
+            ):
+                raise ReviewInputError("API accounting terminal transaction conflicts")
         if self.transaction is not None:
             if not isinstance(self.transaction, ReviewTransaction):
                 raise ReviewInputError("session transaction is invalid")
@@ -1518,6 +1530,57 @@ class SessionRecord:
             disposition_snapshot=disposition_snapshot,
             api_run_accounting=api_run_accounting,
         )
+
+    def rollover_api_accounting(
+        self, accounting: Mapping[str, object]
+    ) -> "SessionRecord":
+        """Retain session state while changing a genuinely different run.
+
+        This is a value invariant, not storage or owner authentication. The
+        adapter must confirm the retained carrier and stopped predecessor first.
+        Ordinary evolve() never allows an accounting identity replacement.
+        """
+        from .api_work import ApiRunAccounting
+
+        previous = ApiRunAccounting.from_document(self.api_run_accounting)
+        candidate = ApiRunAccounting.from_document(accounting)
+        ref = candidate.previous_record
+        if (
+            previous.identity.repository_id != candidate.identity.repository_id
+            or previous.identity.run_id == candidate.identity.run_id
+            or candidate.owner.run_attempt != 1
+            or candidate.owner.generation != 0
+            or candidate.confirmed
+            or candidate.uncertain
+            or candidate.prior_nonstartup_liability
+            or candidate.startup_used != ((candidate.owner.job, 1),)
+            or ref is None
+            or ref["run_id"] != previous.identity.run_id
+            or ref["root_sha256"] != self.record_sha256
+            or self.reservation_id is not None
+            or self.reserved_slot is not None
+            or self.transaction is None
+            or self.transaction.phase
+            not in {"publication_succeeded", "publication_suppressed"}
+            or previous.terminal_transaction != self.transaction.transaction_id
+        ):
+            raise ReviewInputError(
+                "caller run rollover is not terminal or correctly retained"
+            )
+        binding = cast(Mapping[str, Any], ref["manifest"])["binding"]
+        if (
+            binding["repository"] != self.repository
+            or binding["repository_id"] != self.repository_id
+            or binding["pull_request"] != self.pull_request
+            or binding["generation"] != self.generation
+        ):
+            raise ReviewInputError("retained caller root scope conflicts")
+        payload = self.to_dict()
+        del payload["schema_version"], payload["record_sha256"]
+        payload["generation"] = self.generation + 1
+        payload["api_run_accounting"] = candidate.to_document()
+        payload["transaction"] = self.transaction
+        return type(self)._construct(**cast(dict[str, Any], payload))
 
     def evolve(
         self,
@@ -4014,9 +4077,14 @@ def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> No
             raise ReviewInputError("API accounting cannot be silently discarded")
         from .api_work import ApiRunAccounting
 
-        ApiRunAccounting.from_document(before.api_run_accounting).require_successor(
-            ApiRunAccounting.from_document(after.api_run_accounting)
-        )
+        previous = ApiRunAccounting.from_document(before.api_run_accounting)
+        current = ApiRunAccounting.from_document(after.api_run_accounting)
+        if previous.identity != current.identity:
+            expected = before.rollover_api_accounting(after.api_run_accounting)
+            if expected.record_sha256 != after.record_sha256:
+                raise ReviewInputError("caller run rollover discarded session state")
+        else:
+            previous.require_successor(current)
     if before.disposition_snapshot is not None and after.disposition_snapshot is None:
         raise ReviewInputError("disposition snapshot cannot be silently discarded")
     if after.disposition_snapshot is not None and len(
