@@ -101,6 +101,7 @@ def caller_measurement(fixture):
 class LifecycleFixture(fixture_module.HostedRunFixture):
     def __init__(self, directory, *, fanout=30, limit=QUALIFICATION_LIMIT):
         super().__init__(directory, limit=limit, fanout=fanout)
+        self.plan = HOSTED_API_STARTUP_PLAN
         self.limit = limit
         self.reviews = []
         self.inline = []
@@ -692,7 +693,7 @@ class CallerLifecycleTests(unittest.TestCase):
         )
         for limit in (minimum - 1, minimum, minimum + 1):
             with self.subTest(limit=limit), tempfile.TemporaryDirectory() as directory:
-                fixture = fixture_module.HostedRunFixture(directory, limit=limit)
+                fixture = LifecycleFixture(directory, limit=limit)
                 native, configuration, _evidence, owner = fixture.prelude()
                 if limit < minimum:
                     with self.assertRaisesRegex(

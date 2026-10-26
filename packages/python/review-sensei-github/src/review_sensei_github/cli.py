@@ -36,6 +36,7 @@ from review_sensei_github.review_hooks import GitHubReviewHooks
 
 _PUBLIC = (
     "review",
+    "review-run",
     "publish",
     "reply",
     "command",
@@ -48,6 +49,7 @@ _PUBLIC = (
 )
 _HELP = {
     "review": "engine review plus hosted hooks",
+    "review-run": "one metered review lifecycle",
     "publish": "publish a prepared review",
     "reply": "publish a reply",
     "command": "run a maintainer command",
@@ -302,6 +304,14 @@ def _main(argv: list[str] | None = None) -> int:
     command, rest = args[0], args[1:]
     if command.startswith("-") or command in {"publish", "reply", "command"}:
         return _publication(args)
+    if command == "review-run":
+        from .review_run import run_review
+
+        try:
+            return run_review(rest)
+        except (OSError, ValueError, ReviewSenseiError) as error:
+            print(f"review-sensei: {error}", file=sys.stderr)
+            return 1
     if command == "review":
         return engine_main(rest, hosted_hooks=GitHubReviewHooks())
     if command == "host-plan":

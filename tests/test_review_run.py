@@ -1,0 +1,565 @@
+"""Single review owner: distinct policy and reviewed revisions, no file authority."""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from argparse import Namespace
+from dataclasses import replace
+from pathlib import Path
+
+from review_sensei_github.api_run_host import ApiRunReviewHooks
+from review_sensei_github.api_run_requests import ApiRunSessionLedger
+
+from tests.test_api_work_lifecycle import QUALIFICATION_LIMIT, LifecycleFixture
+from tests.test_api_work_persistence import BASE, HEAD, IDENTITY
+
+
+class ReviewRunPolicyTests(unittest.TestCase):
+    def test_frozen_policy_commit_is_independent_from_reviewed_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = LifecycleFixture(directory)
+            native, configuration, _, owner = fixture.prelude()
+            policy = replace(configuration, commit="c" * 40)
+            fixture.accounted.initialize_and_activate(native, IDENTITY, policy, owner)
+            ledger = ApiRunSessionLedger(native, fixture.accounted, IDENTITY)
+            hook = ApiRunReviewHooks(ledger, IDENTITY, base_sha=BASE, head_sha=HEAD)
+            config = Path(directory) / "trusted.yml"
+            config.write_bytes(fixture.config_bytes)
+            args = Namespace(
+                repository=IDENTITY.repository,
+                repository_id=IDENTITY.repository_id,
+                pull_request=IDENTITY.pull_request,
+                base_sha=BASE,
+                config=config,
+            )
+            before = len(fixture.trace)
+            self.assertIs(hook.resolve_ledger(args, resolved_head_sha=HEAD), ledger)
+            self.assertEqual(len(fixture.trace), before)
+            self.assertEqual(fixture.accounted.accounting.configuration, policy)
+
+
+class EntryFixture(LifecycleFixture):
+    """Reuse the accepted real publisher/ledger fixture, adding policy startup."""
+
+    def __init__(self, directory, *, limit=QUALIFICATION_LIMIT, runner_kind="hosted"):
+        import subprocess
+
+        from tests import test_review_transaction as tx
+
+        super().__init__(directory, limit=limit)
+        self.root = Path(directory)
+        self.owner_job = runner_kind
+        backend = "cloud-ollama" if runner_kind == "hosted" else "local-ollama"
+        model = "deepseek-v4.1-flash:cloud" if runner_kind == "hosted" else "qwen3.5:4b"
+        self.config_bytes = (
+            f"schema: 1\napi_request_limit: {limit}\ninference:\n  backend: {backend}\n  model: {model}\ngithub:\n  writes: true\n  publication_inventory: complete\n"
+        ).encode()
+        (self.root / ".reviewsensei.yml").write_bytes(self.config_bytes)
+        subprocess.run(["git", "init", str(self.root)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.root), "add", ".reviewsensei.yml"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.root),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        self.policy = subprocess.check_output(
+            ["git", "-C", str(self.root), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.PIPE,
+        ).strip()
+        self.policy_ref = self.policy
+        (self.root / "review.patch").write_text(tx.HostedAnalysisCliTests.ANALYSIS_DIFF)
+        self.live_head = HEAD
+        self.before_provider = None
+        self.after_engine = None
+        self.before_publication = None
+        self.selected = None
+        self.provider_calls = 0
+        self.overlap = False
+        self.refuse_broker = False
+
+    def external(self, request, timeout):
+        import base64
+        import json
+        from urllib.parse import urlsplit
+
+        from tests.fake_github_http import json_response
+
+        path = urlsplit(request.full_url).path
+        if path == "/api/tags":
+            assert request.get_header("Authorization") is None
+            self.trace.append((self.attempt, request.get_method(), path))
+            return json_response({"models": [{"name": "qwen3.5:4b"}]})
+        policy = (
+            path in ("/repos/owner/repo", "/repos/owner/repo/git/ref/heads/main")
+            or "/contents/.reviewsensei.yml" in path
+        )
+        if policy:
+            assert (
+                len(self.accounted.observations)
+                == sum(a == self.attempt for a, _, _ in self.trace) + 1
+            )
+            self.trace.append((self.attempt, request.get_method(), path))
+            if path.endswith("/main"):
+                return json_response(
+                    {"object": {"type": "commit", "sha": self.policy_ref}}
+                )
+            if "/contents/" in path:
+                return json_response(
+                    {
+                        "type": "file",
+                        "encoding": "base64",
+                        "size": len(self.config_bytes),
+                        "content": base64.b64encode(self.config_bytes).decode(),
+                    }
+                )
+            return json_response(
+                {
+                    "id": 123,
+                    "full_name": "owner/repo",
+                    "fork": False,
+                    "default_branch": "main",
+                }
+            )
+        if (
+            self.refuse_broker
+            and urlsplit(request.full_url).hostname == "broker.github.test"
+        ):
+            self.trace.append((self.attempt, request.get_method(), path))
+            return json_response({"error": "synthetic refusal"}, 401)
+        response = self._external_open(request, timeout)
+        if path.endswith("/pulls/7"):
+            pull = json.loads(response.read(524288))
+            pull["head"]["sha"] = self.live_head
+            return json_response(pull)
+        if path.endswith("/actions/runs/456"):
+            run = json.loads(response.read(524288))
+            run["event"] = "pull_request"
+            return json_response(run)
+        if path.endswith("/jobs"):
+            jobs = json.loads(response.read(524288))
+            jobs["jobs"][0]["name"] = "ReviewSensei / " + self.owner_job
+            if not self.overlap:
+                return json_response(jobs)
+            jobs["jobs"].append(
+                {**jobs["jobs"][0], "id": 9999, "name": "ReviewSensei / command"}
+            )
+            jobs["total_count"] += 1
+            return json_response(jobs)
+        return response
+
+    def invoke(self, *, human=False):
+        import io
+        import json
+        import os
+        from contextlib import ExitStack, redirect_stderr, redirect_stdout
+        from unittest.mock import patch
+
+        from review_sensei_github import cli as package_cli
+        from review_sensei_github import review_run
+        from review_sensei_github.api_run_requests import ApiRunRequestTransport
+        from review_sensei_github.broker_client import BrokerClient
+        from review_sensei_github.http import GitHubHttp
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from review_sensei.models import ProviderResponse
+        from tests import test_review_transaction as tx
+
+        fixture = self
+
+        def caller_factory(**kwargs):
+            caller = ApiRunRequestTransport(**kwargs)
+            fixture.accounted = caller
+            fixture.transports.append(caller)
+            return caller
+
+        def broker_factory(**kwargs):
+            return BrokerClient(
+                broker_url="https://broker.github.test/api/github/token", **kwargs
+            )
+
+        def http_factory(**kwargs):
+            http = GitHubHttp(api_url="https://api.github.test", **kwargs)
+            fixture.http = http
+            return http
+
+        class Provider(tx.HostedAnalysisCliTests._Provider):
+            def complete(self, request):
+                fixture.provider_calls += 1
+                if fixture.before_provider:
+                    fixture.before_provider()
+                comments = (
+                    []
+                    if not human
+                    else [
+                        {
+                            "path": "src/app.py",
+                            "line": 2,
+                            "side": "RIGHT",
+                            "body": "Confirm the external caller contract for this change.",
+                            "severity": "high",
+                            "blocking": False,
+                            "needs_human": True,
+                        }
+                    ]
+                )
+                return ProviderResponse(
+                    text=json.dumps(
+                        {"summary": "Complete review.", "comments": comments}
+                    ),
+                    provider=self.name,
+                    model=self.model,
+                )
+
+        original_engine = review_run.engine_main
+        original_execute = review_run.ReviewRun.execute
+        original_publish = review_run.ReviewRunHooks.publish_review
+
+        def engine(*args, **kwargs):
+            result = original_engine(*args, **kwargs)
+            if fixture.after_engine:
+                fixture.after_engine()
+            return result
+
+        def execute(selected, *args, **kwargs):
+            fixture.selected = selected
+            return original_execute(selected, *args, **kwargs)
+
+        def publish(hooks, *args, **kwargs):
+            if fixture.before_publication:
+                fixture.before_publication()
+            return original_publish(hooks, *args, **kwargs)
+
+        old = Path.cwd()
+        errors = io.StringIO()
+        try:
+            os.chdir(self.root)
+            with ExitStack() as stack:
+                for scope in (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "GITHUB_RUN_ID": "456",
+                            "GITHUB_EVENT_NAME": "pull_request",
+                            "GITHUB_RUN_ATTEMPT": str(self.attempt),
+                            "GITHUB_TOKEN": "synthetic-workflow-read",
+                            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+                            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.github.test/token?fixture=1",
+                            "OLLAMA_API_KEY": "synthetic-only",
+                            "REVIEWSENSEI_APP_ID": "999",
+                        },
+                        clear=True,
+                    ),
+                    patch.object(review_run, "physical_opener", self.external),
+                    patch.object(
+                        review_run, "ApiRunRequestTransport", side_effect=caller_factory
+                    ),
+                    patch.object(
+                        review_run, "BrokerClient", side_effect=broker_factory
+                    ),
+                    patch.object(review_run, "GitHubHttp", side_effect=http_factory),
+                    patch.object(review_run, "engine_main", side_effect=engine),
+                    patch.object(review_run.ReviewRun, "execute", execute),
+                    patch.object(review_run.ReviewRunHooks, "publish_review", publish),
+                    patch(
+                        "review_sensei.cli.default_registry",
+                        return_value=tx.HostedAnalysisCliTests._Registry(Provider()),
+                    ),
+                    patch.object(
+                        EvidenceReadBudget,
+                        "__init__",
+                        side_effect=AssertionError("no phase budget"),
+                    ),
+                    redirect_stdout(io.StringIO()),
+                    redirect_stderr(errors),
+                ):
+                    stack.enter_context(scope)
+                result = package_cli.main(
+                    [
+                        "review-run",
+                        "--policy-commit",
+                        self.policy,
+                        "--run-directory",
+                        str(self.root),
+                        "--publication-outcome",
+                        str(self.root / "publication.json"),
+                        "--",
+                        "--diff",
+                        str(self.root / "review.patch"),
+                        "--repository",
+                        "owner/repo",
+                        "--repository-id",
+                        "123",
+                        "--pull-request",
+                        "7",
+                        "--base-sha",
+                        BASE,
+                        "--head-sha",
+                        HEAD,
+                        "--config",
+                        str(self.root / ".reviewsensei.yml"),
+                        "--review-mode",
+                        "merge-focused",
+                        "--no-learning-proposals",
+                        "--configuration-context-output",
+                        str(self.root / "configuration.json"),
+                        "--admission-context-output",
+                        str(self.root / "admission.json"),
+                    ]
+                )
+            self.error = errors.getvalue()
+            return result
+        finally:
+            os.chdir(old)
+
+
+class ReviewRunEntryTests(unittest.TestCase):
+    def test_actual_package_entry_owns_analysis_and_publication(self):
+        import json
+
+        from tests.test_api_work_lifecycle import caller_measurement
+
+        for human in (False, True):
+            with self.subTest(human=human), tempfile.TemporaryDirectory() as directory:
+                f = EntryFixture(directory)
+                self.assertEqual(f.invoke(human=human), 0, f.error)
+                self.assertEqual(len(f.transports), 1)
+                self.assertEqual(f.accounted.accounting.configuration.commit, f.policy)
+                self.assertNotEqual(f.policy, BASE)
+                self.assertEqual(
+                    any(r["state"] == "APPROVED" for r in f.reviews), not human
+                )
+                self.assertEqual(
+                    json.loads((f.root / "publication.json").read_text())["status"],
+                    "published",
+                )
+                self.assertEqual(f.accounted._terminal_reason, "publication-completion")
+                self.assertEqual(f.provider_calls, 1)
+                self.assertEqual(len(f.trace), 80 if human else 84)
+                self.assertEqual(caller_measurement(f)["startup_reservation"], 82)
+
+    def test_diagnostic_files_cannot_replace_in_memory_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+
+            def corrupt():
+                for name in ("review.json", "configuration.json", "admission.json"):
+                    (f.root / name).write_text('{"untrusted":"not authority"}')
+
+            f.after_engine = corrupt
+            self.assertEqual(f.invoke(), 0, f.error)
+            self.assertTrue(any(r["state"] == "APPROVED" for r in f.reviews))
+
+    def test_policy_head_and_overlap_changes_refuse_before_provider(self):
+        for change in ("policy", "head", "overlap"):
+            with (
+                self.subTest(change=change),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = EntryFixture(directory)
+                if change == "policy":
+                    f.policy_ref = "c" * 40
+                if change == "head":
+                    f.live_head = "d" * 40
+                if change == "overlap":
+                    f.overlap = True
+                self.assertEqual(f.invoke(), 1)
+                self.assertEqual(f.provider_calls, 0)
+                self.assertIsNone(f.comment)
+                self.assertFalse(
+                    any(
+                        m in {"POST", "PATCH"} and "/issues" in p for _, m, p in f.trace
+                    )
+                )
+
+    def test_duplicate_startup_cannot_open_another_process_allowance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            self.assertEqual(f.invoke(), 0, f.error)
+            before = len(f.trace)
+            state = f.accounted.accounting
+            self.assertEqual(f.invoke(), 1)
+            self.assertEqual(len(f.trace), before)
+            self.assertEqual(f.accounted.accounting, state)
+
+    def test_provider_failure_and_handled_cancel_have_one_cleanup_owner(self):
+        from review_sensei.errors import ReviewInputError
+
+        for error, expected in (
+            (ReviewInputError("synthetic provider failure"), 1),
+            (KeyboardInterrupt(), 130),
+        ):
+            with (
+                self.subTest(kind=type(error).__name__),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = EntryFixture(directory)
+
+                def fail():
+                    raise error
+
+                f.before_provider = fail
+                self.assertEqual(f.invoke(), expected, f.error)
+                self.assertEqual(f.accounted._terminal_reason, "analysis-abort")
+                self.assertFalse(f.reviews)
+
+    def test_cancellation_before_publication_retains_pending_work(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+
+            def cancel():
+                raise KeyboardInterrupt()
+
+            f.before_publication = cancel
+            self.assertEqual(f.invoke(), 130, f.error)
+            self.assertFalse(f.reviews)
+            self.assertEqual(
+                parse_session_comment(
+                    f.comment["body"], identity=IDENTITY
+                ).transaction.phase,
+                "publication_pending",
+            )
+
+    def test_unknown_initial_post_is_confirmed_exactly_without_repost(self):
+        for retained in (True, False):
+            with (
+                self.subTest(retained=retained),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = EntryFixture(directory)
+                f.fault = "unknown-stored" if retained else "unknown-absent"
+                self.assertEqual(f.invoke(), 0 if retained else 1, f.error)
+                roots = [
+                    m
+                    for _, m, p in f.trace
+                    if m == "POST" and p.endswith("/issues/7/comments")
+                ]
+                # Extra immutable result parts use POST too; distinguish the
+                # unique session creation through the recorded native writes.
+                self.assertEqual(
+                    sum(
+                        mode[0] == 1 and mode[1] == "startup" for mode in f.write_modes
+                    ),
+                    1,
+                )
+                self.assertGreaterEqual(len(roots), 1)
+                self.assertEqual(
+                    sum(o["outcome"] == "unknown" for o in f.accounted.observations), 1
+                )
+                if not retained:
+                    self.assertEqual(f.provider_calls, 0)
+
+    def test_unknown_checkpoint_patch_uses_original_funded_readback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+
+            def lose():
+                f.fault = "unknown-stored"
+
+            f.before_provider = lose
+            self.assertEqual(f.invoke(), 0, f.error)
+            self.assertEqual(f.accounted.accounting.uncertain, 1)
+            self.assertIsNone(f.accounted._checkpoint)
+            self.assertTrue(any(r["state"] == "APPROVED" for r in f.reviews))
+
+    def test_rejected_worker_post_still_costs_one_caller_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            f.refuse_broker = True
+            self.assertEqual(f.invoke(), 1)
+            self.assertEqual(
+                len(f.trace), 6
+            )  # Four policy/PR reads, OIDC, rejected Worker POST
+            self.assertEqual(f.accounted.startup_dispatches, 6)
+            self.assertEqual(f.provider_calls, 0)
+
+    def test_local_review_uses_same_owner_and_meters_credential_free_model_discovery(
+        self,
+    ):
+        # The fixed fixture adds one caller discovery request per owner; this
+        # is a test-derived input, not a shipping default or a new phase pool.
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(
+                directory, runner_kind="local", limit=QUALIFICATION_LIMIT + 2
+            )
+            self.assertEqual(f.invoke(), 0, f.error)
+            self.assertEqual(f.accounted.accounting.owner.job, "local")
+            self.assertEqual(len(f.transports), 1)
+            self.assertEqual(len(f.trace), 85)
+            self.assertEqual(sum(p == "/api/tags" for _, _, p in f.trace), 1)
+            self.assertTrue(any(r["state"] == "APPROVED" for r in f.reviews))
+
+    def test_unfunded_publication_stops_without_new_allowance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory, limit=QUALIFICATION_LIMIT - 2)
+            self.assertEqual(f.invoke(), 1)
+            self.assertEqual(len(f.transports), 1)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+            self.assertEqual(
+                f.accounted.accounting.configuration.limit, QUALIFICATION_LIMIT - 2
+            )
+            self.assertEqual(f.accounted._terminal_reason, "publication-completion")
+
+    def test_frozen_configuration_cannot_change_while_provider_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+
+            def change():
+                path = f.root / ".reviewsensei.yml"
+                path.write_text(
+                    path.read_text().replace(
+                        str(QUALIFICATION_LIMIT), str(QUALIFICATION_LIMIT + 2)
+                    )
+                )
+
+            f.before_provider = change
+            self.assertEqual(f.invoke(), 1)
+            self.assertFalse(f.reviews)
+            self.assertEqual(
+                f.accounted.accounting.configuration.limit, QUALIFICATION_LIMIT
+            )
+
+    def test_changed_head_before_publication_preserves_pending_review(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+
+            def move():
+                f.live_head = "d" * 40
+
+            f.before_publication = move
+            self.assertEqual(f.invoke(), 1)
+            self.assertFalse(f.reviews)
+            self.assertEqual(
+                parse_session_comment(
+                    f.comment["body"], identity=IDENTITY
+                ).transaction.phase,
+                "publication_pending",
+            )
+
+    def test_undersized_configuration_stops_before_business_http(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory, limit=128)
+            self.assertEqual(f.invoke(), 1)
+            self.assertFalse(f.trace)
+            self.assertIsNone(f.comment)
+            self.assertEqual(f.provider_calls, 0)

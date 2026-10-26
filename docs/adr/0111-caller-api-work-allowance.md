@@ -205,7 +205,7 @@ write to that retained root. All20 decisions remain. This proves the read seam,
 not production historical run-accounting rollover or an end-to-end hosted rescan.
 
 
-## Finite attempted-work qualification checkpoint
+## Historical 4c35a3b finite attempted-work checkpoint
 
 The previous `bcd64fce` lifecycle evidence remains in Git and the frozen
 qualification packet. Astra accepted its public-path evidence but rejected its
@@ -322,3 +322,66 @@ The core pre-write helper requires coordinated versions and dependency pins.
 Arbitrary historical rollover, all publication crash/check/approval faults and
 TaskAlong's 40-file/70-finding workload remain unqualified. No live activation,
 provider request, credentials, rescan retry, package publication or release occurs.
+
+
+## Single-process review entry checkpoint
+
+Astra selected one package process for the review route, rather than a new
+same-job handoff authority. The new `review-sensei-github review-run` entry claims
+startup once, constructs one physical caller transport and accounting owner,
+and runs the engine review, completion, fresh-head validation and publication.
+The hosted and local plan use the same entry; local model discovery is one
+metered, credential-free request. Inference retains independent provider limits.
+The production reusable workflow has not selected this entry yet.
+
+The policy commit P is authenticated independently from the reviewed base B and
+head H. Startup checks the local checkout and policy-file object, authenticated
+repository/default-branch/configuration bytes, the exact PR revisions and the
+Actions run/job owner. Read-only owner checks precede the session enrollment
+exchange. A changed policy, head, configuration or overlapping writer refuses.
+The API allowance remains frozen; a changed working copy cannot authorize a new
+limit. Command/reply and retained-publication recovery remain separate,
+unqualified routes. Explicit rescan/remaining input is refused here pending its
+own complete lifecycle qualification.
+
+The actual nine-request startup prefix is repository policy metadata, default
+policy ref, configuration contents, PR metadata, OIDC, Actions capability, run,
+job inventory and session capability. Adding the two previously missing policy
+reads changes source-prefunded startup from 28+50 to **30+52=82**. The accepted
+operation policy is unchanged: ten requests per read/native operation, two write
+confirmation requests, fifty protected terminal attempts and equal owner shares.
+This is an inventory correction, not a larger ordinary allowance or a default
+selection. Checkout, package installation, Git transport and artifact upload are
+infrastructure outside the ReviewSensei API-work allowance. Business policy,
+authentication, PR/evidence, OIDC/Worker and publication calls are inside it.
+
+The engine passes its completed validated result, prior baseline, current key,
+configuration/evidence contexts and exact diff through an in-process callback
+after checkpointing. Publication revalidates the durable transaction normally.
+Diagnostic JSON is output only: overwriting it cannot replace these inputs or
+create authority. A lost marker POST or checkpoint PATCH can spend only its
+original funded exact readback; there is no repeat mutation or capacity refill.
+Handled provider failure/cancellation use the one protected cleanup owner. A
+cancel before publication preserves the saved pending result.
+
+The current fixed small-fixture input derives as `82+2*(50+68)=318`; local
+model discovery adds one work request per owner, yielding test input320. Neither
+value is a shipping default/minimum/maximum. The actual package entry measures
+**84 caller attempts for approval**, **80 for legitimate human withholding**,
+and **85 for local approval**. The fifteen focused tests also cover in-memory
+publication despite corrupted diagnostics, duplicate startup, stale head,
+configuration change, overlap, provider failure, cancellation, refused POST
+charging, insufficient publication capacity and successful funded lost-write
+readback. No replacement metadata-budget constructor runs. Default128 remains
+unqualified and now refuses before business HTTP in this entry.
+
+Still unqualified: the proposed workflow consolidation removing its separate
+release-reservation and shell live-head/publication business processes; actual
+hard-kill/recovery and multi-page/multi-part controls; real production Worker
+identity, service-owned ceilings, grant and receipt composition; current-main,
+installed and platform checks; obsolete authority removal; and the shipping
+range. This first entry qualifies fresh-session startup. A different run's
+existing session is refused rather than deleting its history, replacing its
+accounting or silently creating a new allowance. Run-record rollover requires a
+separate authenticated retention contract before claiming general operation.
+No package publication, live activation, credentials or release is performed.

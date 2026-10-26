@@ -4015,6 +4015,25 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                             else None
                         ),
                     )
+                    completed = getattr(hosted_hooks, "complete_analysis", None)
+                    if callable(completed):
+                        completed(
+                            ledger=ledger,
+                            identity=identity,
+                            result=result,
+                            baseline=admission_baseline,
+                            current_key=current_key
+                            if current_key is not None
+                            else cache_key,
+                            configuration_context=transaction_configuration_context,
+                            evidence_context={
+                                "evidence_policy": "legacy",
+                                "snapshot_sha256": None,
+                            },
+                            policy=policy,
+                            diff=diff,
+                            changed_paths=changed_paths,
+                        )
                 except BaseException as checkpoint_error:
                     if held_reservation is not None:
                         try:

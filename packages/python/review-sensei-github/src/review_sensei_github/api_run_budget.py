@@ -42,6 +42,12 @@ class CallerRunBudget(EvidenceReadBudget):
         raise ReviewInputError("caller request deadlines cannot be replaced")
 
     def check(self) -> None:
+        # Before the first durable record only the source-prefunded startup
+        # slot can dispatch. This view never creates an ordinary phase window.
+        if self.caller._state is None:
+            if self.caller.startup_dispatches > len(self.caller._slot.requests):
+                raise ReviewInputError("caller startup allocation is exhausted")
+            return
         self.caller.accounting
 
     def _remaining_seconds(self) -> float:
@@ -49,6 +55,8 @@ class CallerRunBudget(EvidenceReadBudget):
         return 60.0
 
     def ordinary_remaining(self) -> int:
+        if self.caller._state is None:
+            return len(self.caller._slot.requests) - self.caller.startup_dispatches
         return self.caller.usable - self._ordinary_hold
 
     def consume(self, *, fence: bool = False) -> float:

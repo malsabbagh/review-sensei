@@ -31,7 +31,7 @@ from review_sensei.api_work import (
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionIdentity, SessionRecord
 
-from .api_run_owner import claim_hosted_startup
+from .api_run_owner import claim_review_startup
 from .caller_operation import CallerOperation
 from .http import Opener
 from .session_ledger import GitHubIssueCommentSessionLedger
@@ -86,13 +86,17 @@ class ApiRunRequestTransport:
         plan: StartupPlan,
         attempt: int,
         opener: Opener,
+        job: str = "hosted",
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
     ):
-        slots = [s for s in plan.slots if s.job == "hosted" and s.attempt == attempt]
+        if job not in {"hosted", "local"}:
+            raise ReviewInputError("review startup job is unsupported")
+        self.job = job
+        slots = [s for s in plan.slots if s.job == job and s.attempt == attempt]
         if len(slots) != 1:
             raise ReviewInputError("startup transport slot is unsupported")
-        claim_hosted_startup(directory, run, attempt)
+        claim_review_startup(directory, run, attempt, job)
         self.run, self.plan, self.attempt = run, plan, attempt
         self._slot, self._clock, self._monotonic = slots[0], clock, monotonic
         self._opener = (
@@ -385,7 +389,7 @@ class ApiRunRequestTransport:
             state.identity != self.run
             or state.startup != self.plan
             or state.owner.run_attempt != self.attempt
-            or state.owner.job != "hosted"
+            or state.owner.job != self.job
         ):
             raise ReviewInputError("confirmed caller reservation scope conflicts")
         block = next((b for b in state.blocks if b.block_id == block_id), None)
@@ -423,7 +427,7 @@ class ApiRunRequestTransport:
             previous.require_successor(candidate)
             new = next((b for b in candidate.blocks if b.block_id == block_id), None)
             if (
-                candidate.owner.job != "hosted"
+                candidate.owner.job != self.job
                 or candidate.owner.run_attempt != self.attempt
                 or new is None
                 or new.issued_by != candidate.owner
@@ -461,7 +465,7 @@ class ApiRunRequestTransport:
         if (
             owner.run_attempt != 1
             or owner.run_attempt != self.attempt
-            or owner.job != "hosted"
+            or owner.job != self.job
         ):
             raise ReviewInputError("initial caller reservation owner conflicts")
         self._reservation_started = True
@@ -499,7 +503,7 @@ class ApiRunRequestTransport:
         if (
             self._state is not None
             or self._activation is None
-            or self._last_method != "PATCH"
+            or self._last_method not in {"POST", "PATCH"}
             or self._activation_readback_attempted
         ):
             raise ReviewInputError("caller reservation has no funded reconciliation")
@@ -507,6 +511,17 @@ class ApiRunRequestTransport:
         loaded = ledger.load(identity)
         if loaded.status != "ok" or loaded.record is None:
             raise ReviewInputError("caller reservation publication is unconfirmed")
+        if self._producer is None:
+            expected, _ = self._activation
+            if (
+                self._last_method != "GET"
+                or loaded.record.record_sha256 != expected.record_sha256
+            ):
+                raise ReviewInputError("caller initial publication is unconfirmed")
+            # The native exact readback authenticates the configured Bot before
+            # its numeric producer identity can first be observed. No absence
+            # or caller document can authorize another POST.
+            self._producer = ledger.evidence_producer()
         return self._accept_activation(ledger, loaded.record)
 
     def replace_checkpoint(

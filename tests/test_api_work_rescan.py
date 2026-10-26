@@ -47,7 +47,7 @@ class CallerRescanReadTests(unittest.TestCase):
                 FrozenApiConfiguration(
                     source.base_sha,
                     hashlib.sha256(b"synthetic frozen config").hexdigest(),
-                    128,
+                    HOSTED_API_STARTUP_PLAN.liability + 50,
                 ),
                 ApiExecutionOwner(1, "hosted", 0),
                 HOSTED_API_STARTUP_PLAN,

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from review_sensei.api_work import StartupPlan, StartupSlot
+from review_sensei.configuration import MAX_CONFIG_BYTES
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionIdentity
 
@@ -23,34 +24,55 @@ from .review_hooks import GitHubReviewHooks
 # and authoritative workflow PR read outside the engine command. Each scan's
 # existing physical pagination ceiling includes fallback and the terminal page.
 _STARTUP_PREFIX = (
-    "oidc",
-    "session",
-    "actions-token",
-    "pull",
+    "repository-policy",
+    "default-policy-ref",
     "configuration",
+    "pull",
+    "oidc",
+    "actions-token",
     "run",
     "jobs",
+    "session",
 )
-HOSTED_API_STARTUP_PLAN = StartupPlan(
-    (
-        StartupSlot(
-            "hosted",
-            1,
-            _STARTUP_PREFIX
-            + ("initial-discovery",) * MAX_PAGINATION_PAGES
-            + ("create",)
-            + ("initial-readback",) * MAX_PAGINATION_PAGES,
-        ),
-        StartupSlot(
-            "hosted",
-            2,
-            _STARTUP_PREFIX
-            + ("ceased-job",) * 2
-            + ("recovery-lists",) * (4 * MAX_PAGINATION_PAGES)
-            + ("update",),
-        ),
+
+
+def review_startup_plan(job: str) -> StartupPlan:
+    if job not in {"hosted", "local"}:
+        raise ReviewInputError("review startup job is unsupported")
+    return StartupPlan(
+        (
+            StartupSlot(
+                job,
+                1,
+                _STARTUP_PREFIX
+                + ("initial-discovery",) * MAX_PAGINATION_PAGES
+                + ("create",)
+                + ("initial-readback",) * MAX_PAGINATION_PAGES,
+            ),
+            StartupSlot(
+                job,
+                2,
+                _STARTUP_PREFIX
+                + ("ceased-job",) * 2
+                + ("recovery-lists",) * (4 * MAX_PAGINATION_PAGES)
+                + ("update",),
+            ),
+        )
     )
-)
+
+
+HOSTED_API_STARTUP_PLAN = review_startup_plan("hosted")
+
+
+def policy_bytes(config: Path | str | None) -> bytes:
+    path = Path(config) if config is not None else Path(".reviewsensei.yml")
+    if config is None and not path.exists():
+        return b""
+    with path.open("rb") as handle:
+        raw = handle.read(MAX_CONFIG_BYTES + 1)
+    if len(raw) > MAX_CONFIG_BYTES:
+        raise ReviewInputError("frozen policy file exceeds its byte bound")
+    return raw
 
 
 class ApiRunReviewHooks:
@@ -64,15 +86,15 @@ class ApiRunReviewHooks:
         base_sha: str,
         head_sha: str,
     ):
-        if (
-            not isinstance(ledger, ApiRunSessionLedger)
-            or ledger.caller.plan != HOSTED_API_STARTUP_PLAN
-        ):
+        if not isinstance(
+            ledger, ApiRunSessionLedger
+        ) or ledger.caller.plan != review_startup_plan(ledger.caller.job):
             raise ReviewInputError(
                 "caller hosted selection requires its native source policy"
             )
         self.ledger, self.identity = ledger, identity
         self.base_sha, self.head_sha = base_sha, head_sha
+        self.configuration = ledger.caller.accounting.configuration
         self._provider_started = self._completion_started = False
 
     def resolve_ledger(self, args, *, resolved_head_sha: str):
@@ -86,9 +108,9 @@ class ApiRunReviewHooks:
             )
             or resolved_head_sha != self.head_sha
             or args.base_sha != self.base_sha
-            or hashlib.sha256(Path(args.config).read_bytes()).hexdigest()
+            or hashlib.sha256(policy_bytes(args.config)).hexdigest()
             != state.configuration.digest
-            or state.configuration.commit != self.base_sha
+            or state.configuration != self.configuration
         ):
             raise ReviewInputError("caller hosted admission scope conflicts")
         self.ledger.caller.label_phase("admission")

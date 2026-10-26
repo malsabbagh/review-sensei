@@ -93,6 +93,7 @@ class StartupFixture:
     def __init__(self, directory, *, fanout=30, limit=128):
         self.directory = Path(directory)
         self.fanout = fanout
+        self.plan = PLAN
         self.attempt = 1
         self.comment = None
         self.trace = []
@@ -252,7 +253,7 @@ class StartupFixture:
         self.accounted = ApiRunRequestTransport(
             directory=self.directory,
             run=RUN,
-            plan=PLAN,
+            plan=self.plan,
             attempt=self.attempt,
             opener=self._external_open,
         )
@@ -301,7 +302,7 @@ class StartupFixture:
             hashlib.sha256(raw).hexdigest(),
             parse_configuration_text(raw.decode()).api_request_limit,
         )
-        PLAN.require_limit(configuration.limit)
+        self.plan.require_limit(configuration.limit)
         evidence = ApiRunActionsEvidence(
             self.http,
             token=actions_token,

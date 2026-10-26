@@ -18,16 +18,18 @@ from review_sensei.session import SessionIdentity
 from .reservation_recovery import ActionsReservationEvidence, _stamp
 
 
-def claim_hosted_startup(directory: Path, run: ApiRunIdentity, attempt: int) -> None:
+def claim_review_startup(
+    directory: Path, run: ApiRunIdentity, attempt: int, job: str
+) -> None:
     """Source-owned runner directory; claim before any ReviewSensei HTTP.
 
     Never remove this marker to retry. A failed process needs the one supported
     Actions rerun. A new runner under the same slot is unsupported, not recovery.
     """
-    ApiExecutionOwner(attempt, "hosted", 0)
+    ApiExecutionOwner(attempt, job, 0)
     path = (
         directory
-        / f"reviewsensei-api-{run.repository_id}-{run.run_id}-{attempt}-hosted.claim"
+        / f"reviewsensei-api-{run.repository_id}-{run.run_id}-{attempt}-{job}.claim"
     )
     try:
         descriptor = os.open(
@@ -54,6 +56,12 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
     its separate read-only Actions capability. Generation remains ledger-owned.
     Only the finite hosted job is qualified by this bounded startup experiment.
     """
+
+    def __init__(self, http, *, token: str, command_run_id: str, job: str = "hosted"):
+        if job not in {"hosted", "local"}:
+            raise ReviewInputError("review owner job is unsupported")
+        super().__init__(http, token=token, command_run_id=command_run_id)
+        self.job = job
 
     def _jobs(self, identity: SessionIdentity, attempt: int) -> list[dict[str, Any]]:
         payload = self._get(
@@ -82,9 +90,14 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         return jobs
 
     def current_owner(
-        self, identity: SessionIdentity, *, attempt: int, generation: int
+        self,
+        identity: SessionIdentity,
+        *,
+        attempt: int,
+        generation: int,
+        event: str | None = None,
     ) -> ApiExecutionOwner:
-        owner = ApiExecutionOwner(attempt, "hosted", generation)
+        owner = ApiExecutionOwner(attempt, self.job, generation)
         run = self._get(identity, f"/actions/runs/{self.command_run_id}")
         repository = run.get("repository")
         if (
@@ -97,10 +110,12 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             or type(run.get("run_attempt")) is not int
             or run["run_attempt"] != attempt
             or run.get("status") != "in_progress"
+            or event is not None
+            and run.get("event") != event
         ):
             raise ReviewInputError("current API run identity is unavailable")
         jobs = self._jobs(identity, attempt)
-        matching = [j for j in jobs if _writer_name(j.get("name"), "hosted")]
+        matching = [j for j in jobs if _writer_name(j.get("name"), self.job)]
         active_writers = [
             j
             for j in jobs
@@ -120,7 +135,7 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
     def ceased_owner(
         self, identity: SessionIdentity, predecessor: ApiExecutionOwner
     ) -> tuple[int, str, str]:
-        if predecessor.job != "hosted":
+        if predecessor.job != self.job:
             raise ReviewInputError("API predecessor job is unsupported")
         jobs = self._jobs(identity, predecessor.run_attempt)
         matching = [j for j in jobs if _writer_name(j.get("name"), predecessor.job)]
