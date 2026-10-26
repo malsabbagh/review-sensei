@@ -45,6 +45,56 @@ from qualify_published_cli import (
 
 
 class BootstrapContracts(unittest.TestCase):
+    def test_missing_current_fixture_fails_before_install_with_error_receipt(self):
+        import shutil
+
+        source = (
+            Path(__file__).resolve().parents[2] / "scripts/qualify_published_cli.py"
+        )
+        for missing in ("operations.py", "run_fixture.py"):
+            with (
+                self.subTest(missing=missing),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                driver = root / "scripts/qualify_published_cli.py"
+                driver.parent.mkdir()
+                shutil.copyfile(source, driver)
+                fixtures = root / "tests/published_cli"
+                fixtures.mkdir(parents=True)
+                for name in (
+                    "operations.py",
+                    "run_child.py",
+                    "entry_child.py",
+                    "run_fixture.py",
+                ):
+                    if name != missing:
+                        (fixtures / name).write_text("# synthetic fixture\n")
+                output = root / "qualification"
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        str(driver),
+                        "--version",
+                        "0.8.14",
+                        "--github-version",
+                        "0.3.20",
+                        "--output",
+                        str(output),
+                    ],
+                    env=clean_environment(root / "home"),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(proc.returncode, 1)
+                self.assertNotIn("Traceback", proc.stderr)
+                report = json.loads((output / "summary.json").read_text())
+                self.assertEqual(report["status"], "ERROR")
+                self.assertIn(missing, report["error"])
+                self.assertFalse((output / "environment").exists())
+
     def test_invalid_historical_cli_refuses_before_installation(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "not-created"
@@ -66,6 +116,9 @@ class BootstrapContracts(unittest.TestCase):
 
     def test_historical_operation_fixtures_keep_original_bytes(self):
         root = Path(__file__).parent
+        # These are immutable historical inputs, not formatting snapshots. Do
+        # not refresh hashes to accept routine edits: a changed baseline needs
+        # separate source/artifact review and an explicit baseline-mode change.
         expected = {
             "historical_operations.py": "e42b435753425f9a055ac9a14fc3c2b5bba2f17a0541c3af9458e009685b84d9",
             "operation_child.py": "e9b5f50e1ff777c342031d768fef9e18d9ab718ffb462624808e78f442bd587a",

@@ -211,15 +211,18 @@ def main():
                 or d.get("terminal_reason") == "already-published"
             )
         if continued and c["partial"]:
+            # A retained completion must use its original published evidence;
+            # requiring a fresh review here would defeat the no-replay oracle.
+            partial = d["seed"] if d.get("seed_exit") is not None else d
             checks["partial_withholds_native_approval"] = not any(
-                x["state"] == "APPROVED" for x in d["reviews"]
+                x["state"] == "APPROVED" for x in partial["reviews"]
             )
-            checks["actual_partial_or_retained_completion"] = (
-                "partial_coverage" in d["stderr"]
-                or d["terminal_reason"] == "already-published"
+            checks["partial_review_present"] = any(
+                x["state"] == "COMMENTED" for x in partial["reviews"]
             )
+            checks["actual_partial_coverage"] = "partial_coverage" in partial["stderr"]
             checks["partial_merge_check_withheld"] = (
-                "action_required" in d["check_conclusions"]
+                "action_required" in partial["check_conclusions"]
             )
         if continued and c.get("purpose", "review") == "review":
             if d["seed_exit"] is not None:
@@ -228,6 +231,8 @@ def main():
                     and d["seed"]["terminal_transaction"] is not None
                     and d["provider_calls"] == 0
                     and not d["reviews"]
+                    and d["retained_reviews_unchanged"]
+                    and d["terminal_transaction"] == d["seed"]["terminal_transaction"]
                 )
             elif not c["partial"]:
                 checks["fresh_complete_native_approval"] = (

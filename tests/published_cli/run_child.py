@@ -63,10 +63,14 @@ code = invoke(
     runid=spec.get("runid", "100") != "",
 )
 data = receipt(fixture)
+retained_reviews_unchanged = (
+    seed is not None and data["reviews"][:before_reviews] == seed["reviews"]
+)
 data.update(
     exit=code,
     seed_exit=seed_exit,
     seed=seed,
+    retained_reviews_unchanged=retained_reviews_unchanged,
     provider_calls=fixture.provider_calls - before_provider,
     reviews=data["reviews"][before_reviews:],
     fault_hits=fixture.hit,

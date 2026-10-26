@@ -5,6 +5,7 @@ src tree, replace a lifecycle continuation, or manufacture an admission result.
 """
 
 import copy
+import hashlib
 import io
 import json
 import os
@@ -393,7 +394,12 @@ def receipt(fixture):
         if state
         else None,
         "reviews": [
-            {"state": r["state"], "commit_id": r["commit_id"]} for r in fixture.reviews
+            {
+                "state": r["state"],
+                "commit_id": r["commit_id"],
+                "body_sha256": hashlib.sha256(r["body"].encode()).hexdigest(),
+            }
+            for r in fixture.reviews
         ],
         "check_conclusions": [x.get("conclusion") for x in fixture.check_runs],
         "requests": getattr(fixture, "requests", []),

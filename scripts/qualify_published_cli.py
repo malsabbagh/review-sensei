@@ -256,25 +256,7 @@ def main():
         "requested_github_version": args.github_version,
         "source": "exact PyPI wheels",
         "mode": mode,
-        "operation_fixture": {
-            "file": operation_script,
-            "sha256": hashlib.sha256(
-                (scripts / operation_script).read_bytes()
-            ).hexdigest(),
-            "child_file": "operation_child.py"
-            if args.historical_baseline
-            else "run_child.py",
-            "child_sha256": hashlib.sha256(
-                (
-                    scripts
-                    / (
-                        "operation_child.py"
-                        if args.historical_baseline
-                        else "run_child.py"
-                    )
-                ).read_bytes()
-            ).hexdigest(),
-        },
+        "operation_fixture": None,
         "credential_free": True,
         "status": "NOT_EXECUTED",
         "suites": [],
@@ -290,6 +272,24 @@ def main():
     }
     exit_code = 1
     try:
+        child = "operation_child.py" if args.historical_baseline else "run_child.py"
+        fixtures = (operation_script, child)
+        if not args.historical_baseline:
+            fixtures += ("run_fixture.py", "entry_child.py")
+        for name in fixtures:
+            if not (scripts / name).is_file():
+                raise ValueError("qualification fixture is missing: " + name)
+        digests = {
+            name: hashlib.sha256((scripts / name).read_bytes()).hexdigest()
+            for name in fixtures
+        }
+        report["operation_fixture"] = {
+            "file": operation_script,
+            "sha256": digests[operation_script],
+            "child_file": child,
+            "child_sha256": digests[child],
+            "support_sha256": {name: digests[name] for name in fixtures[2:]},
+        }
         environment = root / "environment"
         venv.EnvBuilder(with_pip=True).create(environment)
         python = environment / (
