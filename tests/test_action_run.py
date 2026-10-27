@@ -699,6 +699,62 @@ class CurrentCommandEntryTests(unittest.TestCase):
                         self.assertEqual(f.business_writes, 0)
                         self.assertEqual(f.provider_calls, before_provider)
 
+    def test_historical_author_shapes_refuse_without_business_effects(self):
+        for location in ("current", "historical"):
+            for author in (None, [], "not-an-author"):
+                with (
+                    self.subTest(location=location, author=author),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    f = historical_command_case(directory)
+                    before = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                    hold = copy.deepcopy(before.historical_assessments)
+                    review_id = hold["source"]["completion"]["review_id"]
+                    provider = f.provider_calls
+                    external = f.external
+                    malformed_reads = []
+
+                    def malformed_author(request, timeout):
+                        response = external(request, timeout)
+                        path = urlsplit(request.full_url).path
+                        target = (
+                            path.endswith("/pulls/7/reviews")
+                            if location == "current"
+                            else path.endswith(f"/pulls/7/reviews/{review_id}")
+                        )
+                        if request.method == "GET" and target:
+                            value = json.loads(response.read(524288))
+                            if location == "current":
+                                for review in value:
+                                    if review["commit_id"] == f.requested_head:
+                                        review["user"] = copy.deepcopy(author)
+                            else:
+                                value["user"] = copy.deepcopy(author)
+                            malformed_reads.append(path)
+                            return json_response(value)
+                        return response
+
+                    f.external = malformed_author
+                    f.select_command(historical_body(hold), new_run=True)
+                    self.assertEqual(f.invoke_command(), 1, f.error + f.stdout)
+                    self.assertTrue(malformed_reads)
+                    self.assertIsNone(f.exception, str(f.exception))
+                    self.assertIn(
+                        "current historical assessment publication is unavailable"
+                        if location == "current"
+                        else "historical assessment native source conflicts",
+                        f.error,
+                    )
+                    after = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                    self.assertEqual(after.historical_assessments, hold)
+                    self.assertEqual(after.dispositions, before.dispositions)
+                    self.assertEqual(f.business_writes, 0)
+                    self.assertEqual(f.provider_calls, provider)
+                    self.assertEqual(
+                        after.api_run_accounting["action"]["phase"], "pending"
+                    )
+                    self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+
     def test_historical_assessment_unknown_writes_preserve_pending_state_without_replay(
         self,
     ):

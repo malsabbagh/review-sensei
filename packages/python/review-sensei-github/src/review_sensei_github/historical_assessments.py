@@ -60,6 +60,7 @@ class HistoricalAssessmentReader:
                 or not isinstance(review.get("body"), str)
                 or hashlib.sha256(review["body"].encode()).hexdigest()
                 != receipt["review_body_sha256"]
+                or not isinstance(review.get("user"), dict)
                 or review.get("user", {}).get("id") != self.ledger._evidence_author_id
                 or review.get("user", {}).get("type") != "Bot"
             ):

@@ -120,6 +120,7 @@ def prepare_historical_target(run, authority, command, app, permission):
         for r in rows
         if isinstance(r, dict)
         and r.get("commit_id") == run.head_sha
+        and isinstance(r.get("user"), dict)
         and r.get("user", {}).get("id") == run.ledger._evidence_author_id
         and r.get("user", {}).get("type") == "Bot"
         and type(r.get("id")) is int
