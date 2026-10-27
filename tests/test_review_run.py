@@ -1642,6 +1642,7 @@ os._exit(92)
         self,
     ):
         import copy
+        import os
         import subprocess
 
         from review_sensei_github.api_run_history import read_previous_run
@@ -1664,12 +1665,23 @@ os._exit(92)
                             "git",
                             "-C",
                             str(f.root),
+                            "-c",
+                            "user.name=Fixture",
+                            "-c",
+                            "user.email=fixture@example.invalid",
+                            "-c",
+                            "user.useConfigOnly=true",
                             "commit",
                             "-am",
                             "new current policy",
                         ],
                         check=True,
                         capture_output=True,
+                        env=dict(
+                            fixture_process_environment(),
+                            GIT_CONFIG_GLOBAL=os.devnull,
+                            GIT_CONFIG_NOSYSTEM="1",
+                        ),
                     )
                     f.policy_ref = f.policy = subprocess.check_output(
                         ["git", "-C", str(f.root), "rev-parse", "HEAD"], text=True
