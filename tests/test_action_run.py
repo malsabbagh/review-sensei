@@ -674,6 +674,31 @@ class CurrentCommandEntryTests(unittest.TestCase):
                         after.api_run_accounting["action"]["phase"], "terminal"
                     )
 
+    def test_short_historical_fingerprints_refuse_before_enrollment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = historical_command_case(directory)
+            before_body = f.comment["body"]
+            hold = parse_session_comment(
+                before_body, identity=IDENTITY
+            ).historical_assessments
+            instance = hold["assessments"][0]["instance"]
+            before_provider = f.provider_calls
+            for action in ("dismiss", "accept-risk"):
+                for length in range(16, 64):
+                    with self.subTest(action=action, length=length):
+                        f.select_command(
+                            historical_body(
+                                hold, instance=instance[:length], action=action
+                            ),
+                            new_run=True,
+                        )
+                        self.assertEqual(f.invoke_command(), 1, f.error + f.stdout)
+                        self.assertIn("full instance fingerprint", f.error)
+                        self.assertEqual(f.comment["body"], before_body)
+                        self.assertFalse(f.trace)
+                        self.assertEqual(f.business_writes, 0)
+                        self.assertEqual(f.provider_calls, before_provider)
+
     def test_historical_assessment_unknown_writes_preserve_pending_state_without_replay(
         self,
     ):

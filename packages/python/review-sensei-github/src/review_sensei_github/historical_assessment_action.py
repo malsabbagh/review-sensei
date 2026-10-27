@@ -49,6 +49,7 @@ def parse_historical_command(body):
     if (
         match is None
         or parsed.finding_fingerprint is None
+        or re.fullmatch(r"[0-9a-fA-F]{64}", parsed.finding_fingerprint) is None
         or parsed.action not in {"dismiss", "accept-risk"}
     ):
         raise ReviewInputError(
@@ -101,8 +102,8 @@ def prepare_historical_target(run, authority, command, app, permission):
         raise HistoricalTargetRefusal(
             "historical assessment scope does not match current publication"
         )
-    prefix = command.reference[3:].lower()
-    matches = [a for a in hold["assessments"] if a["instance"].startswith(prefix)]
+    reference = command.reference[3:].lower()
+    matches = [a for a in hold["assessments"] if a["instance"] == reference]
     if len(matches) != 1:
         raise HistoricalTargetRefusal(
             "historical assessment target is missing or ambiguous"
