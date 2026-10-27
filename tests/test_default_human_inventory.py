@@ -351,10 +351,9 @@ class DefaultHumanInventoryTests(unittest.TestCase):
             result, key = human_checkpoint(
                 LocalSessionLedger(path),
                 count=53,
-                detail=1,
+                detail=3,
                 summary="Original overview. " + "x" * 31_000,
-                body_findings=40,
-                body_padding=800,
+                body_findings=35,
             )
             PendingHumanReview.from_result(result, BASE).to_dict()
             state = DefaultHumanState(result.comments)
