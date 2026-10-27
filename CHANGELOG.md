@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.8.15 - 2026-10-27
+
+Changes since [v0.8.14](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.14), from [52b5ca47ba3508a526312ce8424ff0c7fa1bb347](https://github.com/malsabbagh/review-sensei/commit/52b5ca47ba3508a526312ce8424ff0c7fa1bb347) through [8ab72ca718dd84822cfb3fc9c2d79a38aff1f463](https://github.com/malsabbagh/review-sensei/commit/8ab72ca718dd84822cfb3fc9c2d79a38aff1f463).
+
+Previous annotated tag object: `568aed045a18ab5fa218360fb5c83907aef33908`.
+
+- docs: record released v0.8.14 ([a1dc6af118164a2165dca8c9a4834da19ae8df73](https://github.com/malsabbagh/review-sensei/commit/a1dc6af118164a2165dca8c9a4834da19ae8df73)).
+- Qualify installed consumers through current run entry points \(\#379\) ([64a982d495cfe66b0dc19e008ad0ebd15f691960](https://github.com/malsabbagh/review-sensei/commit/64a982d495cfe66b0dc19e008ad0ebd15f691960)).
+- chore\(deps\): bump pypa/gh-action-pypi-publish from 1.14.2 to 1.14.3 \(\#386\) ([f0b0c10e73523f8f0c8d82fba479c419e32f44c8](https://github.com/malsabbagh/review-sensei/commit/f0b0c10e73523f8f0c8d82fba479c419e32f44c8)).
+- chore\(deps\): bump the codeql-action group with 2 updates \(\#384\) ([7f138af53b3d91cba96cca5dec3a3fa394f1be23](https://github.com/malsabbagh/review-sensei/commit/7f138af53b3d91cba96cca5dec3a3fa394f1be23)).
+- chore\(deps\): bump coverage from 7.16.2 to 7.17.0 \(\#382\) ([74f3e36a69d0f3f363daab7a78d16c46590d0bdd](https://github.com/malsabbagh/review-sensei/commit/74f3e36a69d0f3f363daab7a78d16c46590d0bdd)).
+- Preserve literal Git paths through blocker admission \(\#388\) ([d071fcfb587595ba37cecef1e4d0bafef02e9704](https://github.com/malsabbagh/review-sensei/commit/d071fcfb587595ba37cecef1e4d0bafef02e9704)).
+- chore\(deps\): bump sigstore from 4.5.0 to 4.5.1 \(\#381\) ([9f2f74381587506619d101a7a177420dad90d38d](https://github.com/malsabbagh/review-sensei/commit/9f2f74381587506619d101a7a177420dad90d38d)).
+- chore\(deps\): bump actions/setup-python from 7.0.0 to 7.1.0 \(\#385\) ([4b8a6822d33cdc2c7f2cc11b4fb8106af3fdcc19](https://github.com/malsabbagh/review-sensei/commit/4b8a6822d33cdc2c7f2cc11b4fb8106af3fdcc19)).
+- chore\(deps\): bump ruff from 0.17.1 to 0.17.2 \(\#383\) ([8ab72ca718dd84822cfb3fc9c2d79a38aff1f463](https://github.com/malsabbagh/review-sensei/commit/8ab72ca718dd84822cfb3fc9c2d79a38aff1f463)).
+
+## review-sensei-github 0.3.21 - 2026-10-27
+
+- Pin `review-sensei==0.8.15`.
+
 ## 0.8.14 - 2026-10-26
 
 - Add the root `api_request_limit` setting, defaulting to 512 physical caller
