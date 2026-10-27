@@ -1364,6 +1364,26 @@ os._exit(92)
 
 
 class ConsecutiveReviewRunTests(unittest.TestCase):
+    def test_historical_fixture_keeps_canonical_diff_bytes_with_crlf_defaults(self):
+        from unittest.mock import patch
+
+        write_text = Path.write_text
+
+        def platform_write(path, data, encoding=None, errors=None, newline=None):
+            if path.name == "review.patch" and newline is None:
+                newline = "\r\n"
+            return write_text(
+                path, data, encoding=encoding, errors=errors, newline=newline
+            )
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(Path, "write_text", platform_write),
+        ):
+            f = self.historical_case(directory)
+            self.assertNotIn(b"\r", (f.root / "review.patch").read_bytes())
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+
     def test_historical_receipts_are_evidence_and_cannot_restore_enrollment_authority(
         self,
     ):
@@ -1612,16 +1632,18 @@ os._exit(92)
         original = patch.read_text()
         patch.write_text(
             original
-            + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\nindex 0000000..1111111\nBinary files /dev/null and b/image.bin differ\n"
+            + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\nindex 0000000..1111111\nBinary files /dev/null and b/image.bin differ\n",
+            encoding="utf-8",
+            newline="\n",
         )
         if f.invoke(human=True) != 0:
             raise AssertionError(f.error)
         if not partial_predecessor:
-            patch.write_text(original)
+            patch.write_text(original, encoding="utf-8", newline="\n")
         f.next_run()
         if f.invoke(human=True) != 0:
             raise AssertionError("original soft cleanup refusal was not exercised")
-        patch.write_text(original)
+        patch.write_text(original, encoding="utf-8", newline="\n")
         if f.threads[0]["isResolved"]:
             raise AssertionError("original cleanup refusal did not retain target")
         # Synthetic external state after a separately authorized confirmation;
@@ -2054,7 +2076,9 @@ os._exit(92)
                     patch.read_text()
                     + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\n"
                     "index 0000000..1111111\n"
-                    "Binary files /dev/null and b/image.bin differ\n"
+                    "Binary files /dev/null and b/image.bin differ\n",
+                    encoding="utf-8",
+                    newline="\n",
                 )
                 self.assertEqual(f.invoke(human=True), 0, f.error)
                 initial = parse_session_comment(f.comment["body"], identity=IDENTITY)
