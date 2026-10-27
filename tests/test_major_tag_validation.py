@@ -825,7 +825,7 @@ class SurfaceTests(unittest.TestCase):
     def test_workflows_and_ci_use_the_same_yaml_requirement(self):
         self.assertEqual(
             (ROOT / "requirements/major-tag-validation.txt").read_text().strip(),
-            "PyYAML==6.0.3\npypi-attestations==0.0.30\nsigstore==4.5.0",
+            "PyYAML==6.0.3\npypi-attestations==0.0.30\nsigstore==4.5.1",
         )
         self.assertIn("-r test.txt", (ROOT / "requirements/ci.txt").read_text())
         self.assertIn(
