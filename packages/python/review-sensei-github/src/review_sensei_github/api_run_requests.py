@@ -631,9 +631,38 @@ class ApiRunRequestTransport:
         self, ledger, identity, configuration, owner, previous, cessation
     ):
         """New run only: archive exact terminal root before replacing accounting."""
+        return self._rollover_and_activate(
+            ledger, identity, configuration, owner, previous, cessation
+        )
+
+    def rollover_historical_and_activate(
+        self, ledger, identity, configuration, owner, previous, authenticate
+    ):
+        """Distinct transition: authenticate within the serialized mutation."""
+        return self._rollover_and_activate(
+            ledger,
+            identity,
+            configuration,
+            owner,
+            previous,
+            None,
+            historical_authenticator=authenticate,
+        )
+
+    def _rollover_and_activate(
+        self,
+        ledger,
+        identity,
+        configuration,
+        owner,
+        previous,
+        cessation,
+        *,
+        historical_authenticator=None,
+    ):
         from dataclasses import replace
 
-        from .api_run_history import retain_previous_run
+        from .api_run_history import RETAINED_CONFIRMATION_TAIL, retain_previous_run
         from .api_run_plan import owner_allocations
 
         self._require_ledger(ledger, identity)
@@ -656,13 +685,39 @@ class ApiRunRequestTransport:
         self._reservation_started = True
         self._producer = ledger.evidence_producer()
         ledger.evidence_budget = self.budget_view
+        historical_prepared = False
 
         def prepare(record):
+            nonlocal historical_prepared
+            if historical_authenticator is not None:
+                if historical_prepared:
+                    raise ReviewInputError(
+                        "historical rollover callback is already consumed"
+                    )
+                historical_prepared = True
             if record.record_sha256 != previous.record_sha256:
                 raise ReviewInputError("previous caller root changed")
             if ledger.evidence_producer() != self._producer:
                 raise ReviewInputError("previous caller root producer changed")
-            cessation()
+            completion = None
+            if historical_authenticator is not None:
+                from .historical_completion import HistoricalPublicationCompletion
+
+                completion = historical_authenticator(record)
+                if type(completion) is not HistoricalPublicationCompletion:
+                    raise ReviewInputError(
+                        "historical enrollment lacks typed completion"
+                    )
+                completion.require(
+                    caller=self,
+                    ledger=ledger,
+                    identity=identity,
+                    configuration=configuration,
+                    owner=owner,
+                    previous=record,
+                )
+            else:
+                cessation()
             if (
                 record.reservation_id is not None
                 or record.reserved_slot is not None
@@ -674,7 +729,11 @@ class ApiRunRequestTransport:
                         record.transaction is None
                         or record.transaction.phase
                         not in {"publication_succeeded", "publication_suppressed"}
-                        or old.terminal_transaction != record.transaction.transaction_id
+                        or (
+                            completion is None
+                            and old.terminal_transaction
+                            != record.transaction.transaction_id
+                        )
                     )
                 )
                 or (old.analysis_abort is not None and record.transaction is not None)
@@ -697,7 +756,26 @@ class ApiRunRequestTransport:
 
                 read_action_result(ledger, identity, record)
             before_archive = len(self.observations)
-            reference = retain_previous_run(ledger, identity, record)
+            if completion is not None:
+                # Existing complete archive/write/readback tail plus fresh old
+                # and current Actions inventories and current PR after archive.
+                self.budget_view.preflight(RETAINED_CONFIRMATION_TAIL + 5)
+            reference = retain_previous_run(
+                ledger, identity, record, completion=completion
+            )
+            if completion is not None:
+                from .review_completion_recovery import _get
+
+                completion.selection.require_current_owner()
+                completion.selection.require_current_pull(
+                    _get(
+                        ledger.http,
+                        ledger.http.repository_path(
+                            identity.repository, f"/pulls/{identity.pull_request}"
+                        ),
+                        ledger.token,
+                    )
+                )
             # The issuer authenticated the exact immutable part readback.
             # Charge the lost response permanently; only its effect is settled.
             self._reconciled_mutations.update(
@@ -720,7 +798,11 @@ class ApiRunRequestTransport:
             state = state.reserve("hosted-review", allocation.first_work).reserve(
                 "hosted-terminal", allocation.first_terminal
             )
-            updated = record.rollover_api_accounting(state.to_document())
+            updated = (
+                record.rollover_historical_api_accounting(state.to_document())
+                if completion is not None
+                else record.rollover_api_accounting(state.to_document())
+            )
             self._activation = updated, "hosted-review"
             return updated
 
@@ -1120,6 +1202,13 @@ class ApiRunRequestTransport:
             raise ReviewInputError("caller run has unresolved terminal work")
 
         def close(record):
+            if (
+                self._terminal_reason == "already-published"
+                and self.accounting.owner.run_attempt == 2
+            ):
+                raise ReviewInputError(
+                    "successor publication tail is unverified; authenticated predecessor completion is required"
+                )
             current = record.transaction
             if (
                 current is None

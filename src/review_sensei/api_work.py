@@ -278,13 +278,38 @@ class ApiRunAccounting:
             ref = self.previous_record
             if (
                 not isinstance(ref, Mapping)
-                or set(ref) != {"run_id", "root_sha256", "manifest"}
+                or set(ref)
+                not in (
+                    {"run_id", "root_sha256", "manifest"},
+                    {
+                        "schema_version",
+                        "run_id",
+                        "root_sha256",
+                        "manifest",
+                        "completion",
+                    },
+                )
                 or not _natural(ref["run_id"], positive=True)
                 or ref["run_id"] == self.identity.run_id
                 or not isinstance(ref["root_sha256"], str)
                 or _HEX64.fullmatch(ref["root_sha256"]) is None
             ):
                 raise ReviewInputError("retained caller run reference is invalid")
+            if "completion" in ref:
+                from .historical_completion import REFERENCE_VERSION, validate_receipt
+
+                receipt = validate_receipt(ref["completion"])
+                if (
+                    ref["schema_version"] != REFERENCE_VERSION
+                    or receipt["historical_run_id"] != ref["run_id"]
+                    or receipt["historical_root_sha256"] != ref["root_sha256"]
+                    or receipt["current_run_id"] != self.identity.run_id
+                    or receipt["repository_id"] != self.identity.repository_id
+                    or receipt["current_policy_commit"] != self.configuration.commit
+                    or receipt["current_configuration_sha256"]
+                    != self.configuration.digest
+                ):
+                    raise ReviewInputError("historical retained reference conflicts")
             object.__setattr__(self, "previous_record", json.loads(json.dumps(ref)))
             manifest = cast(dict[str, Any], validate_manifest(ref["manifest"]))
             if (

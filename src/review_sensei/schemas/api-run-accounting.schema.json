@@ -197,6 +197,36 @@
               "$ref": "evidence-manifest.schema.json"
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_id",
+            "root_sha256",
+            "manifest",
+            "schema_version",
+            "completion"
+          ],
+          "properties": {
+            "run_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "root_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "manifest": {
+              "$ref": "evidence-manifest.schema.json"
+            },
+            "schema_version": {
+              "const": "caller-run-reference-v2"
+            },
+            "completion": {
+              "$ref": "historical-publication-completion.schema.json"
+            }
+          }
         }
       ]
     },

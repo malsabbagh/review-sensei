@@ -260,7 +260,34 @@ class ReviewRun:
         loaded = self.ledger.load(self.identity)
         if loaded.status != "ok" or loaded.record is None:
             raise ReviewInputError("successor checkpoint is unavailable")
+        self.caller._require_ledger(self.ledger, self.identity)
+        if loaded.record.record_sha256 != self.caller._root:
+            raise ReviewInputError("successor checkpoint changed")
         transaction = loaded.record.transaction
+        from .api_run_history import inherited_preprovider_reference, read_previous_run
+
+        inherited = inherited_preprovider_reference(
+            loaded.record, self.caller.accounting
+        )
+        if inherited is not None:
+            receipt = inherited["completion"]
+            if (receipt["current_base_sha"], receipt["current_head_sha"]) != (
+                self.base_sha,
+                self.head_sha,
+            ):
+                raise ReviewInputError(
+                    "inherited pre-provider current revision changed"
+                )
+            read_previous_run(self.ledger, self.identity, inherited)
+            return None
+        if (
+            transaction is not None
+            and transaction.phase == "publication_succeeded"
+            and self.caller.accounting.terminal_transaction is None
+        ):
+            raise ReviewInputError(
+                "successor publication tail is unverified; authenticated predecessor completion is required"
+            )
         if transaction is None or transaction.phase not in {
             "publication_pending",
             "publication_failed",
@@ -934,8 +961,18 @@ def bootstrap(
                 )
                 if previous.identity == caller.run:
                     raise ReviewInputError("caller run already started")
-                stopped = evidence.ceased_run_owner(
-                    identity, previous.identity.run_id, previous.owner
+                historical_candidate = (
+                    purpose == "review"
+                    and previous.terminal_transaction is None
+                    and previous_root.transaction is not None
+                    and previous_root.transaction.phase == "publication_succeeded"
+                )
+                stopped = (
+                    None
+                    if historical_candidate
+                    else evidence.ceased_run_owner(
+                        identity, previous.identity.run_id, previous.owner
+                    )
                 )
 
                 def require_cessation():
@@ -947,9 +984,38 @@ def bootstrap(
                     ):
                         raise ReviewInputError("previous caller cessation changed")
 
-                caller.rollover_and_activate(
-                    native, identity, frozen, owner, previous_root, require_cessation
-                )
+                if historical_candidate:
+                    from .historical_completion import (
+                        authenticate_historical_publication,
+                    )
+
+                    def authenticate(record):
+                        return authenticate_historical_publication(
+                            caller=caller,
+                            ledger=native,
+                            identity=identity,
+                            configuration=frozen,
+                            owner=owner,
+                            previous=record,
+                            actions=evidence,
+                            current_base=args.base_sha,
+                            current_head=args.head_sha,
+                            pull=pull,
+                            authority=session.attestation,
+                        )
+
+                    caller.rollover_historical_and_activate(
+                        native, identity, frozen, owner, previous_root, authenticate
+                    )
+                else:
+                    caller.rollover_and_activate(
+                        native,
+                        identity,
+                        frozen,
+                        owner,
+                        previous_root,
+                        require_cessation,
+                    )
             else:
                 raise ReviewInputError("previous caller root cannot be authenticated")
         except GitHubPublicationTransientError:
@@ -978,8 +1044,35 @@ def bootstrap(
         ):
             raise ReviewInputError("caller run is already terminal")
         prior = loaded.record
+        from .api_run_history import inherited_preprovider_reference, read_previous_run
+
+        inherited = (
+            inherited_preprovider_reference(prior, previous)
+            if purpose == "review"
+            else None
+        )
+        if inherited is not None:
+            receipt = inherited["completion"]
+            if (receipt["current_base_sha"], receipt["current_head_sha"]) != (
+                args.base_sha,
+                args.head_sha,
+            ):
+                raise ReviewInputError(
+                    "inherited pre-provider current revision changed"
+                )
+            read_previous_run(native, identity, inherited)
+        elif (
+            purpose == "review"
+            and previous.previous_record is not None
+            and previous.previous_record.get("schema_version")
+            == "caller-run-reference-v2"
+            and prior.transaction is not None
+            and prior.transaction.phase == "analysis"
+        ):
+            raise ReviewInputError("new transaction has no proven provider non-entry")
         if (
             purpose == "review"
+            and inherited is None
             and prior.transaction is not None
             and (
                 prior.transaction.base_sha != args.base_sha

@@ -3,8 +3,10 @@ Retain future storage; admit full native tails before effects. Unknown writes ne
 Quarantine registry: append-only, empty; workflow disabled until reviewed exact one-shot registration. Release grants no activation.
 One caller HTTP allowance: root `api_request_limit` (default 512).
 Only v3 purpose/source/repo/PR/head/run/attempt/job/workflow authority enables work.
-Successors must prove cessation; uncertainty/abandoned capacity stay charged.
-New runs must archive terminal predecessors.
+Successors must prove cessation; uncertainty and abandoned capacity stay charged.
+New runs archive exact predecessor accounting. Ordinary rollover requires terminal state.
+Historical publication rollover requires typed completion, a confirmed v2 archive/receipt
+and fresh current authority; original charges and current obligations remain intact.
 Only exact results/proven pre-entry aborts close actions; unknown work stays pending.
 Historical readers require exact review/archive evidence, fresh authority and no writes.
 Finite operation/page limits can refuse with caller capacity unused.

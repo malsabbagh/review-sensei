@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/historical-publication-completion.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "cessation_sha256",
+    "check_conclusion",
+    "check_id",
+    "current_authority_sha256",
+    "current_base_sha",
+    "current_configuration_sha256",
+    "current_executor_sha",
+    "current_head_sha",
+    "current_owner_sha256",
+    "current_policy_commit",
+    "current_run_id",
+    "historical_accounting_sha256",
+    "historical_base_sha",
+    "historical_configuration_sha256",
+    "historical_content_sha256",
+    "historical_evidence_sha256",
+    "historical_executor_commit",
+    "historical_executor_sha",
+    "historical_head_sha",
+    "historical_job_id",
+    "historical_policy_sha256",
+    "historical_review_step",
+    "historical_root_sha256",
+    "historical_run_id",
+    "historical_workflow_blob",
+    "publication_result_sha256",
+    "pull_request",
+    "repository",
+    "repository_id",
+    "review_id",
+    "schema_version",
+    "target_inventory_sha256",
+    "termination_basis",
+    "transaction_id",
+    "verifier_version",
+    "writer_inventory_sha256"
+  ],
+  "properties": {
+    "historical_base_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "historical_head_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "current_base_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "current_head_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "current_policy_commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "historical_root_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "historical_accounting_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "transaction_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "historical_policy_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "historical_configuration_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "historical_evidence_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "historical_content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "publication_result_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "target_inventory_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "cessation_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "current_owner_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "current_configuration_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "repository_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "pull_request": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "historical_run_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "current_run_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "review_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "check_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "schema_version": {
+      "const": "historical-publication-completion-v1"
+    },
+    "verifier_version": {
+      "const": "review-sensei-github/historical-completion-v1"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "check_conclusion": {
+      "enum": [
+        "success",
+        "failure",
+        "action_required",
+        "neutral"
+      ]
+    },
+    "historical_executor_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "historical_executor_commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "historical_workflow_blob": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "historical_job_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "historical_review_step": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "writer_inventory_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "termination_basis": {
+      "const": "successful-review-no-unsettled-root-write-v1"
+    },
+    "current_authority_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "current_executor_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    }
+  }
+}

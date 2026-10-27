@@ -107,27 +107,19 @@ class HumanInventoryContext:
     retained_source: RetainedPublishedInventorySource | None = field(
         default=None, repr=False
     )
-    selected_transaction: ReviewTransaction | None = field(default=None, repr=False)
+    historical_source: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         SessionIdentity(self.repository, self.pull_request, self.repository_id)
-        if self.selected_transaction is not None and (
-            not isinstance(self.selected_transaction, ReviewTransaction)
-            or self.selected_transaction.transaction_id != self.transaction_id
-            or self.selected_transaction.result_sha256 != self.original_content_digest
-            or not self.selected_transaction.identity_matches(
-                repository=self.repository,
-                pull_request=self.pull_request,
-                base_sha=self.base_sha,
-                head_sha=self.head_sha,
-                policy_digest=self.policy_digest,
-                configuration_digest=self.configuration_digest,
-                evidence_digest=self.evidence_digest,
-            )
-        ):
-            raise ReviewInputError(
-                "default human inventory selected transaction conflicts"
-            )
+        if self.historical_source is not None:
+            from .historical_completion import HistoricalReadSelection
+
+            if (
+                type(self.historical_source) is not HistoricalReadSelection
+                or self.retained_source is not None
+            ):
+                raise ReviewInputError("historical inventory selection conflicts")
+            self.historical_source.require_process()
         if (
             type(self.repository_id) is not int
             or type(self.producer_id) is not int
@@ -208,7 +200,9 @@ def _transaction(
     context.budget.check()
     record = loaded.record
     transaction = (
-        context.retained_source.select(loaded)
+        context.historical_source.select(loaded)
+        if context.historical_source is not None
+        else context.retained_source.select(loaded)
         if context.retained_source is not None
         else record.transaction
         if record is not None
@@ -269,6 +263,11 @@ def _live_pr(http: GitHubHttp, token: str, context: HumanInventoryContext) -> No
         token,
         http.repository_path(context.repository, f"/pulls/{context.pull_request}"),
     )
+    if context.historical_source is not None:
+        if status != 200:
+            raise ReviewInputError("historical inventory current authority unavailable")
+        context.historical_source.require_current_pull(pr)
+        return
     base = pr.get("base") if isinstance(pr, dict) else None
     head = pr.get("head") if isinstance(pr, dict) else None
     repo = base.get("repo") if isinstance(base, dict) else None
@@ -304,6 +303,7 @@ def build_human_inventory_context(
     budget: EvidenceReadBudget,
     _loaded: SessionLoadResult | None = None,
     _retained_source: RetainedPublishedInventorySource | None = None,
+    _historical_source: Any | None = None,
 ) -> HumanInventoryContext:
     """Select durable transaction independently, then authenticate live Bot and PR."""
     budget.check()
@@ -318,7 +318,9 @@ def build_human_inventory_context(
     loaded = _loaded if _loaded is not None else ledger.load(identity)
     budget.check()
     transaction = (
-        _retained_source.select(loaded)
+        _historical_source.select(loaded)
+        if _historical_source is not None
+        else _retained_source.select(loaded)
         if _retained_source is not None
         else loaded.record.transaction
         if loaded.record is not None
@@ -362,16 +364,7 @@ def build_human_inventory_context(
         evidence_digest,
         budget,
         _retained_source,
-        transaction,
-    )
-    from .api_run_requests import ApiRunSessionLedger
-
-    _transaction(
-        ledger,
-        context,
-        loaded=loaded
-        if isinstance(ledger, ApiRunSessionLedger) and ledger._quarantine_required
-        else _loaded,
+        _historical_source,
     )
     _live_pr(transport, token, context)
     return context
@@ -861,7 +854,10 @@ class HumanInventoryStore:
         self, document: dict[str, object], *, allow_start: bool = False
     ) -> HumanInventoryReference:
         """Reconcile complete parts; starting requires original live admission."""
-        if self.context.retained_source is not None:
+        if (
+            self.context.retained_source is not None
+            or self.context.historical_source is not None
+        ):
             raise ReviewInputError("retained published inventory permits reads only")
         if not isinstance(allow_start, bool):
             raise ReviewInputError("default human inventory start authority is invalid")

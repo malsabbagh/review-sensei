@@ -1617,11 +1617,37 @@ class SessionRecord:
         adapter must confirm the retained carrier and stopped predecessor first.
         Ordinary evolve() never allows an accounting identity replacement.
         """
+        return self._rollover_api_accounting(accounting, historical=False)
+
+    def rollover_historical_api_accounting(
+        self, accounting: Mapping[str, object]
+    ) -> "SessionRecord":
+        """Value constraints only; source adapter authenticates the transition."""
+        return self._rollover_api_accounting(accounting, historical=True)
+
+    def _rollover_api_accounting(
+        self, accounting: Mapping[str, object], *, historical: bool
+    ) -> "SessionRecord":
         from .api_work import ApiRunAccounting
 
         previous = ApiRunAccounting.from_document(self.api_run_accounting)
         candidate = ApiRunAccounting.from_document(accounting)
         ref = candidate.previous_record
+        if historical:
+            from .historical_completion import (
+                REFERENCE_VERSION,
+                require_receipt_matches,
+            )
+
+            if ref is None or ref.get("schema_version") != REFERENCE_VERSION:
+                raise ReviewInputError(
+                    "historical rollover requires a versioned receipt"
+                )
+            require_receipt_matches(self, candidate, ref["completion"])
+        elif ref is not None and "completion" in ref:
+            raise ReviewInputError(
+                "ordinary rollover cannot consume historical completion"
+            )
         if (
             previous.identity.repository_id != candidate.identity.repository_id
             or previous.identity.run_id == candidate.identity.run_id
@@ -1644,7 +1670,11 @@ class SessionRecord:
                     self.transaction is None
                     or self.transaction.phase
                     not in {"publication_succeeded", "publication_suppressed"}
-                    or previous.terminal_transaction != self.transaction.transaction_id
+                    or (
+                        not historical
+                        and previous.terminal_transaction
+                        != self.transaction.transaction_id
+                    )
                 )
             )
             or (previous.analysis_abort is not None and self.transaction is not None)
@@ -4298,7 +4328,13 @@ def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> No
         previous = ApiRunAccounting.from_document(before.api_run_accounting)
         current = ApiRunAccounting.from_document(after.api_run_accounting)
         if previous.identity != current.identity:
-            expected = before.rollover_api_accounting(after.api_run_accounting)
+            reference = current.previous_record
+            expected = (
+                before.rollover_historical_api_accounting(after.api_run_accounting)
+                if reference is not None
+                and reference.get("schema_version") == "caller-run-reference-v2"
+                else before.rollover_api_accounting(after.api_run_accounting)
+            )
             if expected.record_sha256 != after.record_sha256:
                 raise ReviewInputError("caller run rollover discarded session state")
         else:
