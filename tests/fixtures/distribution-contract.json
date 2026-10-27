@@ -55,6 +55,7 @@
         "tests/session_fixture_clock.py",
         "tests/openrouter_cli_contract.py",
         "tests/baseline_cli_contract.py",
+        "tests/literal_blocker_paths_contract.py",
         "tests/provider_deadline_contract.py",
         "tests/conversation_deadline_contract.py",
         "tests/provider_common_flow_contract.py",

@@ -443,7 +443,10 @@ class BlockerCandidate:
         if self.path is not None:
             from .validation import validate_repository_path
 
-            validate_repository_path(self.path, label="blocker candidate path")
+            # This is an exact Git path, like ReviewComment.path, not a pattern.
+            validate_repository_path(
+                self.path, label="blocker candidate path", allow_glob_chars=True
+            )
         if self.side is not None and self.side not in COMMENT_SIDES:
             raise ReviewInputError(
                 "blocker candidate side must be LEFT, RIGHT, or FILE"
