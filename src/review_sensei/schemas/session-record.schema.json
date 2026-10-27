@@ -22,6 +22,9 @@
     "record_sha256"
   ],
   "properties": {
+    "historical_assessments": {
+      "$ref": "https://reviewsensei.dev/schemas/v1/historical-assessment-hold.schema.json"
+    },
     "api_run_accounting": {
       "$ref": "https://reviewsensei.dev/schemas/v1/api-run-accounting.schema.json"
     },

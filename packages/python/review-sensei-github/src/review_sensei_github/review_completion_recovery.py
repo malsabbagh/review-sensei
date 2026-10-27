@@ -531,6 +531,9 @@ def _confirm_native_effects(
         _refuse("historical review inventory changed during authentication")
     return {
         "review_id": review["id"],
+        "review_body_sha256": __import__("hashlib")
+        .sha256(review["body"].encode())
+        .hexdigest(),
         "check_id": check["id"],
         "check_conclusion": check["conclusion"],
         "target_inventory_sha256": _digest(targets),

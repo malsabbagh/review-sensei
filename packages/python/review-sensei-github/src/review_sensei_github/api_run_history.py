@@ -139,16 +139,7 @@ def retained_binding(record: SessionRecord, producer: str) -> dict[str, object]:
     }
 
 
-def retain_previous_run(
-    ledger: GitHubIssueCommentSessionLedger,
-    identity: SessionIdentity,
-    previous: SessionRecord,
-    *,
-    completion=None,
-) -> dict[str, object]:
-    """Only inside the native serialized mutation after fresh root discovery."""
-    if not ledger._mutation_active or ledger.evidence_budget is None:
-        raise ReviewInputError("retained run requires the current native mutation")
+def _prepared_archive(ledger, previous, completion):
     state = ApiRunAccounting.from_document(previous.api_run_accounting)
     producer = ledger.evidence_producer()
     binding = retained_binding(previous, producer)
@@ -181,6 +172,42 @@ def retain_previous_run(
     )
     if len(body.encode()) > MAX_PART_BYTES:
         raise ReviewInputError("retained run exceeds its carrier bound")
+
+    return state, binding, document, parts, body
+
+
+def preview_retained_reference(ledger, previous, *, completion):
+    """Worst-width value for root capacity only; never a stored archive proof."""
+    if not ledger._mutation_active:
+        raise ReviewInputError("retained capacity preview requires the native mutation")
+    state, binding, document, parts, _body = _prepared_archive(
+        ledger, previous, completion
+    )
+    manifest = evidence_manifest(
+        document, binding=binding, item_count=1, parts=parts, storage_ids=("9" * 19,)
+    )
+    return {
+        "schema_version": "caller-run-reference-v2",
+        "run_id": state.identity.run_id,
+        "root_sha256": previous.record_sha256,
+        "manifest": manifest,
+        "completion": completion.receipt,
+    }
+
+
+def retain_previous_run(
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    previous: SessionRecord,
+    *,
+    completion=None,
+) -> dict[str, object]:
+    """Only inside the native serialized mutation after fresh root discovery."""
+    if not ledger._mutation_active or ledger.evidence_budget is None:
+        raise ReviewInputError("retained run requires the current native mutation")
+    state, binding, document, parts, body = _prepared_archive(
+        ledger, previous, completion
+    )
 
     def owned(item: object) -> bool:
         return (
@@ -348,9 +375,9 @@ def read_previous_run(ledger, identity, reference) -> SessionRecord:
 def inherited_preprovider_reference(record, accounting):
     """Recognize only the v2 post-enrollment/pre-transaction boundary.
 
-    This is evidence selection, never standalone recovery authority. The caller
-    must authenticate its carrier, current run/fence and stopped owner before
-    proceeding. Any new transaction or reservation removes this narrow state.
+    This is evidence selection only. Unchanged bytes do not prove that an
+    earlier root PATCH was never dispatched. Abrupt successors must refuse this
+    state without positive settlement or a proven pre-operation abort.
     """
     reference = accounting.previous_record
     if (

@@ -5,7 +5,7 @@ One caller HTTP allowance: root `api_request_limit` (default 512).
 Only v3 purpose/source/repo/PR/head/run/attempt/job/workflow authority enables work.
 Successors must prove cessation; uncertainty and abandoned capacity stay charged.
 Archive unchanged accounting: terminal ordinary runs or typed historical
-completion with a confirmed v2 receipt. Preserve charges and obligations.
+completion with a confirmed v2 receipt. Keep charges; settle historical holds explicitly.
 Only exact results/proven pre-entry aborts close actions; unknown work stays pending.
 Historical readers require exact review/archive evidence, fresh authority and no writes.
 Finite operation/page limits can refuse with caller capacity unused.

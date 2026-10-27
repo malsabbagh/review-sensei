@@ -521,6 +521,7 @@ class ApiRunRequestTransport:
             raise ReviewInputError("confirmed caller reservation owner conflicts")
         self._has_quarantine_assessments = record.quarantine_lineage is not None
         self._state, self._block, self._root = state, block_id, record.record_sha256
+        self._has_historical_assessments = record.historical_assessments is not None
         if self._activation_write_request_id is not None:
             self._reconciled_mutations.add(self._activation_write_request_id)
         return state
@@ -755,6 +756,36 @@ class ApiRunRequestTransport:
                 from .api_run_history import read_action_result
 
                 read_action_result(ledger, identity, record)
+            allocation = owner_allocations(configuration.limit, self.plan.liability)
+
+            def candidate_state(reference):
+                return (
+                    replace(
+                        initial_accounting(
+                            self.run,
+                            configuration,
+                            owner,
+                            self.plan,
+                            prior_nonstartup_liability_upper_bound=0,
+                        ),
+                        previous_record=reference,
+                    )
+                    .reserve("hosted-review", allocation.first_work)
+                    .reserve("hosted-terminal", allocation.first_terminal)
+                )
+
+            if completion is not None:
+                from .api_run_history import preview_retained_reference
+
+                preview = preview_retained_reference(
+                    ledger, record, completion=completion
+                )
+                # Capacity only: this value is never assigned to activation,
+                # granted to a writer, persisted or treated as archive evidence.
+                record.rollover_historical_api_accounting(
+                    candidate_state(preview).to_document(),
+                    assessments=completion.assessments,
+                )
             before_archive = len(self.observations)
             if completion is not None:
                 # Existing complete archive/write/readback tail plus fresh old
@@ -784,22 +815,11 @@ class ApiRunRequestTransport:
                 if o.get("mutation")
                 and (o["outcome"] == "unknown" or o.get("uncertain_effect"))
             )
-            allocation = owner_allocations(configuration.limit, self.plan.liability)
-            state = replace(
-                initial_accounting(
-                    self.run,
-                    configuration,
-                    owner,
-                    self.plan,
-                    prior_nonstartup_liability_upper_bound=0,
-                ),
-                previous_record=reference,
-            )
-            state = state.reserve("hosted-review", allocation.first_work).reserve(
-                "hosted-terminal", allocation.first_terminal
-            )
+            state = candidate_state(reference)
             updated = (
-                record.rollover_historical_api_accounting(state.to_document())
+                record.rollover_historical_api_accounting(
+                    state.to_document(), assessments=completion.assessments
+                )
                 if completion is not None
                 else record.rollover_api_accounting(state.to_document())
             )

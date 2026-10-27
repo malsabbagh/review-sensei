@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/historical-assessment-hold.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source",
+    "scope_sha256",
+    "assessments",
+    "settlements"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "historical-assessment-hold-v1"
+    },
+    "source": {
+      "$ref": "https://reviewsensei.dev/schemas/v1/api-run-accounting.schema.json#/properties/previous_record"
+    },
+    "scope_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "assessments": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "instance",
+          "concern"
+        ],
+        "properties": {
+          "instance": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "concern": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "settlements": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "instance",
+          "action",
+          "actor",
+          "role",
+          "head_sha",
+          "source_id",
+          "source_updated_at",
+          "source_body_sha256",
+          "reason",
+          "policy_sha256"
+        ],
+        "properties": {
+          "instance": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "action": {
+            "enum": [
+              "dismiss",
+              "accept-risk"
+            ]
+          },
+          "actor": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}$"
+          },
+          "role": {
+            "enum": [
+              "admin",
+              "maintain"
+            ]
+          },
+          "head_sha": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{40}$"
+          },
+          "source_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "source_updated_at": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+          },
+          "source_body_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "policy_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      }
+    }
+  }
+}

@@ -234,48 +234,27 @@ class ReviewApprovalEligibility:
     human_review: PendingHumanReview | None = None
     partitioned_root: PartitionedEligibilityRoot | None = None
     human_inventory_reference: HumanInventoryReference | None = None
-    quarantine_assessments: dict[str, Any] | None = None
-    native_union: NativeUnionReceipt | None = None
+    historical_assessments: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        if self.native_union is not None:
-            from .native_union import NativeUnionReceipt
+        if self.historical_assessments is not None:
+            from review_sensei.historical_assessments import validate_view
 
-            if (
-                type(self.native_union) is not NativeUnionReceipt
-                or self.native_union.head_sha != self.head_sha
-                or self.native_union.result_digest != self.result_digest
-            ):
-                raise ReviewInputError("native union eligibility identity conflicts")
-            return {
-                "schema_version": "8",
-                "current": replace(self, native_union=None).to_dict(),
-                "native_union": self.native_union.to_document(),
-            }
-        if self.quarantine_assessments is not None:
-            from review_sensei.quarantine_assessments import validate_view
-
-            view = validate_view(self.quarantine_assessments)
-            if self.human_review is not None and view["fresh_human_pending"] != bool(
-                self.human_review.pending
-            ):
-                raise ReviewInputError("quarantine fresh assessment facts conflict")
-            if self.facts.has_human_adjudication_findings != (
-                view["fresh_human_pending"] or bool(view["pending"])
-            ):
-                raise ReviewInputError("quarantine combined assessment facts conflict")
+            hold = validate_view(self.historical_assessments)
+            if self.human_review is not None:
+                hold["fresh_human_pending"] = bool(self.human_review.pending)
             current = replace(
                 self,
-                quarantine_assessments=None,
+                historical_assessments=None,
                 facts=replace(
                     self.facts,
-                    has_human_adjudication_findings=view["fresh_human_pending"],
+                    has_human_adjudication_findings=hold["fresh_human_pending"],
                 ),
             )
             return {
-                "schema_version": "7",
+                "schema_version": "6",
                 "current": current.to_dict(),
-                "quarantine_assessments": view,
+                "historical_assessments": hold,
             }
         if self.human_inventory_reference is not None:
             return self._referenced_document()
@@ -359,52 +338,19 @@ class ReviewApprovalEligibility:
         visible_reader: VisibleReader | None = None,
         native_union_reader: NativeUnionReader | None = None,
     ) -> "ReviewApprovalEligibility":
-        if isinstance(value, Mapping) and value.get("schema_version") == "8":
-            from .native_union import NativeUnionReceipt
+        if isinstance(value, Mapping) and value.get("schema_version") == "6":
+            from review_sensei.historical_assessments import validate_view
 
             if (
-                set(value) != {"schema_version", "current", "native_union"}
+                set(value) != {"schema_version", "current", "historical_assessments"}
                 or not isinstance(value["current"], Mapping)
-                or value["current"].get("schema_version")
-                not in {"1", "2.0", "3", "4", "5", "7"}
-            ):
-                raise ReviewInputError("native union eligibility envelope is invalid")
-            validate_public_document(value, "eligibility-v8")
-            receipt = NativeUnionReceipt.from_document(value["native_union"])
-            current = cls.from_dict(
-                value["current"],
-                human_inventory_reader=human_inventory_reader,
-                partition_reader=partition_reader,
-                expected_context=expected_context,
-                visible_reader=visible_reader,
-            )
-            if (
-                receipt.head_sha != current.head_sha
-                or receipt.result_digest != current.result_digest
-                or native_union_reader is None
+                or value["current"].get("schema_version") == "6"
             ):
                 raise ReviewInputError(
-                    "native union requires its complete scoped reader"
+                    "historical assessment eligibility envelope is invalid"
                 )
-            from review_sensei.bounded_evidence import canonical_bytes
-
-            receipt.require_evidence(
-                native_union_reader(receipt),
-                document_sha256=hashlib.sha256(canonical_bytes(value)).hexdigest(),
-            )
-            return replace(current, native_union=receipt)
-        if isinstance(value, Mapping) and value.get("schema_version") == "7":
-            from review_sensei.quarantine_assessments import validate_view
-
-            if (
-                set(value) != {"schema_version", "current", "quarantine_assessments"}
-                or not isinstance(value["current"], Mapping)
-                or value["current"].get("schema_version")
-                not in {"1", "2.0", "3", "4", "5"}
-            ):
-                raise ReviewInputError("quarantine eligibility envelope is invalid")
-            validate_public_document(value, "eligibility-v7")
-            view = validate_view(value["quarantine_assessments"])
+            validate_public_document(value, "eligibility-v6")
+            hold = validate_view(value["historical_assessments"])
             current = cls.from_dict(
                 value["current"],
                 human_inventory_reader=human_inventory_reader,
@@ -414,21 +360,19 @@ class ReviewApprovalEligibility:
             )
             if (
                 current.facts.has_human_adjudication_findings
-                != view["fresh_human_pending"]
+                != hold["fresh_human_pending"]
             ):
-                raise ReviewInputError("quarantine fresh assessment facts conflict")
-            combined = replace(
+                raise ReviewInputError("historical assessment fresh facts conflict")
+            return replace(
                 current,
-                quarantine_assessments=view,
+                historical_assessments=hold,
                 facts=replace(
                     current.facts,
                     has_human_adjudication_findings=(
-                        view["fresh_human_pending"] or bool(view["pending"])
+                        hold["fresh_human_pending"] or bool(hold["pending"])
                     ),
                 ),
             )
-            combined.to_dict()
-            return combined
         if (
             isinstance(value, Mapping)
             and value.get("schema_version") == DEFAULT_HUMAN_ELIGIBILITY_VERSION

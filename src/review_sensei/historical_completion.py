@@ -83,8 +83,7 @@ def historical_receipt_matches(previous, receipt):
                 }
             )
         ).hexdigest()
-        and (receipt["historical_base_sha"], receipt["historical_head_sha"])
-        != (receipt["current_base_sha"], receipt["current_head_sha"])
+        and receipt["historical_head_sha"] != receipt["current_head_sha"]
     )
 
 

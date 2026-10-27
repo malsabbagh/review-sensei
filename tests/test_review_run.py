@@ -677,8 +677,8 @@ class _CleanupTailFixture(EntryFixture):
 class _CompletionFixture(_CleanupTailFixture):
     """Native metadata from external HTTP, with the real completion path intact."""
 
-    def __init__(self, directory, mode="lost-ack"):
-        super().__init__(directory, mode)
+    def __init__(self, directory, mode="lost-ack", **kwargs):
+        super().__init__(directory, mode, **kwargs)
         self.completion_fault = None
         self.completion_thread_reads = 0
         self.run_results = {}
@@ -855,15 +855,17 @@ class _CompletionFixture(_CleanupTailFixture):
                     if self.completion_fault == "failed-owner"
                     else "cancelled"
                 )
+            job_kind = getattr(self, "past_jobs", {}).get(run_id, self.owner_job)
             if path.endswith("/jobs"):
+                value["jobs"][0]["name"] = "ReviewSensei / " + job_kind
                 for job in value["jobs"]:
-                    if job["name"].endswith(" / " + self.owner_job):
+                    if job["name"].endswith(" / " + job_kind):
                         if not current:
                             job["conclusion"] = conclusion
                         job["steps"] = [
                             {
                                 "number": 1,
-                                "name": f"Run {self.owner_job} review",
+                                "name": f"Run {job_kind} review",
                                 "status": "in_progress" if current else "completed",
                                 "conclusion": None
                                 if current
@@ -878,13 +880,13 @@ class _CompletionFixture(_CleanupTailFixture):
                             },
                             {
                                 "number": 2,
-                                "name": f"Generate and publish {self.owner_job} mention reply",
+                                "name": f"Generate and publish {job_kind} mention reply",
                                 "status": "completed",
                                 "conclusion": "skipped",
                                 "completed_at": None,
                             },
                         ]
-                for kind in {"hosted", "local", "command"} - {self.owner_job}:
+                for kind in {"hosted", "local", "command"} - {job_kind}:
                     if not any(
                         job["name"].endswith(" / " + kind) for job in value["jobs"]
                     ):
@@ -1455,7 +1457,7 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
                 with self.subTest(key=key), self.assertRaises(ReviewInputError):
                     read_previous_run(f.selected.ledger, IDENTITY, reference)
 
-    def test_historical_transition_process_death_resumes_only_proven_preprovider_state(
+    def test_historical_transition_process_death_never_infers_nonentry_from_absence(
         self,
     ):
         import json
@@ -1481,14 +1483,18 @@ def killed():
         "accounting": f.accounted.accounting.to_document(),
         "run_results": [[r, a, v] for (r, a), v in f.run_results.items()],
         "run_heads": [[r, a, v] for (r, a), v in f.run_heads.items()],
+        "activation_body": getattr(f, "activation_body", None),
+        "delayed_body": getattr(f, "delayed_body", None),
     }))
     os._exit(91)
 def observed(frame, event, value):
     if event != "return":
         return
     name, filename = frame.f_code.co_name, frame.f_code.co_filename
-    if stage == "enrolled" and name == "_accept_activation" and f.accounted._state is not None:
-        killed()
+    if name == "_accept_activation" and f.accounted._state is not None:
+        f.activation_body = f.comment["body"]
+        if stage == "enrolled":
+            killed()
     if stage == "reservation" and name == "prepare_session_round" and value.reservation_id is not None:
         killed()
     if stage == "attached" and name == "prepare_review_transaction" and value.transaction is not None:
@@ -1497,12 +1503,25 @@ def observed(frame, event, value):
         killed()
     if stage == "provider-return" and name == "complete" and f.provider_calls == 3:
         killed()
+original_external = f.external
+def external(request, timeout):
+    if stage == "reservation-request" and request.method == "PATCH":
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_review_run import IDENTITY
+        payload = json.loads(request.data)
+        pending = parse_session_comment(payload.get("body", ""), identity=IDENTITY)
+        if pending is not None and pending.reservation_id is not None:
+            f.delayed_body = payload["body"]
+            killed()
+    return original_external(request, timeout)
+f.external = external
 sys.setprofile(observed)
 f.invoke(human=True)
 os._exit(92)
 """
         for stage in (
             "enrolled",
+            "reservation-request",
             "reservation",
             "attached",
             "provider-entry",
@@ -1531,6 +1550,9 @@ os._exit(92)
                 )
                 self.assertEqual(process.returncode, 91, process.stderr.decode())
                 saved = json.loads(packet.read_text())
+                if stage == "reservation-request":
+                    self.assertEqual(saved["comment"]["body"], saved["activation_body"])
+                    self.assertIsNotNone(saved["delayed_body"])
                 (root / "parent").mkdir()
                 f = _CompletionFixture(str(root / "parent"))
                 f.root = child
@@ -1550,27 +1572,42 @@ os._exit(92)
                 before = parse_session_comment(f.comment["body"], identity=IDENTITY)
                 prior = ApiRunAccounting.from_document(before.api_run_accounting)
                 calls = f.provider_calls
+                self.assertEqual(f.invoke(human=True), 1, f.error)
+                self.assertEqual(f.provider_calls, calls)
+                self.assertEqual(f.comment["body"], saved["comment"]["body"])
                 self.assertEqual(
-                    f.invoke(human=True), 0 if stage == "enrolled" else 1, f.error
+                    ApiRunAccounting.from_document(
+                        parse_session_comment(
+                            f.comment["body"], identity=IDENTITY
+                        ).api_run_accounting
+                    ),
+                    prior,
                 )
-                if stage == "enrolled":
-                    self.assertEqual(f.provider_calls, calls + 1)
-                    for block in prior.blocks:
-                        self.assertIn(block, f.accounted.accounting.blocks)
-                    self.assertEqual(f.check_runs[-1]["conclusion"], "action_required")
-                else:
-                    self.assertEqual(f.provider_calls, calls)
-                    self.assertEqual(f.comment["body"], saved["comment"]["body"])
-                    self.assertIn(
-                        "cannot be established"
-                        if stage == "reservation"
-                        else "no proven provider non-entry",
-                        f.error,
+                self.assertIn(
+                    "cannot be established"
+                    if stage == "reservation"
+                    else "no proven provider non-entry",
+                    f.error,
+                )
+                if stage == "reservation-request":
+                    # The external server may accept that old PATCH after the
+                    # refusal. No successor work or ownership has been issued.
+                    f.comment["body"] = saved["delayed_body"]
+                    late = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                    self.assertIsNotNone(late.reservation_id)
+                    self.assertEqual(
+                        ApiRunAccounting.from_document(
+                            late.api_run_accounting
+                        ).owner.run_attempt,
+                        1,
                     )
+                    self.assertEqual(f.provider_calls, calls)
 
     @staticmethod
-    def historical_case(directory):
-        f = _CompletionFixture(directory, mode="refused")
+    def historical_case(
+        directory, fixture_type=_CompletionFixture, *, partial_predecessor=False
+    ):
+        f = fixture_type(directory, mode="refused")
         patch = f.root / "review.patch"
         original = patch.read_text()
         patch.write_text(
@@ -1579,15 +1616,22 @@ os._exit(92)
         )
         if f.invoke(human=True) != 0:
             raise AssertionError(f.error)
-        patch.write_text(original)
+        if not partial_predecessor:
+            patch.write_text(original)
         f.next_run()
         if f.invoke(human=True) != 0:
             raise AssertionError("original soft cleanup refusal was not exercised")
+        patch.write_text(original)
         if f.threads[0]["isResolved"]:
             raise AssertionError("original cleanup refusal did not retain target")
         # Synthetic external state after a separately authorized confirmation;
         # the historical verifier itself never performs this mutation.
-        f.threads[0]["isResolved"] = True
+        from review_sensei_github.publication import finding_publication_scope
+
+        for thread in f.threads:
+            scope = finding_publication_scope(thread["comments"]["nodes"][0]["body"])
+            if scope is not None and scope[2] != f.requested_head:
+                thread["isResolved"] = True
         f.next_run()
         f.mode = "confirmed"
         f.live_head = f.requested_head = "e" * 40
@@ -1724,6 +1768,7 @@ os._exit(92)
         for fault, diagnostic in (
             ("unresolved", "superseded cleanup target remains unresolved"),
             ("unchanged-revision", "outside historical completion scope"),
+            ("base-only", "outside historical completion scope"),
             ("missing-index", "historical finding inventory is unverifiable"),
             ("edited", "edited after publication"),
             ("missing-root", "original cleanup target is missing"),
@@ -1749,6 +1794,11 @@ os._exit(92)
                 f.completion_fault = fault
                 if fault == "unresolved":
                     f.threads[0]["isResolved"] = False
+                elif fault == "base-only":
+                    original = parse_session_comment(
+                        before["body"], identity=IDENTITY
+                    ).transaction
+                    f.live_head = f.requested_head = original.head_sha
                 elif fault == "unchanged-revision":
                     original = parse_session_comment(
                         before["body"], identity=IDENTITY
@@ -1801,6 +1851,124 @@ os._exit(92)
                     )
                 root = parse_session_comment(f.comment["body"], identity=IDENTITY)
                 self.assertIsNone(root.api_run_accounting["terminal_transaction"])
+
+    def test_historical_hold_root_capacity_refuses_before_any_archive_write(self):
+        import hashlib
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.errors import ReviewInputError
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self.historical_case(directory)
+            previous = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            largest = None
+            for count in range(1, 100):
+                rows = [
+                    {
+                        "fingerprint": hashlib.sha256(str(i).encode()).hexdigest(),
+                        "action": "defer",
+                        "reason": "x" * 480,
+                        "actor": "alice",
+                        "head_sha": "a" * 40,
+                    }
+                    for i in range(count)
+                ]
+                try:
+                    value = previous.evolve(
+                        generation=previous.generation + 1, dispositions=rows
+                    )
+                except ReviewInputError:
+                    break
+                largest = value
+            self.assertIsNotNone(largest)
+            import copy
+
+            history = copy.deepcopy(previous.convergence_history)
+            from dataclasses import replace
+
+            from review_sensei.baseline import (
+                baseline_from_history_document,
+                baseline_history_document,
+            )
+
+            baseline = baseline_from_history_document(history["baseline"])
+            for count in range(1, 256):
+                findings = tuple(
+                    replace(
+                        baseline.findings[0],
+                        fingerprint=hashlib.sha256(
+                            ("fp" + str(i)).encode()
+                        ).hexdigest(),
+                        resolution_criterion=hashlib.sha256(
+                            ("criterion" + str(i)).encode()
+                        ).hexdigest(),
+                        concern=hashlib.sha256(
+                            ("concern" + str(i)).encode()
+                        ).hexdigest(),
+                    )
+                    for i in range(count)
+                )
+                try:
+                    document = baseline_history_document(
+                        replace(baseline, findings=findings)
+                    )
+                except ReviewInputError:
+                    break
+                history["baseline"] = document
+            for count in range(1, 65):
+                history["progress"] = [
+                    {
+                        "event": "completed",
+                        "generation": 0,
+                        "blocker_set_sha256": hashlib.sha256(
+                            str(i).encode()
+                        ).hexdigest(),
+                        "blocker_count": 1,
+                        "transaction_id": hashlib.sha256(
+                            ("tx" + str(i)).encode()
+                        ).hexdigest(),
+                    }
+                    for i in range(count)
+                ]
+                try:
+                    value = largest.evolve(convergence_history=history)
+                except ReviewInputError:
+                    break
+                fullest = value
+            largest = fullest
+            # Obsolete grants are retained inert history, never authority.
+            grants = [
+                {
+                    "command_id": str(i) + "c" * 120,
+                    "actor": "a" * 256,
+                    "head_sha": "a" * 40,
+                    "policy_digest": "b" * 64,
+                    "issued_at": "2026-01-01T00:00:00Z",
+                    "expires_at": "2026-01-02T00:00:00Z",
+                    "consumed_reservation_id": None,
+                    "consumed_generation": None,
+                }
+                for i in range(4)
+            ]
+            try:
+                largest = largest.evolve(continuation_grants=grants)
+            except ReviewInputError:
+                pass
+            f.rewrite_record(mutate=lambda _record: largest)
+            before = f.comment["body"]
+            calls = f.provider_calls
+            self.assertEqual(f.invoke(human=True), 1, f.error)
+            self.assertIn("size limit", f.error)
+            self.assertEqual(f.comment["body"], before)
+            self.assertEqual(f.provider_calls, calls)
+            self.assertIsNone(f.accounted._state)
+            self.assertFalse(
+                any(
+                    method in {"POST", "PATCH"} and "/issues" in path
+                    for _, method, path in f.trace
+                )
+            )
 
     def test_historical_transition_refuses_uncertain_original_terminal_write(self):
         import copy

@@ -264,22 +264,15 @@ class ReviewRun:
         if loaded.record.record_sha256 != self.caller._root:
             raise ReviewInputError("successor checkpoint changed")
         transaction = loaded.record.transaction
-        from .api_run_history import inherited_preprovider_reference, read_previous_run
+        from .api_run_history import inherited_preprovider_reference
 
         inherited = inherited_preprovider_reference(
             loaded.record, self.caller.accounting
         )
         if inherited is not None:
-            receipt = inherited["completion"]
-            if (receipt["current_base_sha"], receipt["current_head_sha"]) != (
-                self.base_sha,
-                self.head_sha,
-            ):
-                raise ReviewInputError(
-                    "inherited pre-provider current revision changed"
-                )
-            read_previous_run(self.ledger, self.identity, inherited)
-            return None
+            raise ReviewInputError(
+                "inherited enrollment has no proven provider non-entry or root-write settlement"
+            )
         if (
             transaction is not None
             and transaction.phase == "publication_succeeded"
@@ -964,6 +957,8 @@ def bootstrap(
                 historical_candidate = (
                     purpose == "review"
                     and previous.terminal_transaction is None
+                    and previous.action is None
+                    and previous.analysis_abort is None
                     and previous_root.transaction is not None
                     and previous_root.transaction.phase == "publication_succeeded"
                 )
@@ -1044,7 +1039,7 @@ def bootstrap(
         ):
             raise ReviewInputError("caller run is already terminal")
         prior = loaded.record
-        from .api_run_history import inherited_preprovider_reference, read_previous_run
+        from .api_run_history import inherited_preprovider_reference
 
         inherited = (
             inherited_preprovider_reference(prior, previous)
@@ -1052,15 +1047,12 @@ def bootstrap(
             else None
         )
         if inherited is not None:
-            receipt = inherited["completion"]
-            if (receipt["current_base_sha"], receipt["current_head_sha"]) != (
-                args.base_sha,
-                args.head_sha,
-            ):
-                raise ReviewInputError(
-                    "inherited pre-provider current revision changed"
-                )
-            read_previous_run(native, identity, inherited)
+            # Remote absence of a reservation is indistinguishable from a
+            # dispatched, unstored root PATCH. Never claim successor ownership
+            # or provider permission from this inherited snapshot alone.
+            raise ReviewInputError(
+                "inherited enrollment has no proven provider non-entry or root-write settlement"
+            )
         elif (
             purpose == "review"
             and previous.previous_record is not None

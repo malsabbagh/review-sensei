@@ -28,7 +28,12 @@ from review_sensei_github.http import GitHubHttp
 from review_sensei_github.run_authority import REQUEST_KEYS, parse_authority
 from review_sensei_github.session_ledger import parse_session_comment
 from test_api_work_persistence import HEAD, IDENTITY
-from test_review_run import EntryFixture, fixture_process_environment
+from test_review_run import (
+    ConsecutiveReviewRunTests,
+    EntryFixture,
+    _CompletionFixture,
+    fixture_process_environment,
+)
 
 from review_sensei.api_work import ApiExecutionOwner, ApiRunAccounting
 from review_sensei.bounded_evidence import EvidenceReadBudget
@@ -259,6 +264,7 @@ class CommandEntryFixture(EntryFixture):
             business = (
                 candidate.operator_paused != previous.operator_paused
                 or candidate.dispositions != previous.dispositions
+                or candidate.historical_assessments != previous.historical_assessments
             )
             closing = (
                 candidate.api_run_accounting["action"] is not None
@@ -435,7 +441,338 @@ class CommandEntryFixture(EntryFixture):
             self.stdout, self.error = output.getvalue(), errors.getvalue()
 
 
+class HistoricalCommandFixture(CommandEntryFixture, _CompletionFixture):
+    """Combine external command HTTP with actual historical review metadata."""
+
+    def __init__(self, directory, mode="refused", *, comments=None):
+        super().__init__(directory, limit=512)
+        self.mode = mode
+        self.provider_comments = comments
+
+
+def historical_command_case(directory, *, comments=None, complete=False):
+    f = ConsecutiveReviewRunTests.historical_case(
+        directory,
+        lambda path, mode: HistoricalCommandFixture(path, mode, comments=comments),
+    )
+    if complete:
+        previous = parse_session_comment(f.comment["body"], identity=IDENTITY)
+        f.requested_base = f.live_base = previous.transaction.base_sha
+    f.provider_comments = None if complete else []
+    if f.invoke(human=True) != 0:
+        raise AssertionError(f.error)
+    return f
+
+
+def historical_body(hold, *, instance=None, action="dismiss"):
+    instance = instance or hold["assessments"][0]["instance"]
+    return (
+        "@reviewsensei "
+        + action
+        + " "
+        + instance
+        + ' --reason "historical:'
+        + hold["scope_sha256"]
+        + ' The earlier assessment has an explicit evidence-backed owner decision."'
+    )
+
+
 class CurrentCommandEntryTests(unittest.TestCase):
+    def test_historical_assessment_decision_is_distinct_and_cannot_clear_incomplete_coverage(
+        self,
+    ):
+        from review_sensei_github.publication import approval_eligibility_from_body
+
+        for action in ("dismiss", "accept-risk"):
+            with (
+                self.subTest(action=action),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = historical_command_case(directory)
+                old = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                hold = copy.deepcopy(old.historical_assessments)
+                self.assertTrue(hold["assessments"])
+                self.assertIn("Historical assessments", f.reviews[-1]["body"])
+                self.assertEqual(f.check_runs[-1]["conclusion"], "action_required")
+                before_provider = f.provider_calls
+                body = historical_body(hold, action=action)
+                f.select_command(body, new_run=True)
+                self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+                current = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                state = current.historical_assessments
+                self.assertEqual(state["source"], hold["source"])
+                self.assertEqual(len(state["settlements"]), 1)
+                decision = state["settlements"][0]
+                self.assertEqual(decision["action"], action)
+                self.assertEqual(decision["head_sha"], f.requested_head)
+                self.assertTrue(
+                    decision["reason"].startswith("historical:" + hold["scope_sha256"])
+                )
+                self.assertEqual(
+                    decision["source_body_sha256"],
+                    hashlib.sha256(body.encode()).hexdigest(),
+                )
+                self.assertEqual(current.dispositions, old.dispositions)
+                eligibility = approval_eligibility_from_body(f.reviews[-1]["body"])
+                self.assertEqual(eligibility.historical_assessments["pending"], [])
+                self.assertEqual(eligibility.facts.review_status, "partial")
+                self.assertEqual(f.check_runs[-1]["conclusion"], "action_required")
+                self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+                self.assertEqual(
+                    current.api_run_accounting["action"]["phase"], "terminal"
+                )
+                self.assertEqual(f.provider_calls, before_provider)
+                self.assertEqual(f.accounted.accounting.configuration.limit, 512)
+                # A later ordinary verify retains the source independently of
+                # the newest accounting archive, without another decision.
+                f.SOURCE_ID += 1
+                f.select_command("@reviewsensei verify", new_run=True)
+                self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+                verified = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertEqual(verified.historical_assessments, state)
+                self.assertEqual(f.check_runs[-1]["conclusion"], "action_required")
+                self.assertEqual(f.provider_calls, before_provider)
+
+    def test_historical_complete_empty_rescan_and_partial_decisions_keep_all_obligations(
+        self,
+    ):
+        from review_sensei_github.publication import approval_eligibility_from_body
+        from test_review_run_rescan import request
+
+        comments = [
+            {
+                "path": "src/app.py",
+                "line": 2,
+                "side": "RIGHT",
+                "body": "Confirm the external caller contract " + str(i) + ".",
+                "severity": "high",
+                "blocking": False,
+                "needs_human": True,
+            }
+            for i in range(2)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            f = historical_command_case(directory, comments=comments)
+            initial = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            hold = copy.deepcopy(initial.historical_assessments)
+            self.assertEqual(len(hold["assessments"]), 2)
+            head = f.requested_head
+            request(f, 9, "rescan")
+            f.requested_head = f.live_head = head
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            f.review_intent = f.event_document = None
+            f.event_name = "pull_request"
+            result = json.loads((f.root / "review.json").read_text())
+            self.assertEqual(result["comments"], [])
+            self.assertEqual(result["review_status"], "complete")
+            eligibility = approval_eligibility_from_body(f.reviews[-1]["body"])
+            self.assertEqual(eligibility.facts.review_status, "complete")
+            self.assertTrue(eligibility.facts.has_human_adjudication_findings)
+            self.assertFalse(eligibility.historical_assessments["fresh_human_pending"])
+            self.assertEqual(len(eligibility.historical_assessments["pending"]), 2)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+            for index, assessment in enumerate(hold["assessments"]):
+                f.SOURCE_ID += 1
+                body = historical_body(
+                    hold,
+                    instance=assessment["instance"],
+                    action="dismiss" if index == 0 else "accept-risk",
+                )
+                f.select_command(body, new_run=True)
+                before_provider = f.provider_calls
+                self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+                record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertEqual(
+                    record.historical_assessments["source"], hold["source"]
+                )
+                self.assertEqual(
+                    len(record.historical_assessments["settlements"]), index + 1
+                )
+                # Select the current finding review rather than an approval's
+                # intentionally index-free confirmation body.
+                current = next(
+                    r for r in reversed(f.reviews) if r["state"] == "COMMENTED"
+                )
+                eligibility = approval_eligibility_from_body(current["body"])
+                self.assertEqual(
+                    len(eligibility.historical_assessments["pending"]), 1 - index
+                )
+                self.assertEqual(
+                    f.check_runs[-1]["conclusion"],
+                    "action_required" if index == 0 else "success",
+                )
+                self.assertEqual(
+                    sum(r["state"] == "APPROVED" for r in f.reviews), index
+                )
+                self.assertEqual(f.provider_calls, before_provider)
+                self.assertEqual(f.accounted.accounting.configuration.limit, 512)
+            settled = copy.deepcopy(record.historical_assessments)
+            # A future fresh recurrence is independently adjudicated. Prior
+            # historical settlements never enter generic finding dispositions.
+            f.past_jobs[f.run_id] = f.owner_job
+            f.command_active = False
+            f.owner_job = "hosted"
+            f.event_name = "pull_request"
+            f.next_run()
+            f.live_head = f.requested_head = "2" * 40
+            f.live_base = f.requested_base = "1" * 40
+            f.provider_comments = comments
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            recurrence = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(recurrence.historical_assessments, settled)
+            self.assertEqual(recurrence.dispositions, ())
+            self.assertNotEqual(f.check_runs[-1]["conclusion"], "success")
+            self.assertFalse(
+                any(
+                    r["state"] == "APPROVED" and r["commit_id"] == f.requested_head
+                    for r in f.reviews
+                )
+            )
+            f.SOURCE_ID += 1
+            f.select_command(historical_body(hold), new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            self.assertIn("collides with a fresh finding", f.stdout)
+            self.assertEqual(
+                parse_session_comment(
+                    f.comment["body"], identity=IDENTITY
+                ).historical_assessments,
+                settled,
+            )
+
+    def test_historical_assessment_refusal_never_falls_through_or_dismisses_a_fresh_finding(
+        self,
+    ):
+        for fault in ("scope", "malformed", "fresh-collision"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = historical_command_case(
+                    directory, complete=fault == "fresh-collision"
+                )
+                before = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                hold = copy.deepcopy(before.historical_assessments)
+                body = historical_body(hold)
+                if fault == "scope":
+                    body = body.replace(hold["scope_sha256"], "0" * 64)
+                elif fault == "malformed":
+                    body = body.replace("historical:", "Historical:")
+                before_body = f.comment["body"]
+                f.select_command(body, new_run=True)
+                code = f.invoke_command()
+                self.assertEqual(
+                    code, 1 if fault == "malformed" else 0, f.error + f.stdout
+                )
+                after = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertEqual(after.historical_assessments, hold)
+                self.assertEqual(after.dispositions, before.dispositions)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+                self.assertEqual(f.check_runs[-1]["conclusion"], "action_required")
+                if fault == "malformed":
+                    self.assertEqual(f.comment["body"], before_body)
+                    self.assertFalse(f.trace)
+                else:
+                    self.assertIn("refused", f.stdout.lower())
+                    self.assertEqual(
+                        after.api_run_accounting["action"]["phase"], "terminal"
+                    )
+
+    def test_historical_assessment_unknown_writes_preserve_pending_state_without_replay(
+        self,
+    ):
+        for fault in ("business-absent", "business-stored", "put-absent", "put-stored"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = historical_command_case(directory)
+                hold = parse_session_comment(
+                    f.comment["body"], identity=IDENTITY
+                ).historical_assessments
+                body = historical_body(hold)
+                f.select_command(body, new_run=True)
+                if fault.startswith("business"):
+                    f.action_fault = fault
+                else:
+                    f.put_fault = fault.split("-", 1)[1]
+                code = f.invoke_command()
+                self.assertEqual(
+                    code, 0 if fault == "business-stored" else 1, f.error + f.stdout
+                )
+                record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertEqual(
+                    len(record.historical_assessments["settlements"]),
+                    0 if fault == "business-absent" else 1,
+                )
+                self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+                self.assertEqual(f.business_writes, 1)
+                if fault.startswith("put"):
+                    self.assertEqual(f.review_put_attempts, 1)
+                if fault != "business-stored":
+                    self.assertEqual(
+                        record.api_run_accounting["action"]["phase"], "pending"
+                    )
+                    before_blocks = copy.deepcopy(record.api_run_accounting["blocks"])
+                    f.attempt = 2
+                    self.assertNotEqual(f.invoke_command(), 0)
+                    self.assertEqual(f.business_writes, 1)
+                    after = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                    self.assertEqual(
+                        after.historical_assessments, record.historical_assessments
+                    )
+                    for block in before_blocks:
+                        self.assertIn(block, after.api_run_accounting["blocks"])
+                    self.assertEqual(
+                        after.api_run_accounting["action"]["phase"], "pending"
+                    )
+
+    def test_historical_hold_is_not_removable_and_unverified_v6_cannot_approve(self):
+        from review_sensei_github.approval import ReviewApprovalEligibility
+        from review_sensei_github.publication import (
+            ReviewApprovalFinalizer,
+            approval_eligibility_from_body,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = historical_command_case(directory)
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            with self.assertRaisesRegex(ReviewInputError, "cannot be removed"):
+                record.evolve(historical_assessments=None)
+            edited = copy.deepcopy(record.historical_assessments)
+            edited["assessments"] = []
+            with self.assertRaises(ReviewInputError):
+                record.evolve(historical_assessments=edited)
+            eligibility = approval_eligibility_from_body(f.reviews[-1]["body"])
+            document = eligibility.to_dict()
+            self.assertEqual(document["schema_version"], "6")
+            for invalid in (
+                {**document, "unknown": True},
+                {**document, "historical_assessments": None},
+                {**document, "current": document},
+                {
+                    **document,
+                    "historical_assessments": {
+                        **document["historical_assessments"],
+                        "pending": None,
+                    },
+                },
+            ):
+                with self.assertRaises(ReviewInputError):
+                    ReviewApprovalEligibility.from_dict(invalid)
+            forged = copy.deepcopy(document)
+            forged["historical_assessments"]["pending"] = []
+            forged["current"]["facts"]["review_status"] = "complete"
+            restored = ReviewApprovalEligibility.from_dict(forged)
+
+            def forbidden(request, timeout):
+                self.fail("unverified historical eligibility reached a transport")
+
+            finalizer = ReviewApprovalFinalizer(http=GitHubHttp(opener=forbidden))
+            outcome = finalizer.finalize(
+                token="synthetic",
+                repository="owner/repo",
+                pull_request=7,
+                head_sha=f.requested_head,
+                app_slug="reviewsensei[bot]",
+                eligibility=restored,
+            )
+            self.assertEqual(outcome.status, "approval_withheld")
+            self.assertEqual(outcome.diagnostic, "historical_assessment_unverified")
+
     def test_pause_and_status_complete_one_metered_action_without_inference(self):
         for body, paused in (
             ("@reviewsensei review pause", True),

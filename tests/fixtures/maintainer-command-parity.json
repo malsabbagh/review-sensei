@@ -1,4 +1,6 @@
 [
+  {"body": "@reviewsensei dismiss aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --reason \"historical:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb The earlier assessment has an explicit documented owner decision.\"", "accepted": true},
+  {"body": "@reviewsensei accept-risk aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --reason \"historical:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb The earlier assessment has an explicit documented owner decision.\"", "accepted": true},
   {"body": "@sensei review status", "accepted": true},
   {"body": "**operator note** @sensei\nreview pause", "accepted": false},
   {"body": "note @sensei\treview pause", "accepted": false},

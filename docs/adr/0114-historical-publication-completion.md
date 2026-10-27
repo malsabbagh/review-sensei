@@ -16,8 +16,8 @@ its original evidence. Historical completion and current eligibility are distinc
 ## Decision
 
 Keep ordinary rollover strict. Add a distinct transition for a new authenticated
-review run, attempt one, whose current base/head differs from an accounting-bearing
-historical predecessor's publication. This does not enroll accounting-free legacy
+review run, attempt one, whose head differs from an accounting-bearing
+historical predecessor's publication. A base-only change refuses before archival or enrollment; the normal PR synchronization gives the recovery a new current head. This does not enroll accounting-free legacy
 roots, pending provider work, active reservations or operator-paused sessions.
 
 Fresh policy commit P/configuration, current PR identity/base/head and exclusive
@@ -75,11 +75,14 @@ without replay; retained and abandoned capacity stays charged.
 After confirmed enrollment but before a new reservation/transaction, the root may
 retain the historical transaction. An exact authenticated v2 pointer/receipt and
 archive identify this as inherited evidence, not a publication by the new caller.
-The one supported same-run successor may start fresh current analysis only from
-that narrow state after cessation/current-fence checks, preserving all first-owner
-blocks. A new reservation or analysis transaction removes this permission. A hard
-kill after transaction attachment or around provider entry cannot establish
-non-entry and refuses; retained completed-result recovery keeps its existing path.
+An abrupt successor must refuse even this inherited snapshot: unchanged remote
+bytes cannot distinguish non-entry from a dispatched, unstored reservation PATCH.
+No successor ownership mutation or fresh provider work follows from absence.
+Preserve original accounting and archive readability. A delayed predecessor write
+may still arrive; this path grants no work that could race it. A positive future
+recovery would require authenticated settlement or a proven pre-operation abort.
+A new reservation or analysis transaction also refuses. Existing retained
+completed-result recovery retains its separate supported path.
 
 ## Eligibility and rollout
 
@@ -106,3 +109,58 @@ Include an uncertain original terminal-marker write, failed/cancelled owners,
 masked step failures and unknown executor provenance. Qualify the recognized old
 source with synthetic stored/unstored response-loss faults at every root-write
 position; retain run-bound installation and complete writer-inventory evidence.
+
+## Historical human assessments
+
+An old unresolved human assessment remains an obligation when current analysis
+omits or reclassifies it. An unresolved old thread alone is insufficient to keep
+current eligibility truthful. The session therefore retains a separate closed
+`historical-assessment-hold-v1` value, independent of the immediate accounting
+archive. It binds the original v2 archive, exact native review/body/index and
+assessment instances. It persists across epochs; ordinary evolution cannot remove
+or rewrite its source, instances or confirmed decisions.
+
+Eligibility v6 wraps the independently encoded current eligibility (versions 1–5)
+and a bounded historical view. Fresh facts and historical assessments remain
+separate. The current review displays the original review/head, assessment IDs
+and a clear hold explanation, without inserting old comments into model output
+or claiming they are current defects. Every approval and check finalizer requires
+the authenticated durable hold. Missing/unsupported evidence, altered state or
+unconfirmed marker updates withhold approval, including empty complete results,
+rescan, later runs and `verify`.
+
+The supported explicit decision retains the existing Worker/Python spelling:
+
+```
+@reviewsensei dismiss <full instance fingerprint> --reason "historical:<scope64> <substantive rationale>"
+@reviewsensei accept-risk <full instance fingerprint> --reason "historical:<scope64> <substantive rationale>"
+```
+
+A separate typed resolver requires the current published hold, exact scope and
+instance, current v3 command actor/source/head, fresh maintain/admin permission
+and a bounded rationale. The historical namespace is strict and canonical;
+malformed or unsupported prefixes never fall through to ordinary dispositions.
+Generic earlier-head rejection is unchanged. Collisions with fresh findings
+refuse. Dismissal records rejection of the assessment; risk acceptance records
+acceptance. Neither is an independently verified fix, and neither settles fresh
+findings, later recurrences or incomplete coverage. Preserve the full submitted
+reason and source provenance. Confirm the durable decision before updating the
+current eligibility marker; partial decisions retain all other holds.
+
+The adapter uses the existing command intent, effect, receipt and terminal
+completion accounting. A definite read-only selector/role refusal may finish as
+a charged explicit no-op after fresh authority fencing. Stale authority,
+transport uncertainty and unknown writes stay pending; successor capacity does
+not permit decision or PUT replay. A stored lost-response decision requires its
+existing exact owned readback. An uncertain native review PUT remains uncertain.
+
+The source has at most 100 assessment identities, a 24,000-byte hold-state ceiling
+and the unchanged 32,768-byte session ceiling. Before the first archive POST,
+construct a capacity-only worst-width reference/root and validate its full future
+hold. This preview grants no execution authority and is never stored. The real
+archive still needs owned readback before enrollment. No API/body/prompt limits,
+Worker grammar, permissions, credentials or deployment settings change.
+
+A normal current full rescan can establish complete empty current findings while
+historical holds remain active. Only after explicit decisions settle those holds
+and independent current coverage/finding gates pass may normal approval follow.

@@ -127,6 +127,11 @@ class HistoricalPublicationCompletion:
     selection: HistoricalReadSelection = field(repr=False)
     receipt_bytes: bytes = field(repr=False)
     state: CompletionState = CompletionState.UNCONFIRMED
+    assessments_bytes: bytes = field(default=b"[]", repr=False)
+
+    @property
+    def assessments(self):
+        return json.loads(self.assessments_bytes)
 
     @property
     def receipt(self):
@@ -147,13 +152,14 @@ class HistoricalPublicationCompletion:
             or s.record.record_sha256 != previous.record_sha256
             or self.receipt["historical_accounting_sha256"]
             != _digest(previous.api_run_accounting)
+            or self.receipt["human_inventory_sha256"] != _digest(self.assessments)
         ):
             _refuse("historical completion is stale, restored or foreign")
         s.require_process()
         validate_receipt(self.receipt)
 
 
-def _complete_selection(selection, effects):
+def _complete_selection(selection, effects, assessments):
     from review_sensei.historical_completion import RECEIPT_VERSION, validate_receipt
 
     s, t = selection, selection.record.transaction
@@ -181,6 +187,7 @@ def _complete_selection(selection, effects):
         "historical_configuration_sha256": t.configuration_digest,
         "historical_evidence_sha256": t.evidence_digest,
         "historical_content_sha256": t.result_sha256,
+        "human_inventory_sha256": _digest(assessments),
         "publication_result_sha256": transaction_publication_digest(t),
         "cessation_sha256": _digest(s.stopped),
         "current_run_id": s.caller.run.run_id,
@@ -196,7 +203,10 @@ def _complete_selection(selection, effects):
     validate_receipt(receipt)
     return _issue(
         HistoricalPublicationCompletion(
-            s, canonical_bytes(receipt), CompletionState.CONFIRMED
+            s,
+            canonical_bytes(receipt),
+            CompletionState.CONFIRMED,
+            assessments_bytes=canonical_bytes(assessments),
         )
     )
 
@@ -293,7 +303,7 @@ def authenticate_historical_publication(
         or previous.reservation_id is not None
         or previous.reserved_slot is not None
         or previous.operator_paused
-        or (transaction.base_sha, transaction.head_sha) == (current_base, current_head)
+        or transaction.head_sha == current_head
     ):
         _refuse("predecessor is outside historical completion scope")
     stopped = actions.qualified_publication_cessation(
@@ -405,4 +415,18 @@ def authenticate_historical_publication(
         )
     )
     budget.check()
-    return _complete_selection(selection, effects)
+    from review_sensei.context import finding_lifecycle_for_comment
+    from review_sensei.human_assessment import finding_instance_fingerprint
+
+    assessments = sorted(
+        (
+            {
+                "instance": finding_instance_fingerprint(comment),
+                "concern": finding_lifecycle_for_comment(comment).concern,
+            }
+            for comment in result.comments
+            if comment.needs_human
+        ),
+        key=lambda item: str(item["instance"]),
+    )
+    return _complete_selection(selection, effects, assessments)

@@ -39,7 +39,9 @@
     "termination_basis",
     "transaction_id",
     "verifier_version",
-    "writer_inventory_sha256"
+    "writer_inventory_sha256",
+    "human_inventory_sha256",
+    "review_body_sha256"
   ],
   "properties": {
     "historical_base_sha": {
@@ -194,6 +196,14 @@
     "current_executor_sha": {
       "type": "string",
       "pattern": "^[a-f0-9]{40}$"
+    },
+    "human_inventory_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "review_body_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
     }
   }
 }

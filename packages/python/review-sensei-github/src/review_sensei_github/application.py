@@ -361,16 +361,15 @@ class GitHubApplication:
         self.replier = replier
         self.session_ledger = session_ledger
         self.enable_disposition_snapshot_writes = enable_disposition_snapshot_writes
-        self._quarantine_hold_readers: dict[tuple[str, int], Any] = {}
-        self._human_inventory_readers: dict[tuple, Any] = {}
+        self._historical_assessment_readers: dict[tuple[str, int], Any] = {}
         if getattr(
             getattr(session_ledger, "caller", None),
-            "_has_quarantine_assessments",
+            "_has_historical_assessments",
             False,
         ):
             for publisher in (reviewer, replier):
-                publisher.finalizer.quarantine_reader_factory = (
-                    self._quarantine_hold_reader
+                publisher.finalizer.historical_assessment_reader_factory = (
+                    self._historical_assessment_reader
                 )
         # Every ordinary fresh application can reconstruct supported default
         # inventories from its independently selected durable ledger.
@@ -380,17 +379,21 @@ class GitHubApplication:
                     self._human_inventory_reader
                 )
 
-    def _quarantine_hold_reader(self, *, token, repository, pull_request, head_sha):
-        from .quarantine_holds import QuarantineHoldReader
+    def _historical_assessment_reader(
+        self, *, token, repository, pull_request, head_sha
+    ):
+        from .historical_assessments import HistoricalAssessmentReader
 
-        key = repository, pull_request
-        if key not in self._quarantine_hold_readers:
-            self._quarantine_hold_readers[key] = QuarantineHoldReader(
+        key = (repository, pull_request)
+        if key not in self._historical_assessment_readers:
+            self._historical_assessment_readers[key] = HistoricalAssessmentReader(
                 ledger=self.session_ledger,
+                http=self.http,
                 repository=repository,
                 pull_request=pull_request,
+                token=token,
             )
-        return self._quarantine_hold_readers[key]
+        return self._historical_assessment_readers[key]
 
     def _human_inventory_reader(
         self,
