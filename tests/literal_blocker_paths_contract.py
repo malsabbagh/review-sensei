@@ -21,7 +21,7 @@ from review_sensei.convergence import (
 from review_sensei.coverage import CoverageManifest, FileCoverage
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import finding_instance_fingerprint
-from review_sensei.models import ReviewComment, ReviewResult
+from review_sensei.models import ReviewComment, ReviewResult, ReviewTransaction
 
 HEAD = "b" * 40
 DIFF = """diff --git a/src/changed.py b/src/changed.py
@@ -79,6 +79,26 @@ class LiteralBlockerPathsContract:
         )
         for mode in ("merge-focused", "strict", "advisory"):
             policy = ReviewConvergencePolicy(mode=mode)
+            bound = ReviewResult.from_dict(
+                replace(
+                    result,
+                    transaction=replace(
+                        ReviewTransaction.create(
+                            repository=key.repository,
+                            pull_request=key.pull_request,
+                            base_sha=key.base_sha,
+                            head_sha=key.head_sha,
+                            policy_digest=policy.digest(),
+                            configuration_digest="d" * 64,
+                            evidence_digest="e" * 64,
+                            reservation_id="f" * 64,
+                            generation=8,
+                        ),
+                        phase="publication_pending",
+                        result_sha256=result.content_digest(),
+                    ),
+                ).to_dict()
+            )
             baseline = baseline_from_history_document(
                 baseline_history_document(
                     baseline_from_review(
@@ -92,7 +112,7 @@ class LiteralBlockerPathsContract:
             for context in ({}, {"baseline": baseline, "current_key": key}):
                 with self.subTest(mode=mode, baseline=bool(context)):
                     prepared = prepare_publication_review(
-                        result=result,
+                        result=bound,
                         diff=DIFF,
                         head_sha=HEAD,
                         convergence_policy=policy,
@@ -100,7 +120,8 @@ class LiteralBlockerPathsContract:
                     )
                     self.assertEqual(len(prepared.result.comments), 80)
                     self.assertEqual(prepared.result.coverage, result.coverage)
-                    self.assertEqual(prepared.result.transaction, result.transaction)
+                    self.assertIsNotNone(bound.transaction)
+                    self.assertEqual(prepared.result.transaction, bound.transaction)
                     self.assertEqual(
                         tuple(
                             finding_instance_fingerprint(c)
