@@ -43,6 +43,8 @@ REGISTRY_ONLY_WORKFLOWS = frozenset(
         "2f7ea8f388968b8cadab9dae156e90a8fb636c945b28585cde6ae04412bccf0c",
         # Current run-owned lifecycle; exact four installation lanes reviewed.
         "5c06dc37b6875df24c9ac6ece3a410d32eeb7b1d2671e7c1bfae412703656185",
+        # actions/setup-python v7.1.0 pin update across the four installation lanes.
+        "9df61a2e77436be2bb609379618dae2e3bcd8f5752267cb17c810b17259f6ada",
     }
 )
 
