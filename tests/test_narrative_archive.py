@@ -117,6 +117,8 @@ def retain(state, ledger, result):
 
 class NarrativeArchiveTests(unittest.TestCase):
     def test_distinct_changed_preparation_refuses_before_native_publication(self):
+        distinct_preparations = []
+
         class ChangedPreparation(ReviewPublisher):
             def prepare(self, **arguments):
                 prepared = super().prepare(**arguments)
@@ -125,7 +127,7 @@ class NarrativeArchiveTests(unittest.TestCase):
                     summary="prepared-only " + prepared.result.summary,
                     transaction=None,
                 )
-                self.assert_distinct = changed is not arguments["result"]
+                distinct_preparations.append(changed is not arguments["result"])
                 return replace(prepared, result=changed)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -147,7 +149,8 @@ class NarrativeArchiveTests(unittest.TestCase):
                         auto_review=True, github_writes=True, complete_inventory=True
                     ),
                 )
-            self.assertTrue(app.reviewer.assert_distinct)
+            self.assertTrue(distinct_preparations)
+            self.assertTrue(all(distinct_preparations))
             self.assertFalse(state.reviews)
             self.assertEqual(result.to_dict(), original)
             self.assertEqual(
