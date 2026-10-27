@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+import test_review_run as review_run_fixtures
 from fake_github_http import json_response
 from review_sensei_github import action_run, review_run
 from review_sensei_github import cli as package_cli
@@ -29,7 +30,6 @@ from review_sensei_github.run_authority import REQUEST_KEYS, parse_authority
 from review_sensei_github.session_ledger import parse_session_comment
 from test_api_work_persistence import HEAD, IDENTITY
 from test_review_run import (
-    ConsecutiveReviewRunTests,
     EntryFixture,
     _CompletionFixture,
     fixture_process_environment,
@@ -451,7 +451,7 @@ class HistoricalCommandFixture(CommandEntryFixture, _CompletionFixture):
 
 
 def historical_command_case(directory, *, comments=None, complete=False):
-    f = ConsecutiveReviewRunTests.historical_case(
+    f = review_run_fixtures.ConsecutiveReviewRunTests.historical_case(
         directory,
         lambda path, mode: HistoricalCommandFixture(path, mode, comments=comments),
     )
