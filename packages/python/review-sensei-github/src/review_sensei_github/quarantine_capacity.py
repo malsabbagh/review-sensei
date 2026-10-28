@@ -9,9 +9,9 @@ This guard grants no write authority and never retries a consumed request.
 from __future__ import annotations
 
 import json
-import math
 import re
 from copy import deepcopy
+from typing import Any
 from urllib.parse import urlsplit
 
 from review_sensei.bounded_evidence import MAX_PART_BYTES
@@ -19,6 +19,7 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.quarantine_assessments import pending_assessments
 
 from .http import MAX_GITHUB_RESPONSE_BYTES, MAX_PAGINATION_ITEMS, MAX_PAGINATION_PAGES
+from .quarantine_scan_capacity import cold_cursor_requests, cold_rest_requests
 
 _SURFACES = (
     "issue_comments",
@@ -34,6 +35,46 @@ _PAGE_BYTES = MAX_GITHUB_RESPONSE_BYTES - _RESPONSE_METADATA_BYTES
 
 def _wire(value):
     return len(json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode())
+
+
+def full_review_comment_tail():
+    """Closed lower component of the unknown full-review transaction.
+
+    One original accepted operation retains the full result. Closed checkpoint
+    and admitted-inventory projections preserve every field, original admission
+    flag and instance without duplicating prose. Their maxima are reserved
+    before startup; no later full-copy fallback is admitted.
+    """
+    from .operation_comments import _MAX_RESULT_BYTES, result_part_bodies
+    from .operation_host import _COMMENT_BOUND
+    from .retention_projection import (
+        MAX_CHECKPOINT_PROJECTION_BYTES,
+        MAX_INVENTORY_PROJECTION_BYTES,
+    )
+
+    result = tuple(
+        _wire({"body": body})
+        for body in result_part_bodies(
+            "a" * 64 + "\t" + "b" * 64, b"x" * _MAX_RESULT_BYTES
+        )
+    )
+
+    def projection(maximum):
+        return tuple(
+            _wire({"body": body})
+            for body in result_part_bodies("a" * 64 + "\t" + "b" * 64, b"x" * maximum)
+        )
+
+    # Startup archive, operation metadata, fixed-binding inventory intent,
+    # operation fallback and both independently authenticated projections.
+    return (
+        MAX_PART_BYTES + _RESPONSE_METADATA_BYTES,
+        2 * _COMMENT_BOUND + 1024,
+        8192,
+        *result,
+        *projection(MAX_CHECKPOINT_PROJECTION_BYTES),
+        *projection(MAX_INVENTORY_PROJECTION_BYTES),
+    )
 
 
 def native_reserve(receipt):
@@ -58,15 +99,105 @@ def native_reserve(receipt):
 
 
 class NativeCapacityGuard:
-    def __init__(self, *, identity, reserve, future_parts=0, future_bytes=0):
+    def __init__(
+        self,
+        *,
+        identity,
+        reserve,
+        future_parts=0,
+        future_bytes=0,
+        comment_bounds=None,
+        cursor=False,
+        closure_wire=0,
+        reply=False,
+        complete_tail=False,
+    ):
         self.identity, self.reserve = identity, deepcopy(reserve)
         self.future_parts, self.future_bytes = future_parts, future_bytes
+        self.comment_reader: Any = None
+        self.cursor = cursor
+        self.closure_wire = closure_wire
+        self.complete_tail = complete_tail
+        self.issue_update_bytes = 2 * closure_wire
+        self.comment_bounds = (
+            list(comment_bounds) if comment_bounds is not None else None
+        )
+        self.review_bounds = [closure_wire] * 2 if cursor else []
+        self.check_bounds = [closure_wire] * 2 if cursor else []
+        self.inline_bounds = [6 * 16_384 + 1024] if cursor and reply else []
+        self.reaction_bounds = [4096] if cursor else []
+        self._publication_prepared = None
         self.stats = {
             name: {"count": 0, "bytes": 0, "largest": 0} for name in _SURFACES
         }
         self.objects = {}
+        self.certificates = {}
         self._pending_create = None
         self.require(self.stats)
+
+    def admit_comment_batch(self, bodies):
+        """Prepare the complete immutable batch before its first POST.
+
+        Existing tail promises remain reserved. Only uncovered prepared bodies
+        add promises; successful/unknown dispatches consume them exactly once.
+        """
+        if self.comment_bounds is None:
+            return
+        available, extra = list(self.comment_bounds), []
+        for body in bodies:
+            size = _wire({"body": body})
+            choices = [bound for bound in available if bound >= size]
+            if choices:
+                available.remove(min(choices))
+            else:
+                extra.append(size)
+        if not extra:
+            return
+        if self.complete_tail:
+            raise ReviewInputError(
+                "quarantine prepared batch exceeds the admitted complete transaction"
+            )
+        old = self.comment_bounds, self.future_parts, self.future_bytes
+        self.comment_bounds = [*self.comment_bounds, *extra]
+        self.future_parts = len(self.comment_bounds)
+        self.future_bytes = sum(self.comment_bounds)
+        try:
+            self.require(self.stats)
+        except BaseException:
+            self.comment_bounds, self.future_parts, self.future_bytes = old
+            raise
+
+    def admit_publication(self, *, review_wire, inline_wires):
+        """Reserve the prepared publication, approval, checks and root close."""
+        if not self.cursor:
+            return
+        requested = (review_wire, tuple(inline_wires))
+        if self._publication_prepared is not None:
+            # Read-only reconciliation can prepare the same frame again.
+            # Dispatch, including unknown dispatch, already consumed its slot.
+            if requested != self._publication_prepared:
+                raise ReviewInputError("quarantine prepared publication changed")
+            return
+        if self.complete_tail and (
+            review_wire > max(self.review_bounds, default=0)
+            or len(inline_wires) > len(self.inline_bounds)
+            or any(
+                size > bound
+                for size, bound in zip(sorted(inline_wires), sorted(self.inline_bounds))
+            )
+        ):
+            raise ReviewInputError(
+                "quarantine publication exceeds the admitted complete transaction"
+            )
+        old = self.review_bounds, self.inline_bounds
+        self.review_bounds = [max(self.closure_wire, review_wire), self.closure_wire]
+        self.inline_bounds = list(inline_wires)
+        try:
+            self.require(self.stats)
+        except BaseException:
+            self.review_bounds, self.inline_bounds = old
+            raise
+        self._publication_prepared = requested
 
     def require(self, stats):
         for surface, current in stats.items():
@@ -90,31 +221,84 @@ class NativeCapacityGuard:
             )
             if surface == "issue_comments":
                 count += self.future_parts
-                size += self.future_bytes
+                size += self.future_bytes + self.future_parts * _RESPONSE_METADATA_BYTES
+                # One session root and one operation metadata root can grow.
+                # Their full final wire bounds remain protected until closure.
+                size += self.issue_update_bytes
+            tail = (
+                self.review_bounds
+                if surface == "reviews"
+                else self.check_bounds
+                if surface == "checks"
+                else self.inline_bounds
+                if surface in {"inline_replies", "threads"}
+                else self.reaction_bounds
+                if surface == "reactions"
+                else []
+            )
+            count += len(tail)
+            size += sum(tail) + len(tail) * _RESPONSE_METADATA_BYTES
             # Native response metadata is additional to emitted mutation bytes.
             size += old["new_objects"] * _RESPONSE_METADATA_BYTES
             largest = max(
                 current["largest"],
                 old["max_object_wire_bytes"] + _RESPONSE_METADATA_BYTES,
+                max(tail, default=0) + _RESPONSE_METADATA_BYTES,
+                self.closure_wire + _RESPONSE_METADATA_BYTES
+                if surface == "issue_comments"
+                else 0,
             )
             if surface == "issue_comments" and self.future_parts:
-                largest = max(largest, MAX_PART_BYTES + _RESPONSE_METADATA_BYTES)
+                largest = max(
+                    largest,
+                    max(self.comment_bounds, default=MAX_PART_BYTES)
+                    + _RESPONSE_METADATA_BYTES
+                    if self.comment_bounds is not None
+                    else MAX_PART_BYTES + _RESPONSE_METADATA_BYTES,
+                )
             if count > MAX_PAGINATION_ITEMS or largest > _PAGE_BYTES:
                 raise ReviewInputError(
                     f"quarantine {surface} item/response capacity exceeded"
                 )
-            # A conservative sequential packing bound: a page is limited by
-            # either its 100 items or by bytes. Two reads remain for adaptation
-            # and final completeness. Actual readers retain their stricter caps.
+            if size > MAX_PAGINATION_PAGES * _PAGE_BYTES:
+                raise ReviewInputError(
+                    f"quarantine {surface} encoded-byte capacity exceeded"
+                )
+            if surface == "checks":
+                if (
+                    current["count"] + len(tail) > 100
+                    or current["bytes"]
+                    + sum(tail)
+                    + len(tail) * _RESPONSE_METADATA_BYTES
+                    + 2 * self.closure_wire
+                    > _PAGE_BYTES
+                ):
+                    raise ReviewInputError(
+                        "quarantine current-check transaction capacity exceeded"
+                    )
+                continue
             pages = (
-                math.ceil(count / 100)
-                + math.ceil(size / max(1, _PAGE_BYTES - largest))
-                + (2 if count else 0)
+                cold_cursor_requests(count, size, largest)
+                if surface == "issue_comments" and self.cursor
+                else cold_rest_requests(count, largest)
             )
+            if surface == "issue_comments" and not self.cursor:
+                pages = max(
+                    pages, cold_rest_requests(count, largest, (100, 50, 20, 10, 5, 1))
+                )
             if pages > MAX_PAGINATION_PAGES:
                 raise ReviewInputError(
                     f"quarantine {surface} page/encoded-byte capacity exceeded"
                 )
+            self.certificates[surface] = {
+                "count_upper_bound": count,
+                "encoded_bytes_upper_bound": size,
+                "largest_upper_bound": largest,
+                "physical_reads_upper_bound": pages,
+                "reader": "closed-comment-cursor"
+                if surface == "issue_comments" and self.cursor
+                else "cold-rest",
+            }
 
     def seed(self, surface, rows):
         seen = set()
@@ -137,6 +321,32 @@ class NativeCapacityGuard:
         self.require(self.stats)
 
     def before_request(self, method, path, body):
+        snapshot = (
+            self.comment_bounds,
+            self.future_parts,
+            self.future_bytes,
+            self.review_bounds,
+            self.check_bounds,
+            self.inline_bounds,
+            self.reaction_bounds,
+            self.issue_update_bytes,
+        )
+        try:
+            return self._before_request(method, path, body)
+        except BaseException:
+            (
+                self.comment_bounds,
+                self.future_parts,
+                self.future_bytes,
+                self.review_bounds,
+                self.check_bounds,
+                self.inline_bounds,
+                self.reaction_bounds,
+                self.issue_update_bytes,
+            ) = snapshot
+            raise
+
+    def _before_request(self, method, path, body):
         if method not in {"POST", "PATCH", "PUT"} or not isinstance(body, dict):
             return
         target = urlsplit(path).path
@@ -173,8 +383,70 @@ class NativeCapacityGuard:
         if surface is None:
             return
         candidate = deepcopy(self.stats)
-        size = _wire(body) + _RESPONSE_METADATA_BYTES
+        # A review POST is one physical write, but its comments are separate
+        # persisted objects. The review-list response does not contain the
+        # submitted comments array. Charge each resulting object exactly once,
+        # including when the one outgoing request has an unknown outcome.
+        object_body = (
+            {key: value for key, value in body.items() if key != "comments"}
+            if surface == "reviews"
+            else body
+        )
+        object_wire = _wire(object_body)
+        size = object_wire + _RESPONSE_METADATA_BYTES
         new = identifier is None and method == "POST"
+        old_tail = (
+            self.comment_bounds,
+            self.future_parts,
+            self.future_bytes,
+            self.review_bounds,
+            self.check_bounds,
+            self.inline_bounds,
+            self.reaction_bounds,
+            self.issue_update_bytes,
+        )
+        if new and surface == "issue_comments" and self.comment_bounds is not None:
+            choices = [bound for bound in self.comment_bounds if bound >= _wire(body)]
+            if not choices:
+                raise ReviewInputError(
+                    "quarantine complete transaction tail is exhausted"
+                )
+            self.comment_bounds = list(self.comment_bounds)
+            self.comment_bounds.remove(min(choices))
+            self.future_parts, self.future_bytes = (
+                len(self.comment_bounds),
+                sum(self.comment_bounds),
+            )
+        elif new and self.cursor and surface in {"reviews", "checks"}:
+            bounds = list(
+                self.review_bounds if surface == "reviews" else self.check_bounds
+            )
+            choices = [bound for bound in bounds if bound >= object_wire]
+            if not choices:
+                raise ReviewInputError(
+                    "quarantine native transaction tail is exhausted"
+                )
+            bounds.remove(min(choices))
+            if surface == "reviews":
+                self.review_bounds = bounds
+            else:
+                self.check_bounds = bounds
+        elif new and self.cursor and surface in {"inline_replies", "reactions"}:
+            bounds = list(
+                self.inline_bounds
+                if surface == "inline_replies"
+                else self.reaction_bounds
+            )
+            choices = [bound for bound in bounds if bound >= _wire(body)]
+            if not choices:
+                raise ReviewInputError(
+                    "quarantine reply/reaction transaction tail is exhausted"
+                )
+            bounds.remove(min(choices))
+            if surface == "inline_replies":
+                self.inline_bounds = bounds
+            else:
+                self.reaction_bounds = bounds
         state = candidate[surface]
         state["count"] += int(new)
         previous = (
@@ -182,15 +454,31 @@ class NativeCapacityGuard:
             if surface in {"issue_comments", "inline_replies", "reviews"}
             else 0
         )
-        state["bytes"] += size if new else max(0, _wire(body) - previous)
+        state["bytes"] += size if new else max(0, object_wire - previous)
+        if self.cursor and surface == "issue_comments" and not new:
+            growth = max(0, _wire(body) - previous)
+            if _wire(body) > self.closure_wire or growth > self.issue_update_bytes:
+                raise ReviewInputError(
+                    "quarantine root update exceeds the admitted positive growth"
+                )
+            self.issue_update_bytes -= growth
         state["largest"] = max(state["largest"], size)
         if surface == "reviews" and isinstance(body.get("comments"), list):
+            remaining = list(self.inline_bounds)
             for comment in body["comments"]:
                 amount = _wire(comment) + _RESPONSE_METADATA_BYTES
+                if self.cursor:
+                    choices = [bound for bound in remaining if bound >= _wire(comment)]
+                    if not choices:
+                        raise ReviewInputError(
+                            "quarantine inline publication tail is exhausted"
+                        )
+                    remaining.remove(min(choices))
                 for name in ("inline_replies", "threads"):
                     candidate[name]["count"] += 1
                     candidate[name]["bytes"] += amount
                     candidate[name]["largest"] = max(candidate[name]["largest"], amount)
+            self.inline_bounds = remaining
         elif (
             surface == "inline_replies"
             and new
@@ -200,13 +488,26 @@ class NativeCapacityGuard:
             candidate["threads"]["count"] += 1
             candidate["threads"]["bytes"] += size
             candidate["threads"]["largest"] = max(candidate["threads"]["largest"], size)
-        self.require(candidate)
+        try:
+            self.require(candidate)
+        except BaseException:
+            (
+                self.comment_bounds,
+                self.future_parts,
+                self.future_bytes,
+                self.review_bounds,
+                self.check_bounds,
+                self.inline_bounds,
+                self.reaction_bounds,
+                self.issue_update_bytes,
+            ) = old_tail
+            raise
         # Reserve before dispatch, including unknown effects. No response is
         # needed to consume this capacity, and no failure releases it.
         self.stats = candidate
         if identifier is not None:
-            self.objects[surface, identifier] = max(previous, _wire(body))
-        self._pending_create = (surface, _wire(body)) if new else None
+            self.objects[surface, identifier] = max(previous, object_wire)
+        self._pending_create = (surface, object_wire) if new else None
 
     def after_response(self, method, value):
         if (
@@ -220,7 +521,9 @@ class NativeCapacityGuard:
         self._pending_create = None
 
 
-def install_capacity(ledger, identity, receipt, *, token, future_parts, future_bytes):
+def install_capacity(
+    ledger, identity, receipt, *, token, future_parts, future_bytes, comment_bounds=None
+):
     from .http import GitHubHttp
     from .publication_recovery import _publication_transport
 
@@ -235,15 +538,34 @@ def install_capacity(ledger, identity, receipt, *, token, future_parts, future_b
         if existing.identity != identity or existing.reserve != reserve:
             raise ReviewInputError("quarantine native capacity scope changed")
         # Only a verified smaller remaining journey releases its own reserve.
-        existing.future_parts = min(existing.future_parts, future_parts)
-        existing.future_bytes = min(existing.future_bytes, future_bytes)
+        # A later consumer cannot replenish a consumed transaction promise.
         existing.require(existing.stats)
         return existing
+    from review_sensei.session import MAX_SESSION_RECORD_BYTES
+
+    from .quarantine_scan_capacity import CapacityCommentReader
+
+    closure_wire = (
+        2 * MAX_SESSION_RECORD_BYTES
+        + 1024
+        + 180 * len(ledger._observed_consumed_grants)
+    )
+    if comment_bounds is None:
+        comment_bounds = (
+            [MAX_PART_BYTES, MAX_PART_BYTES, 65_536]
+            if future_parts == 3
+            else [closure_wire] * future_parts
+        )
     guard = NativeCapacityGuard(
         identity=identity,
         reserve=reserve,
         future_parts=future_parts,
-        future_bytes=future_bytes,
+        future_bytes=sum(comment_bounds),
+        comment_bounds=comment_bounds,
+        cursor=True,
+        closure_wire=closure_wire,
+        reply=ledger._quarantine_native_tail_parts == 8,
+        complete_tail=ledger._quarantine_native_comment_bounds is not None,
     )
     if not ledger._inventory_complete:
         raise ReviewInputError(
@@ -328,18 +650,26 @@ def install_capacity(ledger, identity, receipt, *, token, future_parts, future_b
             raise ReviewInputError("quarantine check census is incomplete")
     guard.seed("checks", list(checks.values()))
     transport._quarantine_capacity_guard = guard
+    ledger._quarantine_capacity_cursor = True
+    guard.comment_reader = CapacityCommentReader(ledger, identity, transport)
     return guard
 
 
 def install_retained_capacity(ledger, identity, authenticated, *, token):
     archive, state = authenticated.archive, authenticated.state
-    pending = pending_assessments(
+    pending_assessments(
         archive["assessment_origins"],
         authenticated.inventories,
         state,
         scope=authenticated.lineage["scope_sha256"],
     )
-    future = 2 * len(pending) + 4
+    # Storage retains2parts per outstanding decision separately. This native
+    # transaction reserves its startup archive, one event/result carrier and
+    # mandatory root/metadata/approval/check closure before its first effect.
+    future = getattr(ledger, "_quarantine_native_tail_parts", 2)
+    bounds = ledger._quarantine_native_comment_bounds
+    if bounds is not None:
+        future = len(bounds)
     return install_capacity(
         ledger,
         identity,
@@ -347,4 +677,5 @@ def install_retained_capacity(ledger, identity, authenticated, *, token):
         token=token,
         future_parts=future,
         future_bytes=future * MAX_PART_BYTES,
+        comment_bounds=bounds,
     )

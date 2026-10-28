@@ -616,15 +616,19 @@ def plan_quarantine(prepared):
         )
     from .quarantine_capacity import install_capacity
 
+    native_tail = ledger._quarantine_native_comment_bounds
+    tail = list(native_tail) if native_tail is not None else [65_536 + 1024] * 2
+    comment_bounds = (
+        [MAX_PART_BYTES] * parts + [len(json.dumps({"body": body}).encode())] + tail
+    )
     install_capacity(
         ledger,
         prepared.identity,
         prepared.isolation.receipt,
         token=prepared.scope.metadata_token,
-        future_parts=parts + future_parts + 1,
-        future_bytes=wire_bytes
-        + future_bytes
-        + len(json.dumps({"body": body}).encode()),
+        future_parts=len(comment_bounds),
+        future_bytes=sum(comment_bounds),
+        comment_bounds=comment_bounds,
     )
     return {
         "parts": parts,

@@ -29,6 +29,7 @@ from review_sensei.session import (
     load_review_transaction_for_publication,
     mark_review_publication_unconfirmed,
 )
+from review_sensei.validation import DEFAULT_REVIEW_LIMITS
 
 from .errors import (
     GitHubHTTPError,
@@ -186,6 +187,8 @@ def confirm_retained_narrative(
         app_slug=app_slug,
         base_sha=base_sha,
         head_sha=head_sha,
+        transaction=validated.transaction,
+        source_app_id=getattr(ledger, "authenticated_app_id", None),
     )
     available = store.read_available_with_carriers(
         event_key=_event_key(identity, validated.transaction)
@@ -198,7 +201,7 @@ def confirm_retained_narrative(
         raise ReviewInputError("retained narrative result is invalid")
     retained = ReviewResult.from_dict(document)
     if (
-        _payload(retained) != payload
+        _payload(retained, projected=store.last_read_was_projection) != payload
         or retained.content_digest() != validated.content_digest()
         or retained.summary != result.summary
         or retained.transaction is None
@@ -636,14 +639,20 @@ def publication_recovery_read_phase(
         phase.close()
 
 
-def _payload(result: ReviewResult) -> bytes:
+def _payload(result: ReviewResult, *, projected: bool = False) -> bytes:
     document = result.to_dict()
     validate_public_document(document, "review-result")
     restored = ReviewResult.from_dict(document)
     if restored.to_dict() != document:
         raise ReviewInputError("retained result is not canonical")
     payload = canonical_bytes(document)
-    ensure_result_part_capacity(len(payload))
+    if projected:
+        if len(payload) > DEFAULT_REVIEW_LIMITS.max_result_bytes:
+            raise ReviewInputError(
+                "retained logical result exceeds the core result limit"
+            )
+    else:
+        ensure_result_part_capacity(len(payload))
     return payload
 
 
@@ -678,6 +687,9 @@ def _store(
     base_sha: str,
     head_sha: str,
     primed_comments: list[Any] | None = None,
+    transaction: ReviewTransaction | None = None,
+    source_app_id: int | None = None,
+    compact_write: bool = False,
 ) -> ResultPartStore:
     if (
         not isinstance(app_slug, str)
@@ -733,7 +745,17 @@ def _store(
     )
     if primed_comments is not None:
         port.prime(primed_comments)
-    return ResultPartStore(port, app_user_id=user_id)
+    from .checkpoint_result_store import CheckpointResultStore
+
+    return CheckpointResultStore(
+        port,
+        app_user_id=user_id,
+        http=http,
+        identity=identity,
+        transaction=transaction,
+        app_id=source_app_id,
+        compact_write=compact_write,
+    )
 
 
 def _validate(
@@ -748,7 +770,9 @@ def _validate(
     policy: ReviewConvergencePolicy,
     loaded: Any = None,
 ) -> ReviewResult:
-    _payload(result)
+    _payload(
+        result, projected=bool(getattr(ledger, "_quarantine_capacity_cursor", False))
+    )
     record = load_review_transaction_for_publication(
         ledger,
         identity,
@@ -830,6 +854,8 @@ def recover_retained_review_result(
             base_sha=base_sha,
             head_sha=head_sha,
             primed_comments=primed_comments,
+            transaction=transaction,
+            source_app_id=getattr(ledger, "authenticated_app_id", None),
         )
         available = store.read_available(event_key=_event_key(identity, transaction))
         if available is None:
@@ -845,7 +871,7 @@ def recover_retained_review_result(
         if not isinstance(document, dict):
             raise ReviewInputError("retained result is invalid")
         result = ReviewResult.from_dict(document)
-        if _payload(result) != payload:
+        if _payload(result, projected=store.last_read_was_projection) != payload:
             raise ReviewInputError("retained result is not canonical")
         return _validate(
             result,
@@ -876,6 +902,7 @@ def retain_checkpoint_review_result(
     configuration_context: Mapping[str, object] | None = None,
     evidence_context: Mapping[str, object] | None = None,
     policy: ReviewConvergencePolicy | None = None,
+    source_app_id: int | None = None,
 ) -> ReviewResult:
     """Durably retain and readback-verify canonical result bytes before committing publication_pending."""
     try:
@@ -906,7 +933,11 @@ def retain_checkpoint_review_result(
         if pending_transaction.result_sha256 != result_digest:
             raise ReviewInputError("review result digest does not match transaction")
         bound = replace(result, transaction=pending_transaction)
-        payload = _payload(bound)
+        projected = (
+            getattr(_publication_transport(http), "_quarantine_capacity_guard", None)
+            is not None
+        )
+        payload = _payload(bound, projected=projected)
         event_key = _event_key(identity, pending_transaction)
         store = _store(
             http,
@@ -915,15 +946,18 @@ def retain_checkpoint_review_result(
             app_slug=app_slug,
             base_sha=base_sha,
             head_sha=head_sha,
+            transaction=pending_transaction,
+            source_app_id=source_app_id,
+            compact_write=True,
         )
         available = store.read_available(event_key=event_key)
         if available is None:
+            parts = store.physical_part_count(payload)
             budget = getattr(http, "publication_budget", None)
             if isinstance(budget, EvidenceReadBudget):
                 from .api_run_budget import CallerRunBudget
                 from .api_run_plan import READ_OPERATION_REQUESTS
 
-                parts = ensure_result_part_capacity(len(payload))
                 liability = 2 * parts + (
                     READ_OPERATION_REQUESTS
                     if isinstance(budget, CallerRunBudget)
@@ -953,7 +987,8 @@ def retain_checkpoint_review_result(
                 raise ReviewInputError("retained result is invalid")
             prior = ReviewResult.from_dict(document)
             if (
-                _payload(prior) != existing_payload
+                _payload(prior, projected=store.last_read_was_projection)
+                != existing_payload
                 or prior.content_digest() != bound.content_digest()
             ):
                 raise ReviewInputError("retained result differs from checkpoint")
@@ -1008,6 +1043,8 @@ def retain_review_result(
             app_slug=app_slug,
             base_sha=base_sha,
             head_sha=head_sha,
+            transaction=validated.transaction,
+            source_app_id=getattr(ledger, "authenticated_app_id", None),
         )
         available = store.read_available(event_key=event_key)
         if available is None:
@@ -1017,7 +1054,14 @@ def retain_review_result(
                     "do not recreate uncertain writes; use the original result "
                     "with the explicit operation-entry opt-out"
                 )
-            payload = _payload(validated)
+            projected = (
+                getattr(
+                    _publication_transport(http), "_quarantine_capacity_guard", None
+                )
+                is not None
+            )
+            payload = _payload(validated, projected=projected)
+            parts = store.physical_part_count(payload)
             budget = getattr(http, "publication_budget", None)
             if isinstance(budget, EvidenceReadBudget):
                 # Before any part POST, admit every bounded listing/readback
@@ -1025,7 +1069,6 @@ def retain_review_result(
                 from .api_run_budget import CallerRunBudget
                 from .api_run_plan import READ_OPERATION_REQUESTS
 
-                parts = ensure_result_part_capacity(len(payload))
                 liability = 2 * parts + (
                     READ_OPERATION_REQUESTS
                     if isinstance(budget, CallerRunBudget)
@@ -1061,7 +1104,7 @@ def retain_review_result(
                 raise ReviewInputError("retained result is invalid")
             prior = ReviewResult.from_dict(document)
             if (
-                _payload(prior) != payload
+                _payload(prior, projected=store.last_read_was_projection) != payload
                 or prior.content_digest() != validated.content_digest()
             ):
                 raise ReviewInputError("retained result differs from checkpoint")

@@ -3,8 +3,8 @@ name: ReviewSensei isolated quarantine
 # Intentionally disabled. Publishing code is not activation. A separate reviewed
 # change must pin this workflow's numeric ID and enabled blob in the append-only
 # packaged registry after the compatible v5 runner has been qualified/promoted.
-# Never dispatch this disabled workflow as a test: only run_number=1/attempt=1
-# can own its registered one-shot creation slot, and deletion grants no retry.
+# Never dispatch this disabled workflow as a test: only its pinned registered
+# positive run number at attempt1 can own the one-shot slot; deletion grants no retry.
 on:
   workflow_dispatch:
     inputs:

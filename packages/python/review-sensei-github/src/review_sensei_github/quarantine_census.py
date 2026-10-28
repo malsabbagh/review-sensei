@@ -11,12 +11,18 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from urllib.parse import urlsplit
 
 from review_sensei.errors import ReviewInputError
 
 from .errors import GitHubHTTPResponseTooLargeError
-from .http import MAX_GITHUB_RESPONSE_BYTES, MAX_PAGINATION_ITEMS, MAX_PAGINATION_PAGES
+from .http import (
+    MAX_GITHUB_RESPONSE_BYTES,
+    MAX_PAGINATION_ITEMS,
+    MAX_PAGINATION_PAGES,
+    _read_allowance,
+)
 
 QUERY = """query QuarantineCommentCensus($owner:String!,$name:String!,$number:Int!,$first:Int!,$after:String){
  repository(owner:$owner,name:$name){databaseId nameWithOwner pullRequest(number:$number){number
@@ -191,7 +197,15 @@ def _page_hint(ledger, seen_ids):
     return max(1, size) if costs else 100
 
 
-def fetch_comments(ledger, identity):
+def fetch_comments(
+    ledger,
+    identity,
+    *,
+    max_requests=None,
+    timeout_seconds=None,
+    before_read=None,
+    observe_request=None,
+):
     """Complete bounded census; every failed adaptive attempt spends a call."""
     owner, name = identity.repository.split("/", 1)
     profiles = getattr(ledger, "_quarantine_census_sizes", None)
@@ -202,9 +216,21 @@ def fetch_comments(ledger, identity):
     seen_ids: set[int] = set()
     cursors: set[str] = set()
     after, total = None, None
-    first = _page_hint(ledger, seen_ids)
-    for _attempt in range(MAX_PAGINATION_PAGES):
-        first = min(first, profiles.get(after, 100))
+    certified = getattr(ledger, "_quarantine_capacity_cursor", False)
+    first = 100 if certified else _page_hint(ledger, seen_ids)
+    requests = (
+        MAX_PAGINATION_PAGES
+        if max_requests is None
+        else min(max_requests, MAX_PAGINATION_PAGES)
+    )
+    if type(requests) is not int or not 1 <= requests <= MAX_PAGINATION_PAGES:
+        raise ReviewInputError("quarantine census request bound is invalid")
+    deadline = time.monotonic() + (
+        60 if timeout_seconds is None else min(timeout_seconds, 60)
+    )
+    for _attempt in range(requests):
+        if not certified:
+            first = min(first, profiles.get(after, 100))
         variables = {
             "owner": owner,
             "name": name,
@@ -214,12 +240,20 @@ def fetch_comments(ledger, identity):
         }
         if not _variables(variables):
             raise ReviewInputError("quarantine census variables are invalid")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ReviewInputError("quarantine census deadline exceeded")
+        if before_read is not None:
+            remaining = min(remaining, _read_allowance(before_read))
+        if observe_request is not None:
+            observe_request()
         try:
             status, response = ledger.http.request(
                 "POST",
                 "/graphql",
                 token=ledger.token,
                 body={"query": QUERY, "variables": variables},
+                timeout_seconds=remaining,
             )
         except GitHubHTTPResponseTooLargeError as error:
             if first <= 1:
@@ -230,16 +264,22 @@ def fetch_comments(ledger, identity):
             # This fixed query has four nested object closures per ordinary
             # comment. A conservative completed-prefix count avoids repeated
             # oversized probes. No partial body or identity is admitted.
+            nodes = getattr(error, "completed_comment_nodes", 0)
             hinted = (
-                max(1, (completed - 1) // 4 - 1)
-                if type(completed) is int and completed >= 5
-                else max(1, first // 2)
+                nodes
+                if certified and type(nodes) is int and nodes > 0
+                else (
+                    max(1, (completed - 1) // 4 - 1)
+                    if type(completed) is int and completed >= 5
+                    else max(1, first // 2)
+                )
             )
             first = min(first - 1, hinted)
             profiles[after] = first
             continue
         if (
-            status != 200
+            time.monotonic() >= deadline
+            or status != 200
             or not isinstance(response, dict)
             or response.get("errors")
             or set(response) - {"data", "errors", "extensions"}
@@ -288,6 +328,18 @@ def fetch_comments(ledger, identity):
                 "quarantine census pagination is incomplete or changed"
             )
         total = count
+        if certified:
+            # The cursor certificate reserves this exact closed response
+            # envelope independently of per-node body/metadata bounds.
+            def wire(value):
+                return len(
+                    json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode()
+                )
+
+            if wire(response) - sum(wire(node) for node in nodes) > 4096:
+                raise ReviewInputError(
+                    "quarantine census response envelope exceeded its bound"
+                )
         for node in nodes:
             item = _comment(node, ledger, identity)
             if item["id"] in seen_ids:
@@ -314,7 +366,7 @@ def fetch_comments(ledger, identity):
         ):
             raise ReviewInputError("quarantine census cursor is missing or repeated")
         cursors.add(cursor)
-        after, first = cursor, _page_hint(ledger, seen_ids)
+        after, first = cursor, 100 if certified else _page_hint(ledger, seen_ids)
     raise ReviewInputError(
         "quarantine complete census exceeded its physical request bound"
     )

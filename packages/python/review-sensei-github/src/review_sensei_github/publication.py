@@ -753,6 +753,7 @@ class AssembledReview:
     inline_blocker_instances: tuple[str, ...]
     requests_changes: bool
     compact_references: bool = False
+    literal_malformed_fences: bool = False
 
 
 def _render_assembled_summary(
@@ -788,6 +789,7 @@ def _render_assembled_summary(
             state=assembled.state,
             head_sha=assembled.head_sha,
             overview=assembled.overview,
+            literal_malformed_fences=assembled.literal_malformed_fences,
             coverage_line=assembled.coverage_line,
             required=tuple(marked(view) for view in assembled.required_views),
             optional=tuple(marked(view) for view in assembled.optional_views),
@@ -5047,7 +5049,7 @@ class ReviewPublisher:
             narrative_compacted = False
             while True:
                 try:
-                    fit_assembled_review(
+                    _native_summary, _native_index = fit_assembled_review(
                         preflight_review,
                         review_marker=marker,
                         eligibility_marker=approval_eligibility_marker(
@@ -5127,6 +5129,56 @@ class ReviewPublisher:
                         continue
                     raise
                 else:
+                    from .publication_recovery import _publication_transport
+
+                    capacity = getattr(
+                        _publication_transport(self.http),
+                        "_quarantine_capacity_guard",
+                        None,
+                    )
+                    if capacity is not None:
+                        # The complete rendered frame and every possible inline
+                        # payload are known before inventory/check/publication
+                        # effects. Include metadata/warning replacements and the
+                        # independent final approval in this transaction tail.
+                        native_frame = _framed_review_body(
+                            _native_summary,
+                            review_marker=marker,
+                            index_marker=_native_index,
+                            eligibility_marker=approval_eligibility_marker(
+                                preflight_document
+                            ),
+                        )
+                        inline_wires = [
+                            len(
+                                json.dumps(
+                                    {
+                                        "path": c.path,
+                                        "line": 2_147_483_647,
+                                        "side": "RIGHT",
+                                        "body": text,
+                                    },
+                                    separators=(",", ":"),
+                                ).encode()
+                            )
+                            + 128
+                            for c, _, text, _ in preflight_review.inline_comments
+                        ]
+                        capacity.admit_publication(
+                            review_wire=len(
+                                json.dumps(
+                                    {
+                                        "commit_id": head_sha,
+                                        "event": "REQUEST_CHANGES",
+                                        "body": native_frame,
+                                    },
+                                    separators=(",", ":"),
+                                ).encode()
+                            )
+                            + 6 * reserve
+                            + 8192,
+                            inline_wires=inline_wires,
+                        )
                     break
             if complete_inventory:
                 complete_review = preflight_review
@@ -6297,6 +6349,7 @@ class ReviewPublisher:
         pull_request: int,
         head_sha: str,
         base_sha: str,
+        literal_malformed_fences: bool | None = None,
     ) -> AssembledReview:
         """Plan placement, including oversized-inline fallback, before the index.
 
@@ -6307,6 +6360,12 @@ class ReviewPublisher:
         explanation unless optional prose must be removed for the body ceiling.
         """
 
+        if literal_malformed_fences is None:
+            from .checkpoint_result_store import uses_literal_publication
+
+            literal_malformed_fences = uses_literal_publication(
+                getattr(self, "http", None), result
+            )
         advisory = not convergence_policy.automatic_github_review_events
         lifecycle_by_fingerprint = {
             item.fingerprint: item.state for item in result.finding_lifecycles
@@ -6371,6 +6430,7 @@ class ReviewPublisher:
                 lifecycle_state=state,
                 placement=placement,
                 advisory=advisory,
+                literal_malformed_fences=literal_malformed_fences,
             )
             # Concern history cannot prove this exact instance was explained.
             view = replace(view, repeat=True)
@@ -6420,6 +6480,7 @@ class ReviewPublisher:
             result, policy=convergence_policy, auto_approve=auto_approve
         )
         return AssembledReview(
+            literal_malformed_fences=literal_malformed_fences,
             inline_comments=tuple(prepared_comments),
             index_entries=tuple(index_entries),
             head_sha=head_sha,

@@ -18,14 +18,23 @@ source/broker provenance and per-surface exposure. The literal-path contract
 keeps its original complete-result predicate. Published-tail isolation carries
 both publication origins independently; see [ADR 0116](adr/0116-published-tail-quarantine.md).
 
-Native capacity checks combine current complete censuses, planned successor and
-decision storage, old late allocations and positive update growth. Evidence and
-operation comments share one comment census. Reviews, inline replies/threads,
-checks and reactions retain separate bounds. Every later native mutation checks
-the permanent reserve on the same caller transport. Capacity exhaustion refuses
-with history intact. Reactions on fixed old objects and checks on old heads do
-not enter current authority readers. Acyclic provenance hashes bind execution
-scope first, then actual qualification bytes; neither hash supplies authority.
+Retain future storage; admit full native tails before effects. Unknown writes never refund. Guarded readers share a cold cursor.
+
+Storage includes all future decision/archive carriers within256 parts/8 MiB.
+Native admission covers fresh complete censuses, permanent old allocation and
+positive update exposure, and the complete current transaction tail. Each later
+transaction recertifies. Evidence and operation comments share one collection;
+separate bounds cover reviews, inline replies/threads, checks and reactions.
+Physical transport guards check every native mutation. Exhaustion stops before
+effects with history intact. Fixed old reactions and old-head checks do not
+enter current authority readers. Acyclic provenance hashes bind execution scope
+first, then actual qualification bytes; neither hash supplies authority.
+
+The shared guarded cursor covers cold bootstrap, operation reconciliation and
+publication readback. Every new cursor starts cold. Bounded prefix counts
+control retry size; complete freshly fetched JSON supplies evidence. The
+certificate includes failed probes, encoded objects and response metadata within
+ten physical requests. Conservative cold-reader certificates cover other surfaces.
 
 A published review with unfinished cleanup/accounting reports
 `published_terminal_pending`, `accounting_terminal:false`, and an operational

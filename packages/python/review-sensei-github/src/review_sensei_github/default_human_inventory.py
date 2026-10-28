@@ -107,9 +107,27 @@ class HumanInventoryContext:
     retained_source: RetainedPublishedInventorySource | None = field(
         default=None, repr=False
     )
+    selected_transaction: ReviewTransaction | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         SessionIdentity(self.repository, self.pull_request, self.repository_id)
+        if self.selected_transaction is not None and (
+            not isinstance(self.selected_transaction, ReviewTransaction)
+            or self.selected_transaction.transaction_id != self.transaction_id
+            or self.selected_transaction.result_sha256 != self.original_content_digest
+            or not self.selected_transaction.identity_matches(
+                repository=self.repository,
+                pull_request=self.pull_request,
+                base_sha=self.base_sha,
+                head_sha=self.head_sha,
+                policy_digest=self.policy_digest,
+                configuration_digest=self.configuration_digest,
+                evidence_digest=self.evidence_digest,
+            )
+        ):
+            raise ReviewInputError(
+                "default human inventory selected transaction conflicts"
+            )
         if (
             type(self.repository_id) is not int
             or type(self.producer_id) is not int
@@ -344,6 +362,7 @@ def build_human_inventory_context(
         evidence_digest,
         budget,
         _retained_source,
+        transaction,
     )
     _transaction(ledger, context, loaded=_loaded)
     _live_pr(transport, token, context)
@@ -419,9 +438,13 @@ class HumanInventoryStore:
         return snapshot[0] if snapshot is not None else None
 
     def _remember_snapshot(
-        self, reference: HumanInventoryReference, payload: bytes, intent: dict[str, Any]
+        self,
+        reference: HumanInventoryReference,
+        payload: bytes,
+        intent: dict[str, Any],
+        comments=None,
     ) -> dict[str, object]:
-        document = self._restore(payload)
+        document = self._restore(payload, comments=comments)
         self._authenticated_snapshot = (reference, payload, canonical_bytes(intent))
         return document
 
@@ -441,7 +464,7 @@ class HumanInventoryStore:
                 "default human inventory authenticated snapshot missing"
             )
         try:
-            self.read(reference)
+            document = self.read(reference)
             if self._authenticated_snapshot != snapshot:
                 raise ReviewInputError(
                     "default human inventory authenticated snapshot changed"
@@ -450,7 +473,7 @@ class HumanInventoryStore:
             # A failed handoff cannot replace the original authenticated intent
             # with the changed live bytes for a subsequent retry.
             self._authenticated_snapshot = snapshot
-        return self._restore(snapshot[1])
+        return document
 
     def _authority(self) -> None:
         _transaction(self.ledger, self.context)
@@ -545,6 +568,19 @@ class HumanInventoryStore:
         return json.loads(canonical_bytes(document))
 
     def _payload(self, document: object) -> bytes:
+        from .publication_recovery import _publication_transport
+
+        guard = getattr(
+            _publication_transport(self.http), "_quarantine_capacity_guard", None
+        )
+        if guard is not None:
+            from .retention_projection import inventory_projection
+
+            document = self._document(document)
+            reference, source = self._checkpoint_source()
+            return inventory_projection(
+                source, document, self.context.binding(), reference
+            )
         envelope = {
             "schema_version": "1.0",
             "purpose": PURPOSE,
@@ -555,9 +591,58 @@ class HumanInventoryStore:
         ensure_result_part_capacity(len(payload))
         return payload
 
-    def _restore(self, payload: bytes) -> dict[str, object]:
+    def _checkpoint_source(self, comments=None):
+        from .checkpoint_result_store import CheckpointResultStore
+        from .publication_recovery import _event_key
+
+        transaction = self.context.selected_transaction
+        if transaction is None:
+            transaction = _transaction(self.ledger, self.context)
+        if comments is None:
+            comments = self.port.list_comments()
+        store = CheckpointResultStore(
+            _SnapshotPort(self.port, comments),
+            app_user_id=self.context.producer_id,
+            http=self.http,
+            identity=SessionIdentity(
+                self.context.repository,
+                self.context.pull_request,
+                self.context.repository_id,
+            ),
+            transaction=transaction,
+            app_id=getattr(self.ledger, "authenticated_app_id", None),
+            compact_write=False,
+        )
+        return store.original_reference(
+            event_key=_event_key(store.identity, transaction)
+        )
+
+    def _restore(self, payload: bytes, *, comments=None) -> dict[str, object]:
         ensure_result_part_capacity(len(payload))
         envelope = json.loads(payload)
+        from .retention_projection import (
+            INVENTORY_VERSION,
+            restore_inventory_projection,
+        )
+
+        if (
+            isinstance(envelope, dict)
+            and envelope.get("schema_version") == INVENTORY_VERSION
+        ):
+            reference, source = self._checkpoint_source(comments)
+
+            def authenticated(requested):
+                if requested != reference:
+                    raise ReviewInputError(
+                        "inventory projection original checkpoint changed"
+                    )
+                return source
+
+            return self._document(
+                restore_inventory_projection(
+                    payload, self.context.binding(), authenticated
+                )
+            )
         if (
             not isinstance(envelope, dict)
             or set(envelope) != {"schema_version", "purpose", "binding", "document"}
@@ -655,7 +740,7 @@ class HumanInventoryStore:
                 raise ReviewInputError(
                     "default human inventory write outcome unknown; retain original intent and parts"
                 )
-            self._remember_snapshot(reference, available[1], intent)
+            self._remember_snapshot(reference, available[1], intent, comments=comments)
             return reference
         if available is not None:
             raise ReviewInputError(
@@ -677,6 +762,16 @@ class HumanInventoryStore:
             "part_count": count,
             "owner": uuid.uuid4().hex,
         }
+        from .operation_comments import result_part_bodies
+
+        preflight = getattr(self.port, "preflight_bodies", None)
+        if callable(preflight):
+            preflight(
+                [
+                    render_marked_comment(INTENT_MARKER, intent),
+                    *result_part_bodies(reference.event_key, payload),
+                ]
+            )
         try:
             self.port.create(render_marked_comment(INTENT_MARKER, intent))
         except Exception:
@@ -736,7 +831,9 @@ class HumanInventoryStore:
         )
         if ensure_result_part_capacity(len(payload)) != intent["part_count"]:
             raise ReviewInputError("default human inventory part count conflicts")
-        return reference, self._remember_snapshot(reference, payload, intent)
+        return reference, self._remember_snapshot(
+            reference, payload, intent, comments=comments
+        )
 
     def read(self, reference: HumanInventoryReference) -> dict[str, object]:
         try:
@@ -766,4 +863,4 @@ class HumanInventoryStore:
         )
         if ensure_result_part_capacity(len(payload)) != intent["part_count"]:
             raise ReviewInputError("default human inventory part count conflicts")
-        return self._remember_snapshot(reference, payload, intent)
+        return self._remember_snapshot(reference, payload, intent, comments=comments)

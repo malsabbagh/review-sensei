@@ -131,10 +131,17 @@ class GitHubHTTPResponseTooLargeError(GitHubHTTPError):
 
     error_category = "github_http_response_too_large"
 
-    def __init__(self, message, *, completed_json_objects: int = 0):
+    def __init__(
+        self,
+        message,
+        *,
+        completed_json_objects: int = 0,
+        completed_comment_nodes: int = 0,
+    ):
         super().__init__(message)
         # Size hint only; never retain or expose partial response bytes.
         self.completed_json_objects = completed_json_objects
+        self.completed_comment_nodes = completed_comment_nodes
 
 
 class GitHubHTTPPaginationLimitError(GitHubHTTPError):

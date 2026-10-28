@@ -1,6 +1,5 @@
 installed registration binds the complete original/refused execution census,
-checks and reactions retain separate bounds. Every later native mutation checks
-the permanent reserve on the same caller transport. Capacity exhaustion refuses
+Retain future storage; admit full native tails before effects. Unknown writes never refund. Guarded readers share a cold cursor.
 Quarantine registry: append-only, empty; workflow disabled until reviewed exact one-shot registration. Release grants no activation.
 One caller HTTP allowance: root `api_request_limit` (default 512).
 Only v3 purpose/source/repo/PR/head/run/attempt/job/workflow authority enables work.

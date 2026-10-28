@@ -70,6 +70,7 @@ class GitHubReviewHooks:
             configuration_context=configuration_context,  # type: ignore[arg-type]
             evidence_context=evidence_context,  # type: ignore[arg-type]
             policy=policy,  # type: ignore[arg-type]
+            source_app_id=ledger.authenticated_app_id,
         )
 
     def load_retained_checkpoint_result(

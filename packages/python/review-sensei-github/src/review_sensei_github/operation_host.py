@@ -1317,6 +1317,7 @@ class GitHubCommentOperationStore(InMemoryOperationStore):
         self._app_user_id = app_user_id
         self._index_id: int | None = None
         self._event_comment_ids: dict[tuple[str, str], int] = {}
+        self._event_bodies: dict[tuple[str, str], str] = {}
         self._index_needs_rewrite = False
         self._results: dict[tuple[str, str], bytes] = {}
         self._defer = False
@@ -1426,6 +1427,7 @@ class GitHubCommentOperationStore(InMemoryOperationStore):
             key, event, event_transitions, event_grants, scope, result = _decode_event(
                 payload
             )
+            self._event_bodies[key] = comment.body
             if key in decoded_events:
                 raise ValueError("ambiguous operation event")
             decoded_events[key] = event
@@ -1522,6 +1524,7 @@ class GitHubCommentOperationStore(InMemoryOperationStore):
         )
         _require_readback(echoed, body, self._app_user_id)
         self._event_comment_ids[key] = echoed.comment_id
+        self._event_bodies[key] = body
 
     def _write_index(self, pending: dict[str, dict[object, object]]) -> None:
         body = encode_index_comment(pending)

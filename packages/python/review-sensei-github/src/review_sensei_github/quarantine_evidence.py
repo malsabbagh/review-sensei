@@ -27,7 +27,7 @@ from review_sensei.session import SessionLoadResult
 from .api_run_history import read_previous_run
 from .default_human_inventory import HumanInventoryContext, HumanInventoryStore
 from .default_human_reader import transaction_publication_digest
-from .operation_comments import GitHubIssueCommentOperationPort, ResultPartStore
+from .operation_comments import GitHubIssueCommentOperationPort
 from .publication import (
     approval_eligibility_from_body,
     parse_finding_index,
@@ -264,8 +264,16 @@ def reconstruct_failed_source(*, ledger, previous, current_scope, retained_resul
             )
             if ledger._inventory_complete:
                 port.prime(ledger._cached_comments())
-            available = ResultPartStore(
-                port, app_user_id=ledger._evidence_author_id
+            from .checkpoint_result_store import CheckpointResultStore
+
+            available = CheckpointResultStore(
+                port,
+                app_user_id=ledger._evidence_author_id,
+                http=ledger.http,
+                identity=identity,
+                transaction=transaction,
+                app_id=getattr(ledger, "authenticated_app_id", None),
+                compact_write=False,
             ).read_available(event_key=_event_key(identity, transaction))
             if available is None:
                 raise ReviewInputError("quarantine original retained result is missing")

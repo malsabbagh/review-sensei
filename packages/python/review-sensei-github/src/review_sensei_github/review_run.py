@@ -858,7 +858,20 @@ def bootstrap(
     from .quarantine_origin import QuarantineOriginReader
 
     native._quarantine_policy_branch = policy_branch
-    native._quarantine_full_discovery = bool(registrations_for(identity))
+    registrations = registrations_for(identity)
+    native._quarantine_full_discovery = bool(registrations)
+    native._quarantine_capacity_cursor = any(
+        "published_tail" in row or "prepublication" in row for row in registrations
+    )
+    native._quarantine_native_tail_parts = (
+        3 if purpose == "command" else 8 if purpose == "reply" else 2
+    )
+    if purpose == "review" or (
+        purpose == "reply" and getattr(args, "enable_broader_review", False)
+    ):
+        from .quarantine_capacity import full_review_comment_tail
+
+        native._quarantine_native_comment_bounds = full_review_comment_tail()
     native._quarantine_origin_reader = QuarantineOriginReader(
         metadata_token=metadata_token,
         actions_token=actions_token,

@@ -112,6 +112,16 @@ class GitHubIssueCommentOperationPort:
 
         self._primed = comments
 
+    def preflight_bodies(self, bodies):
+        """Reserve one prepared complete batch on the shared native transport."""
+        from .publication_recovery import _publication_transport
+
+        guard = getattr(
+            _publication_transport(self._http), "_quarantine_capacity_guard", None
+        )
+        if guard is not None:
+            guard.admit_comment_batch(bodies)
+
     def list_comments(self) -> tuple[OperationComment, ...]:
         from .caller_operation import http_read_operation
 
@@ -125,6 +135,15 @@ class GitHubIssueCommentOperationPort:
         if primed is not None:
             self._primed = None
             return tuple(self._view(item) for item in primed)
+        from .quarantine_scan_capacity import capacity_comment_reader
+
+        reader = capacity_comment_reader(self._http, self._list_path)
+        if reader is not None:
+
+            def observed():
+                self.requests += 1
+
+            return tuple(self._view(item) for item in reader(observe_request=observed))
         collected: list[OperationComment] = []
         page_sizes = (100, 50, 20, 10, 5, 1)
         size_index = 0
@@ -295,6 +314,34 @@ class GitHubIssueCommentOperationPort:
         )
 
 
+def result_part_bodies(event_key: str, result: bytes) -> list[str]:
+    """Prepare the complete physical batch without reading or writing GitHub."""
+    if not isinstance(result, bytes) or not result:
+        raise ValueError("result is empty")
+    _parse_event_key(event_key)
+    ensure_result_part_capacity(len(result))
+    digest = hashlib.sha256(result).hexdigest()
+    count = math.ceil(len(result) / _RESULT_CHUNK)
+    return [
+        bounded_comment(
+            render_marked_comment(
+                RESULT_COMMENT_MARKER,
+                {
+                    "count": count,
+                    "data": base64.b64encode(
+                        result[index * _RESULT_CHUNK : (index + 1) * _RESULT_CHUNK]
+                    ).decode("ascii"),
+                    "event_key": event_key,
+                    "index": index,
+                    "kind": "result",
+                    "result_sha256": digest,
+                },
+            )
+        )
+        for index in range(count)
+    ]
+
+
 class ResultPartStore:
     """App-authored parts of one validated review result.
 
@@ -311,6 +358,15 @@ class ResultPartStore:
             raise ValueError("invalid app user id")
         self._port = port
         self._app_user_id = app_user_id
+        self._confirmed_read: tuple[str, bytes, tuple[int, ...]] | None = None
+
+    @property
+    def last_read_was_projection(self):
+        return False
+
+    def physical_part_count(self, result):
+        """Preflight physical retention independently of logical result bytes."""
+        return ensure_result_part_capacity(len(result))
 
     def write(
         self,
@@ -330,22 +386,11 @@ class ResultPartStore:
             if hashlib.sha256(joined).hexdigest() != digest:
                 raise ValueError("result part digest mismatch")
             return digest
-        count = math.ceil(len(result) / _RESULT_CHUNK)
-        for index in range(count):
-            chunk = result[index * _RESULT_CHUNK : (index + 1) * _RESULT_CHUNK]
-            body = bounded_comment(
-                render_marked_comment(
-                    RESULT_COMMENT_MARKER,
-                    {
-                        "count": count,
-                        "data": base64.b64encode(chunk).decode("ascii"),
-                        "event_key": event_key,
-                        "index": index,
-                        "kind": "result",
-                        "result_sha256": digest,
-                    },
-                )
-            )
+        bodies = result_part_bodies(event_key, result)
+        preflight = getattr(self._port, "preflight_bodies", None)
+        if callable(preflight):
+            preflight(bodies)
+        for body in bodies:
             echoed = self._port.create(body)
             if comment_payload(echoed.body) != comment_payload(body):
                 raise ValueError("operation comment readback failed")
@@ -357,7 +402,13 @@ class ResultPartStore:
         if not isinstance(payload_digest, str) or len(payload_digest) != 64:
             raise ValueError("result digest is invalid")
         _parse_event_key(event_key)
-        return _join(self._parts(event_key), payload_digest)
+        available = self.read_available_with_carriers(event_key=event_key)
+        if available is None:
+            raise ValueError("result part is missing")
+        if available[0] != payload_digest:
+            raise ValueError("result part digest mismatch")
+        self._confirmed_read = available
+        return available[1]
 
     def read_available(self, *, event_key: str) -> tuple[str, bytes] | None:
         """Read a complete owned payload; its digest alone conveys no authority.

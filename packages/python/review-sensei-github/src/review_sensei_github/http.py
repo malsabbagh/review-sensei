@@ -34,6 +34,19 @@ _SAFE_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
 Opener = Callable[..., Any]
 
 
+def _unique_json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate GitHub response key")
+        value[key] = item
+    return value
+
+
+def _invalid_json_number(_value):
+    raise ValueError("non-JSON GitHub response number")
+
+
 def _completed_json_objects(raw: bytes | bytearray) -> int:
     """Count closed object tokens in an already bounded prefix, ignoring strings.
 
@@ -53,6 +66,54 @@ def _completed_json_objects(raw: bytes | bytearray) -> int:
             quoted = True
         elif value == 125:
             count += 1
+    return count
+
+
+def _completed_comment_nodes(raw):
+    """Only count complete direct node objects inside the reserved prefix.
+
+    This discloses no partial response and authenticates no node. Unlike the
+    generic closure count it handles null authors and nested/quoted braces.
+    """
+    raw = raw[: MAX_GITHUB_RESPONSE_BYTES - 4096]
+    stack, quoted, escaped, start = [], False, False, 0
+    node_depth, count, pending_nodes = None, 0, False
+    for index, value in enumerate(raw):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif value == 92:
+                escaped = True
+            elif value == 34:
+                quoted = False
+                pending_nodes = False
+                if node_depth is None and index - start <= 64:
+                    try:
+                        key = json.loads(raw[start : index + 1].decode("utf-8"))
+                    except (ValueError, UnicodeError):
+                        key = None
+                    following = index + 1
+                    while following < len(raw) and raw[following] in b" \t\n\r":
+                        following += 1
+                    pending_nodes = (
+                        key == "nodes" and following < len(raw) and raw[following] == 58
+                    )
+            continue
+        if value == 34:
+            quoted, start = True, index
+        elif value in (91, 123):
+            stack.append(value)
+            if value == 91 and pending_nodes and node_depth is None:
+                node_depth = len(stack)
+            pending_nodes = False
+        elif value in (93, 125):
+            if not stack:
+                return 0
+            if value == 125 and node_depth is not None and len(stack) == node_depth + 1:
+                count += 1
+            if value == 93 and node_depth == len(stack):
+                return count
+            stack.pop()
     return count
 
 
@@ -223,6 +284,7 @@ class GitHubHttp:
                     raise GitHubHTTPResponseTooLargeError(
                         "GitHub response exceeded the configured size limit",
                         completed_json_objects=_completed_json_objects(raw),
+                        completed_comment_nodes=_completed_comment_nodes(raw),
                     )
                 status = int(getattr(response, "status", 200))
                 value = self._parse_body(bytes(raw))
@@ -247,8 +309,12 @@ class GitHubHttp:
         if not raw:
             return None
         try:
-            parsed = json.loads(raw.decode("utf-8", errors="strict"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            parsed = json.loads(
+                raw.decode("utf-8", errors="strict"),
+                object_pairs_hook=_unique_json_object,
+                parse_constant=_invalid_json_number,
+            )
+        except (UnicodeDecodeError, ValueError) as exc:
             raise GitHubHTTPError("GitHub response was not valid UTF-8 JSON") from exc
         if not isinstance(parsed, (dict, list)):
             raise GitHubHTTPError("GitHub response must be a JSON object or array")
@@ -371,6 +437,16 @@ class GitHubHttp:
         deadline = (
             monotonic() + timeout_seconds if timeout_seconds is not None else math.inf
         )
+        from .quarantine_scan_capacity import capacity_comment_reader
+
+        capacity_reader = capacity_comment_reader(self, path)
+        if capacity_reader is not None:
+            return capacity_reader(
+                max_requests=max_requests,
+                timeout_seconds=timeout_seconds,
+                before_read=before_read,
+                expected_items=expected_items,
+            )
         requests = 0
         collected: list[Any] = []
         separator = "&" if "?" in path else "?"

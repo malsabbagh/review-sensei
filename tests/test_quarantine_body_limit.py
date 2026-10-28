@@ -240,5 +240,12 @@ class BodyLimitQuarantineTests(unittest.TestCase):
                     3,
                 )
                 self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
+                f.select_command("@reviewsensei verify", new_run=True)
+                self.assertEqual(f.invoke_command(), 0, f.error or str(f.exception))
+                f.select_command(f.command_body, new_run=True)
+                f.command_active, f.owner_job = False, "hosted"
+                f.event_name, f.event_document = "pull_request", None
+                self.assertEqual(f.invoke(), 0, f.error)
+                self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
                 self.assertEqual(f.comment["body"], old_body)
                 self.assertIsNone(old.api_run_accounting["terminal_transaction"])

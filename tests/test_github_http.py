@@ -23,6 +23,17 @@ class FakeResponse(io.BytesIO):
 
 
 class GitHubHttpTests(unittest.TestCase):
+    def test_complete_response_rejects_duplicate_keys_and_non_json_numbers(self):
+        for raw in (
+            b'{"data":{"node":{"id":1,"id":2}}}',
+            b'{"data":{"node":{"id":1,"\\u0069d":2}}}',
+            b'{"author":{"id":2},"author":{"id":999}}',
+            b'{"totalCount":NaN}',
+            b'{"totalCount":Infinity}',
+        ):
+            with self.subTest(raw=raw), self.assertRaises(GitHubHTTPError):
+                GitHubHttp._parse_body(raw)
+
     def test_adaptive_pagination_obeys_request_budget_independently(self):
         http, calls = self.make_http((200, b"[1]"))
         with self.assertRaises(GitHubHTTPPaginationLimitError):

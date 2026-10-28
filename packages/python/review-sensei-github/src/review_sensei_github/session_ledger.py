@@ -362,6 +362,9 @@ class GitHubIssueCommentSessionLedger:
         self._quarantine_policy_branch: str | None = None
         self._quarantine_full_discovery = False
         self._quarantine_required = False
+        self._quarantine_capacity_cursor = False
+        self._quarantine_native_tail_parts = 2
+        self._quarantine_native_comment_bounds: tuple[int, ...] | None = None
         self._quarantine_checkpoint_snapshot: Any = None
         self._quarantine_complete_read = False
         self._quarantine_authenticated: Any | None = None
@@ -665,6 +668,13 @@ class GitHubIssueCommentSessionLedger:
             for part in prospective_parts
         ]
         missing_bodies = [body for body in prospective_bodies if body not in existing]
+        from .publication_recovery import _publication_transport
+
+        capacity = getattr(
+            _publication_transport(self.http), "_quarantine_capacity_guard", None
+        )
+        if capacity is not None:
+            capacity.admit_comment_batch(missing_bodies)
         if self._tail_scan_pages is not None and not self._inventory_complete:
             raise ReviewInputError(
                 "activation future metadata exceeds sealed page bound"

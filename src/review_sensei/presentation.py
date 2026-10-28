@@ -309,12 +309,40 @@ def _neutralize_links(text: str) -> str:
     return _INLINE_LINK.sub(replace, text)
 
 
-def sanitize_finding_markdown(value: str) -> str:
+def _literal_finding_markdown(text: str) -> str:
+    """Keep malformed Markdown literal without per-backtick expansion.
+
+    A safe fence is longer than every run of its delimiter. Indentation is
+    cheaper when both delimiter runs are long. Selection uses the actual JSON
+    encoding consumed by native readers, preserving all text and the existing
+    metadata-prefix neutralization. Mentions, links and HTML are inert inside
+    either complete code block.
+    """
+    content = text.replace("<!--", r"<\!--")
+    candidates = ["\n".join("    " + line for line in content.split("\n"))]
+    for delimiter in ("`", "~"):
+        longest = max(
+            (
+                len(match.group())
+                for match in re.finditer(re.escape(delimiter) + "+", content)
+            ),
+            default=0,
+        )
+        fence = delimiter * max(3, longest + 1)
+        candidates.append(f"{fence}\n{content}\n{fence}")
+    # Explicit block boundaries also make this safe when a caller appends
+    # trusted prose immediately before or after the sanitized value.
+    return "\n\n" + min(candidates, key=lambda value: len(json.dumps(value))) + "\n\n"
+
+
+def sanitize_finding_markdown(
+    value: str, *, literal_malformed_fences: bool = False
+) -> str:
     """Escape untrusted explanation text while preserving legitimate Markdown.
 
     Newlines, balanced code fences, and real links are preserved. Forged
     HTML comment markers, mention notifications, unsafe link destinations,
-    and unbalanced fences are neutralized so injected text cannot forge
+    and unbalanced fences are made literal so injected text cannot forge
     ReviewSensei metadata, notify users, or swallow later sections.
     """
 
@@ -324,12 +352,13 @@ def sanitize_finding_markdown(value: str) -> str:
     lines = text.split("\n")
     fence_lines = [bool(_FENCE_LINE.match(line)) for line in lines]
     unbalanced = sum(fence_lines) % 2 == 1
+    if unbalanced and literal_malformed_fences:
+        return _literal_finding_markdown(text)
     sanitized: list[str] = []
     in_fence = False
     for line, is_fence_line in zip(lines, fence_lines, strict=True):
         if unbalanced and is_fence_line:
-            # Escaping every fence marker guarantees the text cannot open a
-            # fence that would swallow later published sections.
+            # Preserve the exact prior producer format for its replay path.
             line = line.replace("`", "\\`").replace("~", "\\~")
         if is_fence_line or in_fence:
             # Inside code fences only marker forging is a hazard; mentions
@@ -445,6 +474,7 @@ def build_finding_view(
     lifecycle_state: str = "new",
     placement: str = "body",
     advisory: bool = False,
+    literal_malformed_fences: bool = False,
 ) -> FindingView:
     """Map a validated comment onto its presentation view."""
 
@@ -459,7 +489,9 @@ def build_finding_view(
         requirement=requirement,
         severity=comment.severity,
         title=_title_label(comment.defect_kind),
-        detail=sanitize_finding_markdown(comment.body),
+        detail=sanitize_finding_markdown(
+            comment.body, literal_malformed_fences=literal_malformed_fences
+        ),
         placement=placement,
         lifecycle_state=lifecycle_state,
         advisory=advisory,
@@ -715,6 +747,7 @@ def build_review_summary_view(
     placement_note: str | None = None,
     reason: str | None = None,
     omitted_explanations: int = 0,
+    literal_malformed_fences: bool = False,
 ) -> ReviewSummaryView:
     """Order and bound summary content deterministically before rendering."""
 
@@ -726,7 +759,11 @@ def build_review_summary_view(
     return ReviewSummaryView(
         state=state,
         head_sha=head_sha,
-        overview=sanitize_finding_markdown(overview) if overview else None,
+        overview=sanitize_finding_markdown(
+            overview, literal_malformed_fences=literal_malformed_fences
+        )
+        if overview
+        else None,
         coverage_line=coverage_line,
         required=required_views,
         decisions=decision_views,

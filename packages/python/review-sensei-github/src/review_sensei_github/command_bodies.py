@@ -1484,6 +1484,11 @@ def _run_review_provider(
         ).hexdigest(),
         execute=produced,
         encode=analysis_payload,
+        source_base_sha=kwargs.get("trusted_base_sha"),
+        source_head_sha=head_sha,
+        source_policy_digest=kwargs.get("expected_policy_digest"),
+        source_configuration_digest=kwargs.get("expected_configuration_digest"),
+        source_evidence_digest=kwargs.get("expected_evidence_digest"),
     )
     if isinstance(admitted, OperationRefusal):
         raise ReviewInputError(

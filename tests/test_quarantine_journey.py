@@ -168,6 +168,14 @@ class JourneyFixture(CreationFixture, CommandEntryFixture):
             not in path
         ):
             response = CommandEntryFixture.external(self, request, timeout)
+            if path.endswith("/jobs") and not self.command_active:
+                run_id = int(path.split("/actions/runs/")[1].split("/")[0])
+                if run_id in self.past_jobs:
+                    value = json.loads(response.read(524288))
+                    value["jobs"][0]["name"] = (
+                        "ReviewSensei / " + self.past_jobs[run_id]
+                    )
+                    return json_response(value)
             if path == f"/repos/owner/repo/actions/runs/{self.creation_run}":
                 value = json.loads(response.read(524288))
                 value.update(self.creation_metadata)
@@ -358,6 +366,22 @@ class QuarantineJourneyTests(unittest.TestCase):
                         "remaining": state.remaining,
                     }
                 )
+                from review_sensei_github.publication_recovery import (
+                    _publication_transport,
+                )
+
+                guard = _publication_transport(
+                    fixture.selected.ledger.http
+                )._quarantine_capacity_guard
+                if guard is not None:
+                    self.assertTrue(fixture.selected.ledger._quarantine_capacity_cursor)
+                    self.assertIsNotNone(guard.comment_reader)
+                    self.assertTrue(guard.certificates)
+                    for certificate in guard.certificates.values():
+                        self.assertLessEqual(
+                            certificate["physical_reads_upper_bound"], 10
+                        )
+                    metrics[-1]["native_capacity"] = copy.deepcopy(guard.certificates)
 
             before_calls = fixture.provider_calls
             with registered_resource([registration]):
@@ -471,6 +495,19 @@ class QuarantineJourneyTests(unittest.TestCase):
                     1,
                 )
                 measure("verify")
+                if getattr(
+                    fixture.selected.ledger, "_quarantine_capacity_cursor", False
+                ):
+                    # A new HTTP transport/ledger starts at the next ordinary
+                    # review entry. The head and all historical holds persist.
+                    fixture.select_command(fixture.command_body, new_run=True)
+                    fixture.command_active, fixture.owner_job = False, "hosted"
+                    fixture.event_name, fixture.event_document = "pull_request", None
+                    self.assertEqual(fixture.invoke(), 0, fixture.error)
+                    measure("next-ordinary-review")
+                    self.assertEqual(
+                        sum(r.get("state") == "APPROVED" for r in fixture.reviews), 1
+                    )
                 parts = [
                     item
                     for item in fixture.extra_comments.values()
