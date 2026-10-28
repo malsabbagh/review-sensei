@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from fake_github_http import make_http
+from review_sensei_github.publication_recovery import _publication_transport
 from review_sensei_github.quarantine_capacity import NativeCapacityGuard
 from review_sensei_github.quarantine_published_tail import BROKER_QUALIFICATIONS
 from test_quarantine_activation import IDENTITY, registered_resource
@@ -36,6 +37,86 @@ def no_reserve():
 
 
 class QuarantineNativeCapacityTests(unittest.TestCase):
+    def test_public_entry_and_successor_command_share_one_physical_guard(self):
+        calls = []
+        original = NativeCapacityGuard.before_request
+
+        def before(guard, method, path, body):
+            if method in {"POST", "PATCH", "PUT"} and path.startswith("/repos/"):
+                calls.append((method, path))
+            return original(guard, method, path, body)
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
+        ):
+            f = PublishedTailJourneyFixture(directory)
+            _, registration = f.original_origins()
+            mutations = []
+            with (
+                registered_resource([registration]),
+                patch.object(NativeCapacityGuard, "before_request", before),
+            ):
+                self.assertEqual(f.invoke(), 0, f.error)
+                mutations.extend(
+                    (method, path)
+                    for _, method, path in f.trace
+                    if method in {"POST", "PATCH", "PUT"} and path.startswith("/repos/")
+                )
+                physical = _publication_transport(f.selected.ledger.http)
+                self.assertIsNotNone(physical._quarantine_capacity_guard)
+                pending = f.selected.ledger._quarantine_authenticated.inventories
+                scope = next(iter(pending))
+                item = pending[scope]["assessments"][0]["instance"]
+                f.quarantine_predecessor_comment_id = None
+                f.select_command(
+                    "@reviewsensei dismiss "
+                    + item
+                    + ' --reason "quarantine:'
+                    + scope
+                    + ' Original immutable source disproves this concern."',
+                    new_run=True,
+                )
+                self.assertEqual(f.invoke_command(), 0, f.error or str(f.exception))
+                mutations.extend(
+                    (method, path)
+                    for _, method, path in f.trace
+                    if method in {"POST", "PATCH", "PUT"} and path.startswith("/repos/")
+                )
+            self.assertGreater(len(mutations), 20)
+            self.assertEqual(calls, mutations)
+
+    def test_public_entry_capacity_refusal_precedes_physical_staging(self):
+        original = NativeCapacityGuard.before_request
+
+        def before(guard, method, path, body):
+            if method == "POST" and path.endswith("/issues/7/comments"):
+                guard.reserve["issue_comments"]["new_objects"] = 1001
+            return original(guard, method, path, body)
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
+        ):
+            f = PublishedTailJourneyFixture(directory)
+            _, registration = f.original_origins()
+            old_body, provider_calls = f.comment["body"], f.provider_calls
+            start = len(f.trace)
+            with (
+                registered_resource([registration]),
+                patch.object(NativeCapacityGuard, "before_request", before),
+            ):
+                self.assertEqual(f.invoke(), 1, f.error)
+            self.assertIn("capacity", f.error)
+            self.assertEqual(f.comment["body"], old_body)
+            self.assertEqual(f.provider_calls, provider_calls)
+            self.assertFalse(
+                any(
+                    method in {"POST", "PATCH", "PUT"} and path.startswith("/repos/")
+                    for _, method, path in f.trace[start:]
+                )
+            )
+
     def test_installed_oversized_native_reserve_refuses_before_staging(self):
         for surface, field, amount in (
             ("issue_comments", "new_objects", 1001),

@@ -221,10 +221,16 @@ class NativeCapacityGuard:
 
 
 def install_capacity(ledger, identity, receipt, *, token, future_parts, future_bytes):
+    from .http import GitHubHttp
+    from .publication_recovery import _publication_transport
+
     reserve = native_reserve(receipt)
     if reserve is None:
         return None
-    existing = getattr(ledger.http, "_quarantine_capacity_guard", None)
+    transport = _publication_transport(ledger.http)
+    if type(transport) is not GitHubHttp:
+        raise ReviewInputError("quarantine capacity transport is not audited")
+    existing = transport._quarantine_capacity_guard
     if existing is not None:
         if existing.identity != identity or existing.reserve != reserve:
             raise ReviewInputError("quarantine native capacity scope changed")
@@ -321,7 +327,7 @@ def install_capacity(ledger, identity, receipt, *, token, future_parts, future_b
         else:
             raise ReviewInputError("quarantine check census is incomplete")
     guard.seed("checks", list(checks.values()))
-    ledger.http._quarantine_capacity_guard = guard
+    transport._quarantine_capacity_guard = guard
     return guard
 
 
