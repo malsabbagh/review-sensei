@@ -8,10 +8,9 @@ uncertainty and accounting remain immutable evidence. The successor preserves al
 historical assessment obligations and uses a genuinely new run's finite allowance;
 individual authenticated decisions and normal current review gates are required
 before approval. A closed complete census, exact owned-root fences and fresh scope
-checks guard checkpoint and later startup writes. The append-only activation
-registry remains empty and the dedicated workflow disabled until a separately
-reviewed exact one-shot registration. Publishing the implementation enables no
-transition by itself.
+checks guard checkpoint and later startup writes.
+
+Quarantine registry: append-only, empty; workflow disabled until reviewed exact one-shot registration. Release grants no activation.
 
 ## Repository caller accounting and current Actions authority
 

@@ -1,3 +1,5 @@
+Quarantine registry: append-only, empty; workflow disabled until reviewed exact one-shot registration. Release grants no activation.
+
 Actions retain one caller HTTP allowance: root `api_request_limit` (default 512).
 Only v3 purpose/source/repo/PR/head/run/attempt/job/workflow authority enables work.
 Successors must prove cessation; uncertainty and abandoned capacity stay charged.
