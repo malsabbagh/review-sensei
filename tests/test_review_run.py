@@ -120,7 +120,9 @@ class EntryFixture(LifecycleFixture):
             tx.HostedAnalysisCliTests.ANALYSIS_DIFF, encoding="utf-8", newline="\n"
         )
         self.live_head = HEAD
+        self.live_base = BASE
         self.requested_head = HEAD
+        self.requested_base = BASE
         self.before_provider = None
         self.before_entry = None
         self.after_engine = None
@@ -131,6 +133,7 @@ class EntryFixture(LifecycleFixture):
         self.event_name = "pull_request"
         self.event_document = None
         self.review_intent = None
+        self.quarantine_predecessor_comment_id = None
         self.overlap = False
         self.refuse_broker = False
         self.run_id = 456
@@ -313,6 +316,8 @@ class EntryFixture(LifecycleFixture):
         if path.endswith("/pulls/7"):
             pull = json.loads(response.read(524288))
             pull["head"]["sha"] = self.live_head
+            pull["head"]["repo"]["id"] = 123
+            pull["base"]["sha"] = self.live_base
             return json_response(pull)
         if path.endswith("/actions/runs/456"):
             run = json.loads(response.read(524288))
@@ -518,6 +523,14 @@ class EntryFixture(LifecycleFixture):
                         str(self.root),
                         "--publication-outcome",
                         str(self.root / "publication.json"),
+                        *(
+                            [
+                                "--quarantine-predecessor-comment-id",
+                                str(self.quarantine_predecessor_comment_id),
+                            ]
+                            if self.quarantine_predecessor_comment_id is not None
+                            else []
+                        ),
                         "--",
                         "--diff",
                         str(self.root / "review.patch"),
@@ -528,7 +541,7 @@ class EntryFixture(LifecycleFixture):
                         "--pull-request",
                         "7",
                         "--base-sha",
-                        BASE,
+                        self.requested_base,
                         "--head-sha",
                         self.requested_head,
                         "--config",

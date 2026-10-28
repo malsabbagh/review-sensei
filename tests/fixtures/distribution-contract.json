@@ -24,7 +24,15 @@
       "src/review_sensei/schemas/human-file-receipt-group.schema.json",
       "src/review_sensei/schemas/review-transaction.schema.json",
       "src/review_sensei/schemas/rescan-state.schema.json",
-      "src/review_sensei/schemas/eligibility-v5.schema.json"
+      "src/review_sensei/schemas/eligibility-v5.schema.json",
+      "src/review_sensei/schemas/quarantine-assessment-cursor.schema.json",
+      "src/review_sensei/schemas/quarantine-assessment-event.schema.json",
+      "src/review_sensei/schemas/quarantine-assessment-inventory.schema.json",
+      "src/review_sensei/schemas/quarantine-assessment-origins.schema.json",
+      "src/review_sensei/schemas/quarantine-assessment-state.schema.json",
+      "src/review_sensei/schemas/quarantine-assessment-view.schema.json",
+      "src/review_sensei/schemas/quarantine-lineage.schema.json",
+      "src/review_sensei/schemas/eligibility-v7.schema.json"
     ],
     "description": "Required entries are these paths plus lanes.dist_safe.helpers and every module under lanes.dist_safe.discover. Forbidden entries are lanes.checkout_only.modules. The verifier reads this contract so MANIFEST.in and this file are the only places a lane asset is declared."
   },
@@ -121,7 +129,24 @@
         "tests/test_review_run.py",
         "tests/test_review_run_rescan.py",
         "tests/test_run_authority.py",
-        "tests/test_work_continuation.py"
+        "tests/test_work_continuation.py",
+        "tests/test_quarantine_activation.py",
+        "tests/test_quarantine_approval.py",
+        "tests/test_quarantine_assessments.py",
+        "tests/test_quarantine_command.py",
+        "tests/test_quarantine_creation.py",
+        "tests/test_quarantine_evidence.py",
+        "tests/test_quarantine_isolation.py",
+        "tests/test_quarantine_journey.py",
+        "tests/test_quarantine_lineage.py",
+        "tests/test_quarantine_origin.py",
+        "tests/test_quarantine_record.py",
+        "tests/test_quarantine_registry.py",
+        "tests/test_quarantine_source.py",
+        "tests/test_quarantine_state_chain.py",
+        "tests/test_github_approval.py",
+        "tests/test_quarantine_checkpoint.py",
+        "tests/test_quarantine_census.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },
@@ -143,7 +168,8 @@
         "tests/test_publication.py",
         "tests/test_release.py",
         "tests/test_security_gates.py",
-        "tests/test_trusted_recovery_workflow.py"
+        "tests/test_trusted_recovery_workflow.py",
+        "tests/test_quarantine_workflow.py"
       ]
     }
   },

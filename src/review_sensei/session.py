@@ -866,6 +866,7 @@ class SessionRecord:
     assessment_queue: Mapping[str, object] | None = None
     disposition_snapshot: Mapping[str, object] | None = None
     api_run_accounting: Mapping[str, object] | None = None
+    quarantine_lineage: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
     _digest_shape_input: InitVar[str] = "current"
@@ -1101,6 +1102,20 @@ class SessionRecord:
                 raise ReviewInputError(
                     "assessment queue does not match session identity/generation"
                 )
+        from .quarantine_lineage import normalize_lineage
+
+        normalized_lineage = normalize_lineage(self.quarantine_lineage)
+        object.__setattr__(self, "quarantine_lineage", normalized_lineage)
+        if normalized_lineage is not None:
+            origin = normalized_lineage["origin_manifest"]["binding"]
+            if (
+                self.api_run_accounting is None
+                or origin["repository"] != self.repository
+                or origin["repository_id"] != self.repository_id
+                or origin["pull_request"] != self.pull_request
+                or origin["generation"] > self.generation
+            ):
+                raise ReviewInputError("quarantine lineage does not match its session")
         expected_payload = {
             "current": self._payload,
             "operator-paused": self._payload_without_dispositions,
@@ -1145,6 +1160,10 @@ class SessionRecord:
             payload["disposition_snapshot"] = dict(self.disposition_snapshot)
         if self.api_run_accounting is not None:
             payload["api_run_accounting"] = dict(self.api_run_accounting)
+        if self.quarantine_lineage is not None:
+            payload["quarantine_lineage"] = json.loads(
+                canonical_bytes(self.quarantine_lineage)
+            )
         return payload
 
     def _payload_without_dispositions(self) -> dict[str, object]:
@@ -1200,6 +1219,7 @@ class SessionRecord:
         assessment_queue: Mapping[str, object] | None = None,
         disposition_snapshot: Mapping[str, object] | None = None,
         api_run_accounting: Mapping[str, object] | None = None,
+        quarantine_lineage: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
         normalized_grants = _stored_continuation_grants(continuation_grants)
@@ -1242,6 +1262,11 @@ class SessionRecord:
 
         normalized_snapshot = normalize_snapshot(disposition_snapshot)
         normalized_api = _stored_api_accounting(api_run_accounting)
+        from .quarantine_lineage import normalize_lineage
+
+        normalized_lineage = normalize_lineage(quarantine_lineage)
+        if normalized_lineage is not None:
+            payload["quarantine_lineage"] = normalized_lineage
         if normalized_api is not None:
             payload["api_run_accounting"] = normalized_api
         if normalized_snapshot is not None:
@@ -1281,6 +1306,7 @@ class SessionRecord:
             assessment_queue=normalized_queue,
             disposition_snapshot=normalized_snapshot,
             api_run_accounting=normalized_api,
+            quarantine_lineage=normalized_lineage,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -1355,6 +1381,8 @@ class SessionRecord:
         has_queue = "assessment_queue" in value
         has_snapshot = "disposition_snapshot" in value
         has_api_accounting = "api_run_accounting" in value
+        if "quarantine_lineage" in value and value["quarantine_lineage"] is None:
+            raise ReviewInputError("quarantine lineage cannot be a null absence marker")
         if has_api_accounting and value["api_run_accounting"] is None:
             raise ReviewInputError("API accounting cannot be a null absence marker")
         if has_snapshot and value["disposition_snapshot"] is None:
@@ -1379,6 +1407,7 @@ class SessionRecord:
             or has_queue
             or has_snapshot
             or has_api_accounting
+            or "quarantine_lineage" in value
             or "rescan_state" in value
             else "operator-paused"
             if has_operator_paused
@@ -1462,6 +1491,9 @@ class SessionRecord:
                 Mapping[str, object] | None, value.get("disposition_snapshot")
             ),
             api_run_accounting=_stored_api_accounting(value.get("api_run_accounting")),
+            quarantine_lineage=cast(
+                Mapping[str, object] | None, value.get("quarantine_lineage")
+            ),
             _digest_shape_input=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
@@ -1492,6 +1524,7 @@ class SessionRecord:
         assessment_queue: Mapping[str, object] | None = None,
         disposition_snapshot: Mapping[str, object] | None = None,
         api_run_accounting: Mapping[str, object] | None = None,
+        quarantine_lineage: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         created = _aware_now(now)
         if isinstance(expires_at, str):
@@ -1532,6 +1565,7 @@ class SessionRecord:
             assessment_queue=assessment_queue,
             disposition_snapshot=disposition_snapshot,
             api_run_accounting=api_run_accounting,
+            quarantine_lineage=quarantine_lineage,
         )
 
     def rollover_api_accounting(
@@ -1593,6 +1627,77 @@ class SessionRecord:
         payload["transaction"] = self.transaction
         return type(self)._construct(**cast(dict[str, Any], payload))
 
+    def quarantine_api_accounting(
+        self,
+        accounting: Mapping[str, object],
+        lineage: Mapping[str, object],
+        *,
+        now: datetime | None = None,
+    ) -> "SessionRecord":
+        """Construct a separate unresolved lineage without resetting session state.
+
+        This value operation grants no storage authority. The adapter must
+        authenticate the complete retained origin/hold, finite isolated targets
+        and issued one-shot slot, then create and confirm a DIFFERENT comment.
+        Ordinary accounting rollover and evolve retain their terminal rules.
+        """
+        from .api_work import ApiRunAccounting
+        from .quarantine_lineage import normalize_lineage
+
+        previous = ApiRunAccounting.from_document(self.api_run_accounting)
+        candidate = ApiRunAccounting.from_document(accounting)
+        normalized = normalize_lineage(lineage)
+        if (
+            normalized is None
+            or self.quarantine_lineage is not None
+            or normalized["predecessor_record_sha256"] != self.record_sha256
+            or normalized["creation_run_id"] != candidate.identity.run_id
+            or normalized["assessment_state_manifest"]["item_count"] != 0
+            or previous.identity.repository_id != candidate.identity.repository_id
+            or previous.identity.run_id == candidate.identity.run_id
+            or candidate.owner.run_attempt != 1
+            or candidate.owner.generation != 0
+            or candidate.confirmed
+            or candidate.uncertain
+            or candidate.prior_nonstartup_liability
+            or candidate.previous_record is not None
+            or candidate.action is not None
+            or candidate.analysis_abort is not None
+            or candidate.terminal_transaction is not None
+            or candidate.startup_used != ((candidate.owner.job, 1),)
+            or previous.terminal_transaction is not None
+            or previous.action is not None
+            or previous.analysis_abort is not None
+            or self.transaction is None
+            or self.transaction.phase != "publication_failed"
+            or self.reservation_id is not None
+            or self.reserved_slot is not None
+            or self.operator_paused
+        ):
+            raise ReviewInputError(
+                "quarantine requires a separately funded unresolved predecessor"
+            )
+        binding = normalized["origin_manifest"]["binding"]
+        if (
+            binding["repository"] != self.repository
+            or binding["repository_id"] != self.repository_id
+            or binding["pull_request"] != self.pull_request
+            or binding["generation"] not in {self.generation, self.generation + 1}
+        ):
+            raise ReviewInputError("quarantine retained origin scope conflicts")
+        payload = self.to_dict()
+        del payload["schema_version"], payload["record_sha256"]
+        payload["generation"] = self.generation + 1
+        payload["updated_at"] = _format_datetime(_aware_now(now))
+        payload["api_run_accounting"] = candidate.to_document()
+        payload["quarantine_lineage"] = normalized
+        payload["transaction"] = None
+        payload["reservation_owner"] = None
+        # Every other field, including limits/counters, decisions, TTL, previous
+        # history references and grants, is retained verbatim. The old active
+        # transaction/accounting remains inside the authenticated origin.
+        return type(self)._construct(**cast(dict[str, Any], payload))
+
     def evolve(
         self,
         *,
@@ -1615,7 +1720,14 @@ class SessionRecord:
         assessment_queue: Mapping[str, object] | None | object = ...,
         disposition_snapshot: Mapping[str, object] | None | object = ...,
         api_run_accounting: Mapping[str, object] | None | object = ...,
+        quarantine_lineage: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
+        from .quarantine_lineage import require_lineage_successor
+
+        next_lineage = (
+            self.quarantine_lineage if quarantine_lineage is ... else quarantine_lineage
+        )
+        require_lineage_successor(self.quarantine_lineage, next_lineage)
         updated = _format_datetime(_aware_now(now))
         if self.api_run_accounting is not None and api_run_accounting is not ...:
             if api_run_accounting is None:
@@ -1707,6 +1819,7 @@ class SessionRecord:
                 if api_run_accounting is ...
                 else cast(Mapping[str, object] | None, api_run_accounting)
             ),
+            quarantine_lineage=cast(Mapping[str, object] | None, next_lineage),
             convergence_history=(
                 self.convergence_history
                 if convergence_history is ...
@@ -3659,6 +3772,11 @@ class InMemorySessionLedger:
             raise ReviewInputError(
                 "only an expired or witness-only session can be re-enrolled"
             )
+        retained = self._records.get((identity.repository, identity.pull_request))
+        if retained is not None and retained.quarantine_lineage is not None:
+            raise ReviewInputError(
+                "quarantine lineage requires retained authority and cannot be re-enrolled"
+            )
         self._records.pop((identity.repository, identity.pull_request), None)
         return self.initialize(identity, now=now)
 
@@ -3673,6 +3791,11 @@ class InMemorySessionLedger:
         if loaded.status != "ok" or loaded.record is None:
             raise ReviewInputError("session record is missing")
         updated = mutate(loaded.record)
+        from .quarantine_lineage import require_lineage_successor
+
+        require_lineage_successor(
+            loaded.record.quarantine_lineage, updated.quarantine_lineage
+        )
         self._records[(identity.repository, identity.pull_request)] = updated
         return updated
 
@@ -4091,6 +4214,9 @@ def _history_preserve_sources(
 
 
 def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> None:
+    from .quarantine_lineage import require_lineage_successor
+
+    require_lineage_successor(before.quarantine_lineage, after.quarantine_lineage)
     if before.api_run_accounting is not None:
         if after.api_run_accounting is None:
             raise ReviewInputError("API accounting cannot be silently discarded")
@@ -4332,6 +4458,7 @@ def read_session_baseline(
         or "baseline" not in record.convergence_history
     ):
         return None
+
     value = record.convergence_history["baseline"]
     if not isinstance(value, dict) or value.get("encoding") != PARTITION_ENCODING:
         return baseline_from_history_document(value)
@@ -4905,6 +5032,10 @@ class LocalSessionLedger:
                 "only an expired or witness-only session can be re-enrolled"
             )
         expired_document = self._read_document(self._path(identity))
+        if expired_document is not None and "quarantine_lineage" in expired_document:
+            raise ReviewInputError(
+                "quarantine lineage requires retained authority and cannot be re-enrolled"
+            )
         if expired_document is not None and "assessment_queue" in expired_document:
             raise ReviewInputError(
                 "assessment queue requires retained tombstone authority before re-enrollment"

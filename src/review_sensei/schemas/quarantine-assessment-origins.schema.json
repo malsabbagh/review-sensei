@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/quarantine-assessment-origins.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "origins"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "quarantine-assessment-origins-v1"
+    },
+    "origins": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "kind",
+          "source_manifest",
+          "inventory_manifest",
+          "scope_sha256"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "quarantine-assessment-origin-v1"
+          },
+          "kind": {
+            "enum": [
+              "retained-result",
+              "published-assessment"
+            ]
+          },
+          "source_manifest": {
+            "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+          },
+          "inventory_manifest": {
+            "anyOf": [
+              {
+                "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "encoding",
+                  "binding",
+                  "item_count",
+                  "sha256",
+                  "document"
+                ],
+                "properties": {
+                  "encoding": {
+                    "const": "inline-json-v1"
+                  },
+                  "binding": {
+                    "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json#/properties/binding"
+                  },
+                  "item_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "document": {
+                    "$ref": "https://reviewsensei.dev/schemas/v1/quarantine-assessment-inventory.schema.json"
+                  }
+                }
+              }
+            ]
+          },
+          "scope_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      }
+    }
+  }
+}

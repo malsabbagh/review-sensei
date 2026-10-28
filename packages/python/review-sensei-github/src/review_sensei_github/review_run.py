@@ -86,7 +86,11 @@ class StartupRunLedger(GitHubIssueCommentSessionLedger):
     def _fetch_pages(
         self, identity: SessionIdentity, *, since: str | None
     ) -> list[Any]:
-        if self._startup_caller._state is not None:
+        if (
+            self._startup_caller._state is not None
+            or self._quarantine_required
+            or self._quarantine_full_discovery
+        ):
             return super()._fetch_pages(identity, since=since)
         path = self._comments_path(identity)
         if since is not None:
@@ -490,7 +494,7 @@ def _configuration(
     policy_commit: str,
     path: Path | None,
     repository_id: int,
-) -> FrozenApiConfiguration:
+) -> tuple[FrozenApiConfiguration, str]:
     info = _get(http, http.repository_path(repository), token)
     if (
         type(info.get("id")) is not int
@@ -553,7 +557,7 @@ def _configuration(
     configuration = load_configuration(path)
     return FrozenApiConfiguration(
         policy_commit, hashlib.sha256(raw).hexdigest(), configuration.api_request_limit
-    )
+    ), branch
 
 
 def bootstrap(
@@ -563,6 +567,7 @@ def bootstrap(
     policy_commit: str,
     purpose: str = "review",
     source: Mapping[str, object] | None = None,
+    quarantine_predecessor_comment_id: int | None = None,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
     event = os.environ.get("GITHUB_EVENT_NAME", "")
@@ -586,6 +591,18 @@ def bootstrap(
     run_id = os.environ.get("GITHUB_RUN_ID", "")
     attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
     metadata_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if quarantine_predecessor_comment_id is not None and (
+        purpose != "review"
+        or event != "workflow_dispatch"
+        or attempt != "1"
+        or type(quarantine_predecessor_comment_id) is not int
+        or not 1 <= quarantine_predecessor_comment_id <= 9_007_199_254_740_991
+        or args.rescan
+        or args.review_remaining
+    ):
+        raise ReviewInputError(
+            "quarantine requires one explicit first dispatch and no reanalysis intent"
+        )
     if (
         not isinstance(args.repository, str)
         or _REPOSITORY.fullmatch(args.repository) is None
@@ -678,7 +695,7 @@ def bootstrap(
     from .publication_recovery import _PaginationObservationHttp
 
     http = _PaginationObservationHttp(GitHubHttp(opener=caller.open), budget)
-    frozen = _configuration(
+    frozen, policy_branch = _configuration(
         http,
         args.repository,
         metadata_token,
@@ -804,10 +821,59 @@ def bootstrap(
         reservation_owner=session.reservation_owner,
     )
     native.authenticated_app_id = session.app_id
+    from .quarantine_activation import authorize_creation_slot, registrations_for
+    from .quarantine_evidence import CurrentReadScope
+    from .quarantine_origin import QuarantineOriginReader
+
+    native._quarantine_policy_branch = policy_branch
+    native._quarantine_full_discovery = bool(registrations_for(identity))
+    native._quarantine_origin_reader = QuarantineOriginReader(
+        metadata_token=metadata_token,
+        actions_token=actions_token,
+        current_scope=CurrentReadScope(
+            native, identity, args.base_sha, args.head_sha, metadata_token
+        ),
+    )
+    if quarantine_predecessor_comment_id is not None:
+        event_path = Path(os.environ.get("GITHUB_EVENT_PATH", ""))
+        with event_path.open("rb") as stream:
+            event_bytes = stream.read(1_048_577)
+        if len(event_bytes) > 1_048_576:
+            raise ReviewInputError("quarantine explicit event exceeds its bound")
+        native._quarantine_creation_slot = authorize_creation_slot(
+            http=http,
+            token=actions_token,
+            metadata_token=metadata_token,
+            identity=identity,
+            run_id=caller.run.run_id,
+            policy_commit=policy_commit,
+            predecessor_comment_id=quarantine_predecessor_comment_id,
+            event=json.loads(event_bytes),
+            actor=os.environ.get("GITHUB_ACTOR"),
+            triggering_actor=os.environ.get("GITHUB_TRIGGERING_ACTOR"),
+        )
     loaded = native.load(identity)
     if int(attempt) == 1:
         try:
-            if loaded.status == "missing":
+            if quarantine_predecessor_comment_id is not None:
+                from .quarantine_creation import create_quarantine, prepare_quarantine
+
+                if loaded.status != "ok" or loaded.record is None:
+                    raise ReviewInputError(
+                        "explicit quarantine predecessor cannot be authenticated"
+                    )
+                prepared = prepare_quarantine(
+                    ledger=native,
+                    identity=identity,
+                    previous=loaded.record,
+                    slot=native._quarantine_creation_slot,
+                    configuration=frozen,
+                    owner=owner,
+                    metadata_token=metadata_token,
+                    actions_token=actions_token,
+                )
+                create_quarantine(prepared, actions_token=actions_token)
+            elif loaded.status == "missing":
                 caller.initialize_and_activate(native, identity, frozen, owner)
             elif loaded.status == "ok" and loaded.record is not None:
                 previous_root = loaded.record
@@ -835,6 +901,8 @@ def bootstrap(
             else:
                 raise ReviewInputError("previous caller root cannot be authenticated")
         except GitHubPublicationTransientError:
+            if quarantine_predecessor_comment_id is not None:
+                raise
             if caller._activation is None or caller._last_method not in {
                 "POST",
                 "PATCH",
@@ -932,6 +1000,7 @@ def run_review(argv: Sequence[str]) -> int:
     parser.add_argument("--policy-commit", required=True)
     parser.add_argument("--run-directory", type=Path, required=True)
     parser.add_argument("--publication-outcome", type=Path, required=True)
+    parser.add_argument("--quarantine-predecessor-comment-id", type=int)
     parser.add_argument("engine_args", nargs=argparse.REMAINDER)
     options = parser.parse_args(list(argv))
     core = options.engine_args
@@ -949,7 +1018,10 @@ def run_review(argv: Sequence[str]) -> int:
     ):
         raise ReviewInputError("review lifecycle requires exact base and head")
     selected = bootstrap(
-        args, run_directory=options.run_directory, policy_commit=options.policy_commit
+        args,
+        run_directory=options.run_directory,
+        policy_commit=options.policy_commit,
+        quarantine_predecessor_comment_id=options.quarantine_predecessor_comment_id,
     )
     core = [*core]
     if not _has_option(core, "--base-sha"):

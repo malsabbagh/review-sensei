@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.coverage import coverage_approval_state
@@ -232,8 +232,34 @@ class ReviewApprovalEligibility:
     human_review: PendingHumanReview | None = None
     partitioned_root: PartitionedEligibilityRoot | None = None
     human_inventory_reference: HumanInventoryReference | None = None
+    quarantine_assessments: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, object]:
+        if self.quarantine_assessments is not None:
+            from review_sensei.quarantine_assessments import validate_view
+
+            view = validate_view(self.quarantine_assessments)
+            if self.human_review is not None and view["fresh_human_pending"] != bool(
+                self.human_review.pending
+            ):
+                raise ReviewInputError("quarantine fresh assessment facts conflict")
+            if self.facts.has_human_adjudication_findings != (
+                view["fresh_human_pending"] or bool(view["pending"])
+            ):
+                raise ReviewInputError("quarantine combined assessment facts conflict")
+            current = replace(
+                self,
+                quarantine_assessments=None,
+                facts=replace(
+                    self.facts,
+                    has_human_adjudication_findings=view["fresh_human_pending"],
+                ),
+            )
+            return {
+                "schema_version": "7",
+                "current": current.to_dict(),
+                "quarantine_assessments": view,
+            }
         if self.human_inventory_reference is not None:
             return self._referenced_document()
         if self.partitioned_root is not None:
@@ -315,6 +341,42 @@ class ReviewApprovalEligibility:
         expected_context: PartitionedEligibilityContext | None = None,
         visible_reader: VisibleReader | None = None,
     ) -> "ReviewApprovalEligibility":
+        if isinstance(value, Mapping) and value.get("schema_version") == "7":
+            from review_sensei.quarantine_assessments import validate_view
+
+            if (
+                set(value) != {"schema_version", "current", "quarantine_assessments"}
+                or not isinstance(value["current"], Mapping)
+                or value["current"].get("schema_version")
+                not in {"1", "2.0", "3", "4", "5"}
+            ):
+                raise ReviewInputError("quarantine eligibility envelope is invalid")
+            validate_public_document(value, "eligibility-v7")
+            view = validate_view(value["quarantine_assessments"])
+            current = cls.from_dict(
+                value["current"],
+                human_inventory_reader=human_inventory_reader,
+                partition_reader=partition_reader,
+                expected_context=expected_context,
+                visible_reader=visible_reader,
+            )
+            if (
+                current.facts.has_human_adjudication_findings
+                != view["fresh_human_pending"]
+            ):
+                raise ReviewInputError("quarantine fresh assessment facts conflict")
+            combined = replace(
+                current,
+                quarantine_assessments=view,
+                facts=replace(
+                    current.facts,
+                    has_human_adjudication_findings=(
+                        view["fresh_human_pending"] or bool(view["pending"])
+                    ),
+                ),
+            )
+            combined.to_dict()
+            return combined
         if (
             isinstance(value, Mapping)
             and value.get("schema_version") == DEFAULT_HUMAN_ELIGIBILITY_VERSION
@@ -438,6 +500,8 @@ class ReviewApprovalEligibility:
     ) -> AutoApprovalDecision:
         """Evaluate the persisted facts with the live exact-head thread state."""
 
+        if self.quarantine_assessments is not None:
+            self.to_dict()
         return evaluate_approval_facts(
             replace(
                 self.facts,

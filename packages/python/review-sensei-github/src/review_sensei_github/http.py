@@ -34,6 +34,28 @@ _SAFE_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
 Opener = Callable[..., Any]
 
 
+def _completed_json_objects(raw: bytes | bytearray) -> int:
+    """Count closed object tokens in an already bounded prefix, ignoring strings.
+
+    This is a performance hint, never a partial JSON parser or source of data.
+    """
+    quoted = escaped = False
+    count = 0
+    for value in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif value == 92:
+                escaped = True
+            elif value == 34:
+                quoted = False
+        elif value == 34:
+            quoted = True
+        elif value == 125:
+            count += 1
+    return count
+
+
 class GitHubHttpTransport(Protocol):
     """Protocol for the bounded GitHub REST transport."""
 
@@ -195,7 +217,8 @@ class GitHubHttp:
                     raise GitHubHTTPError("GitHub response was invalid")
                 if len(raw) > MAX_GITHUB_RESPONSE_BYTES:
                     raise GitHubHTTPResponseTooLargeError(
-                        "GitHub response exceeded the configured size limit"
+                        "GitHub response exceeded the configured size limit",
+                        completed_json_objects=_completed_json_objects(raw),
                     )
                 status = int(getattr(response, "status", 200))
                 return status, self._parse_body(bytes(raw))

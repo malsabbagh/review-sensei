@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from review_sensei.baseline import ReviewBaseline
+from review_sensei.baseline import ReviewBaseline, baseline_complete_document
 from review_sensei.cli import (
     _CANONICAL_BACKEND_ADAPTERS,
     _configured_resource_budget,
@@ -53,6 +53,7 @@ class ReconstructedPublicationContexts:
     evidence: dict[str, object]
     baseline: ReviewBaseline | None
     current_key: ReviewContextCacheKey
+    admission_context: dict[str, object] | None = None
 
 
 def reconstruct_publication_contexts(
@@ -173,6 +174,16 @@ def reconstruct_publication_contexts(
         + ":"
         + evidence_digest,
     )
+    quarantine_full_analysis = False
+    if record.quarantine_lineage is not None and transaction is not None:
+        from review_sensei.quarantine_lineage import full_analysis_reservation
+
+        full_reservation = full_analysis_reservation(
+            record.quarantine_lineage["scope_sha256"], reservation
+        )
+        if transaction.reservation_id == full_reservation:
+            reservation = full_reservation
+            quarantine_full_analysis = True
     if record.rescan_state is not None and transaction is not None:
         # The consumed request derives a distinct transaction reservation from
         # this independently reconstructed ordinary context. A successor may
@@ -208,7 +219,12 @@ def reconstruct_publication_contexts(
             "reconstructed context does not match the original committed transaction"
         )
     baseline = read_session_baseline(ledger, record)
-    if baseline is not None and baseline.cache_key == key:
+    if quarantine_full_analysis:
+        # The authenticated transaction commits to the independently rebuilt
+        # ordinary context plus the immutable lineage. It selected a full pass;
+        # the predecessor baseline remains retained, never interpreted as fresh.
+        baseline = None
+    elif baseline is not None and baseline.cache_key == key:
         if (
             record.completed_verification_rounds != 0
             or record.completed_initial_reviews != 1
@@ -230,5 +246,22 @@ def reconstruct_publication_contexts(
             "original prior baseline is unavailable; supply the original admission context"
         )
     return ReconstructedPublicationContexts(
-        reconstructed_configuration, evidence, baseline, key
+        reconstructed_configuration,
+        evidence,
+        baseline,
+        key,
+        {
+            "schema_version": "quarantine-original-admission-context-v1",
+            "configuration": reconstructed_configuration,
+            "evidence": evidence,
+            "active_category_ids": list(selection.active_category_ids),
+            "lens_contexts": [
+                lens.to_prompt_dict() for lens in selection.lens_contexts
+            ],
+            "learnings": [learning.to_dict() for learning in learnings],
+            "baseline": baseline_complete_document(baseline)
+            if baseline is not None
+            else None,
+            "current_key": dict(key.__dict__),
+        },
     )

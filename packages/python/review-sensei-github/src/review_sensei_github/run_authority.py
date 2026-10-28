@@ -282,8 +282,8 @@ class VerifiedRunAction:
         self.fence()
         return cast(Mapping[str, Any], document["actor"])
 
-    def fence(self) -> None:
-        """Fresh source/head read before an action's native business mutation."""
+    def fence(self) -> Mapping[str, Any]:
+        """Fresh source/head read; return the authenticated source observation."""
         run, document = self.run, self.document
         if run.caller.accounting.owner != self.owner:
             raise GitHubBrokerClientError("Current action owner changed")
@@ -328,3 +328,4 @@ class VerifiedRunAction:
                 or pull.get("state") != "open"
             ):
                 raise GitHubBrokerClientError("Current action head changed")
+        return cast(Mapping[str, Any], current)

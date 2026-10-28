@@ -1,5 +1,18 @@
 # Architecture
 
+## Quarantined review lineage
+
+[ADR 0115](adr/0115-quarantined-review-lineage.md) proposes an explicit isolated
+successor for a recognized unresolved predecessor. The predecessor root, history,
+uncertainty and accounting remain immutable evidence. The successor preserves all
+historical assessment obligations and uses a genuinely new run's finite allowance;
+individual authenticated decisions and normal current review gates are required
+before approval. A closed complete census, exact owned-root fences and fresh scope
+checks guard checkpoint and later startup writes. The append-only activation
+registry remains empty and the dedicated workflow disabled until a separately
+reviewed exact one-shot registration. Publishing the implementation enables no
+transition by itself.
+
 ## Repository caller accounting and current Actions authority
 
 Actions retain one caller HTTP allowance: root `api_request_limit` (default 512).

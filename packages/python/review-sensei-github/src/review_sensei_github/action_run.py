@@ -143,7 +143,10 @@ def execute_command(run: ReviewRun, args: Any) -> int:
     run.ledger.business_guard = authority.fence
     source = authority.document["source"]
     actor = authority.document["actor"]
-    command = parse_maintainer_command(
+    from .quarantine_action import parse_quarantine_command
+
+    quarantine = parse_quarantine_command(args.comment_body)
+    command = quarantine or parse_maintainer_command(
         args.comment_body,
         actor=actor["login"],
         head_sha=run.head_sha,
@@ -196,6 +199,21 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             repository=run.identity.repository,
             actor=actor["login"],
         )
+    quarantine_refusal = None
+    if quarantine is not None:
+        from .quarantine_action import (
+            QuarantineTargetRefusal,
+            decision_authority,
+            prepare_quarantine_target,
+        )
+
+        try:
+            quarantine_target = prepare_quarantine_target(
+                run, authority, quarantine, app, permission
+            )
+            run.ledger.business_guard = lambda: decision_authority(run, authority)
+        except QuarantineTargetRefusal as error:
+            quarantine_refusal = str(error)
     authority.fence()
     boundary = caller.begin_action_effect(run.ledger, run.identity, intent)
     explicit_mode = getattr(args, "review_mode", None)
@@ -205,32 +223,48 @@ def execute_command(run: ReviewRun, args: Any) -> int:
         and run.plan.policy.reviews == "advisory"
     ):
         explicit_mode = "advisory"
-    result = app.apply_maintainer_command(
-        options=_options(run),
-        oidc_token=run.oidc,
-        repository=run.identity.repository,
-        repository_id=run.identity.repository_id,
-        pull_request=run.identity.pull_request,
-        head_sha=run.head_sha,
-        body=args.comment_body,
-        actor_login=actor["login"],
-        actor_type=actor["type"],
-        association=actor["association"],
-        app_slug=args.app_slug,
-        source_comment_id=args.source_comment_id,
-        current_action=authority,
-        finding_inventory=inventory,
-        actor_permission=permission,
-        command_budget=caller.budget_view,
-        media_budget=caller.budget_view,
-        media_read_token=run.ledger.token,
-        operation_entry="enabled",
-        app_id=run.ledger.authenticated_app_id,
-        run_id=str(caller.run.run_id),
-        run_attempt=str(caller.attempt),
-        reviews_policy=run.plan.policy.reviews,
-        convergence_policy=resolve_review_convergence_policy(mode=explicit_mode),
-    )
+    if quarantine_refusal is not None:
+        from review_sensei.disposition import MaintainerCommandResult
+
+        result = MaintainerCommandResult(
+            action=command.action,
+            applied=False,
+            operator_paused=run.ledger.load(run.identity).record.operator_paused,
+            summary="Carried historical assessment refused: " + quarantine_refusal,
+        )
+    elif quarantine is not None:
+        from .quarantine_action import apply_quarantine_target
+
+        result = apply_quarantine_target(
+            run, authority, quarantine, quarantine_target, app
+        )
+    else:
+        result = app.apply_maintainer_command(
+            options=_options(run),
+            oidc_token=run.oidc,
+            repository=run.identity.repository,
+            repository_id=run.identity.repository_id,
+            pull_request=run.identity.pull_request,
+            head_sha=run.head_sha,
+            body=args.comment_body,
+            actor_login=actor["login"],
+            actor_type=actor["type"],
+            association=actor["association"],
+            app_slug=args.app_slug,
+            source_comment_id=args.source_comment_id,
+            current_action=authority,
+            finding_inventory=inventory,
+            actor_permission=permission,
+            command_budget=caller.budget_view,
+            media_budget=caller.budget_view,
+            media_read_token=run.ledger.token,
+            operation_entry="enabled",
+            app_id=run.ledger.authenticated_app_id,
+            run_id=str(caller.run.run_id),
+            run_attempt=str(caller.attempt),
+            reviews_policy=run.plan.policy.reviews,
+            convergence_policy=resolve_review_convergence_policy(mode=explicit_mode),
+        )
     if result.evaluation_failed:
         raise ReviewInputError(
             "command effect or required finalization remains unconfirmed: "
@@ -285,6 +319,10 @@ def run_action(argv: Sequence[str], *, purpose: str) -> int:
         )
     if getattr(args, "session_ledger", None) is not None:
         raise ReviewInputError("current Actions routes require their native run ledger")
+    if purpose == "command":
+        from .quarantine_action import parse_quarantine_command
+
+        parse_quarantine_command(args.comment_body)
     source = event_source(args, purpose=purpose)
     args.provider = getattr(args, "provider", None)
     args.model = getattr(args, "model", None)

@@ -45,6 +45,9 @@ REGISTRY_ONLY_WORKFLOWS = frozenset(
         "5c06dc37b6875df24c9ac6ece3a410d32eeb7b1d2671e7c1bfae412703656185",
         # actions/setup-python v7.1.0 pin update across the four installation lanes.
         "9df61a2e77436be2bb609379618dae2e3bcd8f5752267cb17c810b17259f6ada",
+        # Explicit isolated quarantine intent; the four exact installation lanes
+        # retain their registry-only core and source-owned adapter contracts.
+        "9b1d9c66ece39c17fe393ec7b634ba5408ceafabc38f39451f3e8e5bacb867a9",
     }
 )
 

@@ -104,44 +104,108 @@
         }
       }
     },
-    "rescan_state": {"$ref": "https://reviewsensei.dev/schemas/v1/rescan-state.schema.json"},
-    "schema_version": {"const": "1.0"},
-    "repository": {"type": "string", "minLength": 1, "maxLength": 256},
-    "pull_request": {"type": "integer", "minimum": 1, "maximum": 2147483647},
-    "repository_id": {
-      "type": ["integer", "null"],
+    "rescan_state": {
+      "$ref": "https://reviewsensei.dev/schemas/v1/rescan-state.schema.json"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "repository": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "pull_request": {
+      "type": "integer",
       "minimum": 1,
       "maximum": 2147483647
     },
-    "completed_initial_reviews": {"type": "integer", "minimum": 0, "maximum": 1000000},
-    "completed_verification_rounds": {"type": "integer", "minimum": 0, "maximum": 1000000},
-    "failed_attempts": {"type": "integer", "minimum": 0, "maximum": 32},
-    "failed_attempts_head_sha": {"type": ["string", "null"], "pattern": "^[a-f0-9]{40,64}$"},
-    "generation": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+    "repository_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "completed_initial_reviews": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "completed_verification_rounds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "failed_attempts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 32
+    },
+    "failed_attempts_head_sha": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[a-f0-9]{40,64}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
     "reservation_id": {
       "anyOf": [
-        {"type": "null"},
-        {"type": "string", "pattern": "^[a-f0-9]{8,64}$"}
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8,64}$"
+        }
       ]
     },
     "reservation_owner": {
       "description": "Owning run from the authenticated OIDC broker; absent in legacy reservations.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["run_id", "head_sha"],
+      "required": [
+        "run_id",
+        "head_sha"
+      ],
       "properties": {
-        "run_id": {"type": "string", "pattern": "^[1-9][0-9]{0,18}$"},
-        "head_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"}
+        "run_id": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,18}$"
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        }
       }
     },
     "reserved_slot": {
-      "type": ["string", "null"],
-      "enum": ["initial", "verification", "failed-attempt", null]
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "initial",
+        "verification",
+        "failed-attempt",
+        null
+      ]
     },
     "last_committed_reservation_id": {
       "anyOf": [
-        {"type": "null"},
-        {"type": "string", "pattern": "^[a-f0-9]{8,64}$"}
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8,64}$"
+        }
       ]
     },
     "created_at": {
@@ -159,40 +223,134 @@
       "format": "date-time",
       "pattern": "^(?:\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2}))$"
     },
-    "record_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-    "operator_paused": {"type": "boolean"},
-    "assessment_queue": {"$ref": "https://reviewsensei.dev/schemas/v1/assessment-queue-root.schema.json"},
+    "record_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "operator_paused": {
+      "type": "boolean"
+    },
+    "assessment_queue": {
+      "$ref": "https://reviewsensei.dev/schemas/v1/assessment-queue-root.schema.json"
+    },
     "dispositions": {
       "type": "array",
       "maxItems": 256,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["fingerprint", "action", "reason", "actor", "head_sha", "expires_at"],
+        "required": [
+          "fingerprint",
+          "action",
+          "reason",
+          "actor",
+          "head_sha",
+          "expires_at"
+        ],
         "properties": {
-          "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{16,64}$"},
-          "action": {"enum": ["dismiss", "defer", "accept-risk", "accept-coverage-uncertainty"]},
-          "reason": {"type": "string", "minLength": 1, "maxLength": 512},
-          "actor": {"type": "string", "minLength": 1, "maxLength": 256},
-          "head_sha": {"type": ["string", "null"], "pattern": "^[a-f0-9]{40,64}$"},
-          "expires_at": {"type": ["string", "null"], "format": "date-time"},
-          "actor_role": {"type": ["string", "null"], "maxLength": 64},
-          "finding_reference": {"type": ["string", "null"], "pattern": "^(?:RS-)?[A-Fa-f0-9]{6,64}$"},
-          "recorded_at": {"type": ["string", "null"], "format": "date-time"},
-          "policy_digest": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
-          "provenance": {"type": ["string", "null"], "maxLength": 256},
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{16,64}$"
+          },
+          "action": {
+            "enum": [
+              "dismiss",
+              "defer",
+              "accept-risk",
+              "accept-coverage-uncertainty"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "actor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "head_sha": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{40,64}$"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "actor_role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "finding_reference": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^(?:RS-)?[A-Fa-f0-9]{6,64}$"
+          },
+          "recorded_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "policy_digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "provenance": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 256
+          },
           "resolution_kind": {
-            "type": ["string", "null"],
-            "enum": ["disputed", "deferred", "accepted_unresolved", "coverage_uncertainty_accepted", null]
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "disputed",
+              "deferred",
+              "accepted_unresolved",
+              "coverage_uncertainty_accepted",
+              null
+            ]
           },
           "target_kind": {
-            "type": ["string", "null"],
-            "enum": ["finding", "coverage_uncertainty", null]
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "finding",
+              "coverage_uncertainty",
+              null
+            ]
           },
           "incomplete_coverage": {
             "type": "array",
             "maxItems": 256,
-            "items": {"type": "string", "minLength": 1, "maxLength": 256}
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
           }
         }
       }
@@ -214,27 +372,69 @@
           "consumed_reservation_id",
           "consumed_generation"
         ],
-          "properties": {
-            "command_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
-            "actor": {"type": "string", "minLength": 1, "maxLength": 256},
-            "head_sha": {"type": "string", "pattern": "^[a-f0-9]{40,64}$"},
-            "policy_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-            "issued_at": {"type": "string", "format": "date-time"},
-            "expires_at": {"type": "string", "format": "date-time"},
-            "consumed_reservation_id": {"type": ["string", "null"], "pattern": "^[a-f0-9]{8,64}$"},
-            "consumed_generation": {"type": ["integer", "null"], "minimum": 1, "maximum": 2147483647}
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "actor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "head_sha": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{40,64}$"
+          },
+          "policy_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "issued_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "consumed_reservation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{8,64}$"
+          },
+          "consumed_generation": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 2147483647
+          }
         },
         "oneOf": [
           {
             "properties": {
-              "consumed_reservation_id": {"type": "null"},
-              "consumed_generation": {"type": "null"}
+              "consumed_reservation_id": {
+                "type": "null"
+              },
+              "consumed_generation": {
+                "type": "null"
+              }
             }
           },
           {
             "properties": {
-              "consumed_reservation_id": {"type": "string"},
-              "consumed_generation": {"type": "integer"}
+              "consumed_reservation_id": {
+                "type": "string"
+              },
+              "consumed_generation": {
+                "type": "integer"
+              }
             }
           }
         ]
@@ -247,58 +447,183 @@
       "type": "object",
       "description": "Bounded convergence envelope. The field caps below bound each member; the validation seam additionally rejects canonical UTF-8 JSON above 12288 history bytes or 20480 record bytes, which JSON Schema cannot express. Writers allocate less history when the surrounding lifecycle state requires it. Older readers reject expanded records; upgrade all shared-ledger readers before enabling new writes.",
       "additionalProperties": false,
-      "required": ["state", "progress", "provenance"],
+      "required": [
+        "state",
+        "progress",
+        "provenance"
+      ],
       "properties": {
-        "state": {"enum": ["completed", "invalidated", "recovery-required"]},
+        "state": {
+          "enum": [
+            "completed",
+            "invalidated",
+            "recovery-required"
+          ]
+        },
         "baseline": {
           "oneOf": [
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["cache_key", "policy_digest", "complete", "coverage_complete", "generation", "findings", "reviewed_paths", "related_paths"],
+              "required": [
+                "cache_key",
+                "policy_digest",
+                "complete",
+                "coverage_complete",
+                "generation",
+                "findings",
+                "reviewed_paths",
+                "related_paths"
+              ],
               "properties": {
                 "cache_key": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["repository", "pull_request", "base_sha", "head_sha", "engine", "model", "profile", "stage_digest", "context_digest", "learning_digest"],
+                  "required": [
+                    "repository",
+                    "pull_request",
+                    "base_sha",
+                    "head_sha",
+                    "engine",
+                    "model",
+                    "profile",
+                    "stage_digest",
+                    "context_digest",
+                    "learning_digest"
+                  ],
                   "properties": {
-                    "repository": {"type": "string", "maxLength": 256},
-                    "pull_request": {"type": "integer", "minimum": 1},
-                    "base_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
-                    "head_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
-                    "engine": {"type": "string", "maxLength": 256},
-                    "model": {"type": "string", "maxLength": 256},
-                    "profile": {"type": "string", "maxLength": 256},
-                    "stage_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-                    "context_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-                    "learning_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+                    "repository": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "pull_request": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "base_sha": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{40}$"
+                    },
+                    "head_sha": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{40}$"
+                    },
+                    "engine": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "model": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "profile": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "stage_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "context_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "learning_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
                   }
                 },
-                "policy_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-                "complete": {"type": "boolean"},
-                "coverage_complete": {"type": "boolean"},
-                "generation": {"type": "integer", "minimum": 0},
+                "policy_digest": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "complete": {
+                  "type": "boolean"
+                },
+                "coverage_complete": {
+                  "type": "boolean"
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 0
+                },
                 "findings": {
                   "type": "array",
                   "maxItems": 3,
                   "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["fingerprint", "resolution_criterion", "concern", "path", "symbol", "defect_kind", "generation", "blocking"],
+                    "required": [
+                      "fingerprint",
+                      "resolution_criterion",
+                      "concern",
+                      "path",
+                      "symbol",
+                      "defect_kind",
+                      "generation",
+                      "blocking"
+                    ],
                     "properties": {
-                      "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-                      "resolution_criterion": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-                      "concern": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
-                      "path": {"type": ["string", "null"], "maxLength": 256},
-                      "symbol": {"type": ["string", "null"], "maxLength": 256},
-                      "defect_kind": {"type": "string", "maxLength": 128},
-                      "generation": {"type": "integer", "minimum": 0},
-                      "blocking": {"type": "boolean"}
+                      "fingerprint": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "resolution_criterion": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "concern": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "path": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "maxLength": 256
+                      },
+                      "symbol": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "maxLength": 256
+                      },
+                      "defect_kind": {
+                        "type": "string",
+                        "maxLength": 128
+                      },
+                      "generation": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "blocking": {
+                        "type": "boolean"
+                      }
                     }
                   }
                 },
-                "reviewed_paths": {"type": "array", "maxItems": 512, "items": {"type": "string", "maxLength": 256}},
-                "related_paths": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 256}}
+                "reviewed_paths": {
+                  "type": "array",
+                  "maxItems": 512,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 256
+                  }
+                },
+                "related_paths": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 256
+                  }
+                }
               }
             },
             {
@@ -330,7 +655,9 @@
                 }
               }
             },
-            {"$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"}
+            {
+              "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+            }
           ]
         },
         "progress": {
@@ -339,31 +666,83 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["event", "generation"],
+            "required": [
+              "event",
+              "generation"
+            ],
             "properties": {
-              "event": {"enum": ["completed", "invalidated", "recovery-required"]},
-              "generation": {"type": "integer", "minimum": 0, "maximum": 2147483647},
-              "blocker_set_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-              "blocker_count": {"type": "integer", "minimum": 0, "maximum": 4096},
-              "transaction_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+              "event": {
+                "enum": [
+                  "completed",
+                  "invalidated",
+                  "recovery-required"
+                ]
+              },
+              "generation": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "blocker_set_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "blocker_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4096
+              },
+              "transaction_id": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
             },
             "allOf": [
               {
-                "if": {"required": ["blocker_set_sha256"]},
+                "if": {
+                  "required": [
+                    "blocker_set_sha256"
+                  ]
+                },
                 "then": {
-                  "required": ["blocker_count"],
-                  "properties": {"event": {"const": "completed"}}
+                  "required": [
+                    "blocker_count"
+                  ],
+                  "properties": {
+                    "event": {
+                      "const": "completed"
+                    }
+                  }
                 }
               },
               {
-                "if": {"required": ["blocker_count"]},
-                "then": {"required": ["blocker_set_sha256"]}
+                "if": {
+                  "required": [
+                    "blocker_count"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "blocker_set_sha256"
+                  ]
+                }
               },
               {
-                "if": {"required": ["transaction_id"]},
+                "if": {
+                  "required": [
+                    "transaction_id"
+                  ]
+                },
                 "then": {
-                  "required": ["blocker_set_sha256", "blocker_count"],
-                  "properties": {"event": {"const": "completed"}}
+                  "required": [
+                    "blocker_set_sha256",
+                    "blocker_count"
+                  ],
+                  "properties": {
+                    "event": {
+                      "const": "completed"
+                    }
+                  }
                 }
               }
             ]
@@ -372,46 +751,86 @@
         "provenance": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["ledger_digest"],
-          "properties": {"ledger_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+          "required": [
+            "ledger_digest"
+          ],
+          "properties": {
+            "ledger_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
         }
       }
+    },
+    "quarantine_lineage": {
+      "$ref": "https://reviewsensei.dev/schemas/v1/quarantine-lineage.schema.json"
     }
   },
   "allOf": [
     {
-      "if": {"required": ["reservation_owner"]},
+      "if": {
+        "required": [
+          "reservation_owner"
+        ]
+      },
       "then": {
         "properties": {
-          "reservation_id": {"type": "string"},
-          "reserved_slot": {"type": "string"}
+          "reservation_id": {
+            "type": "string"
+          },
+          "reserved_slot": {
+            "type": "string"
+          }
         }
       }
     },
     {
       "if": {
-        "required": ["transaction"],
+        "required": [
+          "transaction"
+        ],
         "properties": {
           "transaction": {
-            "required": ["phase"],
-            "properties": {"phase": {"const": "analysis"}}
+            "required": [
+              "phase"
+            ],
+            "properties": {
+              "phase": {
+                "const": "analysis"
+              }
+            }
           }
         }
       },
       "then": {
-        "required": ["reservation_id", "reserved_slot"],
+        "required": [
+          "reservation_id",
+          "reserved_slot"
+        ],
         "properties": {
-          "reservation_id": {"type": "string"},
-          "reserved_slot": {"enum": ["initial", "verification"]}
+          "reservation_id": {
+            "type": "string"
+          },
+          "reserved_slot": {
+            "enum": [
+              "initial",
+              "verification"
+            ]
+          }
         }
       }
     },
     {
       "if": {
-        "required": ["transaction"],
+        "required": [
+          "transaction"
+        ],
         "properties": {
           "transaction": {
-            "required": ["phase"],
+            "required": [
+              "phase"
+            ],
             "properties": {
               "phase": {
                 "enum": [
@@ -428,40 +847,72 @@
       },
       "then": {
         "properties": {
-          "reservation_id": {"type": "null"},
-          "reserved_slot": {"type": "null"}
+          "reservation_id": {
+            "type": "null"
+          },
+          "reserved_slot": {
+            "type": "null"
+          }
         }
       }
     },
     {
       "if": {
-        "required": ["convergence_history"],
+        "required": [
+          "convergence_history"
+        ],
         "properties": {
           "convergence_history": {
-            "required": ["state"],
-            "properties": {"state": {"const": "completed"}}
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "completed"
+              }
+            }
           }
         }
       },
       "then": {
         "properties": {
-          "convergence_history": {"required": ["baseline"]}
+          "convergence_history": {
+            "required": [
+              "baseline"
+            ]
+          }
         }
       }
     },
     {
       "if": {
-        "required": ["convergence_history"],
+        "required": [
+          "convergence_history"
+        ],
         "properties": {
           "convergence_history": {
-            "required": ["state"],
-            "properties": {"state": {"not": {"const": "completed"}}}
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "not": {
+                  "const": "completed"
+                }
+              }
+            }
           }
         }
       },
       "then": {
         "properties": {
-          "convergence_history": {"not": {"required": ["baseline"]}}
+          "convergence_history": {
+            "not": {
+              "required": [
+                "baseline"
+              ]
+            }
+          }
         }
       }
     }

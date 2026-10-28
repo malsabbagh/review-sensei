@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/quarantine-assessment-event.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "scope_sha256",
+    "sequence",
+    "previous_manifest",
+    "decision"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "quarantine-assessment-event-v1"
+    },
+    "scope_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200
+    },
+    "previous_manifest": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+        }
+      ]
+    },
+    "decision": {
+      "$ref": "https://reviewsensei.dev/schemas/v1/quarantine-assessment-state.schema.json#/properties/settlements/items"
+    }
+  }
+}

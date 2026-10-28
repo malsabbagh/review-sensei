@@ -69,6 +69,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
@@ -82,6 +84,10 @@ jobs:
           python -m pip install -r requirements/ci.txt
           python -m pip install -e .
           python -m pip install -e packages/python/review-sensei-github --no-deps
+      - name: Preserve registered quarantine creation slots
+        env:
+          REGISTRY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python scripts/check_quarantine_registry.py --base-revision "$REGISTRY_BASE"
       - name: Format check
         run: python -m ruff format --check setup.py src tests scripts packages/python/review-sensei-github
       - name: Lint check
@@ -564,6 +570,8 @@ jobs:
         run: python -W error::ResourceWarning -m unittest tests.api_work_worker_qualification -v
       - name: Qualify current command caller and production Worker composition
         run: python -W error::ResourceWarning -m unittest tests.action_run_worker_qualification -v
+      - name: Qualify isolated quarantine and production Worker composition
+        run: python -W error::ResourceWarning -m unittest tests.quarantine_worker_qualification -v
       - name: Run Worker tests
         working-directory: deploy/cloudflare
         run: npm test

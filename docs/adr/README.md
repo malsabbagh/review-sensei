@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-10-20
+Last updated: 2026-10-28
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0115](0115-quarantined-review-lineage.md) | Proposed | Isolate an unresolved review predecessor in a separately authenticated ledger | User-authorized PR387 correction | One registered creation slot, preserved accounting and independent historical holds; local qualification only |
 | [0111](0111-caller-api-work-allowance.md) | Proposed | Separate one run-wide caller API allowance from Worker internal bounds | User-directed API-work redesign | First-block checkpoint; full runtime integration and qualification pending |
 | [0112](0112-retained-published-rescan-inventory.md) | Proposed | Authenticate retained published inventory for explicit full rescans | TaskAlong PR29 | Read-only source admission; no transaction restoration or budget changes |
 | [0109](0109-registry-bound-core-installation.md) | Proposed | Bind core installation to its verified registry publication | Hosted-only release scope | Introduced with hosted 0.3.14; closed reviewed workflow bytes; exact core required; historical equivalence retained |

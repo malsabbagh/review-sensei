@@ -25,11 +25,20 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
+
+      - name: Preserve all previous released quarantine registrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous=$(git describe --tags --match 'github-v[0-9]*' --abbrev=0 HEAD^)
+          registry_base=$(git rev-parse "$previous^{commit}")
+          python scripts/check_quarantine_registry.py --base-revision "$registry_base"
 
       - name: Check tag and version consistency
         run: python scripts/check_release_version.py --package github --tag "$GITHUB_REF_NAME"
