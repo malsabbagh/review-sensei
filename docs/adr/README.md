@@ -125,6 +125,8 @@ Process: `docs/process/adr-process.md`
 
 ## Policy
 
+| [0117](0117-bounded-native-inline-publication-groups.md) | Proposed | Bound complete inline publication with confirmed COMMENT groups and one union-aware authority frame | PR #390 | Full physical walk/caller admission and installed qualification required before activation |
+
 
 New proposal: [0084 - Lossless packed assessment queue carrier](0084-packed-assessment-queue-carrier.md)
 qualifies bounded trusted-library continuation without enabling CLI/Worker writers.

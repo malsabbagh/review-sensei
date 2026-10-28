@@ -765,6 +765,99 @@
     },
     "quarantine_lineage": {
       "$ref": "https://reviewsensei.dev/schemas/v1/quarantine-lineage.schema.json"
+    },
+    "publication_staging": {
+      "description": "Closed bounded frontier for a multipart native publication. Unknown attempts are retained.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "transaction_id",
+        "result_sha256",
+        "plan_sha256",
+        "part_count",
+        "attempted_parts",
+        "receipts",
+        "final_attempted",
+        "final_receipt"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "publication-staging-v1"
+        },
+        "transaction_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "result_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "plan_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "part_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "attempted_parts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "receipts": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "native_id",
+              "content_sha256"
+            ],
+            "properties": {
+              "native_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_:.=-]{1,64}$"
+              },
+              "content_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          }
+        },
+        "final_attempted": {
+          "type": "boolean"
+        },
+        "final_receipt": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "native_id",
+                "content_sha256"
+              ],
+              "properties": {
+                "native_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_:.=-]{1,64}$"
+                },
+                "content_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
     }
   },
   "allOf": [
