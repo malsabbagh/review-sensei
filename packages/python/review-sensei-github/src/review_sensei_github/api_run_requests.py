@@ -679,7 +679,19 @@ class ApiRunRequestTransport:
                 )
                 or (old.analysis_abort is not None and record.transaction is not None)
             ):
-                raise ReviewInputError("previous caller run is not terminal")
+                phase = (
+                    record.transaction.phase
+                    if record.transaction is not None
+                    else "no-transaction"
+                )
+                raise ReviewInputError(
+                    "previous caller run is not terminal: "
+                    f"run={old.identity.run_id} root={record.record_sha256} phase={phase}; "
+                    "terminal accounting or action completion is unconfirmed; "
+                    "installed recovery classifiers: literal-blocker-path-prepublication-v1, "
+                    "body-limit-prepublication-v1, published-tail-reply-isolation-v1; "
+                    "each requires its own authenticated source and activation"
+                )
             if old.action is not None:
                 from .api_run_history import read_action_result
 

@@ -30,7 +30,46 @@ def require_registry_successor(before, after):
             or any(not isinstance(row, dict) for row in value["registrations"])
         ):
             raise RegistryCheckError("registry container is unsupported")
-        return value["registrations"]
+        result = value["registrations"]
+        slots, predecessors = set(), set()
+        for row in result:
+            version = row.get("schema_version")
+            if (
+                version
+                not in {
+                    "quarantine-activation-v1",
+                    "quarantine-activation-v2",
+                    "quarantine-published-activation-v1",
+                    "quarantine-published-activation-v2",
+                    "quarantine-body-limit-activation-v2",
+                }
+                or any(
+                    type(row.get(key)) is not int
+                    or not 1 <= row[key] <= 9_007_199_254_740_991
+                    for key in (
+                        "repository_id",
+                        "pull_request",
+                        "predecessor_comment_id",
+                        "workflow_id",
+                        "run_number",
+                    )
+                )
+                or (version.endswith("-v1") and row["run_number"] != 1)
+            ):
+                raise RegistryCheckError("registered execution ordinal is unsupported")
+            slot = row["repository_id"], row["workflow_id"], row["run_number"]
+            predecessor = (
+                row["repository_id"],
+                row["pull_request"],
+                row["predecessor_comment_id"],
+            )
+            if slot in slots or predecessor in predecessors:
+                raise RegistryCheckError(
+                    "registered execution or predecessor slot is reused"
+                )
+            slots.add(slot)
+            predecessors.add(predecessor)
+        return result
 
     previous, candidate = rows(before), rows(after)
     if candidate[: len(previous)] != previous:

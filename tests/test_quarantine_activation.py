@@ -104,6 +104,80 @@ def registered_resource(rows=None):
 
 
 class QuarantineActivationTests(unittest.TestCase):
+    def test_v2_distinct_pinned_ordinals_share_one_workflow_without_reassignment(self):
+        from review_sensei_github.quarantine_activation import (
+            read_registry,
+            require_registry_successor,
+        )
+
+        first = registration()
+        second = {
+            **first,
+            "schema_version": "quarantine-activation-v2",
+            "pull_request": 8,
+            "predecessor_comment_id": 42,
+            "run_number": 2,
+        }
+
+        def registry(rows):
+            return json.dumps(
+                {
+                    "schema_version": "quarantine-activation-registry-v1",
+                    "registrations": rows,
+                }
+            ).encode()
+
+        self.assertEqual(read_registry(registry([first, second])), [first, second])
+        self.assertEqual(
+            require_registry_successor(registry([first]), registry([first, second])),
+            [first, second],
+        )
+        for changed in ([], [second, first], [{**first, "run_number": 2}, second]):
+            with self.subTest(changed=changed), self.assertRaises(ReviewInputError):
+                require_registry_successor(registry([first, second]), registry(changed))
+        for changed in (
+            {**second, "run_number": 1},
+            {**second, "predecessor_comment_id": 41, "pull_request": 7},
+        ):
+            with self.subTest(changed=changed), self.assertRaises(ReviewInputError):
+                read_registry(registry([first, changed]))
+
+    def test_v2_authority_requires_exact_registered_ordinal_and_attempt_one(self):
+        scope = {
+            **registration(),
+            "schema_version": "quarantine-activation-v2",
+            "run_number": 7,
+        }
+        with registered_resource([scope]):
+            for number, attempt in ((1, 1), (6, 1), (8, 1), (7, 2)):
+                http, calls = make_http(
+                    responses(
+                        actual={
+                            **run(),
+                            "id": 9900 + number + attempt,
+                            "run_number": number,
+                            "run_attempt": attempt,
+                        }
+                    )
+                )
+                with (
+                    self.subTest(number=number, attempt=attempt),
+                    self.assertRaises(ReviewInputError),
+                ):
+                    self.authorize(http, run_id=9900 + number + attempt)
+                self.assertTrue(all(method == "GET" for method, _, _ in calls))
+            http, _ = make_http(
+                responses(actual={**run(), "id": 9950, "run_number": 7})
+            )
+            slot = self.authorize(http, run_id=9950)
+            self.assertEqual(slot.registration, scope)
+            slot.consume_creation(http=http, identity=IDENTITY, run_id=9950)
+            again, _ = make_http(
+                responses(actual={**run(), "id": 9950, "run_number": 7})
+            )
+            with self.assertRaises(ReviewInputError):
+                self.authorize(again, run_id=9950)
+
     def authorize(self, http, **extra):
         from review_sensei_github.quarantine_activation import authorize_creation_slot
 

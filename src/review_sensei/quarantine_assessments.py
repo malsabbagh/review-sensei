@@ -22,6 +22,8 @@ from .errors import ReviewInputError
 from .quarantine_lineage import validate_assessment_state
 from .schemas import validate_public_document
 
+PUBLISHED_KINDS = frozenset({"published-current", "published-earlier"})
+LEGACY_KINDS = frozenset({"retained-result", "published-assessment"})
 MAX_ORIGINS = 2
 MAX_ORIGIN_ASSESSMENTS = 100
 MAX_ORIGIN_INVENTORY_BYTES = 24_000
@@ -58,7 +60,8 @@ def validate_origins(value):
     if (
         not isinstance(value, dict)
         or set(value) != {"schema_version", "origins"}
-        or value["schema_version"] != "quarantine-assessment-origins-v1"
+        or value["schema_version"]
+        not in {"quarantine-assessment-origins-v1", "quarantine-published-origins-v1"}
         or not isinstance(value["origins"], list)
         or not 1 <= len(value["origins"]) <= MAX_ORIGINS
     ):
@@ -71,7 +74,7 @@ def validate_origins(value):
             not isinstance(origin, dict)
             or set(origin) != _ORIGIN_FIELDS | {"scope_sha256"}
             or origin["schema_version"] != "quarantine-assessment-origin-v1"
-            or origin["kind"] not in {"retained-result", "published-assessment"}
+            or origin["kind"] not in LEGACY_KINDS | PUBLISHED_KINDS
             or not _digest(origin["scope_sha256"])
         ):
             raise ReviewInputError("quarantine assessment origin is unsupported")
@@ -99,7 +102,11 @@ def validate_origins(value):
     if (
         scopes != sorted(set(scopes))
         or len(kinds) != len(set(kinds))
-        or "retained-result" not in kinds
+        or (
+            set(kinds) != PUBLISHED_KINDS
+            if value["schema_version"] == "quarantine-published-origins-v1"
+            else not set(kinds) <= LEGACY_KINDS or "retained-result" not in kinds
+        )
     ):
         raise ReviewInputError(
             "quarantine assessment origins are incomplete or duplicated"
@@ -233,7 +240,7 @@ def validate_view(value):
             or set(origin) != {"scope_sha256", "kind", "inventory_sha256", "item_count"}
             or not _digest(origin["scope_sha256"])
             or not _digest(origin["inventory_sha256"])
-            or origin["kind"] not in {"retained-result", "published-assessment"}
+            or origin["kind"] not in LEGACY_KINDS | PUBLISHED_KINDS
             or type(origin["item_count"]) is not int
             or not 0 <= origin["item_count"] <= MAX_ORIGIN_ASSESSMENTS
         ):
@@ -244,7 +251,10 @@ def validate_view(value):
         list(origins) != sorted(origins)
         or len(origins) != len(value["origins"])
         or len(kinds) != len(set(kinds))
-        or "retained-result" not in kinds
+        or not (
+            set(kinds) == PUBLISHED_KINDS
+            or (set(kinds) <= LEGACY_KINDS and "retained-result" in kinds)
+        )
     ):
         raise ReviewInputError("quarantine publication origins are incomplete")
     members, counts = [], dict.fromkeys(origins, 0)

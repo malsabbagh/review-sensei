@@ -1669,7 +1669,12 @@ class SessionRecord:
             or previous.action is not None
             or previous.analysis_abort is not None
             or self.transaction is None
-            or self.transaction.phase != "publication_failed"
+            or self.transaction.phase
+            != (
+                "publication_succeeded"
+                if normalized["schema_version"] == "quarantine-published-tail-v1"
+                else "publication_failed"
+            )
             or self.reservation_id is not None
             or self.reserved_slot is not None
             or self.operator_paused

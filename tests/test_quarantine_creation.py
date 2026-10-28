@@ -122,11 +122,13 @@ class CreationFixture(OriginFixture):
                     raise TimeoutError("synthetic uncertain carrier acknowledgement")
         return super().external(request, timeout)
 
-    def prepare(self):
+    def prepare(self, *, head_sha=None):
         old = parse_session_comment(
             self.comment["body"], identity=self.selected.identity
         )
         self.next_run()
+        if head_sha is not None:
+            self.live_head = self.requested_head = head_sha
         self.run_id = next(_RUN_IDS)
         self.event_name = "workflow_dispatch"
         self.source_previous = old

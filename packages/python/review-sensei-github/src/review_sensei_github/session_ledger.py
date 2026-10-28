@@ -356,6 +356,8 @@ class GitHubIssueCommentSessionLedger:
         self._part_digests: dict[str, str] = {}
         self._reuse_listed_parts = False
         self._quarantine_origin_reader: Any | None = None
+        self._quarantine_check_token_provider: Callable[[], str] | None = None
+        self._quarantine_rollover_snapshot: Any | None = None
         self._quarantine_creation_slot: Any | None = None
         self._quarantine_policy_branch: str | None = None
         self._quarantine_full_discovery = False
@@ -645,7 +647,13 @@ class GitHubIssueCommentSessionLedger:
             stored_bytes += len(body.encode())
             stored_count += 1
             existing[body] = str(item["id"])
-        if stored_count > MAX_STORED_PARTS or stored_bytes > MAX_STORED_PART_BYTES:
+        from .quarantine_published_tail import retained_storage_reserve
+
+        reserve_parts, reserve_bytes = retained_storage_reserve(self)
+        if (
+            stored_count + reserve_parts > MAX_STORED_PARTS
+            or stored_bytes + reserve_bytes > MAX_STORED_PART_BYTES
+        ):
             raise ReviewInputError("GitHub partition retention capacity exceeded")
         prospective_parts = partition_evidence(
             document, binding=binding, item_count=item_count
@@ -662,8 +670,10 @@ class GitHubIssueCommentSessionLedger:
                 "activation future metadata exceeds sealed page bound"
             )
         if (
-            stored_count + len(missing_bodies) > MAX_STORED_PARTS
-            or stored_bytes + sum(len(body.encode()) for body in missing_bodies)
+            stored_count + len(missing_bodies) + reserve_parts > MAX_STORED_PARTS
+            or stored_bytes
+            + sum(len(body.encode()) for body in missing_bodies)
+            + reserve_bytes
             > MAX_STORED_PART_BYTES
         ):
             raise ReviewInputError(
@@ -679,8 +689,10 @@ class GitHubIssueCommentSessionLedger:
             if body in existing:
                 return existing[body]
             if (
-                len(existing) >= MAX_STORED_PARTS
-                or sum(len(old.encode()) for old in existing) + len(body.encode())
+                len(existing) + reserve_parts >= MAX_STORED_PARTS
+                or sum(len(old.encode()) for old in existing)
+                + len(body.encode())
+                + reserve_bytes
                 > MAX_STORED_PART_BYTES
                 or len(body.encode()) > MAX_PART_BYTES
             ):

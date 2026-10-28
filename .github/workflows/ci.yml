@@ -572,6 +572,8 @@ jobs:
         run: python -W error::ResourceWarning -m unittest tests.action_run_worker_qualification -v
       - name: Qualify isolated quarantine and production Worker composition
         run: python -W error::ResourceWarning -m unittest tests.quarantine_worker_qualification -v
+      - name: Qualify body-limit and published-tail recovery with production Worker
+        run: python -W error::ResourceWarning -m unittest tests.quarantine_body_worker_qualification tests.quarantine_published_tail_worker_qualification -v
       - name: Run Worker tests
         working-directory: deploy/cloudflare
         run: npm test

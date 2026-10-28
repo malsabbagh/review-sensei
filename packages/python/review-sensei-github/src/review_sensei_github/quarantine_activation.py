@@ -46,11 +46,32 @@ _INPUTS = (
 
 
 def normalize_registration(value):
-    if not isinstance(value, dict) or set(value) != _KEYS:
+    body_limit = (
+        isinstance(value, dict)
+        and value.get("schema_version") == "quarantine-body-limit-activation-v2"
+    )
+    published = isinstance(value, dict) and value.get("schema_version") in {
+        "quarantine-published-activation-v1",
+        "quarantine-published-activation-v2",
+    }
+    if not isinstance(value, dict) or set(value) != (
+        _KEYS | {"published_tail"}
+        if published
+        else _KEYS | {"prepublication"}
+        if body_limit
+        else _KEYS
+    ):
         raise ReviewInputError("quarantine activation registration is unsupported")
     value = json.loads(canonical_bytes(value))
     if (
-        value["schema_version"] != "quarantine-activation-v1"
+        value["schema_version"]
+        not in {
+            "quarantine-activation-v1",
+            "quarantine-activation-v2",
+            "quarantine-published-activation-v1",
+            "quarantine-published-activation-v2",
+            "quarantine-body-limit-activation-v2",
+        }
         or not isinstance(value["repository"], str)
         or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value["repository"]) is None
         or any(
@@ -63,7 +84,8 @@ def normalize_registration(value):
             )
         )
         or type(value["run_number"]) is not int
-        or value["run_number"] != 1
+        or not 1 <= value["run_number"] <= 9_007_199_254_740_991
+        or (value["schema_version"].endswith("-v1") and value["run_number"] != 1)
         or value["workflow_path"] != WORKFLOW_PATH
         or any(
             not isinstance(value[k], str)
@@ -77,6 +99,14 @@ def normalize_registration(value):
         )
     ):
         raise ReviewInputError("quarantine activation registration is invalid")
+    if published or body_limit:
+        from .quarantine_published_tail import BODY_CONTRACT, normalize_tail_contract
+
+        execution = normalize_tail_contract(
+            value["prepublication" if body_limit else "published_tail"]
+        )
+        if (execution["schema_version"] == BODY_CONTRACT) != body_limit:
+            raise ReviewInputError("quarantine activation execution class conflicts")
     return value
 
 
@@ -112,7 +142,9 @@ def read_registry(raw):
     ]
     if len(set(keys)) != len(keys):
         raise ReviewInputError("quarantine predecessor creation slot was reassigned")
-    if len({(r["repository_id"], r["workflow_id"]) for r in rows}) != len(rows):
+    if len(
+        {(r["repository_id"], r["workflow_id"], r["run_number"]) for r in rows}
+    ) != len(rows):
         raise ReviewInputError("quarantine workflow creation slot was reused")
     return rows
 
@@ -285,7 +317,7 @@ def _authenticate_creation_scope(
         or type(run.get("workflow_id")) is not int
         or run["workflow_id"] != scope["workflow_id"]
         or type(run.get("run_number")) is not int
-        or run["run_number"] != 1
+        or run["run_number"] != scope["run_number"]
         or type(run.get("run_attempt")) is not int
         or run["run_attempt"] != 1
         or run.get("event") != "workflow_dispatch"

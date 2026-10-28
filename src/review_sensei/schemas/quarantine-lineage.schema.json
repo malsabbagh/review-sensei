@@ -14,7 +14,10 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "quarantine-lineage-v1"
+      "enum": [
+        "quarantine-lineage-v1",
+        "quarantine-published-tail-v1"
+      ]
     },
     "predecessor_comment_id": {
       "type": "integer",

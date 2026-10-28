@@ -160,6 +160,7 @@ class GitHubHttp:
         self.opener = opener
         self.timeout = timeout
         self.primed_issue_comments: dict[str, list[Any]] = {}
+        self._quarantine_capacity_guard: Any = None
 
     def repository_path(self, repository: str, suffix: str = "") -> str:
         owner, _, name = repository.partition("/")
@@ -186,6 +187,9 @@ class GitHubHttp:
         payload = None
         if body is not None:
             payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        guard = self._quarantine_capacity_guard
+        if guard is not None:
+            guard.before_request(method, path, body)
         headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
@@ -221,7 +225,10 @@ class GitHubHttp:
                         completed_json_objects=_completed_json_objects(raw),
                     )
                 status = int(getattr(response, "status", 200))
-                return status, self._parse_body(bytes(raw))
+                value = self._parse_body(bytes(raw))
+                if guard is not None:
+                    guard.after_response(method, value)
+                return status, value
         except HTTPError as exc:
             self._read_bounded_error_body(exc)
             # Preserve the status as data so callers can reconcile ambiguous

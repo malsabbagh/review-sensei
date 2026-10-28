@@ -346,12 +346,15 @@ class DefaultHumanInventoryTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ledger"
+            # Finding prose must still exceed the frame after archive-backed
+            # narrative compaction; a large narrative alone can now fit.
             result, key = human_checkpoint(
                 LocalSessionLedger(path),
                 count=53,
                 detail=1,
                 summary="Original overview. " + "x" * 31_000,
                 body_findings=40,
+                body_padding=800,
             )
             PendingHumanReview.from_result(result, BASE).to_dict()
             state = DefaultHumanState(result.comments)

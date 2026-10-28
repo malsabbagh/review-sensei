@@ -59,13 +59,16 @@ before this transition is executable.
 
 That boundary is a positive registered Actions execution slot. The installed,
 reviewed append-only registry binds one predecessor scope to one dedicated
-dispatch-only numeric workflow ID, its exact source blob, run number 1 and
-attempt 1. A recreated workflow, rerun or later dispatch refuses creation even
+dispatch-only numeric workflow ID, its exact source blob and attempt 1. V1 rows
+retain run number 1. V2 rows pin a specific positive run number; uniqueness is
+repository/workflow/ordinal, while predecessor assignment remains unique.
+Two PRs can use separately registered ordinals on the same workflow. No runtime
+code chooses the next ordinal. A recreated workflow, rerun or wrong ordinal refuses creation even
 when the first run or new root was deleted or omitted from a listing. Run-name
 and bounded census evidence may detect conflicts, but absence never creates a
 slot. Registration is empty until the disabled workflow's identity has been
 obtained read-only and registered through a separately reviewed activation.
-No automatic replacement slot is available if the first execution fails before
+No automatic replacement slot is available if the registered execution fails before
 POST. Existing predecessor registrations cannot be deleted or reassigned.
 
 Before activation, failure leaves the predecessor untouched. After activation,

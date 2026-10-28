@@ -22,6 +22,7 @@ from review_sensei.session import (
 )
 
 from .errors import GitHubPublicationTransientError
+from .http import MAX_PAGINATION_PAGES
 from .session_ledger import parse_session_comment
 
 if TYPE_CHECKING:
@@ -96,6 +97,34 @@ class _StartupSnapshot:
         return self.validate(payload, record, body)
 
 
+def retention_preflight(ledger, previous):
+    """Exact tail bound only for this issued inline-state startup transaction.
+
+    Archive POST + complete unknown-response census + part readback, then one
+    exact old-root GET, current-PR GET, PATCH and at most two exact readbacks.
+    The generic path still reserves its three complete-root scans. External
+    baseline/decision/queue references keep that conservative generic bound.
+    """
+    snapshot = getattr(ledger, "_quarantine_rollover_snapshot", None)
+    if snapshot is None:
+        return None
+    if type(snapshot) is not _StartupSnapshot or snapshot not in _ISSUED:
+        raise ReviewInputError("quarantine rollover retention proof is foreign")
+    snapshot.require()
+    if previous.record_sha256 != snapshot.digest:
+        raise ReviewInputError("quarantine rollover retention record changed")
+    history = previous.convergence_history
+    baseline = history.get("baseline") if history is not None else None
+    if (
+        previous.disposition_snapshot is not None
+        or previous.assessment_queue is not None
+        or isinstance(baseline, dict)
+        and baseline.get("encoding") == "partitioned-json-v1"
+    ):
+        return None
+    return 1 + MAX_PAGINATION_PAGES + 1 + 1 + 1 + 1 + 2
+
+
 def replace_quarantine_rollover(
     caller: ApiRunRequestTransport, ledger, identity, previous, prepare
 ):
@@ -146,6 +175,9 @@ def replace_quarantine_rollover(
     if reader is None:
         raise ReviewInputError("quarantine startup origin reader is absent")
     _ISSUED.add(snapshot)
+    if getattr(ledger, "_quarantine_rollover_snapshot", None) is not None:
+        raise ReviewInputError("quarantine rollover retention proof already exists")
+    ledger._quarantine_rollover_snapshot = snapshot
     try:
         snapshot.get(record, snapshot.body)
         reader.current_scope.require()
@@ -154,7 +186,8 @@ def replace_quarantine_rollover(
         try:
             # The original issuer still checks exact previous root, ceased
             # terminal owner, immutable archive readback and normal allocation.
-            # Its unchanged conservative 34-call retention preflight applies.
+            # Its retention preflight is derived from this issued exact-root
+            # transaction; ordinary three-census rollover remains unchanged.
             updated = prepare(record)
             require_native_decision(ledger, record, updated)
             _validate_queue_retention(record, updated)
@@ -199,4 +232,5 @@ def replace_quarantine_rollover(
                     "quarantine startup root remains unconfirmed; no retry"
                 ) from error
     finally:
+        ledger._quarantine_rollover_snapshot = None
         _ISSUED.discard(snapshot)

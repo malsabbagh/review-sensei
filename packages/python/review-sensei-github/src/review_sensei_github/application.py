@@ -1520,6 +1520,38 @@ class GitHubApplication:
 
                 if is_rescan_transaction(transaction_record):
                     publisher_arguments["explicit_reanalysis"] = True
+            if (
+                isinstance(reviewer, ReviewPublisher)
+                and options.complete_inventory
+                and result_retained
+                and retention_context_required
+                and ledger is not None
+                and budget is not None
+                and result.transaction is not None
+                and configuration_context is not None
+                and evidence_context is not None
+            ):
+                from .publication_recovery import confirm_retained_narrative
+
+                # Called only after ordinary complete-frame fitting fails. Read
+                # the existing exact carriers using this invocation's meter;
+                # compaction never stages replacement parts or resets work.
+                publisher_arguments["narrative_archive"] = lambda: (
+                    confirm_retained_narrative(
+                        http=transport,
+                        token=token,
+                        result=publisher_result,
+                        identity=identity,
+                        base_sha=base_sha,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        ledger=ledger,
+                        configuration_context=configuration_context,
+                        evidence_context=evidence_context,
+                        policy=policy,
+                        budget=budget,
+                    )
+                )
             if publisher_has_prepare:
                 publisher_arguments["prepared_review"] = prepared_publishable
             if retained_eligibility is not None:

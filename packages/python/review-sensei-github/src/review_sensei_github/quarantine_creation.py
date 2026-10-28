@@ -141,9 +141,58 @@ def prepare_quarantine(
         metadata_token,
     )
     with scope.read_only_window():
-        failed, inventory, result = reconstruct_failed_source(
-            ledger=ledger, previous=previous, current_scope=scope
-        )
+        failed = None
+        if previous.transaction.phase == "publication_succeeded":
+            from .quarantine_evidence import read_published_tail_sources
+
+            published = read_published_tail_sources(
+                ledger=ledger, previous=previous, current_scope=scope
+            )
+            sources = []
+            from review_sensei.session import SessionRecord
+
+            for kind, (source, inventory) in published.items():
+                sources.append(
+                    {
+                        "kind": kind,
+                        "source": source,
+                        "inventory": inventory,
+                        "binding": source_binding(
+                            SessionRecord.from_dict(source["record"]),
+                            ledger.evidence_producer(),
+                        ),
+                    }
+                )
+            result = None
+        else:
+            failed, inventory, result = reconstruct_failed_source(
+                ledger=ledger, previous=previous, current_scope=scope
+            )
+            sources = [
+                {
+                    "kind": "retained-result",
+                    "source": failed,
+                    "inventory": inventory,
+                    "binding": source_binding(previous, ledger.evidence_producer()),
+                }
+            ]
+            earlier = read_published_source(
+                ledger=ledger, previous=previous, current_scope=scope
+            )
+            if earlier is not None:
+                from review_sensei.session import SessionRecord
+
+                sources.append(
+                    {
+                        "kind": "published-assessment",
+                        "source": earlier[0],
+                        "inventory": earlier[1],
+                        "binding": source_binding(
+                            SessionRecord.from_dict(earlier[0]["record"]),
+                            ledger.evidence_producer(),
+                        ),
+                    }
+                )
         isolation = authenticate_isolated_predecessor(
             actions=ApiRunActionsEvidence(
                 ledger.http, token=actions_token, command_run_id=str(caller.run.run_id)
@@ -152,33 +201,9 @@ def prepare_quarantine(
             identity=identity,
             previous=previous,
             retained_result=result,
+            failed_source=failed,
             predecessor_comment_id=registration["predecessor_comment_id"],
             current_head=scope.head_sha,
-        )
-        earlier = read_published_source(
-            ledger=ledger, previous=previous, current_scope=scope
-        )
-    sources = [
-        {
-            "kind": "retained-result",
-            "source": failed,
-            "inventory": inventory,
-            "binding": source_binding(previous, ledger.evidence_producer()),
-        }
-    ]
-    if earlier is not None:
-        from review_sensei.session import SessionRecord
-
-        sources.append(
-            {
-                "kind": "published-assessment",
-                "source": earlier[0],
-                "inventory": earlier[1],
-                "binding": source_binding(
-                    SessionRecord.from_dict(earlier[0]["record"]),
-                    ledger.evidence_producer(),
-                ),
-            }
         )
     prepared = PreparedQuarantine(
         ledger=ledger,
@@ -207,7 +232,7 @@ def _get(prepared, suffix, token):
     return value
 
 
-def _fence(prepared):
+def _fence(prepared, *, revalidate_slot=False):
     """Fresh current head/base, policy and numeric maintainer before each effect."""
     ledger, identity, slot = prepared.ledger, prepared.identity, prepared.slot
     caller = ledger._startup_caller
@@ -218,22 +243,37 @@ def _fence(prepared):
         raise ReviewInputError("quarantine registration was revoked or changed")
     context = json.loads(slot._context)
     actor = context["actor"]
-    permission = _get(
-        prepared, f"/collaborators/{actor}/permission", prepared.scope.metadata_token
-    )
-    person = permission.get("user")
-    role = permission.get("permission")
-    if role == "write" and permission.get("role_name") == "maintain":
-        role = "maintain"
-    if (
-        role not in {"admin", "maintain"}
-        or not isinstance(person, dict)
-        or person.get("id") != context["event"]["sender"]["id"]
-        or type(person.get("id")) is not int
-        or person.get("type") != "User"
-        or person.get("login") != actor
-    ):
-        raise ReviewInputError("quarantine maintainer authority was revoked")
+    if revalidate_slot:
+        # This exact slot's fresh validation already reads and verifies the
+        # same numeric maintainer. Keep one permission read in this pre-effect
+        # fence, followed by the independent current policy/head checks.
+        slot.revalidate(
+            http=ledger.http,
+            identity=identity,
+            run_id=caller.run.run_id,
+            token=prepared.actions_token,
+            metadata_token=prepared.scope.metadata_token,
+            policy_commit=prepared.configuration.commit,
+        )
+    else:
+        permission = _get(
+            prepared,
+            f"/collaborators/{actor}/permission",
+            prepared.scope.metadata_token,
+        )
+        person = permission.get("user")
+        role = permission.get("permission")
+        if role == "write" and permission.get("role_name") == "maintain":
+            role = "maintain"
+        if (
+            role not in {"admin", "maintain"}
+            or not isinstance(person, dict)
+            or person.get("id") != context["event"]["sender"]["id"]
+            or type(person.get("id")) is not int
+            or person.get("type") != "User"
+            or person.get("login") != actor
+        ):
+            raise ReviewInputError("quarantine maintainer authority was revoked")
     # Read the same authenticated default-branch ref selected by bootstrap.
     branch = getattr(ledger, "_quarantine_policy_branch", None)
     if not isinstance(branch, str) or not branch:
@@ -283,10 +323,14 @@ def _stage(prepared, document, binding, count):
         and isinstance(item.get("body"), str)
         and item["body"].endswith("<!-- reviewsensei:evidence-part:v1 -->")
     ]
+    from .quarantine_published_tail import late_growth
+
+    reserve = late_growth(prepared.isolation.receipt)
     if (
-        len(retained) + len(parts) > MAX_STORED_PARTS
+        len(retained) + len(parts) + reserve["evidence_parts"] > MAX_STORED_PARTS
         or sum(len(item["body"].encode()) for item in retained)
         + sum(len(b.encode()) for b in bodies)
+        + reserve["evidence_bytes"]
         > MAX_STORED_PART_BYTES
     ):
         raise ReviewInputError("quarantine complete retained storage capacity exceeded")
@@ -332,7 +376,11 @@ def _archive(prepared, origins):
     )
     caller = ledger._startup_caller
     archive = {
-        "schema_version": "quarantine-origin-v1",
+        "schema_version": (
+            "quarantine-published-origin-v1"
+            if old.transaction.phase == "publication_succeeded"
+            else "quarantine-origin-v1"
+        ),
         "predecessor_comment_id": slot.registration["predecessor_comment_id"],
         "predecessor_record": encode_predecessor(old),
         "predecessor_record_representation": "zlib-json-v1",
@@ -344,7 +392,14 @@ def _archive(prepared, origins):
         ).hexdigest(),
         "target_isolation": prepared.isolation.receipt,
         "assessment_origins": validate_origins(
-            {"schema_version": "quarantine-assessment-origins-v1", "origins": origins}
+            {
+                "schema_version": (
+                    "quarantine-published-origins-v1"
+                    if old.transaction.phase == "publication_succeeded"
+                    else "quarantine-assessment-origins-v1"
+                ),
+                "origins": origins,
+            }
         ),
     }
     binding = origin_binding(
@@ -367,7 +422,11 @@ def _candidate(prepared, origin_manifest, origin_count):
     caller = ledger._startup_caller
     binding = origin_manifest["binding"]
     lineage = {
-        "schema_version": "quarantine-lineage-v1",
+        "schema_version": (
+            "quarantine-published-tail-v1"
+            if old.transaction.phase == "publication_succeeded"
+            else "quarantine-lineage-v1"
+        ),
         "predecessor_comment_id": slot.registration["predecessor_comment_id"],
         "predecessor_record_sha256": old.record_sha256,
         "creation_run_id": caller.run.run_id,
@@ -543,23 +602,41 @@ def plan_quarantine(prepared):
     future_parts = 2 * obligations + 4
     future_bytes = future_parts * MAX_PART_BYTES
     stored_bytes = sum(len(item["body"].encode()) for item in retained)
+    from .quarantine_published_tail import late_growth
+
+    reserve = late_growth(prepared.isolation.receipt)
     if (
-        len(retained) + parts + future_parts > MAX_STORED_PARTS
-        or stored_bytes + wire_bytes + future_bytes > MAX_STORED_PART_BYTES
+        len(retained) + parts + future_parts + reserve["evidence_parts"]
+        > MAX_STORED_PARTS
+        or stored_bytes + wire_bytes + future_bytes + reserve["evidence_bytes"]
+        > MAX_STORED_PART_BYTES
     ):
         raise ReviewInputError(
             "quarantine complete future retention capacity exceeded before staging"
         )
+    from .quarantine_capacity import install_capacity
+
+    install_capacity(
+        ledger,
+        prepared.identity,
+        prepared.isolation.receipt,
+        token=prepared.scope.metadata_token,
+        future_parts=parts + future_parts + 1,
+        future_bytes=wire_bytes
+        + future_bytes
+        + len(json.dumps({"body": body}).encode()),
+    )
     return {
         "parts": parts,
         "origin_parts": origin_parts,
         "wire_bytes_upper_bound": wire_bytes,
         "root_bytes_upper_bound": len(body.encode()),
+        "late_growth_reserve": reserve,
         "future_parts": future_parts,
         "future_bytes_upper_bound": future_bytes,
         # Three current fences plus one POST per part; two complete bounded
         # listings, slot revalidation, final current fences and one root POST.
-        "requests": 4 * parts + 2 * MAX_PAGINATION_PAGES + 7,
+        "requests": 4 * parts + 2 * MAX_PAGINATION_PAGES + 6,
     }
 
 
@@ -567,6 +644,8 @@ def create_quarantine(prepared, *, actions_token):
     """Consume the issued process preparation and slot before one new-root POST."""
     if type(prepared) is not PreparedQuarantine:
         raise ReviewInputError("quarantine requires issued complete preparation")
+    if actions_token != prepared.actions_token:
+        raise ReviewInputError("quarantine creation Actions capability changed")
     prepared.require()
     ledger, identity, old, slot = (
         prepared.ledger,
@@ -640,15 +719,7 @@ def create_quarantine(prepared, *, actions_token):
     finally:
         ledger._reuse_listed_parts = prior_reuse
         ledger._quarantine_complete_read = False
-    _fence(prepared)
-    slot.revalidate(
-        http=ledger.http,
-        identity=identity,
-        run_id=caller.run.run_id,
-        token=actions_token,
-        metadata_token=prepared.scope.metadata_token,
-        policy_commit=prepared.configuration.commit,
-    )
+    _fence(prepared, revalidate_slot=True)
     ledger.evidence_budget.preflight(1 + MAX_PAGINATION_PAGES)
     slot.consume_creation(http=ledger.http, identity=identity, run_id=caller.run.run_id)
     try:

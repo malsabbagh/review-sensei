@@ -191,15 +191,20 @@ def retain_previous_run(
             and isinstance(item.get("body"), str)
             and item["body"].endswith("<!-- reviewsensei:evidence-part:v1 -->")
         ]
+        from .quarantine_published_tail import retained_storage_reserve
+
+        reserve_parts, reserve_bytes = retained_storage_reserve(ledger)
         if (
-            len(retained) >= MAX_STORED_PARTS
-            or sum(len(item["body"].encode()) for item in retained) + len(body.encode())
+            len(retained) + reserve_parts >= MAX_STORED_PARTS
+            or sum(len(item["body"].encode()) for item in retained)
+            + len(body.encode())
+            + reserve_bytes
             > MAX_STORED_PART_BYTES
         ):
             raise ReviewInputError("retained run carrier capacity exceeded")
         # Reserve the bounded lost-response listing plus all remaining root
         # scans/head/PATCH/readback before the first immutable POST.
-        ledger.evidence_budget.preflight(
+        requests = (
             1
             + MAX_PAGINATION_PAGES
             + 1
@@ -208,6 +213,13 @@ def retain_previous_run(
             + 1
             + MAX_PAGINATION_PAGES
         )
+        if previous.quarantine_lineage is not None:
+            from .quarantine_rollover import retention_preflight
+
+            exact = retention_preflight(ledger, previous)
+            if exact is not None:
+                requests = exact
+        ledger.evidence_budget.preflight(requests)
         try:
             status, payload = ledger._request(
                 "POST", ledger._comments_path(identity), body={"body": body}

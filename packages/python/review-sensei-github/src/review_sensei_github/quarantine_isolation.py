@@ -35,7 +35,16 @@ _EXECUTORS = {
         "contract": "literal-blocker-path-prepublication-v1",
         "caller_path": ".github/workflows/review-sensei-review.yml",
         "caller_blob": "dbc745b3b3471cf2d9861e9a84774e34eb0d6e8b",
-    }
+    },
+    "c7f13b8cfe28e89ec82ad03bd2f34aed5b40cbb1": {
+        "commit": "e006596160be74a9a72b9428c5675224afa347c6",
+        "workflow_blob": "b23d80ebbc831f8baa6a38937c044dc3a13633f7",
+        "workflow_path": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
+        "workflow_ref": "refs/tags/v5",
+        "contract": "body-limit-prepublication-v1",
+        "caller_path": ".github/workflows/review-sensei-review.yml",
+        "caller_blob": "dbc745b3b3471cf2d9861e9a84774e34eb0d6e8b",
+    },
 }
 _ISSUED: weakref.WeakSet[IsolatedPredecessor] = weakref.WeakSet()
 
@@ -80,6 +89,8 @@ def authenticate_isolated_predecessor(
     retained_result,
     predecessor_comment_id,
     current_head,
+    creation_run_id=None,
+    failed_source=None,
 ):
     """Authenticate cessation plus deterministic isolation of one failed path.
 
@@ -88,6 +99,61 @@ def authenticate_isolated_predecessor(
     assessment authority. Revalidate this evidence and the current head before
     creation; previously dispatched old requests remain uncertain and charged.
     """
+    if (
+        isinstance(previous, SessionRecord)
+        and previous.transaction is not None
+        and previous.transaction.phase == "publication_succeeded"
+    ):
+        from .quarantine_activation import registered_activation
+        from .quarantine_published_tail import authenticate_tail_contract
+
+        if (
+            not isinstance(actions, ApiRunActionsEvidence)
+            or not isinstance(metadata_token, str)
+            or not metadata_token.strip()
+            or previous.identity() != identity
+            or type(predecessor_comment_id) is not int
+            or predecessor_comment_id < 1
+            or not isinstance(current_head, str)
+            or re.fullmatch(r"[a-f0-9]{40}", current_head) is None
+        ):
+            raise ReviewInputError("published-tail predecessor scope is unsupported")
+        registration = registered_activation(identity, predecessor_comment_id)
+        if (
+            registration["schema_version"]
+            not in {
+                "quarantine-published-activation-v1",
+                "quarantine-published-activation-v2",
+            }
+            or registration["predecessor_record_sha256"] != previous.record_sha256
+            or previous.transaction.head_sha == current_head
+            or previous.api_run_accounting is None
+            or str(
+                ApiRunAccounting.from_document(
+                    previous.api_run_accounting
+                ).identity.run_id
+            )
+            == actions.command_run_id
+        ):
+            raise ReviewInputError("published-tail installed registration conflicts")
+        receipt = authenticate_tail_contract(
+            actions=actions,
+            metadata_token=metadata_token,
+            identity=identity,
+            previous=previous,
+            registration=registration,
+            creation_run_id=creation_run_id,
+        )
+        proof = IsolatedPredecessor(
+            http=actions.http,
+            identity=identity,
+            previous=previous,
+            predecessor_comment_id=predecessor_comment_id,
+            current_head=current_head,
+            receipt=receipt,
+        )
+        _ISSUED.add(proof)
+        return proof
     if (
         not isinstance(metadata_token, str)
         or not metadata_token.strip()
@@ -126,15 +192,33 @@ def authenticate_isolated_predecessor(
         or retained_result.transaction is None
         or retained_result.transaction.transaction_id != transaction.transaction_id
         or retained_result.content_digest() != transaction.result_sha256
-        or retained_result.review_status != "complete"
-        or retained_result.coverage_only_partial
-        or not any(
-            any(c in comment.path for c in "*?[")
-            for comment in retained_result.comments
-        )
     ):
         raise ReviewInputError(
             "quarantine predecessor has no recognized isolated failure"
+        )
+    literal = (
+        retained_result.review_status == "complete"
+        and not retained_result.coverage_only_partial
+        and any(
+            any(c in comment.path for c in "*?[")
+            for comment in retained_result.comments
+        )
+    )
+    body_failure = None
+    if not literal:
+        from .quarantine_body_limit import ReconstructedFailedSource
+
+        if type(
+            failed_source
+        ) is not ReconstructedFailedSource or retained_result.review_status not in {
+            "complete",
+            "partial",
+        }:
+            raise ReviewInputError(
+                "quarantine predecessor has no recognized isolated failure"
+            )
+        body_failure = failed_source.require_body_failure(
+            http=actions.http, previous=previous, result=retained_result
         )
     previous_actions = ApiRunActionsEvidence(
         actions.http,
@@ -171,6 +255,12 @@ def authenticate_isolated_predecessor(
     contract = _EXECUTORS.get(source_sha) if isinstance(source_sha, str) else None
     if (
         contract is None
+        or contract["contract"]
+        != (
+            "literal-blocker-path-prepublication-v1"
+            if literal
+            else "body-limit-prepublication-v1"
+        )
         or source.get("path") != contract["workflow_path"]
         or source.get("ref") != contract["workflow_ref"]
         or run.get("path") != contract["caller_path"]
@@ -279,6 +369,28 @@ def authenticate_isolated_predecessor(
             "evidence_transaction_id": transaction.transaction_id,
         },
     }
+    if body_failure is not None:
+        from .quarantine_activation import registered_activation
+        from .quarantine_published_tail import authenticate_tail_contract
+
+        registration = registered_activation(identity, predecessor_comment_id)
+        if (
+            registration["schema_version"] != "quarantine-body-limit-activation-v2"
+            or registration["predecessor_record_sha256"] != previous.record_sha256
+            or registration["head_sha"] != current_head
+        ):
+            raise ReviewInputError(
+                "body-limit installed execution registration conflicts"
+            )
+        receipt["execution_isolation"] = authenticate_tail_contract(
+            actions=actions,
+            metadata_token=metadata_token,
+            identity=identity,
+            previous=previous,
+            registration=registration,
+            creation_run_id=creation_run_id,
+        )
+        receipt["body_limit_failure"] = body_failure
     proof = IsolatedPredecessor(
         http=actions.http,
         identity=identity,

@@ -107,7 +107,12 @@ class QuarantineTarget:
 
 def decision_authority(run, authority):
     """Fresh source/head/base/policy/maintainer checks before each decision effect."""
-    current_source = authority.fence()
+    origin_reader = getattr(run.ledger, "_quarantine_origin_reader", None)
+    if origin_reader is None:
+        raise ReviewInputError("quarantine decision provenance reader is absent")
+    current_source = authority.fence(
+        validate_pull=origin_reader.current_scope.validate_pull
+    )
     source_user = current_source.get("user")
     if (
         not isinstance(source_user, dict)
@@ -117,10 +122,6 @@ def decision_authority(run, authority):
         raise ReviewInputError(
             "quarantine decision source numeric actor is unavailable"
         )
-    origin_reader = getattr(run.ledger, "_quarantine_origin_reader", None)
-    if origin_reader is None:
-        raise ReviewInputError("quarantine decision provenance reader is absent")
-    origin_reader.current_scope.require()
     branch = getattr(run.ledger, "_quarantine_policy_branch", None)
     if not isinstance(branch, str) or not branch:
         raise ReviewInputError("quarantine current policy branch is absent")
@@ -254,13 +255,18 @@ def prepare_quarantine_target(run, authority, command, app, permission):
         raise ReviewInputError(
             "current quarantine assessment finding index is unavailable"
         )
-    if any(
+    if authenticated.lineage[
+        "schema_version"
+    ] != "quarantine-published-tail-v1" and any(
         item.instance == instance or item.lifecycle == members[0]["concern"]
         for item in index.entries
     ):
         raise QuarantineTargetRefusal(
             "quarantine assessment collides with a fresh finding; no decision applied"
         )
+    # The published-tail variant has two exact publication origins. Its scoped
+    # event changes only that origin's hold, never ordinary dispositions or a
+    # fresh thread. A recurrence therefore retains its independent fresh gate.
     actual_permission = decision_authority(run, authority)
     return QuarantineTarget(reader, authenticated, instance, actual_permission)
 
@@ -287,9 +293,14 @@ def _stage_decision_event(run, authority, event, binding):
         and isinstance(item.get("body"), str)
         and item["body"].endswith("<!-- reviewsensei:evidence-part:v1 -->")
     ]
+    from .quarantine_published_tail import retained_storage_reserve
+
+    reserve_parts, reserve_bytes = retained_storage_reserve(run.ledger)
     if (
-        len(stored) + 1 > MAX_STORED_PARTS
-        or sum(len(item["body"].encode()) for item in stored) + len(body.encode())
+        len(stored) + 1 + reserve_parts > MAX_STORED_PARTS
+        or sum(len(item["body"].encode()) for item in stored)
+        + len(body.encode())
+        + reserve_bytes
         > MAX_STORED_PART_BYTES
     ):
         raise ReviewInputError(
@@ -447,24 +458,39 @@ def apply_quarantine_target(run, authority, command, target, app):
             raise ReviewInputError("quarantine individual decision was not confirmed")
     else:
         confirmed = run.ledger.load(run.identity).record
+    if existing is None:
+        summary = (
+            (
+                "Carried historical assessment dismissed"
+                if command.action == "dismiss"
+                else "Carried historical assessment risk accepted"
+            )
+            + "; the predecessor remains unresolved and no verified fix is claimed; fresh findings require independent decisions"
+        )
+        outcome, detail = "recorded", command.action
+    else:
+        same_decision = (existing["action"], existing["actor"]) == (
+            command.action,
+            actor["login"],
+        )
+        summary = (
+            "Carried historical assessment decision already recorded"
+            if same_decision
+            else "Conflicting carried historical assessment decision not applied"
+        ) + f"; immutable prior action: {existing['action']} by {existing['actor']}"
+        outcome = "already-recorded" if same_decision else "not-applied"
+        detail = f"prior action={existing['action']}; actor={existing['actor']}; requested action={command.action}; actor={actor['login']}"
     result = MaintainerCommandResult(
         action=command.action,
         applied=existing is None,
         operator_paused=confirmed.operator_paused,
-        summary=(
-            "Carried historical assessment dismissed"
-            if command.action == "dismiss"
-            else "Carried historical assessment risk accepted"
-        )
-        + "; the predecessor remains unresolved and no verified fix is claimed"
-        if existing is None
-        else "Carried historical assessment already has an individual durable decision",
+        summary=summary,
         receipts=(
             OverrideReceipt(
                 "quarantine:" + command.scope + "/RS-" + target.instance.upper(),
                 target.instance,
-                "recorded" if existing is None else "already-recorded",
-                command.action,
+                outcome,
+                detail,
             ),
         ),
     )

@@ -29,7 +29,7 @@ from review_sensei.baseline import ReviewBaseline, ReviewContextCacheKey
 from review_sensei.cli import _parser as engine_parser
 from review_sensei.cli import main as engine_main
 from review_sensei.configuration import MAX_CONFIG_BYTES, load_configuration
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import ReviewInputError, ReviewSenseiError
 from review_sensei.hosted import HostedPlan, plan_hosted_execution
 from review_sensei.models import ReviewResult, ReviewTransaction
 from review_sensei.session import SessionIdentity
@@ -387,21 +387,30 @@ class ReviewRun:
                 or current.get("base", {}).get("sha") != self.base_sha
             ):
                 raise ReviewInputError("already published review head or base changed")
-            self.caller.begin_terminal("already-published")
-            self.caller.finish_review_run(
-                self.ledger, self.identity, hooks.skipped_transaction
-            )
+            terminal_reason = None
+            try:
+                self.caller.begin_terminal("already-published")
+                self.caller.finish_review_run(
+                    self.ledger, self.identity, hooks.skipped_transaction
+                )
+            except ReviewSenseiError:
+                terminal_reason = "terminal_close_unconfirmed"
             publication_output.write_text(
                 json.dumps(
                     {
-                        "status": "already_published",
+                        "status": "published_terminal_pending"
+                        if terminal_reason
+                        else "already_published",
+                        "publication_status": "already_published",
+                        "accounting_terminal": terminal_reason is None,
+                        "terminal_reason": terminal_reason,
                         "review_id": None,
                         "diagnostic": None,
                     }
                 )
                 + "\n"
             )
-            return 0
+            return 1 if terminal_reason else 0
         application = GitHubApplication(
             broker=self.broker,
             http=self.http,
@@ -446,6 +455,17 @@ class ReviewRun:
             current_key=analysis.current_key,
             changed_paths=analysis.changed_paths,
         )
+        published = publication.status in {
+            "published",
+            "already_published",
+            "auto_approval_disabled",
+        }
+        terminal_reason = (
+            "thread_cleanup_unconfirmed"
+            if publication.thread_resolution == "unconfirmed"
+            else "publication_finalization_incomplete"
+        )
+        accounting_terminal = False
         if (
             publication.status
             in {"published", "already_published", "auto_approval_disabled"}
@@ -458,13 +478,24 @@ class ReviewRun:
             }
             and publication.thread_resolution != "unconfirmed"
         ):
-            self.caller.finish_review_run(
-                self.ledger, self.identity, analysis.result.transaction
-            )
+            try:
+                self.caller.finish_review_run(
+                    self.ledger, self.identity, analysis.result.transaction
+                )
+            except ReviewSenseiError:
+                terminal_reason = "terminal_close_unconfirmed"
+            else:
+                accounting_terminal = True
+                terminal_reason = None
         publication_output.write_text(
             json.dumps(
                 {
-                    "status": publication.status,
+                    "status": "published_terminal_pending"
+                    if published and not accounting_terminal
+                    else publication.status,
+                    "publication_status": publication.status,
+                    "accounting_terminal": accounting_terminal,
+                    "terminal_reason": terminal_reason,
                     "review_id": publication.review_id,
                     "diagnostic": publication.diagnostic,
                 },
@@ -472,12 +503,7 @@ class ReviewRun:
             )
             + "\n"
         )
-        return (
-            0
-            if publication.status
-            in {"published", "already_published", "auto_approval_disabled"}
-            else 1
-        )
+        return 0 if published and accounting_terminal else 1
 
 
 def _get(http: GitHubHttp, path: str, token: str) -> dict[str, Any]:
@@ -821,6 +847,12 @@ def bootstrap(
         reservation_owner=session.reservation_owner,
     )
     native.authenticated_app_id = session.app_id
+    # Capacity uses the existing check capability's read permission, never a
+    # workflow token that may intentionally lack Checks. This requests no new
+    # installation permission and stays on the same physical caller budget.
+    native._quarantine_check_token_provider = lambda: broker.exchange(
+        oidc, capability="check_publish"
+    )
     from .quarantine_activation import authorize_creation_slot, registrations_for
     from .quarantine_evidence import CurrentReadScope
     from .quarantine_origin import QuarantineOriginReader

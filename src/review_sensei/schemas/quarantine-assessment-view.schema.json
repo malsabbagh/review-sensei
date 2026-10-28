@@ -42,7 +42,9 @@
           "kind": {
             "enum": [
               "retained-result",
-              "published-assessment"
+              "published-assessment",
+              "published-current",
+              "published-earlier"
             ]
           },
           "inventory_sha256": {

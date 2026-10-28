@@ -80,7 +80,7 @@ class CurrentReadScope:
             object.__setattr__(self, "_read_window", False)
         self.require()
 
-    def require(self):
+    def _require_caller(self):
         ledger, identity = self.ledger, self.identity
         caller = getattr(ledger, "caller", None) or getattr(
             ledger, "_startup_caller", None
@@ -91,6 +91,10 @@ class CurrentReadScope:
             )
         caller._require_ledger(ledger, identity)
         caller.budget_view.check()
+
+    def require(self):
+        self._require_caller()
+        ledger, identity = self.ledger, self.identity
         if self._read_window:
             return
         status, pull = ledger.http.request(
@@ -100,9 +104,20 @@ class CurrentReadScope:
             ),
             token=self.metadata_token,
         )
+        if status != 200:
+            raise ReviewInputError("quarantine current evidence scope changed")
+        self.validate_pull(pull)
+
+    def validate_pull(self, pull):
+        """Pure additional facts on a fresh action-owned PR observation.
+
+        This validates data; it issues no read, cache or authority. The action
+        fence calls it synchronously after its own authenticated GET.
+        """
+        self._require_caller()
+        identity = self.identity
         if (
-            status != 200
-            or not isinstance(pull, dict)
+            not isinstance(pull, dict)
             or pull.get("number") != identity.pull_request
             or pull.get("state") != "open"
             or pull.get("draft") is not False
@@ -309,11 +324,24 @@ def reconstruct_failed_source(*, ledger, previous, current_scope, retained_resul
                 contexts.admission_context, source
             ),
         }
+        from .quarantine_body_limit import reconstructed_source
+
+        document = reconstructed_source(
+            document,
+            ledger=ledger,
+            previous=previous,
+            result=result,
+            admitted=admitted,
+            diff=source.diff,
+            policy=policy,
+        )
     current_scope.require()
     return document, assessments, result
 
 
-def read_published_source(*, ledger, previous, current_scope, retained_source=None):
+def read_published_source(
+    *, ledger, previous, current_scope, retained_source=None, complete_inventory=False
+):
     """Authenticate the earlier published inventory without completing anything."""
     current_scope.require()
     identity = previous.identity()
@@ -338,22 +366,61 @@ def read_published_source(*, ledger, previous, current_scope, retained_source=No
             raise ReviewInputError("quarantine earlier published source is unsupported")
         original = SessionRecord.from_dict(retained_source["record"])
     state = ApiRunAccounting.from_document(original.api_run_accounting)
-    transaction = original.transaction
     if (
         original.record_sha256 != reference["root_sha256"]
         or original.identity() != identity
         or state.identity.run_id != reference["run_id"]
         or state.previous_record is not None
-        or transaction is None
+    ):
+        raise ReviewInputError(
+            "quarantine earlier published origin reference conflicts"
+        )
+    return _read_published_record(
+        ledger=ledger,
+        original=original,
+        current_scope=current_scope,
+        retained_source=retained_source,
+        complete_inventory=complete_inventory,
+    )
+
+
+def _read_published_record(
+    *,
+    ledger,
+    original,
+    current_scope,
+    retained_source=None,
+    complete_inventory=False,
+    unfinished=False,
+):
+    """Read an authenticated record's publication; this issues no write authority."""
+    identity = original.identity()
+    state = ApiRunAccounting.from_document(original.api_run_accounting)
+    transaction = original.transaction
+    if (
+        transaction is None
         or transaction.phase != "publication_succeeded"
         or transaction.result_sha256 is None
-        or state.terminal_transaction != transaction.transaction_id
+        or (
+            state.terminal_transaction is not None
+            if unfinished
+            else state.terminal_transaction != transaction.transaction_id
+        )
         or original.dispositions
         or original.disposition_snapshot is not None
     ):
         raise ReviewInputError(
             "quarantine earlier published origin is unsupported or incomplete"
         )
+    if retained_source is not None and (
+        not isinstance(retained_source, dict)
+        or set(retained_source)
+        != {"schema_version", "record", "review_id", "review_body"}
+        or retained_source["schema_version"]
+        != "quarantine-published-assessment-source-v1"
+        or retained_source["record"] != original.to_dict()
+    ):
+        raise ReviewInputError("quarantine published snapshot changed")
     publication_digest = transaction_publication_digest(transaction)
 
     def matches(review):
@@ -393,6 +460,9 @@ def read_published_source(*, ledger, previous, current_scope, retained_source=No
             ),
             token=current_scope.metadata_token,
         )
+        # Same-process complete native census, before any business effect. A
+        # capacity reader may reuse these exact bytes, never across transports.
+        ledger._quarantine_native_reviews = (ledger.http, identity, reviews)
         found = [
             (review, index)
             for review in reviews
@@ -463,7 +533,15 @@ def read_published_source(*, ledger, previous, current_scope, retained_source=No
         raise ReviewInputError(
             "quarantine earlier published assessment state is unreadable"
         )
-    pending = eligibility.human_review.pending if eligibility.human_review else ()
+    pending = (
+        (
+            eligibility.human_review.findings
+            if complete_inventory
+            else eligibility.human_review.pending
+        )
+        if eligibility.human_review
+        else ()
+    )
     indexed = {entry.instance: entry for entry in index.entries if entry.needs_human}
     complete_inventory = (
         {item.fingerprint for item in eligibility.human_review.findings}
@@ -498,3 +576,34 @@ def read_published_source(*, ledger, previous, current_scope, retained_source=No
         "review_id": review["id"],
         "review_body": review["body"],
     }, assessments
+
+
+def read_published_tail_sources(
+    *, ledger, previous, current_scope, retained_sources=None
+):
+    """Two distinct immutable published origins; no terminal flag is fabricated.
+
+    The caller independently qualifies the closed execution/target contract.
+    Complete historical membership ignores resolution receipts and thread flags.
+    """
+    retained_sources = retained_sources if retained_sources is not None else {}
+    if set(retained_sources) - {"published-current", "published-earlier"}:
+        raise ReviewInputError("published-tail sources contain a foreign origin")
+    current = _read_published_record(
+        ledger=ledger,
+        original=previous,
+        current_scope=current_scope,
+        retained_source=retained_sources.get("published-current"),
+        complete_inventory=True,
+        unfinished=True,
+    )
+    earlier = read_published_source(
+        ledger=ledger,
+        previous=previous,
+        current_scope=current_scope,
+        retained_source=retained_sources.get("published-earlier"),
+        complete_inventory=True,
+    )
+    if earlier is None:
+        raise ReviewInputError("published-tail earlier publication is absent")
+    return {"published-current": current, "published-earlier": earlier}

@@ -90,6 +90,14 @@ def select_quarantine(ledger, identity, items, found):
         ledger._reuse_listed_parts = prior_reuse
         ledger._quarantine_complete_read = False
     ledger._quarantine_required = True
+    from .quarantine_capacity import install_retained_capacity
+
+    install_retained_capacity(
+        ledger,
+        identity,
+        ledger._quarantine_authenticated,
+        token=reader.metadata_token,
+    )
     caller = getattr(ledger, "caller", None) or getattr(ledger, "_startup_caller", None)
     if caller is not None:
         caller._require_ledger(ledger, identity)

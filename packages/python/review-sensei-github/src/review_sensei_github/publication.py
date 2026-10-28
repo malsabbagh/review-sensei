@@ -122,6 +122,7 @@ if TYPE_CHECKING:
         PartitionedPublicationHost,
         PartitionedPublicationReceipt,
     )
+    from .publication_recovery import ConfirmedNarrativeArchive
 
 REVIEW_MARKER_PREFIX = "<!-- reviewsensei:review:v1"
 FINDING_MARKER_PREFIX = "<!-- reviewsensei:finding:v1"
@@ -4649,6 +4650,7 @@ class ReviewPublisher:
         complete_inventory: bool = False,
         human_inventory_store: HumanInventoryStore | None = None,
         allow_human_inventory_start: bool = False,
+        narrative_archive: Callable[[], ConfirmedNarrativeArchive] | None = None,
     ) -> PublicationResult:
         self._quarantine_context = dict(
             token=token,
@@ -4705,6 +4707,7 @@ class ReviewPublisher:
                 complete_inventory=complete_inventory,
                 human_inventory_store=human_inventory_store,
                 allow_human_inventory_start=allow_human_inventory_start,
+                narrative_archive=narrative_archive,
             )
             return (
                 publication
@@ -4756,6 +4759,7 @@ class ReviewPublisher:
         complete_inventory: bool = False,
         human_inventory_store: HumanInventoryStore | None = None,
         allow_human_inventory_start: bool = False,
+        narrative_archive: Callable[[], ConfirmedNarrativeArchive] | None = None,
     ) -> PublicationResult:
         if not isinstance(complete_inventory, bool):
             raise GitHubPublicationError("complete inventory writer gate is invalid")
@@ -4881,6 +4885,7 @@ class ReviewPublisher:
                 evidence_confirmed_concerns=evidence_confirmed_concerns,
                 authorized_dispositions=authorized_dispositions,
             )
+        original_result = result
         result = prepared.result
         authority = self.finalizer.qualification_authority
         qualification_binding = (
@@ -5039,6 +5044,7 @@ class ReviewPublisher:
             reserve = _disposition_frame_reserve(
                 preflight_document, preflight_review.index_entries
             )
+            narrative_compacted = False
             while True:
                 try:
                     fit_assembled_review(
@@ -5094,6 +5100,30 @@ class ReviewPublisher:
                             preflight_document, preflight_review.index_entries
                         )
                         needs_human_inventory = True
+                        continue
+                    if (
+                        exc.check in {"published-summary", "framed-review-body"}
+                        and not narrative_compacted
+                        and narrative_archive is not None
+                        and len(original_result.summary.encode("utf-8")) > 1024
+                    ):
+                        from .publication_recovery import ConfirmedNarrativeArchive
+
+                        archive = narrative_archive()
+                        if type(archive) is not ConfirmedNarrativeArchive:
+                            raise ReviewInputError(
+                                "retained narrative confirmation is unavailable"
+                            )
+                        overview = archive.excerpt(
+                            original_result,
+                            repository=repository,
+                            repository_id=repository_id,
+                            pull_request=pull_request,
+                            base_sha=base_sha,
+                            head_sha=head_sha,
+                        )
+                        preflight_review = replace(preflight_review, overview=overview)
+                        narrative_compacted = True
                         continue
                     raise
                 else:

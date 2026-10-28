@@ -9,7 +9,10 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "quarantine-assessment-origins-v1"
+      "enum": [
+        "quarantine-assessment-origins-v1",
+        "quarantine-published-origins-v1"
+      ]
     },
     "origins": {
       "type": "array",
@@ -32,7 +35,9 @@
           "kind": {
             "enum": [
               "retained-result",
-              "published-assessment"
+              "published-assessment",
+              "published-current",
+              "published-earlier"
             ]
           },
           "source_manifest": {

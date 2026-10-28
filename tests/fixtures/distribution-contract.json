@@ -75,6 +75,7 @@
         "tests/test_review_work.py",
         "tests/test_bounded_v1_publication.py",
         "tests/test_publication_recovery.py",
+        "tests/test_narrative_archive.py",
         "tests/test_review_transaction.py",
         "tests/test_checkpoint_publication_acceptance.py",
         "tests/test_publication_cli_recovery.py",
@@ -146,7 +147,16 @@
         "tests/test_quarantine_state_chain.py",
         "tests/test_github_approval.py",
         "tests/test_quarantine_checkpoint.py",
-        "tests/test_quarantine_census.py"
+        "tests/test_quarantine_census.py",
+        "tests/test_quarantine_body_limit.py",
+        "tests/test_quarantine_capacity.py",
+        "tests/test_quarantine_decision_conflict.py",
+        "tests/test_quarantine_published_tail.py",
+        "tests/test_quarantine_published_tail_isolation.py",
+        "tests/test_quarantine_published_tail_journey.py",
+        "tests/quarantine_published_tail_exposure.py",
+        "tests/quarantine_inline_exposure.py",
+        "tests/test_quarantine_rollover.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },

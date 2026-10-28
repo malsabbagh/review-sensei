@@ -2,6 +2,7 @@
 
 import unittest
 from copy import deepcopy
+from dataclasses import replace
 
 from review_sensei_github.api_run_host import review_startup_plan
 from test_quarantine_isolation import predecessor
@@ -45,6 +46,40 @@ def successor_values(old):
 
 
 class QuarantineRecordTests(unittest.TestCase):
+    def test_published_tail_value_preserves_the_missing_terminal_marker(self):
+        old, _ = predecessor()
+        old = old.evolve(
+            transaction=replace(old.transaction, phase="publication_succeeded")
+        )
+        lineage, state = successor_values(old)
+        with self.assertRaises(ReviewInputError):
+            old.quarantine_api_accounting(state.to_document(), lineage)
+        lineage["schema_version"] = "quarantine-published-tail-v1"
+        lineage["scope_sha256"] = lineage_scope(lineage)
+        lineage["assessment_state_manifest"] = inline_manifest(
+            {
+                "schema_version": "quarantine-assessment-state-v1",
+                "scope_sha256": lineage["scope_sha256"],
+                "settlements": [],
+            },
+            binding={
+                **lineage["assessment_state_manifest"]["binding"],
+                "policy_digest": lineage["scope_sha256"],
+            },
+            item_count=0,
+        )
+        before = deepcopy(old.to_dict())
+        successor = old.quarantine_api_accounting(state.to_document(), lineage)
+        self.assertEqual(old.to_dict(), before)
+        self.assertIsNone(old.api_run_accounting["terminal_transaction"])
+        self.assertEqual(old.transaction.phase, "publication_succeeded")
+        self.assertEqual(
+            successor.completed_initial_reviews, old.completed_initial_reviews
+        )
+        self.assertEqual(successor.api_run_accounting, state.to_document())
+        with self.assertRaises(ReviewInputError):
+            old.rollover_api_accounting(state.to_document())
+
     def test_new_value_preserves_limits_history_and_old_accounting_without_completion(
         self,
     ):

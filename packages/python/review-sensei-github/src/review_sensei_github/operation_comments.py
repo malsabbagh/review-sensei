@@ -11,7 +11,7 @@ import hashlib
 import json
 import math
 import time
-from typing import Any
+from typing import Any, cast
 
 from .errors import GitHubHTTPResponseTooLargeError
 from .http import GitHubHttp
@@ -376,7 +376,34 @@ class ResultPartStore:
         return digest, _join(parts, digest)
 
     def _parts(self, event_key: str) -> list[dict[str, object]]:
-        found: list[dict[str, object]] = []
+        return [document for _, document in self._part_records(event_key)]
+
+    def read_available_with_carriers(
+        self, *, event_key: str
+    ) -> tuple[str, bytes, tuple[int, ...]] | None:
+        """Confirm complete owned bytes and their ordered carriers.
+
+        Transport integrity is not authority. The caller must independently
+        validate the payload against its selected transaction and live scope.
+        """
+        _parse_event_key(event_key)
+        records = self._part_records(event_key)
+        if not records:
+            return None
+        digest = records[0][1].get("result_sha256")
+        if not isinstance(digest, str):
+            raise ValueError("result digest is invalid")
+        payload = _join([document for _, document in records], digest)
+        carriers = tuple(
+            comment_id
+            for comment_id, _ in sorted(
+                records, key=lambda record: cast(int, record[1]["index"])
+            )
+        )
+        return digest, payload, carriers
+
+    def _part_records(self, event_key: str) -> list[tuple[int, dict[str, object]]]:
+        found: list[tuple[int, dict[str, object]]] = []
         identities: set[int] = set()
         for comment in self._port.list_comments():
             if RESULT_COMMENT_MARKER not in comment.body:
@@ -389,10 +416,15 @@ class ResultPartStore:
                 raise ValueError("result part is invalid")
             if payload.get("event_key") != event_key:
                 continue
+            if (
+                type(comment.comment_id) is not int
+                or not 0 < comment.comment_id < 2**63
+            ):
+                raise ValueError("result part carrier identity is invalid")
             if comment.comment_id in identities:
                 raise ValueError("result part identity is duplicated")
             identities.add(comment.comment_id)
-            found.append(payload)
+            found.append((comment.comment_id, payload))
         return found
 
 

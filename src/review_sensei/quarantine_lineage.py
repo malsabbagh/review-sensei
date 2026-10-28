@@ -64,13 +64,18 @@ def normalize_lineage(value):
         raise ReviewInputError("quarantine lineage is unsupported")
     value = json.loads(canonical_bytes(value))
     if (
-        value["schema_version"] != "quarantine-lineage-v1"
+        value["schema_version"]
+        not in {"quarantine-lineage-v1", "quarantine-published-tail-v1"}
         or any(
             type(value[k]) is not int or not 1 <= value[k] <= 9_007_199_254_740_991
             for k in ("predecessor_comment_id", "creation_run_id")
         )
         or type(value["origin_count"]) is not int
         or not 1 <= value["origin_count"] <= 2
+        or (
+            value["schema_version"] == "quarantine-published-tail-v1"
+            and value["origin_count"] != 2
+        )
         or any(
             not _digest(value[k])
             for k in (

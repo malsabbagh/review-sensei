@@ -10,16 +10,40 @@ individual authenticated decisions and normal current review gates are required
 before approval. A closed complete census, exact owned-root fences and fresh scope
 checks guard checkpoint and later startup writes.
 
+The c7 body-limit contract also requires local reproduction of the complete
+framing failure against authenticated original admission and immutable Git
+context. Partial coverage and all raw candidates remain evidence. A separate
+installed registration binds the complete original/refused execution census,
+source/broker provenance and per-surface exposure. The literal-path contract
+keeps its original complete-result predicate. Published-tail isolation carries
+both publication origins independently; see [ADR 0116](adr/0116-published-tail-quarantine.md).
+
+Native capacity checks combine current complete censuses, planned successor and
+decision storage, old late allocations and positive update growth. Evidence and
+operation comments share one comment census. Reviews, inline replies/threads,
+checks and reactions retain separate bounds. Every later native mutation checks
+the permanent reserve on the same caller transport. Capacity exhaustion refuses
+with history intact. Reactions on fixed old objects and checks on old heads do
+not enter current authority readers. Acyclic provenance hashes bind execution
+scope first, then actual qualification bytes; neither hash supplies authority.
+
+A published review with unfinished cleanup/accounting reports
+`published_terminal_pending`, `accounting_terminal:false`, and an operational
+failure. The publication remains truthful; no terminal marker is invented.
+Conflicting historical decisions preserve the prior immutable settlement and
+report its actual action and actor. Same-action, same-actor repeats are explicit
+idempotence; no receipt attributes an unrecorded action to a maintainer.
+
 Quarantine registry: append-only, empty; workflow disabled until reviewed exact one-shot registration. Release grants no activation.
 
 ## Repository caller accounting and current Actions authority
 
-Actions retain one caller HTTP allowance: root `api_request_limit` (default 512).
+One caller HTTP allowance: root `api_request_limit` (default 512).
 Only v3 purpose/source/repo/PR/head/run/attempt/job/workflow authority enables work.
-Successors must prove cessation; uncertainty and abandoned capacity stay charged.
-New runs must archive terminal predecessor accounting.
+Successors must prove cessation; uncertainty/abandoned capacity stay charged.
+New runs must archive terminal predecessors.
 Only exact results/proven pre-entry aborts close actions; unknown work stays pending.
-Historical readers retain exact review/archive evidence and fresh authority, without writes.
+Historical readers require exact review/archive evidence, fresh authority and no writes.
 Finite operation/page limits can refuse with caller capacity unused.
 
 `review_run` and `action_run` own one lifecycle process across startup, review,
@@ -38,16 +62,15 @@ See [ADR 0111](adr/0111-caller-api-work-allowance.md).
 
 ## Default human inventory references
 
-Beyond legacy future-assessment capacity, closed schema 5 owned purpose-bound parts
-preserve every admitted human instance/metadata/original index. References grant no authority:
-require independent durable transaction and live repository/PR/base/head/numeric Bot
-identity. Inference/decisions/approval require fresh complete original prose/index verification.
-Receipt metadata fences never authorize decisions. All approval facts/provider qualification/other blockers
-persist through resolution. Preflight largest future receipt and prose/frame bounds.
-Only original live admission starts writes; durable intent precedes data. Unknown/incomplete
-writes hold without blind recreation. One original finite evidence budget covers
-publication/reply broker/storage/readers/mutable fences. Missing/conflicting evidence withholds
-decisions. Require reader-first rollout and trusted complete emission. See ADR 0094.
+Schema 5 owned purpose-bound parts retain all admitted human instances, metadata and
+original indexes beyond legacy capacity. References grant no authority: require independent
+transaction, live repo/PR/base/head and numeric Bot. Inference/decisions/approval require
+fresh complete original prose/index; receipt metadata never grants decisions. Retain all
+approval/provider/blocker facts through resolution. Preflight future receipts/prose/frames.
+Only original live admission starts writes; intent precedes data. Unknown/incomplete writes
+hold without recreation. One original finite budget covers publication/reply broker,
+storage/readers/fences. Missing/conflicting evidence withholds decisions. Require reader-first
+rollout and trusted complete emission (ADR 0094).
 
 Explicit rescan source admission is documented in ADR 0112 in the [ADR index](adr/README.md).
 
@@ -1210,6 +1233,14 @@ ADR: fifty varied findings fit the baseline and resolution-growth contracts;
 larger or more verbose inventories can still exceed inline bounds. Full finding
 text is budgeted separately from the input overview, while the framed review
 body remains bounded to 65,536 bytes.
+
+Only confirmed archives enable narrative excerpts; retain finding prose and authority.
+Complete-profile fitting can use a labelled UTF-8 provider-narrative excerpt
+with digest and links to the complete original transaction-bound result parts.
+The original result stays unchanged, and all confirmation reads share the
+current caller budget. The final frame includes links and future disposition
+reserves within its existing ceiling. Unconfirmed carriers prevent this fallback.
+See [ADR 0113](adr/0113-archive-backed-provider-narrative-excerpts.md).
 
 ### Explicit incomplete-review reanalysis
 

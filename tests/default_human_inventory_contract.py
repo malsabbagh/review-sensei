@@ -45,10 +45,25 @@ DEFAULT_INVENTORY_INTENT_MARKER = (
 
 
 def human_checkpoint(
-    ledger, *, count=77, detail=3, gate=None, summary=None, body_findings=0
+    ledger,
+    *,
+    count=77,
+    detail=3,
+    gate=None,
+    summary=None,
+    body_findings=0,
+    body_padding=0,
 ):
     """Checkpoint the original varied bodies and exact identities publicly."""
     result = human_result(varied_comments(count, detail=detail, unique_paths=32))
+    if body_padding:
+        result = replace(
+            result,
+            comments=tuple(
+                replace(comment, body=comment.body + "x" * body_padding)
+                for comment in result.comments
+            ),
+        )
     if body_findings:
         result = replace(
             result,

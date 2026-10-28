@@ -247,7 +247,7 @@ class QuarantineOriginReader:
             or type(run.get("workflow_id")) is not int
             or run["workflow_id"] != registration["workflow_id"]
             or type(run.get("run_number")) is not int
-            or run["run_number"] != 1
+            or run["run_number"] != registration["run_number"]
             or type(run.get("run_attempt")) is not int
             or run["run_attempt"] != 1
             or run.get("event") != "workflow_dispatch"
@@ -295,7 +295,12 @@ class QuarantineOriginReader:
         if (
             not isinstance(archive, dict)
             or set(archive) != _ARCHIVE_FIELDS
-            or archive["schema_version"] != "quarantine-origin-v1"
+            or archive["schema_version"]
+            != (
+                "quarantine-published-origin-v1"
+                if lineage["schema_version"] == "quarantine-published-tail-v1"
+                else "quarantine-origin-v1"
+            )
             or type(archive["predecessor_comment_id"]) is not int
             or not 1 <= archive["predecessor_comment_id"] <= 9_007_199_254_740_991
             or type(archive["creation_run_id"]) is not int
@@ -369,109 +374,188 @@ class QuarantineOriginReader:
         source_snapshot = canonical_bytes(
             {"sources": sources, "inventories": inventories}
         )
-        failed = sources.get("retained-result")
-        if (
-            not isinstance(failed, dict)
-            or set(failed)
-            != {
-                "schema_version",
-                "predecessor_record_sha256",
-                "retained_result",
-                "original_context_source",
-                "original_admission_context",
-            }
-            or failed["schema_version"] != "quarantine-failed-result-source-v1"
-            or failed["predecessor_record_sha256"] != previous.record_sha256
-        ):
-            raise ReviewInputError("quarantine failed-result source is unsupported")
-        if "published-assessment" in sources:
-            published = sources["published-assessment"]
-            if (
-                not isinstance(published, dict)
-                or set(published)
-                != {"schema_version", "record", "review_id", "review_body"}
-                or published["schema_version"]
-                != "quarantine-published-assessment-source-v1"
-            ):
-                raise ReviewInputError("quarantine published source is unsupported")
-        for origin in origins["origins"]:
-            source_record = (
-                previous
-                if origin["kind"] == "retained-result"
-                else SessionRecord.from_dict(sources["published-assessment"]["record"])
-            )
-            if origin["source_manifest"]["binding"] != source_binding(
-                source_record, ledger.evidence_producer()
-            ):
-                raise ReviewInputError("quarantine original source binding conflicts")
-        if cached != source_snapshot:
-            with self.current_scope.read_only_window():
-                self.current_scope.require()
-                self._creator(ledger, identity, archive, registration)
-                reconstructed, expected_inventory, result = reconstruct_failed_source(
-                    ledger=ledger,
-                    previous=previous,
-                    current_scope=self.current_scope,
-                    retained_result=failed["retained_result"],
+        if lineage["schema_version"] == "quarantine-published-tail-v1":
+            from .quarantine_evidence import read_published_tail_sources
+
+            if origins["schema_version"] != "quarantine-published-origins-v1" or set(
+                sources
+            ) != {"published-current", "published-earlier"}:
+                raise ReviewInputError(
+                    "published-tail immutable origin union conflicts"
                 )
-                if canonical_bytes(reconstructed) != canonical_bytes(failed):
-                    raise ReviewInputError("quarantine original context source changed")
-                caller = getattr(ledger, "caller", None) or getattr(
-                    ledger, "_startup_caller", None
-                )
-                if caller is None:
-                    raise ReviewInputError("quarantine reader has no current lifecycle")
-                actions = ApiRunActionsEvidence(
-                    ledger.http,
-                    token=self.actions_token,
-                    command_run_id=str(caller.run.run_id),
-                    job=old.owner.job,
-                )
-                isolation = authenticate_isolated_predecessor(
-                    actions=actions,
-                    metadata_token=self.metadata_token,
-                    identity=identity,
-                    previous=previous,
-                    retained_result=result,
-                    predecessor_comment_id=lineage["predecessor_comment_id"],
-                    current_head=self.current_scope.head_sha,
-                )
-                if isolation.receipt != archive["target_isolation"]:
+            for origin in origins["origins"]:
+                source = sources[origin["kind"]]
+                if not isinstance(source, dict) or not isinstance(
+                    source.get("record"), dict
+                ):
+                    raise ReviewInputError("published-tail source record is absent")
+                if origin["source_manifest"]["binding"] != source_binding(
+                    SessionRecord.from_dict(source["record"]),
+                    ledger.evidence_producer(),
+                ):
                     raise ReviewInputError(
-                        "quarantine source-bound target isolation changed"
+                        "published-tail original source binding conflicts"
                     )
-                earlier = read_published_source(
-                    ledger=ledger,
-                    previous=previous,
-                    current_scope=self.current_scope,
-                    retained_source=sources.get("published-assessment"),
-                )
-                expected = {"retained-result": expected_inventory}
-                if earlier is not None:
-                    expected["published-assessment"] = earlier[1]
-                if set(sources) != set(expected):
-                    raise ReviewInputError(
-                        "quarantine assessment origins are incomplete"
+            if cached != source_snapshot:
+                with self.current_scope.read_only_window():
+                    self._creator(ledger, identity, archive, registration)
+                    published = read_published_tail_sources(
+                        ledger=ledger,
+                        previous=previous,
+                        current_scope=self.current_scope,
+                        retained_sources=sources,
                     )
-                for origin in origins["origins"]:
-                    source_record = (
-                        previous
-                        if origin["kind"] == "retained-result"
-                        else SessionRecord.from_dict(
-                            sources["published-assessment"]["record"]
-                        )
+                    caller = getattr(ledger, "caller", None) or getattr(
+                        ledger, "_startup_caller", None
                     )
-                    if (
-                        origin["source_manifest"]["binding"]
-                        != source_binding(source_record, ledger.evidence_producer())
-                        or inventories[origin["scope_sha256"]]
-                        != expected[origin["kind"]]
-                    ):
+                    if caller is None:
                         raise ReviewInputError(
-                            "quarantine original assessment membership conflicts"
+                            "published-tail reader has no current lifecycle"
                         )
-                self.current_scope.require()
-            self._authenticated_sources[cache_key] = source_snapshot
+                    isolation = authenticate_isolated_predecessor(
+                        actions=ApiRunActionsEvidence(
+                            ledger.http,
+                            token=self.actions_token,
+                            command_run_id=str(caller.run.run_id),
+                        ),
+                        metadata_token=self.metadata_token,
+                        identity=identity,
+                        previous=previous,
+                        retained_result=None,
+                        predecessor_comment_id=lineage["predecessor_comment_id"],
+                        current_head=self.current_scope.head_sha,
+                        creation_run_id=archive["creation_run_id"],
+                    )
+                    if isolation.receipt != archive["target_isolation"]:
+                        raise ReviewInputError(
+                            "published-tail isolation contract changed"
+                        )
+                    for origin in origins["origins"]:
+                        expected_source, expected_inventory = published[origin["kind"]]
+                        if (
+                            expected_source != sources[origin["kind"]]
+                            or inventories[origin["scope_sha256"]] != expected_inventory
+                        ):
+                            raise ReviewInputError(
+                                "published-tail assessment membership conflicts"
+                            )
+                self._authenticated_sources[cache_key] = source_snapshot
+        else:
+            failed = sources.get("retained-result")
+            if (
+                not isinstance(failed, dict)
+                or set(failed)
+                != {
+                    "schema_version",
+                    "predecessor_record_sha256",
+                    "retained_result",
+                    "original_context_source",
+                    "original_admission_context",
+                }
+                or failed["schema_version"] != "quarantine-failed-result-source-v1"
+                or failed["predecessor_record_sha256"] != previous.record_sha256
+            ):
+                raise ReviewInputError("quarantine failed-result source is unsupported")
+            if "published-assessment" in sources:
+                published = sources["published-assessment"]
+                if (
+                    not isinstance(published, dict)
+                    or set(published)
+                    != {"schema_version", "record", "review_id", "review_body"}
+                    or published["schema_version"]
+                    != "quarantine-published-assessment-source-v1"
+                ):
+                    raise ReviewInputError("quarantine published source is unsupported")
+            for origin in origins["origins"]:
+                source_record = (
+                    previous
+                    if origin["kind"] == "retained-result"
+                    else SessionRecord.from_dict(
+                        sources["published-assessment"]["record"]
+                    )
+                )
+                if origin["source_manifest"]["binding"] != source_binding(
+                    source_record, ledger.evidence_producer()
+                ):
+                    raise ReviewInputError(
+                        "quarantine original source binding conflicts"
+                    )
+            if cached != source_snapshot:
+                with self.current_scope.read_only_window():
+                    self.current_scope.require()
+                    self._creator(ledger, identity, archive, registration)
+                    reconstructed, expected_inventory, result = (
+                        reconstruct_failed_source(
+                            ledger=ledger,
+                            previous=previous,
+                            current_scope=self.current_scope,
+                            retained_result=failed["retained_result"],
+                        )
+                    )
+                    if canonical_bytes(reconstructed) != canonical_bytes(failed):
+                        raise ReviewInputError(
+                            "quarantine original context source changed"
+                        )
+                    caller = getattr(ledger, "caller", None) or getattr(
+                        ledger, "_startup_caller", None
+                    )
+                    if caller is None:
+                        raise ReviewInputError(
+                            "quarantine reader has no current lifecycle"
+                        )
+                    actions = ApiRunActionsEvidence(
+                        ledger.http,
+                        token=self.actions_token,
+                        command_run_id=str(caller.run.run_id),
+                        job=old.owner.job,
+                    )
+                    isolation = authenticate_isolated_predecessor(
+                        actions=actions,
+                        metadata_token=self.metadata_token,
+                        identity=identity,
+                        previous=previous,
+                        retained_result=result,
+                        failed_source=reconstructed,
+                        predecessor_comment_id=lineage["predecessor_comment_id"],
+                        current_head=self.current_scope.head_sha,
+                        creation_run_id=archive["creation_run_id"],
+                    )
+                    if isolation.receipt != archive["target_isolation"]:
+                        raise ReviewInputError(
+                            "quarantine source-bound target isolation changed"
+                        )
+                    earlier = read_published_source(
+                        ledger=ledger,
+                        previous=previous,
+                        current_scope=self.current_scope,
+                        retained_source=sources.get("published-assessment"),
+                    )
+                    expected = {"retained-result": expected_inventory}
+                    if earlier is not None:
+                        expected["published-assessment"] = earlier[1]
+                    if set(sources) != set(expected):
+                        raise ReviewInputError(
+                            "quarantine assessment origins are incomplete"
+                        )
+                    for origin in origins["origins"]:
+                        source_record = (
+                            previous
+                            if origin["kind"] == "retained-result"
+                            else SessionRecord.from_dict(
+                                sources["published-assessment"]["record"]
+                            )
+                        )
+                        if (
+                            origin["source_manifest"]["binding"]
+                            != source_binding(source_record, ledger.evidence_producer())
+                            or inventories[origin["scope_sha256"]]
+                            != expected[origin["kind"]]
+                        ):
+                            raise ReviewInputError(
+                                "quarantine original assessment membership conflicts"
+                            )
+                    self.current_scope.require()
+                self._authenticated_sources[cache_key] = source_snapshot
         state_manifest = lineage["assessment_state_manifest"]
         binding = state_manifest["binding"]
         if (

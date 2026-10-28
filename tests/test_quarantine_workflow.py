@@ -59,6 +59,8 @@ class QuarantineWorkflowTests(unittest.TestCase):
     def test_real_git_registry_gate_preserves_prefix_and_rejects_noncommit_baselines(
         self,
     ):
+        from test_quarantine_activation import registration
+
         gate = script()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -91,18 +93,30 @@ class QuarantineWorkflowTests(unittest.TestCase):
             target.parent.mkdir(parents=True)
             initial = {
                 "schema_version": "quarantine-activation-registry-v1",
-                "registrations": [{"retained": 1}],
+                "registrations": [registration()],
             }
             target.write_text(json.dumps(initial))
             git("add", "--", gate.REGISTRY)
             git("commit", "-m", "registered original slot")
             base = git("rev-parse", "HEAD")
             self.assertEqual(gate.check(root, base), initial["registrations"])
+            second = {
+                **registration(),
+                "schema_version": "quarantine-activation-v2",
+                "pull_request": 8,
+                "predecessor_comment_id": 42,
+                "run_number": 2,
+            }
             target.write_text(
-                json.dumps({**initial, "registrations": [{"retained": 1}, {"new": 2}]})
+                json.dumps({**initial, "registrations": [registration(), second]})
             )
             self.assertEqual(len(gate.check(root, base)), 2)
-            for rows in ([], [{"retained": 2}], [{"new": 2}, {"retained": 1}]):
+            for rows in (
+                [],
+                [second],
+                [second, registration()],
+                [registration(), {**second, "run_number": 1}],
+            ):
                 target.write_text(json.dumps({**initial, "registrations": rows}))
                 with self.assertRaises(gate.RegistryCheckError):
                     gate.check(root, base)

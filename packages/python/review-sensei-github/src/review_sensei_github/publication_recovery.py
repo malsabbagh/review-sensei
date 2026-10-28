@@ -13,7 +13,7 @@ import json
 import re
 from contextlib import contextmanager
 from copy import copy
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterator, Mapping
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from weakref import WeakKeyDictionary
@@ -46,6 +46,184 @@ from .operation_diagnostics import OperationObserver
 # Metadata dies with the original budget. No response bytes, credentials or
 # authority decisions are retained; distinct physical transports stay isolated.
 _PAGINATION_OBSERVATIONS: WeakKeyDictionary = WeakKeyDictionary()
+_NARRATIVE_CONFIRMATION = object()
+
+
+@dataclass(frozen=True)
+class ConfirmedNarrativeArchive:
+    """Read-only confirmation of original narrative retention, not a grant."""
+
+    identity: SessionIdentity
+    base_sha: str
+    head_sha: str
+    transaction_id: str
+    content_digest: str
+    payload_digest: str
+    summary_digest: str
+    carrier_ids: tuple[int, ...]
+    _confirmation: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._confirmation is _NARRATIVE_CONFIRMATION:
+            object.__setattr__(
+                self, "_confirmation", (_NARRATIVE_CONFIRMATION, self._fields_digest())
+            )
+
+    def _fields_digest(self) -> str:
+        return hashlib.sha256(
+            canonical_bytes(
+                {
+                    "repository": self.identity.repository,
+                    "repository_id": self.identity.repository_id,
+                    "pull_request": self.identity.pull_request,
+                    "base_sha": self.base_sha,
+                    "head_sha": self.head_sha,
+                    "transaction_id": self.transaction_id,
+                    "content_digest": self.content_digest,
+                    "payload_digest": self.payload_digest,
+                    "summary_digest": self.summary_digest,
+                    "carrier_ids": list(self.carrier_ids),
+                }
+            )
+        ).hexdigest()
+
+    def excerpt(
+        self,
+        result: ReviewResult,
+        *,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        base_sha: str,
+        head_sha: str,
+    ) -> str:
+        """Render a labelled UTF-8 excerpt with every confirmed carrier link."""
+        transaction = result.transaction
+        if (
+            self._confirmation != (_NARRATIVE_CONFIRMATION, self._fields_digest())
+            or self.identity != SessionIdentity(repository, pull_request, repository_id)
+            or self.base_sha != base_sha
+            or self.head_sha != head_sha
+            or transaction is None
+            or transaction.transaction_id != self.transaction_id
+            or result.content_digest() != self.content_digest
+            or hashlib.sha256(result.summary.encode("utf-8")).hexdigest()
+            != self.summary_digest
+            or not self.carrier_ids
+            or len(self.carrier_ids) > 32
+            or len(set(self.carrier_ids)) != len(self.carrier_ids)
+            or any(
+                type(value) is not int or not 0 < value < 2**63
+                for value in self.carrier_ids
+            )
+        ):
+            raise ReviewInputError("retained narrative confirmation conflicts")
+        links = ", ".join(
+            f"[part {index + 1}]"
+            f"(https://github.com/{repository}/pull/{pull_request}#issuecomment-{identifier})"
+            for index, identifier in enumerate(self.carrier_ids)
+        )
+        prefix = (
+            "Excerpt; the complete original provider narrative remains in the "
+            "authenticated immutable result parts. Finding explanations and "
+            "approval requirements are unchanged.\n\n"
+        )
+        suffix = (
+            "…\n\n"
+            f"Retained content SHA-256: `{self.content_digest}`. "
+            f"Carrier payload SHA-256: `{self.payload_digest}`.\n\n{links}"
+        )
+        original = result.summary.encode("utf-8")
+        available = len(original) - len((prefix + suffix).encode("utf-8")) - 1
+        if available < 1:
+            raise ReviewInputError("retained narrative framing cannot shrink overview")
+        excerpt = original[: min(1024, available)].decode("utf-8", errors="ignore")
+        return prefix + excerpt + suffix
+
+
+def confirm_retained_narrative(
+    *,
+    http: GitHubHttp,
+    token: str,
+    result: ReviewResult,
+    identity: SessionIdentity,
+    base_sha: str,
+    head_sha: str,
+    app_slug: str,
+    ledger: SessionLedger,
+    configuration_context: Mapping[str, object],
+    evidence_context: Mapping[str, object],
+    policy: ReviewConvergencePolicy,
+    budget: EvidenceReadBudget,
+) -> ConfirmedNarrativeArchive:
+    """Confirm existing exact result parts without writing or reopening work.
+
+    Use the caller's original shared budget. A changed ledger, missing part,
+    foreign producer or unconfirmed payload cannot authorize compaction.
+    """
+    if not isinstance(budget, EvidenceReadBudget):
+        raise ReviewInputError("retained narrative requires the original read budget")
+    budget.check()
+    before = ledger.load(identity)
+    if before.status != "ok" or before.record is None:
+        raise ReviewInputError("retained narrative ledger is unavailable")
+    validated = _validate(
+        result,
+        ledger=ledger,
+        identity=identity,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        configuration_context=configuration_context,
+        evidence_context=evidence_context,
+        policy=policy,
+        loaded=before,
+    )
+    assert validated.transaction is not None
+    store = _store(
+        publication_http(http, budget),
+        token=token,
+        identity=identity,
+        app_slug=app_slug,
+        base_sha=base_sha,
+        head_sha=head_sha,
+    )
+    available = store.read_available_with_carriers(
+        event_key=_event_key(identity, validated.transaction)
+    )
+    if available is None:
+        raise ReviewInputError("retained narrative original parts are missing")
+    digest, payload, carriers = available
+    document = json.loads(payload)
+    if not isinstance(document, dict):
+        raise ReviewInputError("retained narrative result is invalid")
+    retained = ReviewResult.from_dict(document)
+    if (
+        _payload(retained) != payload
+        or retained.content_digest() != validated.content_digest()
+        or retained.summary != result.summary
+        or retained.transaction is None
+        or retained.transaction.transaction_id != validated.transaction.transaction_id
+    ):
+        raise ReviewInputError("retained narrative original result conflicts")
+    after = ledger.load(identity)
+    if (
+        after.status != "ok"
+        or after.record is None
+        or after.record.record_sha256 != before.record.record_sha256
+    ):
+        raise ReviewInputError("retained narrative ledger changed during confirmation")
+    budget.check()
+    return ConfirmedNarrativeArchive(
+        identity=identity,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        transaction_id=validated.transaction.transaction_id,
+        content_digest=validated.content_digest(),
+        payload_digest=digest,
+        summary_digest=hashlib.sha256(result.summary.encode("utf-8")).hexdigest(),
+        carrier_ids=carriers,
+        _confirmation=_NARRATIVE_CONFIRMATION,
+    )
 
 
 def _page_scope(path: str) -> tuple[str, int, int] | None:
