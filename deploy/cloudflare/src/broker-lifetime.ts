@@ -89,7 +89,7 @@ function waitFor<T>(pending: Promise<T>, signal: AbortSignal, check: () => unkno
 
 export class BrokerUpstream {
   private readonly controller = new AbortController();
-  private readonly timer: ReturnType<typeof setTimeout>;
+  private timer: ReturnType<typeof setTimeout>;
   private readonly parentAbort = () => this.controller.abort(this.parent.reason);
   private readonly paidAbort = () => this.controller.abort(new Error("broker_control_deadline_exhausted"));
 
@@ -97,18 +97,26 @@ export class BrokerUpstream {
     private readonly paid: AbortSignal | undefined, private readonly control?: BrokerDispatchControl, private readonly span?: BrokerSpan) {
     // A refused constructor cannot be closed by its caller. Check before
     // attaching listeners that would retain this otherwise unreachable scope.
+    const upstreamDeadline = Date.now() + BROKER_UPSTREAM_MS;
     const remaining = Math.min(BROKER_UPSTREAM_MS, lifetime.check());
     parent.addEventListener("abort", this.parentAbort, { once: true });
     paid?.addEventListener("abort", this.paidAbort, { once: true });
     if (parent.aborted) this.parentAbort();
     if (paid?.aborted) this.paidAbort();
-    this.timer = setTimeout(() => {
-      // Preserve an original control/request deadline even if this timer wins
-      // the race with its AbortSignal (including direct adapter callers).
-      try { lifetime.check(); }
+    const timeout = () => {
+      if (this.controller.signal.aborted) return;
+      // Timer delivery can precede the wall-clock deadline. Re-arm only to
+      // the original absolute bounds, without another dispatch or allowance.
+      let remaining: number;
+      try { remaining = Math.min(upstreamDeadline - Date.now(), lifetime.check()); }
       catch (error) { this.controller.abort(error); return; }
+      if (remaining > 0) {
+        this.timer = setTimeout(timeout, remaining);
+        return;
+      }
       this.controller.abort(new Error("broker_upstream_timeout"));
-    }, remaining);
+    };
+    this.timer = setTimeout(timeout, remaining);
   }
 
   check(): void {
