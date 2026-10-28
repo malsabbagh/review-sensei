@@ -5,6 +5,7 @@ import copy
 import json
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -663,9 +664,14 @@ class Rich250LateFeedbackTests(unittest.TestCase):
             state, publisher, prepared, work, provider, host = values
             activate = host.activate
             barrier = threading.Barrier(2)
+            # Coverage runs this rich serialization test alongside three
+            # other workers. Bound the harness independently of its original
+            # 60-call business budget; 15-second per-thread joins can expire
+            # while both correct writers are still scheduled under coverage.
+            watchdog_seconds = 60
 
             def together(request, *, verify):
-                barrier.wait(timeout=10)
+                barrier.wait(timeout=watchdog_seconds)
                 return activate(request, verify=verify)
 
             host.activate = together
@@ -682,8 +688,9 @@ class Rich250LateFeedbackTests(unittest.TestCase):
             threads = [threading.Thread(target=run) for _ in range(2)]
             for thread in threads:
                 thread.start()
+            deadline = time.monotonic() + watchdog_seconds
             for thread in threads:
-                thread.join(timeout=15)
+                thread.join(timeout=max(0, deadline - time.monotonic()))
             self.assertFalse(any(thread.is_alive() for thread in threads))
             self.assertEqual(errors, [])
             self.assertEqual(len(results), 2)
