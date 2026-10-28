@@ -34,7 +34,7 @@ class QuarantineSourceTests(unittest.TestCase):
 
     def fixture(self, root):
         self.git(root, "init")
-        (root / ".reviewsensei.yml").write_text("schema: 1\napi_request_limit: 512\n")
+        (root / ".reviewsensei.yml").write_bytes(b"schema: 1\napi_request_limit: 512\n")
         (root / "docs").mkdir()
         (root / "docs/architecture.md").write_text("# Original trusted architecture\n")
         (root / "file.py").write_text("old\n")
