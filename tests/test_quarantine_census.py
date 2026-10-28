@@ -2,6 +2,7 @@
 
 import copy
 import json
+import tempfile
 import unittest
 from types import SimpleNamespace
 from urllib.request import Request
@@ -90,6 +91,80 @@ class CensusBackend:
 
 
 class QuarantineCensusTests(unittest.TestCase):
+    def test_existing_thread_queries_are_reads_but_the_resolution_mutation_is_not(self):
+        from review_sensei_github.publication import _REVIEW_THREADS_QUERY
+        from review_sensei_github.thread_resolution import _MUTATION, _QUERY
+
+        variables = {
+            "owner": "owner",
+            "name": "repo",
+            "number": 7,
+            "first": 100,
+            "after": None,
+        }
+        for query, operation in (
+            (_REVIEW_THREADS_QUERY, "ReviewThreads"),
+            (_QUERY, "FindingResolutionThreads"),
+        ):
+            for named in (False, True):
+                body = {"query": query, "variables": variables}
+                if named:
+                    body["operationName"] = operation
+                request = Request(
+                    "https://api.github.test/graphql",
+                    data=json.dumps(body).encode(),
+                    method="POST",
+                )
+                with self.subTest(operation=operation, named=named):
+                    self.assertTrue(
+                        is_readonly_census(request, "https://api.github.test")
+                    )
+                for bad in (
+                    {**body, "query": query + " mutation {danger}"},
+                    {**body, "operationName": "ResolveReviewThread"},
+                    {**body, "variables": {**variables, "first": True}},
+                    {
+                        **body,
+                        "variables": {**variables, "input": {"threadId": "foreign"}},
+                    },
+                ):
+                    request = Request(
+                        "https://api.github.test/graphql",
+                        data=json.dumps(bad).encode(),
+                        method="POST",
+                    )
+                    self.assertFalse(
+                        is_readonly_census(request, "https://api.github.test")
+                    )
+        request = Request(
+            "https://api.github.test/graphql",
+            data=json.dumps(
+                {"query": _MUTATION, "variables": {"input": {"threadId": "thread"}}}
+            ).encode(),
+            method="POST",
+        )
+        self.assertFalse(is_readonly_census(request, "https://api.github.test"))
+
+    def test_native_thread_read_does_not_consume_the_physical_mutation_tail(self):
+        from test_review_run import EntryFixture
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EntryFixture(directory, limit=512)
+            original, observed = fixture.external, []
+
+            def opener(request, timeout):
+                if request.full_url == "https://api.github.test/graphql":
+                    observed.append(dict(fixture.accounted.observations[-1]))
+                return original(request, timeout)
+
+            fixture.external = opener
+            fixture.before_provider = lambda: setattr(
+                fixture.accounted, "_quarantine_census_api_url", fixture.http.api_url
+            )
+            self.assertEqual(fixture.invoke(), 0, fixture.error)
+            self.assertTrue(observed)
+            self.assertTrue(all(item["mutation"] is False for item in observed))
+
     def test_complete_bodies_big_numeric_ids_and_numeric_bot_identity_are_not_replaced_by_hints(
         self,
     ):

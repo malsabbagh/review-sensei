@@ -68,7 +68,7 @@ def _unique(pairs):
 
 
 def is_readonly_census(request, api_url):
-    """Classify only this exact source query, never arbitrary GraphQL POSTs."""
+    """Classify only closed source reads, never arbitrary GraphQL POSTs."""
     if not isinstance(api_url, str) or request.get_method() != "POST":
         return False
     endpoint, expected = (
@@ -85,10 +85,26 @@ def is_readonly_census(request, api_url):
         value = json.loads(request.data, object_pairs_hook=_unique)
     except (ValueError, UnicodeError):
         return False
+    if not isinstance(value, dict) or not isinstance(value.get("query"), str):
+        return False
+    if value["query"] == QUERY:
+        return set(value) == {"query", "variables"} and _variables(value["variables"])
+    # Existing authority/suppression/cleanup readers use these exact immutable
+    # query texts. POST is their transport, not a native mutation. The same
+    # closed variables and endpoint/byte checks still apply; mutations and
+    # unknown query texts retain the ordinary mutation accounting.
+    from .publication import _REVIEW_THREADS_QUERY
+    from .thread_resolution import _QUERY
+
+    operation = {
+        _REVIEW_THREADS_QUERY: "ReviewThreads",
+        _QUERY: "FindingResolutionThreads",
+    }.get(value["query"])
     return (
-        isinstance(value, dict)
-        and set(value) == {"query", "variables"}
-        and value["query"] == QUERY
+        operation is not None
+        and set(value)
+        in ({"query", "variables"}, {"query", "variables", "operationName"})
+        and value.get("operationName", operation) == operation
         and _variables(value["variables"])
     )
 

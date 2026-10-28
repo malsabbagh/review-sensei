@@ -62,6 +62,112 @@ class IsolatedCheckpointPort:
 
 
 class CheckpointResultStoreTests(unittest.TestCase):
+    def test_native_replay_requires_the_exact_original_rendering(self):
+        from fake_github_http import json_response, make_http
+        from review_sensei_github.errors import GitHubPublicationError
+        from review_sensei_github.publication import (
+            ReviewPublisher,
+            finding_index_marker,
+            review_result_digest,
+        )
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.diff import DiffAnalysis
+        from review_sensei.models import ReviewComment
+        from review_sensei.placement import HostPlacementFacts
+
+        result = ReviewResult(
+            summary="Complete.",
+            comments=(
+                ReviewComment(path="f.py", line=1, body="`" * 4000, blocking=True),
+            ),
+            provider="fixture",
+            model="fixture",
+            review_status="complete",
+        )
+        analysis = DiffAnalysis(
+            changed_lines={"f.py": frozenset({1})},
+            changed_paths=("f.py",),
+            diff_bytes=100,
+            diff_files=1,
+            diff_hunks=1,
+            diff_lines=5,
+        )
+        publisher = object.__new__(ReviewPublisher)
+        assemblies = {
+            literal: publisher._assemble_review_body(
+                result=result,
+                analysis=analysis,
+                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+                read_facts=lambda: HostPlacementFacts(),
+                auto_approve=True,
+                repository_id=123,
+                pull_request=7,
+                head_sha="b" * 40,
+                base_sha="a" * 40,
+                literal_malformed_fences=literal,
+            )
+            for literal in (False, True)
+        }
+        self.assertNotEqual(
+            assemblies[False].inline_comments[0][2],
+            assemblies[True].inline_comments[0][2],
+        )
+        for literal, expected in assemblies.items():
+            index = finding_index_marker(
+                repository_id=123,
+                pull_request=7,
+                head_sha="b" * 40,
+                base_sha="a" * 40,
+                result_digest=review_result_digest(result),
+                complete_inventory=True,
+                entries=expected.index_entries,
+            )
+            review = {"id": 77, "body": index, "user": {"type": "Bot"}}
+            row = {
+                "id": 88,
+                "pull_request_review_id": 77,
+                "user": {"type": "Bot", "login": "reviewsensei[bot]"},
+                "body": expected.inline_comments[0][2],
+            }
+            for outcome in ("stored", "absent", "other_format", "late"):
+                with self.subTest(literal=literal, outcome=outcome):
+                    observed = [] if outcome in {"absent", "late"} else [row]
+                    if outcome == "other_format":
+                        observed = [
+                            {
+                                **row,
+                                "body": assemblies[not literal].inline_comments[0][2],
+                            }
+                        ]
+                    publisher.http, calls = make_http(
+                        [json_response(observed), json_response([row])]
+                    )
+
+                    def verify():
+                        publisher._verify_complete_review(
+                            token="synthetic",
+                            repository="owner/repo",
+                            repository_id=123,
+                            pull_request=7,
+                            head_sha="b" * 40,
+                            app_slug="reviewsensei[bot]",
+                            review=review,
+                            assembled=expected,
+                            base_sha="a" * 40,
+                            result_digest=review_result_digest(result),
+                        )
+
+                    if outcome == "stored":
+                        verify()
+                    else:
+                        with self.assertRaises(GitHubPublicationError):
+                            verify()
+                    if outcome == "late":
+                        verify()
+                    self.assertTrue(all(method == "GET" for method, _, _ in calls))
+                    self.assertEqual(len(calls), 2 if outcome == "late" else 1)
+
     def test_roundtrip_unknown_ack_and_exact_original_carrier_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             f = EntryFixture(directory, limit=512)

@@ -1,9 +1,12 @@
 """Original public computation → exact owned event/parts source validation."""
 
 import copy
+import json
 import tempfile
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
+from unittest.mock import patch
 
 from review_sensei_github.accepted_result import (
     read_accepted_result,
@@ -11,9 +14,12 @@ from review_sensei_github.accepted_result import (
 )
 from review_sensei_github.operation_comments import ResultPartStore
 from review_sensei_github.operation_host import OperationComment
+from review_sensei_github.publication_recovery import _event_key
 from review_sensei_github.retention_projection import (
     checkpoint_projection,
+    inventory_projection,
     restore_checkpoint_projection,
+    restore_inventory_projection,
 )
 from review_sensei_github.session_ledger import parse_session_comment
 from test_review_run import EntryFixture
@@ -47,6 +53,97 @@ class FreshNativeComments:
 
 
 class AcceptedResultTests(unittest.TestCase):
+    def test_projection_preserves_the_inventory_emitted_by_publication(self):
+        from review_sensei_github.default_human_inventory import HumanInventoryStore
+
+        observed = []
+        original = HumanInventoryStore._payload
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory, limit=512)
+
+            def record(store, document):
+                # Observe the real publisher's document without changing its
+                # writer, authority, policy, budgets or stored legacy bytes.
+                payload = original(store, document)
+                reference, source = store._checkpoint_source(
+                    FreshNativeComments(f).list_comments()
+                )
+                binding = store.context.binding()
+                encoded = inventory_projection(source, document, binding, reference)
+
+                def load(selected):
+                    self.assertEqual(selected, reference)
+                    return source
+
+                self.assertEqual(
+                    restore_inventory_projection(encoded, binding, load), document
+                )
+                observed.append(copy.deepcopy(document))
+                return payload
+
+            with patch.object(HumanInventoryStore, "_payload", record):
+                self.assertEqual(f.invoke(human=True), 0, f.error)
+            self.assertTrue(observed)
+            self.assertIsNotNone(observed[0]["human_inventory"])
+
+    def test_projection_matches_the_actual_public_checkpoint_and_successor(self):
+        for overflow in (False, True):
+            with (
+                self.subTest(overflow=overflow),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = EntryFixture(directory, limit=512)
+                f.provider_comments = [
+                    {
+                        "path": "src/app.py",
+                        "line": 2,
+                        "side": "RIGHT",
+                        "body": "Preserve the complete original explanation.",
+                        "severity": "low",
+                        "blocking": False,
+                    }
+                ]
+                for run in range(2 if not overflow else 1):
+                    capacity = (
+                        patch(
+                            "review_sensei.session.checkpoint_baseline_capacity",
+                            return_value=128,
+                        )
+                        if overflow
+                        else nullcontext()
+                    )
+                    with capacity:
+                        self.assertEqual(f.invoke(), 1 if overflow else 0, f.error)
+                    if overflow:
+                        self.assertIn("baseline_capacity_exceeded", f.error)
+                    tx = parse_session_comment(
+                        f.comment["body"], identity=f.selected.identity
+                    ).transaction
+                    captured = selected_accepted_result(f.selected.http, tx, app_id=999)
+                    store = ResultPartStore(FreshNativeComments(f), app_user_id=999)
+                    available = store.read_available(
+                        event_key=_event_key(f.selected.identity, tx)
+                    )
+                    self.assertIsNotNone(available)
+                    actual = ReviewResult.from_dict(json.loads(available[1]))
+                    if overflow:
+                        self.assertEqual(actual.persistence_status, "capacity-exceeded")
+                    descriptor = checkpoint_projection(
+                        captured.payload, actual, captured.reference
+                    )
+                    self.assertEqual(
+                        restore_checkpoint_projection(
+                            descriptor,
+                            tx,
+                            lambda ref: read_accepted_result(
+                                ref, tx, store, repository_id=123, app_id=999
+                            ),
+                        ),
+                        available[1],
+                    )
+                    if run == 0 and not overflow:
+                        f.next_run()
+
     def test_public_accepted_embedded_and_fallback_sources_reconstruct_exact_checkpoint(
         self,
     ):
