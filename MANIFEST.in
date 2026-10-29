@@ -122,6 +122,13 @@ include tests/test_quarantine_census.py
 include tests/test_quarantine_body_limit.py
 include tests/test_quarantine_capacity.py
 include tests/test_quarantine_scan_capacity.py
+include tests/test_publication_staging.py
+include tests/test_native_review_groups.py
+include tests/test_native_review_census.py
+include tests/test_native_group_publication.py
+include tests/test_native_union.py
+include tests/test_native_reader_projection.py
+include tests/test_packed_comment_census.py
 include tests/test_retention_projection.py
 include tests/test_accepted_result.py
 include tests/test_checkpoint_result_store.py

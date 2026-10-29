@@ -7,6 +7,11 @@
 - Linked PR: https://github.com/malsabbagh/review-sensei/pull/390
 - Depends on: ADRs 0115 and 0116
 
+This is an unfinished implementation checkpoint. The bounded source components
+and their tests are present; public producer/consumer wiring, whole-transaction
+admission, installed qualification and composed independent review remain open.
+This checkpoint is not eligible for merge, release or recovery activation.
+
 ## Context
 
 A valid 1-MiB accepted result with 250 inline findings can exhaust the existing

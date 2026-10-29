@@ -1080,6 +1080,26 @@ def finding_marker(
     )
 
 
+def render_native_inline(
+    comment: ReviewComment,
+    *,
+    view: FindingView,
+    result: ReviewResult,
+    repository_id: int,
+    pull_request: int,
+    head_sha: str,
+    base_sha: str,
+    fingerprint: str,
+    state: str,
+) -> str:
+    """The exact shared native body, after independently retained admission."""
+    return (
+        f"{_with_discussion_instruction(render_finding(view))}\n\n"
+        f"{finding_instance_marker(comment)}\n\n"
+        f"{finding_marker(repository_id=repository_id, pull_request=pull_request, head_sha=head_sha, base_sha=base_sha, result=result, blocking=comment.blocks_approval, fingerprint=fingerprint, state=state, needs_human=comment.needs_human)}"
+    )
+
+
 def finding_fingerprint_from_body(body: object) -> str | None:
     """Return a stable finding fingerprint from an App-authored root, if present."""
 
@@ -6447,10 +6467,16 @@ class ReviewPublisher:
             # Concern history cannot prove this exact instance was explained.
             view = replace(view, repeat=True)
             if placement == INLINE_PLACEMENT:
-                comment_body = (
-                    f"{_with_discussion_instruction(render_finding(view))}\n\n"
-                    f"{finding_instance_marker(comment)}\n\n"
-                    f"{finding_marker(repository_id=repository_id, pull_request=pull_request, head_sha=head_sha, base_sha=base_sha, result=result, blocking=comment.blocks_approval, fingerprint=fingerprint, state=state, needs_human=comment.needs_human)}"
+                comment_body = render_native_inline(
+                    comment,
+                    view=view,
+                    result=result,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    fingerprint=fingerprint,
+                    state=state,
                 )
                 if (
                     len(comment_body.encode("utf-8"))

@@ -90,6 +90,7 @@ class GroupWriterBackend(NativeCensusBackend):
             base_sha=BASE_SHA,
             literal_malformed_fences=True,
         )
+        self.assembled = assembled
         self.plan = NativeReviewPlan.prepare(
             repository_id=IDENTITY.repository_id,
             pull_request=IDENTITY.pull_request,

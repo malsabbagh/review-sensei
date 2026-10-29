@@ -37,7 +37,7 @@ MAX_ROOTS = 300
 MAX_EXISTING_ROOT_PROJECTION_BYTES = 96 * 1024
 MAX_EXISTING_ROOT_IDS_BYTES = 1536
 
-_SCOPE = "n:number h:headRefOid b:baseRefOid"
+_SCOPE = "n:number h:headRefOid b:baseRefOid "
 _ROOT = "s:isResolved d:diffSide t:subjectType x:comments(first:1){totalCount nodes{n:fullDatabaseId r:pullRequestReview{n:fullDatabaseId} a:author{t:__typename ... on Bot{n:databaseId}} c:commit{o:oid} q:replyTo{n:fullDatabaseId} u:updatedAt}}"
 _FIRST = (
     "f:reviewThreads(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{"

@@ -32,7 +32,8 @@
       "src/review_sensei/schemas/quarantine-assessment-state.schema.json",
       "src/review_sensei/schemas/quarantine-assessment-view.schema.json",
       "src/review_sensei/schemas/quarantine-lineage.schema.json",
-      "src/review_sensei/schemas/eligibility-v7.schema.json"
+      "src/review_sensei/schemas/eligibility-v7.schema.json",
+      "src/review_sensei/schemas/eligibility-v8.schema.json"
     ],
     "description": "Required entries are these paths plus lanes.dist_safe.helpers and every module under lanes.dist_safe.discover. Forbidden entries are lanes.checkout_only.modules. The verifier reads this contract so MANIFEST.in and this file are the only places a lane asset is declared."
   },
@@ -151,6 +152,13 @@
         "tests/test_quarantine_body_limit.py",
         "tests/test_quarantine_capacity.py",
         "tests/test_quarantine_scan_capacity.py",
+        "tests/test_publication_staging.py",
+        "tests/test_native_review_groups.py",
+        "tests/test_native_review_census.py",
+        "tests/test_native_group_publication.py",
+        "tests/test_native_union.py",
+        "tests/test_native_reader_projection.py",
+        "tests/test_packed_comment_census.py",
         "tests/test_retention_projection.py",
         "tests/test_accepted_result.py",
         "tests/test_checkpoint_result_store.py",

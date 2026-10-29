@@ -18,6 +18,28 @@ from review_sensei.publication_staging import PublicationStaging
 
 
 class NativeUnionTests(unittest.TestCase):
+    def test_fresh_consumer_reconstructs_exact_plan_from_original_admission(self):
+        from review_sensei_github.publication import FindingIndex, review_result_digest
+        from test_native_group_publication import GroupWriterBackend
+
+        backend = GroupWriterBackend()
+        state = backend.host.publish_parts()
+        receipt = NativeUnionReceipt.from_staging(backend.plan, state, producer_id=999)
+        index = FindingIndex(
+            review_result_digest(backend.result),
+            backend.plan.base_sha,
+            backend.assembled.index_entries,
+        )
+        self.assertEqual(receipt.reconstruct_plan(backend.result, index), backend.plan)
+        with self.assertRaises(ReviewInputError):
+            receipt.reconstruct_plan(replace(backend.result, summary="Changed"), index)
+        altered = replace(
+            index,
+            entries=(replace(index.entries[0], blocking=False), *index.entries[1:]),
+        )
+        with self.assertRaises(ReviewInputError):
+            receipt.reconstruct_plan(backend.result, altered)
+
     def fixture(self):
         backend = NativeCensusBackend()
         evidence = backend.read()

@@ -13,8 +13,11 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.publication_staging import PublicationReceipt, PublicationStaging
 
 if TYPE_CHECKING:
+    from review_sensei.models import ReviewResult
+
     from .native_review_census import NativePublicationEvidence
     from .native_review_groups import NativeReviewPlan
+    from .publication import FindingIndex
 
 UNION_VERSION = "native-review-union-v1"
 MAX_UNION_BYTES = 4096
@@ -220,6 +223,122 @@ class NativeUnionReceipt:
             raise ReviewInputError(
                 "native union does not cover the complete inline set"
             )
+
+    def reconstruct_plan(
+        self, result: ReviewResult, index: FindingIndex
+    ) -> NativeReviewPlan:
+        """Replay exact native bodies from the authenticated original admission.
+
+        The stored index restores the original flags and placement. No diff,
+        provider, mutable branch policy or new admission decision is consulted.
+        The two finite presentation modes are selected only by the immutable
+        complete plan hash; this never changes the retained approval facts.
+        """
+        from dataclasses import replace
+
+        from review_sensei.context import finding_lifecycle_for_comment
+        from review_sensei.human_assessment import finding_instance_fingerprint
+        from review_sensei.presentation import (
+            assign_finding_identifiers,
+            build_finding_view,
+        )
+
+        from .native_review_groups import NativeInline, NativeReviewPlan
+        from .publication import render_native_inline
+
+        transaction = result.transaction
+        if (
+            transaction is None
+            or transaction.transaction_id != self.transaction_id
+            or result.content_digest() != self.result_sha256
+            or (transaction.head_sha, transaction.base_sha)
+            != (self.head_sha, self.base_sha)
+            or index.result_digest != self.result_digest
+            or index.base_sha != self.base_sha
+        ):
+            raise ReviewInputError(
+                "native union original result/admission scope conflicts"
+            )
+        entries = {entry.instance: entry for entry in index.entries}
+        if len(entries) != len(index.entries):
+            raise ReviewInputError(
+                "native union original admission duplicates an instance"
+            )
+        states = {item.fingerprint: item.state for item in result.finding_lifecycles}
+        originals = {}
+        instances = [
+            finding_instance_fingerprint(comment) for comment in result.comments
+        ]
+        identifiers = assign_finding_identifiers(instances)
+        for comment, instance in zip(result.comments, instances, strict=True):
+            fingerprint = finding_lifecycle_for_comment(comment).fingerprint
+            if states.get(fingerprint, "new") in {"fixed", "outdated"}:
+                continue
+            if instance not in originals:
+                originals[instance] = (comment, fingerprint)
+        if set(originals) != set(entries) or any(
+            entries[instance].lifecycle != fingerprint
+            for instance, (_, fingerprint) in originals.items()
+        ):
+            raise ReviewInputError(
+                "native union original admission membership conflicts"
+            )
+        for advisory in (False, True):
+            items = []
+            for instance, (comment, fingerprint) in originals.items():
+                entry = entries[instance]
+                if entry.body_placed:
+                    continue
+                comment = replace(
+                    comment,
+                    effective_blocking=entry.blocking,
+                    needs_human=entry.needs_human,
+                )
+                if comment.side not in {"LEFT", "RIGHT"} or comment.line is None:
+                    raise ReviewInputError(
+                        "native union retained inline location is invalid"
+                    )
+                state = states.get(fingerprint, "new")
+                view = replace(
+                    build_finding_view(
+                        comment,
+                        fingerprint=fingerprint,
+                        identifier=identifiers[instance],
+                        lifecycle_state=state,
+                        placement="inline",
+                        advisory=advisory,
+                        literal_malformed_fences=True,
+                    ),
+                    repeat=True,
+                )
+                body = render_native_inline(
+                    comment,
+                    view=view,
+                    result=result,
+                    repository_id=self.repository_id,
+                    pull_request=self.pull_request,
+                    head_sha=self.head_sha,
+                    base_sha=self.base_sha,
+                    fingerprint=fingerprint,
+                    state=state,
+                )
+                items.append(
+                    NativeInline.from_prepared(
+                        comment, body, anchor=comment.side.lower()
+                    )
+                )
+            plan = NativeReviewPlan.prepare(
+                repository_id=self.repository_id,
+                pull_request=self.pull_request,
+                base_sha=self.base_sha,
+                head_sha=self.head_sha,
+                transaction_id=self.transaction_id,
+                result_sha256=self.result_sha256,
+                items=tuple(items),
+            )
+            if plan.sha256 == self.plan_sha256 and len(plan.items) == self.inline_count:
+                return plan
+        raise ReviewInputError("native union complete original rendering changed")
 
 
 NativeUnionReader = Callable[[NativeUnionReceipt], "NativePublicationEvidence"]

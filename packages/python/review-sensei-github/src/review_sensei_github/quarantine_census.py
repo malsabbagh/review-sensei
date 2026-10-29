@@ -89,6 +89,16 @@ def is_readonly_census(request, api_url):
         return False
     if value["query"] == QUERY:
         return set(value) == {"query", "variables"} and _variables(value["variables"])
+    from .packed_comment_census import METADATA_QUERY, is_metadata_query
+
+    if value["query"] == METADATA_QUERY:
+        return (
+            set(value)
+            in ({"query", "variables"}, {"query", "variables", "operationName"})
+            and value.get("operationName", "PackedCommentMembership")
+            == "PackedCommentMembership"
+            and is_metadata_query(value["query"], value.get("variables"))
+        )
     from .native_review_groups import PART_QUERY
 
     if value["query"] == PART_QUERY:
