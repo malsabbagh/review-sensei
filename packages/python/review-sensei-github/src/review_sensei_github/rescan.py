@@ -415,7 +415,9 @@ def resolve_rescan(
         _retained_source=retained_source,
     )
     eligibility = approval_eligibility_from_body(
-        latest["body"], human_inventory_reader=reader
+        latest["body"],
+        human_inventory_reader=reader,
+        native_union_reader=reader.native_union_reader(latest),
     )
     if eligibility is None or eligibility.head_sha != args.head_sha:
         raise ReviewInputError("explicit rescan published coverage is unverifiable")

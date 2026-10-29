@@ -118,8 +118,17 @@ class NativeCapacityGuard:
         reply=False,
         complete_tail=False,
         comment_plan=None,
+        native_profile=None,
+        receipt_update_bytes=0,
     ):
         self.identity, self.reserve = identity, deepcopy(reserve)
+        self.native_profile = native_profile
+        self.native_old_root_nodes = (
+            None if native_profile is None else native_profile["targets"]
+        )
+        self.native_grouped = native_profile is not None and complete_tail
+        self._native_prepared = None
+        self.command_receipt_update_id = None
         self.future_parts, self.future_bytes = future_parts, future_bytes
         self.comment_reader: Any = None
         self.cursor = cursor
@@ -129,7 +138,7 @@ class NativeCapacityGuard:
         self.comment_read_calls = (
             comment_plan.worst_read_calls() if comment_plan is not None else None
         )
-        self.issue_update_bytes = 2 * closure_wire
+        self.issue_update_bytes = 2 * closure_wire + receipt_update_bytes
         self.comment_bounds = (
             list(comment_bounds) if comment_bounds is not None else None
         )
@@ -137,6 +146,14 @@ class NativeCapacityGuard:
         self.check_bounds = [closure_wire] * 2 if cursor else []
         self.inline_bounds = [6 * 16_384 + 1024] if cursor and reply else []
         self.reaction_bounds = [4096] if cursor else []
+        if self.native_grouped:
+            from .native_review_groups import full_inline_envelope
+
+            envelope = full_inline_envelope()
+            self.inline_bounds = [envelope["largest_selected_item_bytes"]] * envelope[
+                "findings"
+            ]
+            self.review_bounds = [8192] * 8 + [6 * 65536 + 1024, self.closure_wire]
         self._publication_prepared = None
         self.stats = {
             name: {"count": 0, "bytes": 0, "largest": 0} for name in _SURFACES
@@ -178,10 +195,81 @@ class NativeCapacityGuard:
             self.comment_bounds, self.future_parts, self.future_bytes = old
             raise
 
+    def admit_grouped_publication(self, *, plan, review_wire=None, inline_wires=None):
+        """Refine the complete before-startup promise; never add native room.
+
+        The immutable accepted source and admission reconstruct this plan. Its
+        body packets, old-body packet, metadata packets and final frame share
+        the original complete native-walk certificate.
+        """
+        from .native_review_groups import (
+            NativeReviewPlan,
+            full_inline_envelope,
+            wire_bytes,
+        )
+
+        if not self.native_grouped or type(plan) is not NativeReviewPlan:
+            raise ReviewInputError(
+                "grouped publication complete startup admission is unavailable"
+            )
+        if review_wire is None or inline_wires is None:
+            if self._native_prepared is None or self._native_prepared[0] != plan.sha256:
+                raise ReviewInputError(
+                    "grouped publication was not prepared before effects"
+                )
+            self.require(self.stats)
+            return
+        requested = (plan.sha256, review_wire, tuple(inline_wires))
+        if self._native_prepared is not None:
+            if requested != self._native_prepared:
+                raise ReviewInputError(
+                    "grouped publication original preparation changed"
+                )
+            self.require(self.stats)
+            return
+        envelope = full_inline_envelope()
+        if (
+            len(plan.items) > 250
+            or len(plan.groups) > 8
+            or len(inline_wires) != len(plan.items)
+            or sum(item.selected_upper_bound for item in plan.items)
+            > envelope["selected_total_bytes"]
+            or review_wire > 6 * 65536 + 1024
+            or any(
+                wire_bytes(item.payload()) > bound
+                for item, bound in zip(plan.items, inline_wires)
+            )
+        ):
+            raise ReviewInputError(
+                "grouped publication exceeds complete startup admission"
+            )
+        old = self.review_bounds, self.inline_bounds
+        self.review_bounds = [
+            wire_bytes(
+                {
+                    "body": plan.part_body(i),
+                    "event": "COMMENT",
+                    "commit_id": plan.head_sha,
+                }
+            )
+            for i in range(len(plan.groups))
+        ] + [max(self.closure_wire, review_wire), self.closure_wire]
+        self.inline_bounds = list(inline_wires)
+        try:
+            self.require(self.stats)
+        except BaseException:
+            self.review_bounds, self.inline_bounds = old
+            raise
+        self._native_prepared = requested
+
     def admit_publication(self, *, review_wire, inline_wires):
         """Reserve the prepared publication, approval, checks and root close."""
         if not self.cursor:
             return
+        if self.native_grouped:
+            raise ReviewInputError(
+                "complete grouped admission cannot use a legacy publication"
+            )
         requested = (review_wire, tuple(inline_wires))
         if self._publication_prepared is not None:
             # Read-only reconciliation can prepare the same frame again.
@@ -267,6 +355,66 @@ class NativeCapacityGuard:
                     if self.comment_bounds is not None
                     else MAX_PART_BYTES + _RESPONSE_METADATA_BYTES,
                 )
+            if self.native_profile is not None and surface in {
+                "reviews",
+                "inline_replies",
+                "threads",
+            }:
+                from .native_review_census import (
+                    MAX_REVIEWS,
+                    MAX_ROOTS,
+                    closing_envelope_bound,
+                )
+                from .native_review_groups import full_inline_envelope
+
+                if largest > _PAGE_BYTES or count > MAX_PAGINATION_ITEMS:
+                    raise ReviewInputError(f"quarantine {surface} capacity exceeded")
+                if surface == "reviews":
+                    if count > MAX_REVIEWS or size > MAX_PAGINATION_PAGES * _PAGE_BYTES:
+                        raise ReviewInputError(
+                            "quarantine native review metadata capacity exceeded"
+                        )
+                else:
+                    roots = stats["threads"]["count"] + len(self.inline_bounds)
+                    if roots > MAX_ROOTS:
+                        raise ReviewInputError(
+                            "quarantine complete native root capacity exceeded"
+                        )
+                    # Replies cannot become thread roots under the installed
+                    # source/parent certificate. They stay in reserve and in
+                    # the complete conversation/report-conflict domains.
+                    if (
+                        old["new_wire_bytes"] + old["positive_update_bytes"]
+                        > MAX_PAGINATION_PAGES * _PAGE_BYTES
+                    ):
+                        raise ReviewInputError(
+                            "quarantine complete conversation capacity exceeded"
+                        )
+                envelope = full_inline_envelope()
+                if (
+                    max(
+                        envelope["largest_body_response_bytes"],
+                        envelope["smallest_with_old_roots_bytes"],
+                        envelope["second_with_root_opening_bytes"],
+                        envelope["third_with_middle_bytes"],
+                        closing_envelope_bound(),
+                    )
+                    > MAX_GITHUB_RESPONSE_BYTES
+                ):
+                    raise ReviewInputError(
+                        "quarantine complete native packet capacity exceeded"
+                    )
+                self.certificates[surface] = {
+                    "count_upper_bound": count,
+                    "encoded_bytes_upper_bound": size,
+                    "largest_upper_bound": largest,
+                    "physical_reads_upper_bound": 10,
+                    "reader": "complete-native-root-union",
+                    "complete_conversation_reserve": deepcopy(
+                        self.reserve["inline_replies"]
+                    ),
+                }
+                continue
             if count > MAX_PAGINATION_ITEMS or largest > _PAGE_BYTES:
                 raise ReviewInputError(
                     f"quarantine {surface} item/response capacity exceeded"
@@ -346,7 +494,35 @@ class NativeCapacityGuard:
             self.objects[surface, row["id"]] = _wire({"body": row.get("body", "")})
         self.require(self.stats)
 
+    def seed_projected_roots(self):
+        """Count actual root identities with their source-enforced body bounds.
+
+        These are capacity bounds, not fabricated native body observations.
+        Full conversation/reply/report readers keep their complete raw domain.
+        """
+        from .native_review_groups import full_inline_envelope
+
+        profile = self.native_profile
+        if profile is None:
+            raise ReviewInputError("native projected root capacity is unavailable")
+        maximum = full_inline_envelope()["largest_selected_item_bytes"]
+        known = profile["root_body_wires"]
+        for identifier in profile["root_metadata"]:
+            bound = known.get(identifier, maximum)
+            for surface in ("inline_replies", "threads"):
+                state = self.stats[surface]
+                state["count"] += 1
+                state["bytes"] += bound + _RESPONSE_METADATA_BYTES
+                state["largest"] = max(
+                    state["largest"], bound + _RESPONSE_METADATA_BYTES
+                )
+                self.objects[surface, identifier] = bound
+        self.require(self.stats)
+
     def before_request(self, method, path, body):
+        # A response may bind only its own physical create. A later GraphQL
+        # POST or a read after an unknown write cannot inherit that pending ID.
+        self._pending_create = None
         snapshot = (
             self.comment_bounds,
             self.future_parts,
@@ -551,7 +727,9 @@ class NativeCapacityGuard:
         self.stats = candidate
         if identifier is not None:
             self.objects[surface, identifier] = max(previous, object_wire)
-        self._pending_create = (surface, object_wire) if new else None
+        self._pending_create = (
+            (surface, object_wire, deepcopy(object_body)) if new else None
+        )
 
     def after_response(self, method, value):
         if (
@@ -560,13 +738,62 @@ class NativeCapacityGuard:
             and isinstance(value, dict)
             and type(value.get("id")) is int
         ):
-            surface, size = self._pending_create
+            surface, size, submitted = self._pending_create
+            self._pending_create = None
             self.objects[surface, value["id"]] = size
+            if surface == "issue_comments" and value.get("body") == submitted.get(
+                "body"
+            ):
+                self._bind_immutable_comment_capacity(value["id"], submitted)
+
+    def _bind_immutable_comment_capacity(self, identifier, submitted):
+        """Refine packing for an own exact echo, never reuse its content.
+
+        Every old and interrupted-current unknown slot remains in the plan.
+        This intentionally double-counts this known object rather than removing
+        any uncertainty liability. The refined plan is used only if its full
+        interleaving proof needs no more physical calls than original admission.
+        Subsequent walks still fetch every body and full opening/closing scope.
+        """
+        from .operation_host import OPERATION_COMMENT_MARKER
+        from .packed_comment_census import CommentAllocationPlan
+        from .session_ledger import SESSION_MARKER_ANY_VERSION
+
+        plan = self.comment_plan
+        text = submitted.get("body")
+        if (
+            plan is None
+            or self.comment_read_calls is None
+            or type(identifier) is not int
+            or identifier <= 0
+            or identifier in plan.known
+            or not isinstance(text, str)
+            or SESSION_MARKER_ANY_VERSION in text
+            or text.startswith(OPERATION_COMMENT_MARKER + "\n")
+            or "<!-- reviewsensei:command-receipt:v1 " in text
+            or len(plan.known) + len(plan.unknown) >= 200
+        ):
+            return
+        refined = CommentAllocationPlan(
+            {**plan.known, identifier: _wire({"body": text})},
+            plan.unknown,
+            metadata_known=plan.metadata_known,
+            metadata_unknown=plan.metadata_unknown,
+        )
+        if refined.worst_read_calls() <= self.comment_read_calls:
+            self.comment_plan = refined
         self._pending_create = None
 
 
 def _comment_allocation_plan(
-    ledger, receipt, comment_bounds, closure_wire, root_slot, *, identity
+    ledger,
+    receipt,
+    comment_bounds,
+    closure_wire,
+    root_slot,
+    *,
+    identity,
+    receipt_update=None,
 ):
     """Issue capacity from the complete census and authenticated source bounds.
 
@@ -627,6 +854,8 @@ def _comment_allocation_plan(
             OPERATION_COMMENT_MARKER + "\n"
         ):
             amount = max(amount, ordinary["max_object_wire_bytes"], closure_wire)
+        if receipt_update is not None and identifier == receipt_update[0]:
+            amount = max(amount, receipt_update[1])
         known[identifier] = amount
         author = row.get("user")
         metadata_known[identifier] = (
@@ -710,9 +939,103 @@ def install_capacity(
             if future_parts == 3
             else [closure_wire] * future_parts
         )
+    receipt_update = None
+    receipt_update_bytes = 0
+    receipt_marker = getattr(ledger, "_quarantine_command_receipt_marker", None)
+    if receipt_marker is not None:
+        matches = [
+            row
+            for row in ledger._cached_comments()
+            if isinstance(row.get("body"), str)
+            and row["body"].rstrip().endswith(receipt_marker)
+            and isinstance(row.get("user"), dict)
+            and row["user"].get("type") == "Bot"
+            and row["user"].get("id") == ledger._evidence_author_id
+        ]
+        if len(matches) > 1:
+            raise ReviewInputError("current command receipt is duplicated")
+        if matches:
+            # Transfer the existing command's receipt promise to the selected
+            # existing ID before effects. This adds no slot or byte allowance;
+            # the old thirteen allocations and their uncertainty stay intact.
+            choices = [bound for bound in comment_bounds if bound >= 65_536]
+            if not choices:
+                raise ReviewInputError("current command receipt update is unfunded")
+            bound = min(choices)
+            comment_bounds = list(comment_bounds)
+            comment_bounds.remove(bound)
+            future_parts -= 1
+            receipt_update = (matches[0]["id"], bound)
+            receipt_update_bytes = max(0, bound - _wire({"body": matches[0]["body"]}))
     comment_plan = _comment_allocation_plan(
-        ledger, receipt, comment_bounds, closure_wire, root_slot, identity=identity
+        ledger,
+        receipt,
+        comment_bounds,
+        closure_wire,
+        root_slot,
+        identity=identity,
+        receipt_update=receipt_update,
     )
+    native_profile = None
+    isolation = receipt.get("execution_isolation", receipt)
+    qualification = isolation.get("qualification", {})
+    if qualification.get("schema_version") == "quarantine-published-tail-provenance-v2":
+        from .native_reader_projection import (
+            read_projection_roots,
+            validate_reader_projection,
+        )
+        from .native_review_groups import NativeReviewPlan
+        from .quarantine_activation import registered_activation
+
+        registration = registered_activation(
+            identity, isolation["predecessor_comment_id"]
+        )
+        contract = registration.get(
+            "published_tail", registration.get("prepublication")
+        )
+        if not isinstance(contract, dict):
+            raise ReviewInputError(
+                "native reader projection has no installed source contract"
+            )
+        projection = validate_reader_projection(
+            qualification["reader_projection"],
+            contract,
+            source_contract_sha256=qualification["exposure"]["source_contract_sha256"],
+            surface_exposure=qualification["exposure"]["surfaces"],
+        )
+        scope = ledger._quarantine_origin_reader.current_scope
+        skeleton = NativeReviewPlan.prepare(
+            repository_id=identity.repository_id,
+            pull_request=identity.pull_request,
+            head_sha=scope.head_sha,
+            base_sha=scope.base_sha,
+            transaction_id="0" * 64,
+            result_sha256="0" * 64,
+            items=(),
+        )
+        targets, root_count, old_bytes, reads, root_metadata, root_body_wires = (
+            read_projection_roots(
+                ledger.http,
+                token=token,
+                repository=identity.repository,
+                plan=skeleton,
+                projection=projection,
+                ceased_census_sha256=isolation["census_sha256"],
+                current_census_sha256=isolation["census_sha256"],
+            )
+        )
+        if old_bytes + reserve["threads"]["positive_update_bytes"] > 96 * 1024:
+            raise ReviewInputError(
+                "quarantine historical root positive-growth capacity exceeded"
+            )
+        native_profile = {
+            "projection": projection,
+            "targets": targets,
+            "root_count": root_count,
+            "reads": reads,
+            "root_metadata": root_metadata,
+            "root_body_wires": root_body_wires,
+        }
     guard = NativeCapacityGuard(
         identity=identity,
         reserve=reserve,
@@ -724,6 +1047,11 @@ def install_capacity(
         reply=ledger._quarantine_native_tail_parts == 8,
         complete_tail=ledger._quarantine_native_comment_bounds is not None,
         comment_plan=comment_plan,
+        native_profile=native_profile,
+        receipt_update_bytes=receipt_update_bytes,
+    )
+    guard.command_receipt_update_id = (
+        None if receipt_update is None else receipt_update[0]
     )
     if not ledger._inventory_complete:
         raise ReviewInputError(
@@ -731,6 +1059,13 @@ def install_capacity(
         )
     guard.seed("issue_comments", ledger._cached_comments())
     for surface, suffix in (("reviews", "reviews"), ("inline_replies", "comments")):
+        if (
+            surface == "inline_replies"
+            and native_profile is not None
+            and ledger._quarantine_native_tail_parts != 8
+        ):
+            guard.seed_projected_roots()
+            continue
         cached = (
             getattr(ledger, "_quarantine_native_reviews", None)
             if surface == "reviews"
@@ -749,7 +1084,12 @@ def install_capacity(
         if surface == "inline_replies":
             # Every thread has at least one inline root. Counting all inline
             # comments also as possible threads is a conservative superset.
-            guard.seed("threads", rows)
+            guard.seed(
+                "threads",
+                [row for row in rows if row.get("in_reply_to_id") is None]
+                if native_profile is not None
+                else rows,
+            )
     # The check authority reads the current head. Fixed old-head checks never
     # enter that reader; their late allocation reserve remains conservatively
     # charged here nevertheless. The same holds for fixed old reaction IDs:

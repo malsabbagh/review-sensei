@@ -77,6 +77,12 @@ class NativeReviewPlanTests(unittest.TestCase):
         self.assertGreaterEqual(bound["fixed_inline_bytes"], 2863)
         self.assertGreater(bound["body_response_margin_bytes"], 0)
         self.assertLessEqual(bound["largest_body_response_bytes"], 512 * 1024)
+        for packet in (
+            "smallest_with_old_roots_bytes",
+            "second_with_root_opening_bytes",
+            "third_with_middle_bytes",
+        ):
+            self.assertLessEqual(bound[packet], 512 * 1024)
 
     def test_selected_metadata_bound_covers_signed_64_bit_ids_and_timestamp_escaping(
         self,

@@ -38,6 +38,53 @@ def no_reserve():
 
 
 class QuarantineNativeCapacityTests(unittest.TestCase):
+    def test_exact_immutable_echo_refines_packing_without_releasing_unknown_slots(self):
+        from review_sensei_github.packed_comment_census import (
+            CommentAllocationPlan,
+            wire,
+        )
+        from test_packed_comment_census import PackedBackend
+
+        unknown = (32768,) * 9 + (65536,) * 4
+        backend = PackedBackend(["new immutable body"])
+        identifier = int(backend.rows[0]["fullDatabaseId"])
+        guard = NativeCapacityGuard(
+            identity=IDENTITY,
+            reserve=no_reserve(),
+            comment_plan=CommentAllocationPlan({}, unknown),
+        )
+        admitted_calls = guard.comment_read_calls
+        reserve = copy.deepcopy(guard.reserve)
+        body = {"body": "new immutable body"}
+        guard.before_request("POST", "/repos/owner/repo/issues/7/comments", body)
+        charged = copy.deepcopy(guard.stats)
+        guard.after_response("POST", {"id": identifier, **body})
+        self.assertEqual(guard.comment_plan.unknown, unknown)
+        self.assertEqual(guard.comment_plan.known[identifier], wire(body))
+        self.assertLessEqual(guard.comment_plan.worst_read_calls(), admitted_calls)
+        self.assertEqual(guard.reserve, reserve)
+        self.assertEqual(guard.stats, charged)
+        # Capacity binding is no content receipt: a later walk fetches the body
+        # and refuses positive growth beyond the known immutable envelope.
+        from review_sensei_github.packed_comment_census import fetch_packed_comments
+
+        self.assertEqual(
+            fetch_packed_comments(backend.ledger(), IDENTITY, plan=guard.comment_plan)[
+                0
+            ]["body"],
+            body["body"],
+        )
+        backend.rows[0]["body"] += " changed"
+        with self.assertRaisesRegex(ReviewInputError, "complete body page"):
+            fetch_packed_comments(backend.ledger(), IDENTITY, plan=guard.comment_plan)
+        # An unknown dispatch stays charged and grants no identity binding to
+        # a later read/GraphQL response, even if that response contains an ID.
+        guard.before_request("POST", "/repos/owner/repo/issues/7/comments", body)
+        guard.before_request("POST", "/graphql", {"query": "query Example{x}"})
+        guard.after_response("POST", {"id": identifier + 1, **body})
+        self.assertNotIn(identifier + 1, guard.comment_plan.known)
+        self.assertEqual(guard.stats["issue_comments"]["count"], 2)
+
     def test_review_post_charges_separate_persisted_objects_even_without_ack(self):
         for response in (json_response({"id": 77}, 201), TimeoutError("unknown")):
             with self.subTest(ack=isinstance(response, TimeoutError)):

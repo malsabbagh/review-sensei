@@ -119,6 +119,28 @@ class DefaultHumanInventoryPublisherTests(unittest.TestCase):
         arguments.update(overrides)
         return self.publisher.publish(**arguments)
 
+    def test_grouped_producer_refuses_before_effects_without_complete_startup_admission(
+        self,
+    ):
+        before = len(self.state.calls)
+        with (
+            patch(
+                "review_sensei_github.checkpoint_result_store.uses_grouped_publication",
+                return_value=True,
+            ),
+            self.assertRaisesRegex(
+                ReviewInputError, "complete startup admission is unavailable"
+            ),
+        ):
+            self.publish()
+        self.assertIsNone(self.store.authenticated_reference)
+        self.assertFalse(
+            any(
+                method in {"POST", "PATCH", "PUT"} and "/repos/" in path
+                for method, path, _ in self.state.calls[before:]
+            )
+        )
+
     def test_scoped_reader_reuses_admitted_store_under_remaining_original_budget(self):
         from review_sensei_github.default_human_reader import (
             DefaultHumanInventoryReader,

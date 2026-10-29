@@ -121,7 +121,7 @@ def remember_accepted_result(
         "evidence_digest": evidence_digest,
     }
     from .quarantine_capacity import NativeCapacityGuard
-    from .retention_projection import NATIVE_RENDER_FORMAT
+    from .retention_projection import GROUPED_NATIVE_RENDER_FORMAT, NATIVE_RENDER_FORMAT
 
     transport = _publication_transport(http)
     guard = getattr(transport, "_quarantine_capacity_guard", None)
@@ -134,7 +134,11 @@ def remember_accepted_result(
     _CAPTURED[transport] = CapturedAcceptedResult(
         canonical_bytes(reference),
         payload,
-        NATIVE_RENDER_FORMAT if protected else "legacy",
+        GROUPED_NATIVE_RENDER_FORMAT
+        if protected and guard is not None and guard.native_grouped
+        else NATIVE_RENDER_FORMAT
+        if protected
+        else "legacy",
     )
 
 

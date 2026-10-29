@@ -31,6 +31,10 @@ _RUNS = itertools.count(7900)
 
 
 class BodyLimitJourneyFixture(JourneyFixture):
+    # Match the independently reconstructed incident:80raw candidates and23
+    # distinct historical holds, each requiring its own authorized decision.
+    historical_hold_count = 23
+
     def creator(self):
         return {
             **super().creator(),
@@ -91,9 +95,9 @@ class BodyLimitJourneyFixture(JourneyFixture):
                 "path": "src/app.py",
                 "side": "FILE",
                 "body": f"Original candidate {i}: " + "bounded finding evidence " * 20,
-                "severity": "high" if i < 3 else "low",
+                "severity": "high" if i < self.historical_hold_count else "low",
                 "blocking": False,
-                "needs_human": i < 3,
+                "needs_human": i < self.historical_hold_count,
             }
             for i in range(80)
         ]
@@ -219,7 +223,7 @@ class BodyLimitQuarantineTests(unittest.TestCase):
                 pending = approval_eligibility_from_body(
                     f.reviews[-1]["body"]
                 ).quarantine_assessments["pending"]
-                self.assertEqual(len(pending), 3)
+                self.assertEqual(len(pending), self.fixture_type.historical_hold_count)
                 self.assertEqual(f.provider_calls, calls + 1)
                 self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
                 for item in pending:
@@ -237,7 +241,7 @@ class BodyLimitQuarantineTests(unittest.TestCase):
                     len(
                         f.selected.ledger._quarantine_authenticated.state["settlements"]
                     ),
-                    3,
+                    self.fixture_type.historical_hold_count,
                 )
                 self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
                 f.select_command("@reviewsensei verify", new_run=True)

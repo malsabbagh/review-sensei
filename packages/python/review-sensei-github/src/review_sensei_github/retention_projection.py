@@ -27,6 +27,8 @@ INVENTORY_VERSION = "admitted-inventory-projection-v1"
 MAX_CHECKPOINT_PROJECTION_BYTES = 8192
 MAX_INVENTORY_PROJECTION_BYTES = 65_536
 NATIVE_RENDER_FORMAT = "literal-malformed-v1"
+GROUPED_NATIVE_RENDER_FORMAT = "bounded-inline-groups-v1"
+NATIVE_RENDER_FORMATS = frozenset({NATIVE_RENDER_FORMAT, GROUPED_NATIVE_RENDER_FORMAT})
 
 
 def _sha(payload):
@@ -62,8 +64,19 @@ def _result(payload):
     return result
 
 
-def checkpoint_projection(source_payload, result, source_reference):
+def checkpoint_projection(
+    source_payload,
+    result,
+    source_reference,
+    *,
+    native_render_format=NATIVE_RENDER_FORMAT,
+):
     """Encode only the source-proven transaction/overflow transformation."""
+    if (
+        not isinstance(native_render_format, str)
+        or native_render_format not in NATIVE_RENDER_FORMATS
+    ):
+        raise ReviewInputError("checkpoint native producer format is unsupported")
     source = _result(source_payload)
     if not isinstance(result, ReviewResult) or result.transaction is None:
         raise ReviewInputError("checkpoint projection requires a transaction")
@@ -94,7 +107,7 @@ def checkpoint_projection(source_payload, result, source_reference):
     return _bounded(
         {
             "schema_version": CHECKPOINT_VERSION,
-            "native_render_format": NATIVE_RENDER_FORMAT,
+            "native_render_format": native_render_format,
             "source": source_reference,
             "source_payload_sha256": _sha(source_payload),
             "transaction": transaction.to_dict(),
@@ -120,7 +133,8 @@ def restore_checkpoint_projection(payload, transaction, load_authenticated_sourc
             "result_payload_sha256",
         }
         or value["schema_version"] != CHECKPOINT_VERSION
-        or value["native_render_format"] != NATIVE_RENDER_FORMAT
+        or not isinstance(value["native_render_format"], str)
+        or value["native_render_format"] not in NATIVE_RENDER_FORMATS
     ):
         raise ReviewInputError("checkpoint projection fields are invalid")
     bound = ReviewTransaction.from_dict(value["transaction"])

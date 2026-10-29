@@ -80,6 +80,12 @@ def application(run: ReviewRun) -> GitHubApplication:
     )
     app.reviewer.finalizer.evidence_budget = run.caller.budget_view
     app.replier.finalizer.evidence_budget = run.caller.budget_view
+    # Source/admission reads retain the original metadata credential. Review
+    # mutations use their independently selected write capability; a later
+    # finalizer need not rebuild this same operation's immutable read context.
+    if run.ledger._quarantine_required:
+        app.reviewer.finalizer.human_inventory_read_token = run.ledger.token
+        app.replier.finalizer.human_inventory_read_token = run.ledger.token
     return app
 
 

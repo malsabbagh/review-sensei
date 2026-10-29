@@ -105,6 +105,47 @@ def fixture(count=60, body_bytes=4000, *, evidence_policy="legacy"):
 
 
 class RetentionProjectionTests(unittest.TestCase):
+    def test_native_format_is_immutable_and_legacy_descriptors_keep_their_renderer(
+        self,
+    ):
+        from review_sensei_github.retention_projection import (
+            GROUPED_NATIVE_RENDER_FORMAT,
+            NATIVE_RENDER_FORMAT,
+        )
+
+        _, bound, raw, _, _, _ = fixture(2)
+        reference = {"original": True}
+        expected = canonical_bytes(bound.to_dict())
+        for native_format in (NATIVE_RENDER_FORMAT, GROUPED_NATIVE_RENDER_FORMAT):
+            encoded = checkpoint_projection(
+                raw, bound, reference, native_render_format=native_format
+            )
+            self.assertEqual(json.loads(encoded)["native_render_format"], native_format)
+            self.assertEqual(
+                restore_checkpoint_projection(
+                    encoded, bound.transaction, lambda _: raw
+                ),
+                expected,
+            )
+        legacy = checkpoint_projection(raw, bound, reference)
+        self.assertEqual(
+            json.loads(legacy)["native_render_format"], NATIVE_RENDER_FORMAT
+        )
+        with self.assertRaises(ReviewInputError):
+            checkpoint_projection(
+                raw, bound, reference, native_render_format="future-v99"
+            )
+        for unsupported in ("future-v99", [], {}, None):
+            changed = json.loads(legacy)
+            changed["native_render_format"] = unsupported
+            with (
+                self.subTest(unsupported=unsupported),
+                self.assertRaises(ReviewInputError),
+            ):
+                restore_checkpoint_projection(
+                    canonical_bytes(changed), bound.transaction, lambda _: raw
+                )
+
     def test_original_confirmed_policy_is_preserved_without_running_policy_again(self):
         _, _, _, source, binding, document = fixture(4, evidence_policy="confirmed")
         encoded = inventory_projection(source, document, binding, {"original": True})

@@ -319,6 +319,33 @@ class PublicationStaging:
                     native_id=receipt.native_id, content_sha256=receipt.content_sha256
                 )
             )
+        # A positive receipt is evidence, not another native effect. It may
+        # share one durable CAS with the next unique attempt claim. The prior
+        # attempt remains recorded, so an interrupted combined CAS never grants
+        # a replacement dispatch for the already attempted effect.
+        settled = tuple(candidates)
+        for confirmed in settled:
+            if len(confirmed.receipts) > len(self.receipts):
+                if confirmed.attempted_parts < confirmed.part_count:
+                    if len(after.attempt_tokens) == confirmed.attempted_parts + 1:
+                        candidates.append(
+                            confirmed.attempt_part(
+                                confirmed.attempted_parts,
+                                token=after.attempt_tokens[-1],
+                            )
+                        )
+                elif confirmed.manifest_required and after.manifest_token is not None:
+                    candidates.append(
+                        confirmed.attempt_manifest(token=after.manifest_token)
+                    )
+                elif not confirmed.manifest_required and after.final_token is not None:
+                    candidates.append(confirmed.attempt_final(token=after.final_token))
+            elif (
+                confirmed.manifest_receipt is not None
+                and self.manifest_receipt is None
+                and after.final_token is not None
+            ):
+                candidates.append(confirmed.attempt_final(token=after.final_token))
         if after not in candidates:
             raise ReviewInputError(
                 "publication staging changed its plan, receipt, or durable frontier"
@@ -413,13 +440,19 @@ def require_staging_successor(before: object, after: object) -> None:
     if new is None:
         raise ReviewInputError("publication staging cannot be silently discarded")
     if old is None or old.complete and old.transaction_id != new.transaction_id:
-        if new != PublicationStaging.prepare(
+        prepared = PublicationStaging.prepare(
             transaction_id=new.transaction_id,
             result_sha256=new.result_sha256,
             plan_sha256=new.plan_sha256,
             part_count=new.part_count,
             manifest_required=new.manifest_required,
-        ):
+        )
+        candidates = [prepared]
+        if prepared.part_count and new.attempt_tokens:
+            candidates.append(prepared.attempt_part(0, token=new.attempt_tokens[0]))
+        elif not prepared.part_count and new.manifest_token is not None:
+            candidates.append(prepared.attempt_manifest(token=new.manifest_token))
+        if new not in candidates:
             raise ReviewInputError(
                 "publication staging must begin before its first attempt"
             )

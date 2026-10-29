@@ -1,6 +1,7 @@
 """Compact physical descriptors keep original source and unknown writes intact."""
 
 import hashlib
+import itertools
 import json
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from unittest.mock import patch
 from review_sensei_github.accepted_result import selected_accepted_result
 from review_sensei_github.checkpoint_result_store import (
     CheckpointResultStore,
+    uses_grouped_publication,
     uses_literal_publication,
 )
 from review_sensei_github.operation_host import (
@@ -204,8 +206,11 @@ class CheckpointResultStoreTests(unittest.TestCase):
                     event_key=key, result=canonical, _check_existing=False
                 )
             self.assertEqual(legacy_port.creates, 0)
-            for fault in (None, "stored", "absent"):
-                with self.subTest(fault=fault):
+            for native_format, fault in itertools.product(
+                ("literal-malformed-v1", "bounded-inline-groups-v1"),
+                (None, "stored", "absent"),
+            ):
+                with self.subTest(native_format=native_format, fault=fault):
                     port = IsolatedCheckpointPort(f, key, fault=fault)
                     store = CheckpointResultStore(
                         port,
@@ -224,9 +229,7 @@ class CheckpointResultStoreTests(unittest.TestCase):
                         patch.object(physical, "_quarantine_capacity_guard", object()),
                         patch(
                             "review_sensei_github.checkpoint_result_store.selected_accepted_result",
-                            return_value=replace(
-                                captured, native_format="literal-malformed-v1"
-                            ),
+                            return_value=replace(captured, native_format=native_format),
                         ),
                     ):
                         if fault:
@@ -258,6 +261,10 @@ class CheckpointResultStoreTests(unittest.TestCase):
                         self.assertTrue(
                             uses_literal_publication(f.selected.http, bound)
                         )
+                        self.assertEqual(
+                            uses_grouped_publication(f.selected.http, bound),
+                            native_format == "bounded-inline-groups-v1",
+                        )
                         unbound = replace(
                             bound, transaction=None, summary="Another complete result."
                         )
@@ -273,6 +280,18 @@ class CheckpointResultStoreTests(unittest.TestCase):
                         self.assertEqual(ref["carrier_ids"], [8_000_001])
                         self.assertNotEqual(
                             ref["storage_payload_sha256"], ref["result_payload_sha256"]
+                        )
+                        self.assertEqual(store._decode(canonical), canonical)
+                        self.assertFalse(
+                            uses_literal_publication(f.selected.http, bound)
+                        )
+                        self.assertFalse(
+                            uses_grouped_publication(f.selected.http, bound)
+                        )
+                        store.original_reference(event_key=key)
+                        self.assertEqual(
+                            uses_grouped_publication(f.selected.http, bound),
+                            native_format == "bounded-inline-groups-v1",
                         )
                         port.rows.append(replace(port.rows[-1], comment_id=8_000_002))
                         with self.assertRaises((ValueError, ReviewInputError)):

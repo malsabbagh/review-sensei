@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import time
+from bisect import bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -135,6 +136,7 @@ def packed_request_bound(
     upper = [0]
     for bound in largest:
         upper.append(upper[-1] + bound)
+    unknown_cost = [value + NODE_METADATA_BYTES * i for i, value in enumerate(upper)]
     work = 0
 
     class ProofWorkExceeded(Exception):
@@ -147,22 +149,38 @@ def packed_request_bound(
             return 0 if closing_metadata_bytes is None else 1
         worst = 0
         for end_known in range(ki, len(known) + 1):
-            known_cost = prefix[end_known] - prefix[ki]
-            for added_unknown in range(len(unknown) - ui + 1):
+            work += 1
+            if work > 500_000:
+                raise ProofWorkExceeded
+            known_count = end_known - ki
+            if known_count > 100:
+                break
+            known_cost = (
+                prefix[end_known] - prefix[ki] + NODE_METADATA_BYTES * known_count
+            )
+            capacity = MAX_GITHUB_RESPONSE_BYTES - OUTER_BYTES - known_cost
+            if capacity < 0:
+                break
+            maximum = min(
+                len(unknown) - ui,
+                100 - known_count,
+                bisect_right(unknown_cost, capacity) - 1,
+            )
+            # Only maximal page boundaries recurse. Skip all prefixes for
+            # which another known and unknown item would both still fit.
+            candidates = {maximum}
+            if end_known < len(known):
+                minimum = bisect_right(
+                    unknown_cost,
+                    capacity - NODE_METADATA_BYTES - known[end_known],
+                )
+                candidates.update(range(minimum, maximum + 1))
+            for added_unknown in sorted(candidates):
                 work += 1
                 if work > 500_000:
                     raise ProofWorkExceeded
-                count = end_known - ki + added_unknown
-                if count > 100:
-                    break
-                cost = (
-                    OUTER_BYTES
-                    + NODE_METADATA_BYTES * count
-                    + known_cost
-                    + upper[added_unknown]
-                )
-                if cost > MAX_GITHUB_RESPONSE_BYTES:
-                    break
+                count = known_count + added_unknown
+                cost = OUTER_BYTES + known_cost + unknown_cost[added_unknown]
                 if not count:
                     continue
                 end_unknown = ui + added_unknown

@@ -18,6 +18,29 @@ from review_sensei.publication_staging import PublicationStaging
 
 
 class NativeUnionTests(unittest.TestCase):
+    def test_union_frame_reserve_covers_maximum_union_at_each_base64_alignment(self):
+        import base64
+
+        from review_sensei_github.native_union import (
+            MAX_UNION_BYTES,
+            NATIVE_UNION_FRAME_RESERVE,
+        )
+
+        # An opaque canonical JSON string reaches the declared union ceiling.
+        # Vary the old frame length through all three encoding alignments.
+        union = "u" * (MAX_UNION_BYTES - 2)
+        self.assertEqual(len(canonical_bytes(union)), MAX_UNION_BYTES)
+        for length in range(6):
+            current = {"schema_version": "7", "text": "深🙂" * length}
+            old = canonical_bytes(current)
+            framed = canonical_bytes(
+                {"schema_version": "8", "current": current, "native_union": union}
+            )
+            growth = len(base64.urlsafe_b64encode(framed)) - len(
+                base64.urlsafe_b64encode(old)
+            )
+            self.assertLessEqual(growth, NATIVE_UNION_FRAME_RESERVE)
+
     def test_fresh_consumer_reconstructs_exact_plan_from_original_admission(self):
         from review_sensei_github.publication import FindingIndex, review_result_digest
         from test_native_group_publication import GroupWriterBackend
@@ -39,6 +62,63 @@ class NativeUnionTests(unittest.TestCase):
         )
         with self.assertRaises(ReviewInputError):
             receipt.reconstruct_plan(backend.result, altered)
+
+    def test_cold_plan_checks_body_explanations_against_original_admission(self):
+        from review_sensei_github.native_review_groups import NativeReviewPlan
+        from review_sensei_github.publication import FindingIndex, review_result_digest
+        from test_native_group_publication import GroupWriterBackend
+
+        from review_sensei.presentation import (
+            assign_finding_identifiers,
+            build_finding_view,
+            render_finding,
+        )
+
+        backend = GroupWriterBackend()
+        state = backend.host.publish_parts()
+        original = NativeUnionReceipt.from_staging(backend.plan, state, producer_id=999)
+        entries = backend.assembled.index_entries
+        body_entry = replace(entries[0], body_placed=True)
+        index = FindingIndex(
+            review_result_digest(backend.result),
+            backend.plan.base_sha,
+            (body_entry, *entries[1:]),
+        )
+        plan = NativeReviewPlan.prepare(
+            repository_id=backend.plan.repository_id,
+            pull_request=backend.plan.pull_request,
+            head_sha=backend.plan.head_sha,
+            base_sha=backend.plan.base_sha,
+            transaction_id=backend.plan.transaction_id,
+            result_sha256=backend.plan.result_sha256,
+            items=backend.plan.items[1:],
+        )
+        receipt = replace(
+            original,
+            plan_sha256=plan.sha256,
+            inline_count=1,
+            parts=(replace(original.parts[0], finding_count=1),),
+        )
+        comment = backend.result.comments[0]
+        identifiers = assign_finding_identifiers([entry.instance for entry in entries])
+        view = replace(
+            build_finding_view(
+                comment,
+                fingerprint=body_entry.lifecycle,
+                identifier=identifiers[body_entry.instance],
+                placement="body",
+                advisory=False,
+                literal_malformed_fences=True,
+            ),
+            repeat=True,
+        )
+        complete = render_finding(view)
+        self.assertEqual(
+            receipt.reconstruct_plan(backend.result, index, main_body=complete), plan
+        )
+        for body in ("Missing explanation", complete.replace(comment.body, "Edited")):
+            with self.subTest(body=body), self.assertRaises(ReviewInputError):
+                receipt.reconstruct_plan(backend.result, index, main_body=body)
 
     def fixture(self):
         from review_sensei_github.native_review_groups import (

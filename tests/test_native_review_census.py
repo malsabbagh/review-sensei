@@ -11,8 +11,10 @@ from review_sensei_github.native_review_census import (
     CLOSE_MIDDLE_QUERY,
     CLOSE_QUERY,
     MAX_EXISTING_ROOT_IDS_BYTES,
+    OLD_QUERY,
     OPEN_QUERY,
     PART_MIDDLE_QUERY,
+    PART_OLD_QUERY,
     PART_ROOTS_QUERY,
     ROOT_METADATA_BYTES,
     ROOT_OPEN_QUERY,
@@ -150,7 +152,7 @@ class NativeCensusBackend:
         query, variables = value["query"], value["variables"]
         self.calls.append(query)
         data = {}
-        if query in {PART_QUERY, PART_MIDDLE_QUERY, PART_ROOTS_QUERY}:
+        if query in {PART_QUERY, PART_MIDDLE_QUERY, PART_ROOTS_QUERY, PART_OLD_QUERY}:
             ordinal = int(variables["id"].split(":")[1])
             data.update(copy.deepcopy(self.group_payloads[ordinal]["data"]))
         if query == OPEN_QUERY:
@@ -168,7 +170,7 @@ class NativeCensusBackend:
                 },
             }
             data["repository"] = {"n": self.plan.repository_id, "p": pr}
-        if query in {ROOT_OPEN_QUERY, PART_ROOTS_QUERY}:
+        if query in {ROOT_OPEN_QUERY, PART_ROOTS_QUERY, OLD_QUERY}:
             data["repository"] = {
                 "n": self.plan.repository_id,
                 "p": {
@@ -208,15 +210,24 @@ class NativeCensusBackend:
             if query == CLOSE_MIDDLE_QUERY:
                 pr["m"] = self.window(self.roots[100 : 100 + variables["first"]])
             data["repository"] = {"n": self.plan.repository_id, "p": pr}
-            data["main"] = {
-                "n": str(self.main_id),
-                "b": self.main_body,
-                "s": "COMMENTED",
-                "a": {"t": "Bot", "n": 999},
-                "c": {"o": self.plan.head_sha},
-                "p": {"n": self.plan.pull_request, "r": {"n": self.plan.repository_id}},
-                "x": {"totalCount": 0},
-            }
+            data["frames"] = [
+                {
+                    "n": str(self.main_id),
+                    "b": self.main_body,
+                    "s": "COMMENTED",
+                    "a": {"t": "Bot", "n": 999},
+                    "c": {"o": self.plan.head_sha},
+                    "p": {
+                        "n": self.plan.pull_request,
+                        "r": {"n": self.plan.repository_id},
+                    },
+                    "x": {"totalCount": 0},
+                },
+                *copy.deepcopy(getattr(self, "approval_rows", [])),
+            ]
+        if query in {OLD_QUERY, PART_OLD_QUERY}:
+            if query == PART_OLD_QUERY:
+                data["repository"] = {"n": self.plan.repository_id, "p": self.scope()}
             data["old"] = [
                 {
                     "i": self.old_nodes[int(row["n"])],
@@ -260,8 +271,7 @@ class NativeReviewCensusTests(unittest.TestCase):
             "number": 2**31 - 1,
             "front": 100,
             "back": 100,
-            "main": "x" * 2048,
-            "roots": roots,
+            "frames": ["x" * 2048, "z" * 2048],
             "first": 100,
             "after": "y" * 2048,
         }
@@ -272,6 +282,17 @@ class NativeReviewCensusTests(unittest.TestCase):
             {"query": CLOSE_MIDDLE_QUERY, "variables": variables}, separators=(",", ":")
         ).encode()
         self.assertLessEqual(len(encoded), 8192)
+        old_variables = {
+            "owner": "x" * 256,
+            "name": "y" * 256,
+            "number": 2**31 - 1,
+            "id": "x" * 2048,
+            "roots": roots,
+        }
+        self.assertTrue(source_query_variables(PART_OLD_QUERY, old_variables))
+        self.assertLessEqual(
+            wire_bytes({"query": PART_OLD_QUERY, "variables": old_variables}), 8192
+        )
 
     def test_200_reviews_with_2048_byte_node_ids_keep_the_same_ten_call_walk(self):
         backend = NativeCensusBackend()
@@ -340,6 +361,61 @@ class NativeReviewCensusTests(unittest.TestCase):
             )
         self.assertEqual(len(backend.calls), 10)
 
+    def test_existing_bodies_share_smallest_packet_and_remain_version_fenced(self):
+        backend = NativeCensusBackend()
+        backend.read()
+        self.assertEqual(backend.calls.count(PART_OLD_QUERY), 1)
+        self.assertEqual(backend.calls[1], PART_OLD_QUERY)
+        backend = NativeCensusBackend()
+        backend.change = lambda query, value: (
+            value["data"]["old"].pop() if query == PART_OLD_QUERY else None
+        )
+        with self.assertRaises(ReviewInputError):
+            backend.read()
+        backend = NativeCensusBackend()
+        backend.change = lambda query, value: (
+            value["data"]["old"][0]["x"]["nodes"][0].update(u="2026-10-27T00:00:00Z")
+            if query == PART_OLD_QUERY
+            else None
+        )
+        with self.assertRaises(ReviewInputError):
+            backend.read()
+
+    def test_actual_approval_body_is_returned_and_changed_scope_refuses(self):
+        for changed in (False, True):
+            backend = NativeCensusBackend()
+            backend.reviews.append(
+                {
+                    "i": "approval",
+                    "n": "9000",
+                    "s": "APPROVED",
+                    "a": {"t": "Bot", "n": 999},
+                    "c": {"o": backend.plan.head_sha},
+                    "x": {"totalCount": 0, "nodes": []},
+                }
+            )
+            approval = {
+                "n": "9000",
+                "b": "Exact original approval marker.",
+                "s": "APPROVED",
+                "a": {"t": "Bot", "n": 999},
+                "c": {"o": backend.plan.head_sha},
+                "p": {
+                    "n": backend.plan.pull_request,
+                    "r": {"n": backend.plan.repository_id},
+                },
+                "x": {"totalCount": 0},
+            }
+            backend.approval_rows = [approval]
+            if changed:
+                approval["c"]["o"] = "d" * 40
+                with self.assertRaises(ReviewInputError):
+                    backend.read()
+            else:
+                evidence = backend.read()
+                self.assertEqual(evidence.approvals, (approval,))
+                self.assertEqual(evidence.physical_reads, 10)
+
     def test_joint_closing_and_selected_metadata_bounds_fit_source_maxima(self):
         maximum = {
             "s": False,
@@ -364,7 +440,7 @@ class NativeReviewCensusTests(unittest.TestCase):
 
     def test_closing_membership_body_head_and_parent_edits_never_become_evidence(self):
         changes = [
-            lambda value: value["data"]["main"].update(b="changed"),
+            lambda value: value["data"]["frames"][0].update(b="changed"),
             lambda value: value["data"]["repository"]["p"].update(h="e" * 40),
             lambda value: value["data"]["repository"]["p"]["m"]["nodes"][0]["x"][
                 "nodes"
@@ -372,7 +448,6 @@ class NativeReviewCensusTests(unittest.TestCase):
             lambda value: value["data"]["repository"]["p"]["f"]["nodes"][0]["x"][
                 "nodes"
             ][0].update(n="12345"),
-            lambda value: value["data"]["old"].pop(),
         ]
         for change in changes:
             backend = NativeCensusBackend()

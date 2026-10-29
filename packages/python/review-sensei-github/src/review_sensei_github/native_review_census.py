@@ -16,6 +16,7 @@ from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
 
 from .native_review_groups import (
+    EXISTING_ROOT_PROJECTION_BYTES,
     MIDDLE_METADATA_BYTES,
     PART_QUERY,
     NativeGroupEvidence,
@@ -34,7 +35,8 @@ MAX_REVIEWS = 200
 ROOT_OPEN_METADATA_BYTES = 80 * 1024
 MAX_EXISTING_ROOTS = 50
 MAX_ROOTS = 300
-MAX_EXISTING_ROOT_PROJECTION_BYTES = 96 * 1024
+MAX_EXISTING_ROOT_PROJECTION_BYTES = EXISTING_ROOT_PROJECTION_BYTES
+MAX_APPROVAL_PROJECTION_BYTES = 4096
 MAX_EXISTING_ROOT_IDS_BYTES = 1536
 
 _SCOPE = "n:number h:headRefOid b:baseRefOid "
@@ -97,8 +99,22 @@ PART_MIDDLE_QUERY = (
     + _MIDDLE
     + "}"
 )
-_MAIN = "main:node(id:$main){... on PullRequestReview{n:fullDatabaseId b:body s:state a:author{t:__typename ... on Bot{n:databaseId}} c:commit{o:oid} p:pullRequest{n:number r:repository{n:databaseId}} x:comments(first:1){totalCount}}}"
+_MAIN = "frames:nodes(ids:$frames){... on PullRequestReview{n:fullDatabaseId b:body s:state a:author{t:__typename ... on Bot{n:databaseId}} c:commit{o:oid} p:pullRequest{n:number r:repository{n:databaseId}} x:comments(first:1){totalCount}}}"
 _OLD = "old:nodes(ids:$roots){... on PullRequestReviewThread{i:id s:isResolved d:diffSide t:subjectType x:comments(first:1){totalCount nodes{n:fullDatabaseId b:body p:path l:line o:originalLine a:author{t:__typename ... on Bot{n:databaseId}} c:commit{o:oid} z:originalCommit{o:oid} r:pullRequestReview{n:fullDatabaseId} q:replyTo{n:fullDatabaseId} u:updatedAt}}}}"
+_OLD_SCOPE = _REPOSITORY_SCOPE + "}}"
+OLD_QUERY = (
+    "query NativeExistingRoots($owner:String!,$name:String!,$number:Int!,$roots:[ID!]!){"
+    + _ROOT_OPEN
+    + _OLD
+    + "}"
+)
+PART_OLD_QUERY = (
+    "query NativeReviewPartWithOldRoots($id:ID!,$owner:String!,$name:String!,$number:Int!,$roots:[ID!]!){"
+    + _PART_SELECTION
+    + _OLD_SCOPE
+    + _OLD
+    + "}"
+)
 _CLOSE_FRAGMENT = "fragment NativeClosingRoot on PullRequestReviewThread{" + _ROOT + "}"
 _CLOSE_SCOPE = (
     "repository(owner:$owner,name:$name){n:databaseId p:pullRequest(number:$number){"
@@ -114,7 +130,9 @@ _CLOSE_MIDDLE = (
     + "...NativeClosingRoot"
     + "}}"
 )
-_CLOSE_VARS = "$owner:String!,$name:String!,$number:Int!,$front:Int!,$back:Int!,$main:ID!,$roots:[ID!]!"
+_CLOSE_VARS = (
+    "$owner:String!,$name:String!,$number:Int!,$front:Int!,$back:Int!,$frames:[ID!]!"
+)
 CLOSE_QUERY = (
     "query NativePublicationClosing("
     + _CLOSE_VARS
@@ -122,7 +140,6 @@ CLOSE_QUERY = (
     + _CLOSE_SCOPE
     + "}}"
     + _MAIN
-    + _OLD
     + "}"
     + _CLOSE_FRAGMENT
 )
@@ -134,7 +151,6 @@ CLOSE_MIDDLE_QUERY = (
     + _CLOSE_MIDDLE
     + "}}"
     + _MAIN
-    + _OLD
     + "}"
     + _CLOSE_FRAGMENT
 )
@@ -162,17 +178,27 @@ def source_query_variables(query: str, variables: object) -> bool:
             or not _opaque(variables.get("after"))
         ):
             return False
-    if query in {PART_MIDDLE_QUERY, PART_ROOTS_QUERY}:
+    if query in {PART_MIDDLE_QUERY, PART_ROOTS_QUERY, PART_OLD_QUERY}:
         fields.add("id")
         if not _opaque(variables.get("id")):
             return False
     if query in {CLOSE_QUERY, CLOSE_MIDDLE_QUERY}:
-        fields.update(("front", "back", "main", "roots"))
+        fields.update(("front", "back", "frames"))
         if any(
             type(variables.get(key)) is not int or not 1 <= variables[key] <= 100
             for key in ("front", "back")
-        ) or not _opaque(variables.get("main")):
+        ):
             return False
+        frames = variables.get("frames")
+        if (
+            not isinstance(frames, list)
+            or not 1 <= len(frames) <= 2
+            or any(not _opaque(value) for value in frames)
+            or len(set(frames)) != len(frames)
+        ):
+            return False
+    if query in {OLD_QUERY, PART_OLD_QUERY}:
+        fields.add("roots")
         roots = variables.get("roots")
         if (
             not isinstance(roots, list)
@@ -185,6 +211,8 @@ def source_query_variables(query: str, variables: object) -> bool:
         query
         not in {
             OPEN_QUERY,
+            OLD_QUERY,
+            PART_OLD_QUERY,
             ROOT_OPEN_QUERY,
             PART_ROOTS_QUERY,
             MIDDLE_QUERY,
@@ -432,6 +460,7 @@ class NativePublicationEvidence:
     main_body: str
     main_state: str
     document_sha256: str | None
+    approvals: tuple[dict[str, Any], ...] = ()
 
 
 def closing_envelope_bound() -> int:
@@ -461,7 +490,7 @@ def closing_envelope_bound() -> int:
         + (MAX_EXISTING_ROOTS + 1) * ROOT_METADATA_BYTES
         + MAX_REVIEWS * CLOSING_REVIEW_METADATA_BYTES
         + 8192
-        + MAX_EXISTING_ROOT_PROJECTION_BYTES
+        + MAX_APPROVAL_PROJECTION_BYTES
     )
 
 
@@ -503,11 +532,34 @@ def read_publication_union(
     groups: list[NativeGroupEvidence | None] = [None] * len(plan.groups)
     middle = None
     root_open = None
+    old_threads = None
     order = sorted(range(len(plan.groups)), key=plan.response_upper_bound)
     for position, ordinal in enumerate(order):
         review_id = group_review_ids[ordinal]
         node = opening.review_nodes[review_id]
         if position == 0:
+            payload = budget.request(
+                http,
+                token=token,
+                query=PART_OLD_QUERY,
+                variables={
+                    **opening.scope_variables,
+                    "id": node["i"],
+                    "roots": list(old_root_nodes.values()),
+                },
+            )
+            _scope(payload, plan)
+            old_threads = payload["data"]["old"]
+            if wire_bytes(old_threads) > MAX_EXISTING_ROOT_PROJECTION_BYTES:
+                raise ReviewInputError("native existing root packet exceeds its bound")
+            groups[ordinal] = verify_complete_group_response(
+                payload,
+                plan=plan,
+                ordinal=ordinal,
+                expected_review_id=review_id,
+                producer_id=producer_id,
+            )
+        elif position == 1:
             payload = budget.request(
                 http,
                 token=token,
@@ -574,6 +626,18 @@ def read_publication_union(
                 producer_id=producer_id,
                 budget=budget,
             )
+    if old_threads is None:
+        payload = budget.request(
+            http,
+            token=token,
+            query=OLD_QUERY,
+            variables={
+                **opening.scope_variables,
+                "roots": list(old_root_nodes.values()),
+            },
+        )
+        _scope(payload, plan)
+        old_threads = payload["data"]["old"]
     if root_open is None:
         payload = budget.request(
             http, token=token, query=ROOT_OPEN_QUERY, variables=opening.scope_variables
@@ -601,12 +665,21 @@ def read_publication_union(
         expected_count=root_open.root_count,
         complete=True,
     )
+    approvals = [
+        identifier
+        for identifier, row in opening.review_nodes.items()
+        if row.get("s") == "APPROVED"
+        and row.get("c") == {"o": plan.head_sha}
+        and row.get("a") == {"t": "Bot", "n": producer_id}
+    ]
+    if len(approvals) > 1 or main_review_id in approvals:
+        raise ReviewInputError("native publication approval membership is ambiguous")
+    frame_ids = [main_review_id, *approvals]
     variables = {
         **opening.scope_variables,
         "front": min(100, max(1, root_open.root_count)),
         "back": min(100, max(1, root_open.root_count - 100)),
-        "main": opening.review_nodes[main_review_id]["i"],
-        "roots": list(old_root_nodes.values()),
+        "frames": [opening.review_nodes[identifier]["i"] for identifier in frame_ids],
     }
     query = CLOSE_QUERY
     if needs_middle:
@@ -637,7 +710,32 @@ def read_publication_union(
             or pr["f"]["pageInfo"]["endCursor"] != root_open.first_cursor
         ):
             raise ReviewInputError("native publication closing root membership changed")
-        main = payload["data"]["main"]
+        frames = payload["data"]["frames"]
+        if not isinstance(frames, list) or len(frames) != len(frame_ids):
+            raise ReviewInputError(
+                "native publication authority frame closure is incomplete"
+            )
+        by_id = {_native_number(row["n"]): row for row in frames}
+        if len(by_id) != len(frames) or set(by_id) != set(frame_ids):
+            raise ReviewInputError("native publication authority identities conflict")
+        approval_rows = tuple(by_id[identifier] for identifier in approvals)
+        if wire_bytes(approval_rows) > MAX_APPROVAL_PROJECTION_BYTES:
+            raise ReviewInputError(
+                "native publication approval frame exceeds its bound"
+            )
+        for row in approval_rows:
+            if (
+                row["s"] != "APPROVED"
+                or not isinstance(row["b"], str)
+                or row["a"]["t"] != "Bot"
+                or _native_number(row["a"]["n"]) != producer_id
+                or row["c"]["o"] != plan.head_sha
+                or row["p"]["n"] != plan.pull_request
+                or _native_number(row["p"]["r"]["n"]) != plan.repository_id
+                or row["x"]["totalCount"] != 0
+            ):
+                raise ReviewInputError("native publication approval scope conflicts")
+        main = by_id[main_review_id]
         if (
             _native_number(main["n"]) != main_review_id
             or not isinstance(main["b"], str)
@@ -678,7 +776,6 @@ def read_publication_union(
             raise ReviewInputError(
                 "native publication root union contains an unselected source"
             )
-        old_threads = payload["data"]["old"]
         if (
             not isinstance(old_threads, list)
             or len(old_threads) != len(old_root_nodes)
@@ -742,6 +839,7 @@ def read_publication_union(
             main["b"],
             main["s"],
             document_sha256,
+            approval_rows,
         )
     except (KeyError, TypeError, AttributeError, ValueError) as exc:
         raise ReviewInputError(

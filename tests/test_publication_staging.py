@@ -38,6 +38,69 @@ class PublicationStagingTests(unittest.TestCase):
             PublicationStaging.from_document(complete.to_document()), complete
         )
 
+    def test_receipt_and_next_unique_claim_share_one_durable_checkpoint(self):
+        from test_review_transaction import IDENTITY, NOW, _checkpoint
+
+        from review_sensei.publication_staging import checkpoint_publication_staging
+        from review_sensei.session import InMemorySessionLedger
+
+        ledger = InMemorySessionLedger()
+        transaction = _checkpoint(ledger).transaction
+        prepared = PublicationStaging.prepare(
+            transaction_id=transaction.transaction_id,
+            result_sha256=transaction.result_sha256,
+            plan_sha256="c" * 64,
+            part_count=2,
+            manifest_required=True,
+        )
+        attempted = prepared.attempt_part(0)
+        checkpoint_publication_staging(
+            ledger, IDENTITY, transaction, expected=None, after=attempted, now=NOW
+        )
+        settled = attempted.confirm_part(0, native_id="81", content_sha256="d" * 64)
+        next_claim = settled.attempt_part(1)
+        checkpoint_publication_staging(
+            ledger, IDENTITY, transaction, expected=attempted, after=next_claim, now=NOW
+        )
+        # A persisted combined CAS with a lost ACK reconciles exactly; a stale
+        # caller cannot mint a different claim from the same positive receipt.
+        self.assertEqual(
+            checkpoint_publication_staging(
+                ledger,
+                IDENTITY,
+                transaction,
+                expected=attempted,
+                after=next_claim,
+                now=NOW,
+            ),
+            next_claim,
+        )
+        with self.assertRaisesRegex(ReviewInputError, "expected frontier changed"):
+            checkpoint_publication_staging(
+                ledger,
+                IDENTITY,
+                transaction,
+                expected=attempted,
+                after=settled.attempt_part(1),
+                now=NOW,
+            )
+        with self.assertRaises(ReviewInputError):
+            next_claim.attempt_manifest()
+        manifest = next_claim.confirm_part(
+            1, native_id="82", content_sha256="e" * 64
+        ).attempt_manifest()
+        next_claim.require_successor(manifest)
+        final = manifest.confirm_manifest(
+            native_id="issue:83", content_sha256="f" * 64
+        ).attempt_final()
+        manifest.require_successor(final)
+        with self.assertRaises(ReviewInputError):
+            attempted.require_successor(final)
+        with self.assertRaises(ReviewInputError):
+            prepared.require_successor(next_claim)
+        self.assertEqual(len(final.receipts), 2)
+        self.assertIsNone(final.final_receipt)
+
     def test_stale_callers_cannot_share_an_attempt_claim(self):
         from test_review_transaction import IDENTITY, NOW, _checkpoint
 

@@ -863,6 +863,13 @@ def bootstrap(
     native._quarantine_capacity_cursor = any(
         "published_tail" in row or "prepublication" in row for row in registrations
     )
+    if purpose == "command" and source is not None:
+        # Capacity only: live source/actor authorization still precedes every
+        # command effect. Replay updates this same bounded receipt object.
+        native._quarantine_command_receipt_marker = (
+            "<!-- reviewsensei:command-receipt:v1 "
+            f"source={source['id']} digest={hashlib.sha256(args.comment_body.encode()).hexdigest()} -->"
+        )
     native._quarantine_native_tail_parts = (
         3 if purpose == "command" else 8 if purpose == "reply" else 2
     )

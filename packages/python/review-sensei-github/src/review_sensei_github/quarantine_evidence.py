@@ -143,10 +143,10 @@ class _HistoricalInventoryStore(HumanInventoryStore):
         super().__init__(*args, **kwargs)
         self._current_scope = current_scope
 
-    def _authority(self):
+    def _authority(self, *, loaded=None):
         from .default_human_inventory import _transaction
 
-        _transaction(self.ledger, self.context)
+        _transaction(self.ledger, self.context, loaded=loaded)
         self._current_scope.require()
 
     def revalidate_snapshot(self):

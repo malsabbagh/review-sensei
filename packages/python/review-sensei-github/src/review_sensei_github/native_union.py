@@ -23,6 +23,16 @@ if TYPE_CHECKING:
 
 UNION_VERSION = "native-review-union-v1"
 MAX_UNION_BYTES = 4096
+# The v8 envelope wraps the existing canonical eligibility document. Base64
+# growth is at most four bytes per added three input bytes, plus one quantum
+# for the old document's alignment. Keep the full validated union ceiling.
+_UNION_ENVELOPE_BYTES = (
+    len(canonical_bytes({"schema_version": "8", "current": None, "native_union": None}))
+    - len(b"null") * 2
+)
+NATIVE_UNION_FRAME_RESERVE = (
+    (MAX_UNION_BYTES + _UNION_ENVELOPE_BYTES + 2) // 3
+) * 4 + 4
 _SHA = re.compile(r"[a-f0-9]{64}")
 _GIT_SHA = re.compile(r"[a-f0-9]{40}")
 
@@ -270,7 +280,7 @@ class NativeUnionReceipt:
             )
 
     def reconstruct_plan(
-        self, result: ReviewResult, index: FindingIndex
+        self, result: ReviewResult, index: FindingIndex, *, main_body: str | None = None
     ) -> NativeReviewPlan:
         """Replay exact native bodies from the authenticated original admission.
 
@@ -286,6 +296,7 @@ class NativeUnionReceipt:
         from review_sensei.presentation import (
             assign_finding_identifiers,
             build_finding_view,
+            render_finding,
         )
 
         from .native_review_groups import NativeInline, NativeReviewPlan
@@ -330,16 +341,17 @@ class NativeUnionReceipt:
             )
         for advisory in (False, True):
             items = []
+            body_complete = True
             for instance, (comment, fingerprint) in originals.items():
                 entry = entries[instance]
-                if entry.body_placed:
-                    continue
                 comment = replace(
                     comment,
                     effective_blocking=entry.blocking,
                     needs_human=entry.needs_human,
                 )
-                if comment.side not in {"LEFT", "RIGHT"} or comment.line is None:
+                if not entry.body_placed and (
+                    comment.side not in {"LEFT", "RIGHT"} or comment.line is None
+                ):
                     raise ReviewInputError(
                         "native union retained inline location is invalid"
                     )
@@ -350,12 +362,16 @@ class NativeUnionReceipt:
                         fingerprint=fingerprint,
                         identifier=identifiers[instance],
                         lifecycle_state=state,
-                        placement="inline",
+                        placement="body" if entry.body_placed else "inline",
                         advisory=advisory,
                         literal_malformed_fences=True,
                     ),
                     repeat=True,
                 )
+                if entry.body_placed:
+                    if main_body is not None and render_finding(view) not in main_body:
+                        body_complete = False
+                    continue
                 body = render_native_inline(
                     comment,
                     view=view,
@@ -381,7 +397,11 @@ class NativeUnionReceipt:
                 result_sha256=self.result_sha256,
                 items=tuple(items),
             )
-            if plan.sha256 == self.plan_sha256 and len(plan.items) == self.inline_count:
+            if (
+                plan.sha256 == self.plan_sha256
+                and len(plan.items) == self.inline_count
+                and body_complete
+            ):
                 return plan
         raise ReviewInputError("native union complete original rendering changed")
 

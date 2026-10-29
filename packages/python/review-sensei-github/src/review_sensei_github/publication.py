@@ -111,6 +111,7 @@ from .http import (
     BoundedGraphQLPages,
     GitHubHttp,
 )
+from .native_union import NATIVE_UNION_FRAME_RESERVE
 from .operation_diagnostics import OperationDiagnostics, OperationObserver
 from .qualification import TrustedOpenRouterQualification
 from .thread_resolution import graphql_app_author
@@ -1607,6 +1608,22 @@ class _ScopedHumanInventoryReader:
             return False
         return reader.attach_authenticated_store(store)
 
+    def native_union_reader(self, review):
+        from .native_union import native_union_frame_document
+
+        try:
+            native_union_frame_document(review.get("body"))
+        except ReviewInputError:
+            return None
+        self.budget.check()
+        factory = getattr(self._reader(), "native_union_reader", None)
+        return factory(review) if callable(factory) else None
+
+    def confirmed_native_root(self, eligibility):
+        self.budget.check()
+        method = getattr(self._reader(), "confirmed_native_root", None)
+        return method(eligibility) if callable(method) else None
+
     def validate_root(self, review: dict[str, Any], reviews: list[Any]) -> None:
         self.budget.check()
         validate = getattr(self._reader(), "validate_root", None)
@@ -1681,6 +1698,7 @@ class ReviewApprovalFinalizer:
         self.human_inventory_reader = human_inventory_reader
         self.human_inventory_reader_factory = human_inventory_reader_factory
         self.prior_publication_reader_factory: Callable[[object], Any] | None = None
+        self.native_union_reader_factory: Callable[[dict[str, Any]], Any] | None = None
         self.quarantine_reader_factory: Callable[..., Any] | None = None
         # An explicitly supplied metadata credential is independent of the
         # capability used for review/check mutations. Never persist this value.
@@ -2748,6 +2766,32 @@ class ReviewApprovalFinalizer:
                 return live.result
             if live.base_sha != index.base_sha or live.repository_id != repository_id:
                 return PublicationResult(status="skipped_stale_base")
+        elif eligibility.native_union is not None:
+            # The complete native union was just authenticated above. This
+            # operation changes only its main frame, so fence those exact owned
+            # bytes before PUT rather than rebuilding the same immutable source
+            # context and rereading every part a second time. Post-PUT proof and
+            # all cleanup/approval gates still use their complete fresh readers.
+            status, current_root = self.http.request(
+                "GET",
+                self.http.repository_path(
+                    repository, f"/pulls/{pull_request}/reviews/{chosen['id']}"
+                ),
+                token=token,
+            )
+            if (
+                status != 200
+                or not isinstance(current_root, dict)
+                or current_root.get("id") != chosen["id"]
+                or current_root.get("body") != body
+                or current_root.get("user") != chosen.get("user")
+                or current_root.get("state") != chosen.get("state")
+                or current_root.get("commit_id") != head_sha
+                or current_root.get("pull_request_url") != pull_request_url
+            ):
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="approval_withheld"
+                )
         elif (
             self.load_eligibility(
                 token=token,
@@ -3335,8 +3379,75 @@ class ReviewApprovalFinalizer:
         if not instances:
             return ThreadResolutionResult()
 
+        native_root = None
+        if getattr(eligibility, "native_union", None) is not None and not records:
+            reader = self._human_reader_for_scope(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            snapshot = getattr(reader, "confirmed_native_root", None)
+            if callable(snapshot):
+                native_root = snapshot(eligibility)
+
         def fence() -> bool:
             self._observe_stage("cleanup.authority-fence")
+            if native_root is not None:
+                # The complete native body/index proof preceded this cleanup.
+                # Resolution changes only the candidate's mutable state. The
+                # resolver separately rereads that exact inline root before
+                # both capability issuance and dispatch; here fence the exact
+                # main frame and fresh ledger holds, then the live PR last.
+                # Legacy report receipts retain their full reader above.
+                status, selected = self.http.request(
+                    "GET",
+                    self.http.repository_path(
+                        repository, f"/pulls/{pull_request}/reviews/{native_root['id']}"
+                    ),
+                    token=token,
+                )
+                if (
+                    status != 200
+                    or not isinstance(selected, dict)
+                    or any(
+                        selected.get(key) != native_root.get(key)
+                        for key in (
+                            "id",
+                            "body",
+                            "user",
+                            "state",
+                            "commit_id",
+                            "pull_request_url",
+                        )
+                    )
+                ):
+                    return False
+                holds = self.quarantine_reader(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                )
+                if (
+                    holds is None
+                    or holds.require(eligibility, head_sha=head_sha) != eligibility
+                ):
+                    return False
+                live = self._preflight(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
+                return (
+                    live.result is None
+                    and live.repository_id == repository_id
+                    and live.base_sha == index.base_sha
+                    and not live.app_authored
+                )
             live_reviews = self._load_head_reviews(
                 token=token, repository=repository, pull_request=pull_request
             )
@@ -4066,15 +4177,23 @@ class ReviewApprovalFinalizer:
                         "latest partition eligibility root ownership conflicts"
                     )
                 return None
+            selected_reader = (
+                self.prior_publication_reader_factory(review)
+                if self.prior_publication_reader_factory is not None
+                else None
+            )
+            selected_reader = selected_reader or human_reader
+            document_reader = selected_reader
+            native_factory = getattr(document_reader, "native_union_reader", None)
             eligibility = approval_eligibility_from_body(
                 body,
-                human_inventory_reader=(
-                    selected_reader := (
-                        self.prior_publication_reader_factory(review)
-                        if self.prior_publication_reader_factory is not None
-                        else None
-                    )
-                    or human_reader
+                human_inventory_reader=document_reader,
+                native_union_reader=(
+                    self.native_union_reader_factory(review)
+                    if self.native_union_reader_factory is not None
+                    else native_factory(review)
+                    if callable(native_factory)
+                    else None
                 ),
                 partition_reader=partition_reader,
                 expected_context=expected_context,
@@ -4235,6 +4354,106 @@ class ReviewPublisher:
         self._pending_thread_cleanup: Callable[[], str | None] | None = None
         self._confirmed_review_id: int | None = None
         self._confirmed_check: tuple[str, str, int] | None = None
+
+    def _native_group_host(self, *, result, assembled, store, capacity):
+        from review_sensei.session import SessionIdentity
+
+        from .native_group_publication import NativeGroupPublication
+        from .native_manifest import NativeManifestStore, NativePublicationReader
+        from .native_review_groups import NativeInline, NativeReviewPlan
+
+        transaction = result.transaction
+        admit = getattr(capacity, "admit_grouped_publication", None)
+        if transaction is None or store is None or not callable(admit):
+            raise ReviewInputError(
+                "grouped publication complete startup admission is unavailable"
+            )
+        context = store.context
+        if (
+            context.transaction_id != transaction.transaction_id
+            or context.original_content_digest != transaction.result_sha256
+            or context.publication_digest != review_result_digest(result)
+        ):
+            raise ReviewInputError(
+                "grouped publication original admission scope changed"
+            )
+        source_comments = None
+        from .api_run_requests import ApiRunSessionLedger
+        from .quarantine_holds import QuarantineHoldReader
+
+        hold_reader = self.finalizer.quarantine_reader(
+            token=store.token,
+            repository=context.repository,
+            pull_request=context.pull_request,
+            head_sha=context.head_sha,
+        )
+        if (
+            type(hold_reader) is QuarantineHoldReader
+            and isinstance(hold_reader.ledger, ApiRunSessionLedger)
+            and isinstance(store.ledger, ApiRunSessionLedger)
+            and hold_reader.ledger.caller is store.ledger.caller
+            and hold_reader.ledger._inventory_complete
+        ):
+            # This read just authenticated the prospective historical holds.
+            # Decode the original checkpoint from that same complete opening;
+            # the later staging CAS performs fresh discovery before effects.
+            hold_reader.record_after_read()
+            store.port.prime(list(hold_reader.ledger._cached_comments()))
+            source_comments = store.port.list_comments()
+        reference, _source = store._checkpoint_source(source_comments)
+        plan = NativeReviewPlan.prepare(
+            repository_id=context.repository_id,
+            pull_request=context.pull_request,
+            base_sha=context.base_sha,
+            head_sha=context.head_sha,
+            transaction_id=transaction.transaction_id,
+            result_sha256=transaction.result_sha256,
+            items=tuple(
+                NativeInline.from_prepared(comment, body, anchor=anchor)
+                for comment, _, body, anchor in assembled.inline_comments
+            ),
+        )
+        old_targets = getattr(capacity, "native_old_root_nodes", None)
+        if not isinstance(old_targets, dict):
+            raise ReviewInputError(
+                "grouped publication historical target admission is unavailable"
+            )
+        self.finalizer.native_union_reader_factory = lambda review: (
+            NativePublicationReader.for_review(
+                store, review, old_root_nodes=old_targets
+            )
+        )
+
+        def authority_fence():
+            from .default_human_inventory import _live_pr
+
+            # The inventory's independent Bot lookup bound the numeric producer
+            # for this finite publication. Every exact ledger/part read checks
+            # that producer; each dispatch still freshly fences the live PR.
+            _live_pr(store.http, store.token, store.context)
+            return True
+
+        return NativeGroupPublication(
+            http=self.http,
+            ledger=store.ledger,
+            identity=SessionIdentity(
+                context.repository, context.pull_request, context.repository_id
+            ),
+            transaction=transaction,
+            plan=plan,
+            token=store.token,
+            producer_id=context.producer_id,
+            admission=lambda prepared: admit(plan=prepared),
+            authority_fence=authority_fence,
+            manifest_store=NativeManifestStore(
+                store.port,
+                SessionIdentity(
+                    context.repository, context.pull_request, context.repository_id
+                ),
+                context.producer_id,
+                hashlib.sha256(canonical_bytes(reference)).hexdigest(),
+            ),
+        )
 
     def _finish_thread_cleanup(
         self, publication: PublicationResult
@@ -4795,6 +5014,23 @@ class ReviewPublisher:
         allow_human_inventory_start: bool = False,
         narrative_archive: Callable[[], ConfirmedNarrativeArchive] | None = None,
     ) -> PublicationResult:
+        from .checkpoint_result_store import uses_grouped_publication
+
+        grouped_publication = isinstance(
+            result, ReviewResult
+        ) and uses_grouped_publication(self.http, result)
+        if grouped_publication and (
+            not complete_inventory or human_inventory_store is None
+        ):
+            raise ReviewInputError(
+                "grouped publication requires complete original admission"
+            )
+        if grouped_publication and retained_eligibility is not None:
+            raise ReviewInputError(
+                "grouped publication requires its own complete transaction"
+            )
+        native_host = None
+        capacity = None
         if not isinstance(complete_inventory, bool):
             raise GitHubPublicationError("complete inventory writer gate is invalid")
         if not isinstance(allow_human_inventory_start, bool):
@@ -5078,6 +5314,8 @@ class ReviewPublisher:
             reserve = _disposition_frame_reserve(
                 preflight_document, preflight_review.index_entries
             )
+            if grouped_publication:
+                reserve += NATIVE_UNION_FRAME_RESERVE
             narrative_compacted = False
             while True:
                 try:
@@ -5133,6 +5371,8 @@ class ReviewPublisher:
                         reserve = _disposition_frame_reserve(
                             preflight_document, preflight_review.index_entries
                         )
+                        if grouped_publication:
+                            reserve += NATIVE_UNION_FRAME_RESERVE
                         needs_human_inventory = True
                         continue
                     if (
@@ -5168,6 +5408,10 @@ class ReviewPublisher:
                         "_quarantine_capacity_guard",
                         None,
                     )
+                    if grouped_publication and capacity is None:
+                        raise ReviewInputError(
+                            "grouped publication complete startup admission is unavailable"
+                        )
                     if capacity is not None:
                         # The complete rendered frame and every possible inline
                         # payload are known before inventory/check/publication
@@ -5196,7 +5440,28 @@ class ReviewPublisher:
                             + 128
                             for c, _, text, _ in preflight_review.inline_comments
                         ]
-                        capacity.admit_publication(
+                        admission = (
+                            getattr(capacity, "admit_grouped_publication", None)
+                            if grouped_publication
+                            else capacity.admit_publication
+                        )
+                        if not callable(admission):
+                            raise ReviewInputError(
+                                "grouped publication complete startup admission is unavailable"
+                            )
+                        if grouped_publication:
+                            native_host = self._native_group_host(
+                                result=result,
+                                assembled=preflight_review,
+                                store=human_inventory_store,
+                                capacity=capacity,
+                            )
+                        admission(
+                            **(
+                                {"plan": native_host.plan}
+                                if native_host is not None
+                                else {}
+                            ),
                             review_wire=len(
                                 json.dumps(
                                     {
@@ -5246,6 +5511,7 @@ class ReviewPublisher:
                     complete_review=complete_review,
                     base_sha=base_sha,
                     result_digest=review_result_digest(result),
+                    native_host=native_host if grouped_publication else None,
                 )
             )
             if self._confirmed_publication_only and (
@@ -5666,6 +5932,7 @@ class ReviewPublisher:
                 reserved_bytes=_disposition_frame_reserve(
                     eligibility, assembled.index_entries
                 )
+                + (NATIVE_UNION_FRAME_RESERVE if grouped_publication else 0)
                 + (len(check_warning.encode("utf-8")) + 2 if check_warning else 0),
                 preserve_explanations=human_inventory is not None,
             )
@@ -5809,6 +6076,62 @@ class ReviewPublisher:
                 app_slug=app_slug,
                 eligibility=eligibility,
                 replacements=prepared_comments,
+            )
+
+        if grouped_publication:
+            if native_host is None or capacity is None:
+                raise ReviewInputError(
+                    "grouped publication lost complete startup admission"
+                )
+            expected_comments = tuple(item.payload() for item in native_host.plan.items)
+            if tuple(comments) != expected_comments:
+                raise ReviewInputError(
+                    "grouped publication prepared inline plan changed"
+                )
+            from .native_union import NativeUnionReceipt
+
+            hold_reader = self.finalizer.quarantine_reader(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )
+            if hold_reader is not None:
+                native_host.adopt_read_frontier(hold_reader)
+            before_staging = native_host.state()
+            state, evidence = native_host.publish_final(
+                body_for_receipt=lambda receipt: body.replace(
+                    eligibility_marker,
+                    approval_eligibility_marker(
+                        replace(eligibility, native_union=receipt)
+                    ),
+                    1,
+                ),
+                event=event,
+                old_root_nodes=capacity.native_old_root_nodes,
+            )
+            eligibility = replace(
+                eligibility,
+                native_union=NativeUnionReceipt.from_staging(
+                    native_host.plan, state, producer_id=native_host.producer_id
+                ),
+            )
+            self._confirmed_review_id = evidence.main_review_id
+            schedule_reconciled_cleanup()
+            return self._finalize_after_publication(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
+                require_persisted=True,
+                check_diagnostic=check_diagnostic,
+                status="already_published"
+                if before_staging is not None and before_staging.final_attempted
+                else "published",
+                review_id=evidence.main_review_id,
+                assume_inline_unresolved=frozenset(assembled.inline_blocker_instances),
             )
 
         try:
@@ -6703,9 +7026,45 @@ class ReviewPublisher:
         complete_review: AssembledReview | None = None,
         base_sha: str | None = None,
         result_digest: str | None = None,
+        native_host=None,
     ) -> tuple[frozenset[str], frozenset[str], ReviewApprovalEligibility | None]:
-        path = self.http.repository_path(repository, f"/pulls/{pull_request}/reviews")
-        payload = self.http.paginate(path=path, token=token)
+        if native_host is not None:
+            reader = self.finalizer.quarantine_reader(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )
+            if reader is not None:
+                native_host.adopt_read_frontier(reader)
+            frontier = native_host.state()
+            payload = []
+            if frontier is not None and frontier.final_receipt is not None:
+                identifier = frontier.final_receipt.native_id
+                status, selected = self.http.request(
+                    "GET",
+                    self.http.repository_path(
+                        repository, f"/pulls/{pull_request}/reviews/{identifier}"
+                    ),
+                    token=token,
+                )
+                if (
+                    status != 200
+                    or not isinstance(selected, dict)
+                    or str(selected.get("id")) != identifier
+                ):
+                    raise _NativeReplayAuthorityError(
+                        "original native final review is unavailable"
+                    )
+                payload = [selected]
+            # Incomplete staging has no settled main review. Only the original
+            # host's durable attempt protocol can reconcile it; old unrelated
+            # review bodies cannot create or substitute a publication claim.
+        else:
+            path = self.http.repository_path(
+                repository, f"/pulls/{pull_request}/reviews"
+            )
+            payload = self.http.paginate(path=path, token=token)
         identity_states: set[str] = set()
         result_states: set[str] = set()
         for review in payload:
@@ -6829,6 +7188,36 @@ class ReviewPublisher:
             raise GitHubPublicationError(
                 "complete publication inventory differs from retained review"
             )
+        from .native_union import NativeUnionReceipt, native_union_frame_document
+
+        try:
+            native_document = native_union_frame_document(review["body"])
+        except ReviewInputError:
+            native_document = None
+        if native_document is not None:
+            source_reader = self.finalizer._human_reader_for_scope(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            factory = self.finalizer.native_union_reader_factory or getattr(
+                source_reader, "native_union_reader", None
+            )
+            reader = factory(dict(review)) if callable(factory) else None
+            if reader is None:
+                raise GitHubPublicationError(
+                    "complete native replay reader is unavailable"
+                )
+            receipt = NativeUnionReceipt.from_document(native_document["native_union"])
+            receipt.require_evidence(
+                reader(receipt),
+                document_sha256=hashlib.sha256(
+                    canonical_bytes(native_document)
+                ).hexdigest(),
+            )
+            return
         if any(
             render_finding(item.view) not in review["body"]
             for item in assembled.body_explanations

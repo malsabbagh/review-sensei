@@ -1036,6 +1036,26 @@ def retain_review_result(
                 )
             return
         event_key = _event_key(identity, validated.transaction)
+        primed_comments = None
+        from .api_run_requests import ApiRunSessionLedger
+
+        if isinstance(ledger, ApiRunSessionLedger) and ledger._quarantine_required:
+            authenticated = getattr(ledger, "_quarantine_authenticated", None)
+            if (
+                _loaded is not None
+                and _loaded.status == "ok"
+                and _loaded.record is not None
+                and authenticated is not None
+                and ledger._inventory_complete
+                and ledger.caller._checkpoint is None
+                and _loaded.record.record_sha256
+                == authenticated.record_sha256
+                == ledger.caller._root
+            ):
+                # The application just completed this full native load. Feed
+                # the same bodies to retention in this finite operation; every
+                # subsequent effect retains its independent complete CAS fence.
+                primed_comments = list(ledger._cached_comments())
         store = _store(
             http,
             token=token,
@@ -1045,6 +1065,7 @@ def retain_review_result(
             head_sha=head_sha,
             transaction=validated.transaction,
             source_app_id=getattr(ledger, "authenticated_app_id", None),
+            primed_comments=primed_comments,
         )
         available = store.read_available(event_key=event_key)
         if available is None:
@@ -1117,6 +1138,7 @@ def retain_review_result(
                 configuration_context=configuration_context,
                 evidence_context=evidence_context,
                 policy=policy,
+                loaded=_loaded if primed_comments is not None else None,
             )
             if validated.transaction.phase == "publication_pending":
                 mark_review_publication_unconfirmed(

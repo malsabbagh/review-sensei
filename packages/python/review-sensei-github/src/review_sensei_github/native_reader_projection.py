@@ -283,3 +283,144 @@ def validate_reader_projection(
         allocation["implicit_new_objects"],
         tuple(roots),
     )
+
+
+def read_projection_roots(
+    http,
+    *,
+    token,
+    repository,
+    plan,
+    projection,
+    ceased_census_sha256,
+    current_census_sha256,
+):
+    """Fresh complete native associations before reserving a root-domain walk.
+
+    This does not narrow either full conversation domain or acknowledge a write.
+    The host supplies independently authenticated stopped-execution evidence.
+    """
+    from .native_review_census import (
+        MAX_EXISTING_ROOT_IDS_BYTES,
+        MAX_EXISTING_ROOT_PROJECTION_BYTES,
+        MIDDLE_QUERY,
+        OLD_QUERY,
+        _join,
+        _root_opening,
+        _scope,
+        _window,
+    )
+    from .native_review_groups import NativeWalkBudget, _native_number, wire_bytes
+
+    if type(projection) is not ReaderProjection:
+        raise ReviewInputError("native root projection is unavailable")
+    targets = {root.root_id: root.thread_id for root in projection.roots}
+    if (
+        len(targets) > 50
+        or wire_bytes(list(targets.values())) > MAX_EXISTING_ROOT_IDS_BYTES
+    ):
+        raise ReviewInputError("native historical root capacity exceeded")
+    owner, separator, name = repository.partition("/")
+    if not separator:
+        raise ReviewInputError("native root repository is invalid")
+    variables = {"owner": owner, "name": name, "number": plan.pull_request}
+    budget = NativeWalkBudget()
+    payload = budget.request(
+        http,
+        token=token,
+        query=OLD_QUERY,
+        variables={**variables, "roots": list(targets.values())},
+    )
+    _scope(payload, plan)
+    threads = payload["data"]["old"]
+    if (
+        not isinstance(threads, list)
+        or len(threads) != len(targets)
+        or wire_bytes(threads) > MAX_EXISTING_ROOT_PROJECTION_BYTES
+    ):
+        raise ReviewInputError("native historical body projection exceeds capacity")
+    roots = _root_opening(payload, plan)
+    metadata = roots.roots
+    if roots.root_count > 200:
+        middle = budget.request(
+            http,
+            token=token,
+            query=MIDDLE_QUERY,
+            variables={
+                **variables,
+                "first": roots.root_count - 200,
+                "after": roots.first_cursor,
+            },
+        )
+        _, rows = _window(_scope(middle, plan)["m"], expected_count=roots.root_count)
+        metadata = _join(
+            (tuple(metadata.values()), rows),
+            expected_count=roots.root_count,
+            complete=True,
+        )
+    associations = []
+    known_body_wires = {}
+    seen = set()
+    originals = {root.root_id: root for root in projection.roots}
+    for thread in threads:
+        comments = thread["x"]
+        if (
+            type(comments["totalCount"]) is not int
+            or not 1 <= comments["totalCount"] <= 1000
+            or not isinstance(comments["nodes"], list)
+            or len(comments["nodes"]) != 1
+        ):
+            raise ReviewInputError("native historical root association is incomplete")
+        row = comments["nodes"][0]
+        identifier = _native_number(row["n"])
+        selected = originals.get(identifier)
+        current = metadata.get(identifier)
+        if (
+            identifier in seen
+            or selected is None
+            or current is None
+            or thread["i"] != selected.thread_id
+            or current.review_id != selected.review_id
+            or current.head_sha != selected.head_sha
+            or current.producer_id != projection.producer_id
+            or _native_number(row["r"]["n"]) != selected.review_id
+            or row["a"]["t"] != "Bot"
+            or _native_number(row["a"]["n"]) != projection.producer_id
+            or row["c"]["o"] != selected.head_sha
+            or row["q"] is not None
+            or row["u"] != current.updated_at
+            or not isinstance(row["b"], str)
+            or thread["s"] is not current.resolved
+            or thread["d"] != current.side
+            or thread["t"] != current.subject_type
+        ):
+            raise ReviewInputError("native historical root association changed")
+        seen.add(identifier)
+        known_body_wires[identifier] = wire_bytes({"body": row["b"]})
+        associations.append(
+            {
+                "root_id": identifier,
+                "thread_id": thread["i"],
+                "review_id": current.review_id,
+                "head_sha": current.head_sha,
+                "producer_id": current.producer_id,
+            }
+        )
+    projection.require_fresh_associations(
+        repository_id=plan.repository_id,
+        pull_request=plan.pull_request,
+        producer_id=projection.producer_id,
+        successor_head=plan.head_sha,
+        execution_manifest_sha256=projection.execution_manifest_sha256,
+        ceased_census_sha256=ceased_census_sha256,
+        current_census_sha256=current_census_sha256,
+        rows=tuple(associations),
+    )
+    return (
+        targets,
+        roots.root_count,
+        wire_bytes(threads),
+        budget.used,
+        metadata,
+        known_body_wires,
+    )

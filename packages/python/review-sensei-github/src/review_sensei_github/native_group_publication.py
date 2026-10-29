@@ -57,6 +57,10 @@ class NativeGroupPublication:
     _physical_attempts: dict[str, tuple[Any, int]] = field(
         default_factory=dict, init=False, repr=False
     )
+    _frontier_record: SessionRecord | None = field(default=None, init=False, repr=False)
+    _claim_receipt: tuple[Any, str, str, int, str] | None = field(
+        default=None, init=False, repr=False
+    )
 
     def _remember_dispatch(self, claim: str) -> None:
         from .caller_operation import caller_for_http
@@ -108,18 +112,100 @@ class NativeGroupPublication:
             or not self.authority_fence()
         ):
             raise ReviewInputError("native grouped publication authority changed")
+        self._frontier_record = current.record
         return current.record
 
+    def adopt_read_frontier(self, reader) -> None:
+        """Use this operation's complete hold read for read-only staging choice.
+
+        No mutation or claim is authorized by this handoff. Each actual staging
+        CAS still discovers the whole ledger and confirms its own exact root.
+        """
+        from .api_run_requests import ApiRunSessionLedger
+        from .quarantine_holds import QuarantineHoldReader
+
+        if (
+            type(reader) is not QuarantineHoldReader
+            or not isinstance(self.ledger, ApiRunSessionLedger)
+            or not isinstance(reader.ledger, ApiRunSessionLedger)
+            or reader.ledger.caller is not self.ledger.caller
+            or (reader.repository, reader.pull_request)
+            != (self.identity.repository, self.identity.pull_request)
+        ):
+            raise ReviewInputError("native publication complete read owner changed")
+        record = reader.record_after_read()
+        if (
+            record.transaction is None
+            or not record.transaction.logical_identity_matches(self.transaction)
+            or record.transaction.phase
+            not in {"publication_pending", "publication_failed"}
+        ):
+            raise ReviewInputError(
+                "native publication complete read transaction changed"
+            )
+        self._frontier_record = record
+
+    def _current_frontier(self) -> SessionRecord:
+        """Reuse an own process's confirmed frontier only for read-only work.
+
+        Every new native dispatch uses the exact own-CAS receipt below. Every
+        staging mutation uses the native ledger's complete CAS census, actor,
+        live-head and protected confirmation checks. Cold readers have no cache.
+        """
+        from .api_run_requests import ApiRunSessionLedger
+
+        record = self._frontier_record
+        if (
+            isinstance(self.ledger, ApiRunSessionLedger)
+            and record is not None
+            and self.ledger.caller._checkpoint is None
+            and record.record_sha256 == self.ledger.caller._root
+            and record.transaction is not None
+            and record.transaction.logical_identity_matches(self.transaction)
+            and record.transaction.phase
+            in {"publication_pending", "publication_failed"}
+        ):
+            return record
+        return self.fence()
+
     def state(self) -> PublicationStaging | None:
-        record = self.fence()
+        record = self._current_frontier()
         value = record.publication_staging
         return None if value is None else PublicationStaging.from_document(value)
 
     def checkpoint(
         self, before: PublicationStaging | None, after: PublicationStaging
     ) -> PublicationStaging:
-        self.fence()
-        return checkpoint_publication_staging(
+        from .api_run_requests import ApiRunSessionLedger
+
+        native = (
+            isinstance(self.ledger, ApiRunSessionLedger)
+            and self.ledger._quarantine_required
+        )
+        if not native:
+            self.fence()
+        if (
+            (
+                after.transaction_id,
+                after.result_sha256,
+                after.plan_sha256,
+                after.part_count,
+            )
+            != (
+                self.plan.transaction_id,
+                self.plan.result_sha256,
+                self.plan.sha256,
+                len(self.plan.groups),
+            )
+            or self.transaction.transaction_id != self.plan.transaction_id
+            or self.transaction.result_sha256 != self.plan.result_sha256
+            or (self.transaction.head_sha, self.transaction.base_sha)
+            != (self.plan.head_sha, self.plan.base_sha)
+            or (self.identity.repository_id, self.identity.pull_request)
+            != (self.plan.repository_id, self.plan.pull_request)
+        ):
+            raise ReviewInputError("native publication checkpoint plan changed")
+        confirmed = checkpoint_publication_staging(
             self.ledger,
             self.identity,
             self.transaction,
@@ -127,16 +213,79 @@ class NativeGroupPublication:
             after=after,
             now=self.now,
         )
+        if (
+            isinstance(self.ledger, ApiRunSessionLedger)
+            and self.ledger._quarantine_required
+        ):
+            from .quarantine_checkpoint import take_confirmed_checkpoint
+
+            caller = self.ledger.caller
+            receipt = take_confirmed_checkpoint(
+                caller,
+                self.ledger,
+                self.identity,
+                staging=confirmed.to_document(),
+            )
+            self._frontier_record = receipt.record
+            self._claim_receipt = (
+                caller,
+                receipt.record.record_sha256,
+                receipt.block,
+                receipt.comment_id,
+                receipt.body,
+            )
+        return confirmed
 
     def require_claim(self, state: PublicationStaging) -> None:
-        """Only the caller that durably claimed this attempt may dispatch it."""
-        if self.state() != state:
-            raise ReviewInputError("native publication attempt claim changed")
+        """Only the caller with this positive own attempt CAS may dispatch it."""
+        from .api_run_requests import ApiRunSessionLedger
+        from .caller_operation import http_read_operation
+
+        if (
+            not isinstance(self.ledger, ApiRunSessionLedger)
+            or not self.ledger._quarantine_required
+        ):
+            if self.state() != state:
+                raise ReviewInputError("native publication attempt claim changed")
+            return
+        receipt, self._claim_receipt = self._claim_receipt, None
+        caller = self.ledger.caller
+        if (
+            receipt is None
+            or receipt[0] is not caller
+            or caller._root != receipt[1]
+            or caller._block != receipt[2]
+            or caller._checkpoint is not None
+            or self._frontier_record is None
+            or self._frontier_record.publication_staging != state.to_document()
+        ):
+            raise ReviewInputError(
+                "native publication attempt has no own checkpoint receipt"
+            )
+        with http_read_operation(self.http, "native-claim:" + receipt[1]):
+            status, row = self.http.request(
+                "GET",
+                self.http.repository_path(
+                    self.identity.repository, f"/issues/comments/{receipt[3]}"
+                ),
+                token=self.token,
+            )
+            if status != 200 or not isinstance(row, dict):
+                raise ReviewInputError(
+                    "native publication own attempt readback is unavailable"
+                )
+            self.ledger._part_owner(row, self.identity)
+            if (
+                row.get("id") != receipt[3]
+                or row.get("body") != receipt[4]
+                or not self.authority_fence()
+            ):
+                raise ReviewInputError("native publication attempt claim changed")
 
     def reconcile_part(
         self, ordinal: int, *, known_review_id: int | None = None
     ) -> NativeGroupEvidence:
-        record = self.fence()
+        record = self._current_frontier()
         budget = NativeWalkBudget()
         opening = open_publication_census(
             self.http,
@@ -211,10 +360,15 @@ class NativeGroupPublication:
             raise GitHubPublicationTransientError(
                 "native publication part changed during reconciliation"
             )
-        self.fence()
+        self._current_frontier()
         return evidence
 
     def publish_parts(self) -> PublicationStaging:
+        return self._publish_parts(claim_manifest=False)[0]
+
+    def _publish_parts(
+        self, *, claim_manifest: bool
+    ) -> tuple[PublicationStaging, bool]:
         # This callback must reserve all native/storage/caller effects before
         # the first staging CAS. It cannot add capacity during preparation.
         self.admission(self.plan)
@@ -226,12 +380,21 @@ class NativeGroupPublication:
             part_count=len(self.plan.groups),
             manifest_required=self.manifest_store is not None,
         )
+        own_part_claim = False
+        own_manifest_claim = False
         if (
             state is None
             or state.complete
             and state.transaction_id != prepared.transaction_id
         ):
-            state = self.checkpoint(state, prepared)
+            initial = prepared
+            if prepared.part_count:
+                initial = prepared.attempt_part(0)
+                own_part_claim = True
+            elif claim_manifest:
+                initial = prepared.attempt_manifest()
+                own_manifest_claim = True
+            state = self.checkpoint(state, initial)
         if (
             state.transaction_id,
             state.result_sha256,
@@ -251,6 +414,9 @@ class NativeGroupPublication:
             if state.outstanding_part is None:
                 attempted = state.attempt_part(ordinal)
                 state = self.checkpoint(state, attempted)
+                own_part_claim = True
+            if own_part_claim:
+                own_part_claim = False
                 self.require_claim(state)
                 self._remember_dispatch(state.attempt_tokens[ordinal])
                 try:
@@ -279,8 +445,15 @@ class NativeGroupPublication:
                 native_id=str(evidence.review_id),
                 content_sha256=evidence.receipt_digest,
             )
-            state = self.checkpoint(state, confirmed)
-        return state
+            next_state = confirmed
+            if ordinal + 1 < state.part_count:
+                next_state = confirmed.attempt_part(ordinal + 1)
+                own_part_claim = True
+            elif claim_manifest:
+                next_state = confirmed.attempt_manifest()
+                own_manifest_claim = True
+            state = self.checkpoint(state, next_state)
+        return state, own_manifest_claim
 
     def publish_final(
         self,
@@ -306,13 +479,15 @@ class NativeGroupPublication:
             raise ReviewInputError(
                 "native final publication requires its original manifest store"
             )
-        state = self.publish_parts()
+        state, own_manifest_claim = self._publish_parts(claim_manifest=True)
         receipt = NativeUnionReceipt.from_staging(
             self.plan, state, producer_id=self.producer_id
         )
         known_manifest = None
         if not state.manifest_attempted:
             state = self.checkpoint(state, state.attempt_manifest())
+            own_manifest_claim = True
+        if own_manifest_claim:
             self.require_claim(state)
             assert state.manifest_token is not None
             self._remember_dispatch(state.manifest_token)
@@ -330,14 +505,21 @@ class NativeGroupPublication:
                 )
             known_manifest = _native_number(manifest_identifier)
         retained_manifest = store.find(receipt, known_id=known_manifest)
-        self.fence()
+        self._current_frontier()
         assert state.manifest_token is not None
         self._settle_original_dispatch(state.manifest_token)
         confirmed_manifest = state.confirm_manifest(
             native_id=retained_manifest.native_id,
             content_sha256=retained_manifest.content_sha256,
         )
-        state = self.checkpoint(state, confirmed_manifest)
+        # Keep the verified manifest receipt in the same CAS as the final
+        # attempt claim. Both become durable before the main POST; a cold or
+        # unknown-ACK invocation only reconciles that original claim.
+        own_final_claim = not state.final_attempted
+        if own_final_claim:
+            state = self.checkpoint(state, confirmed_manifest.attempt_final())
+        elif confirmed_manifest != state:
+            state = self.checkpoint(state, confirmed_manifest)
         body = body_for_receipt(receipt)
         document = native_union_frame_document(body, receipt)
         if not isinstance(body, str) or not 0 < len(body.encode()) <= 65_536:
@@ -350,8 +532,7 @@ class NativeGroupPublication:
         }
         digest = hashlib.sha256(canonical_bytes(payload)).hexdigest()
         known = None
-        if not state.final_attempted:
-            state = self.checkpoint(state, state.attempt_final())
+        if own_final_claim:
             self.require_claim(state)
             assert state.final_token is not None
             self._remember_dispatch(state.final_token)
@@ -425,7 +606,7 @@ class NativeGroupPublication:
             evidence,
             document_sha256=hashlib.sha256(canonical_bytes(document)).hexdigest(),
         )
-        self.fence()
+        self._current_frontier()
         assert state.final_token is not None
         self._settle_original_dispatch(state.final_token)
         confirmed = state.confirm_final(

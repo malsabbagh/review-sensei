@@ -374,6 +374,7 @@ class GitHubIssueCommentSessionLedger:
         self._quarantine_required = False
         self._quarantine_capacity_cursor = False
         self._quarantine_native_tail_parts = 2
+        self._quarantine_command_receipt_marker: str | None = None
         self._quarantine_native_comment_bounds: tuple[int, ...] | None = None
         self._quarantine_checkpoint_snapshot: Any = None
         self._quarantine_complete_read = False

@@ -30,6 +30,7 @@ SELECTED_COMMENT_METADATA_BYTES = 512
 PART_RESPONSE_FRAMING_BYTES = 8192
 MIDDLE_METADATA_BYTES = 36 * 1024
 ROOT_OPEN_METADATA_BYTES = 80 * 1024
+EXISTING_ROOT_PROJECTION_BYTES = 96 * 1024
 MAX_GROUP_ROOTS = 32
 _SHA = re.compile(r"[a-f0-9]{64}")
 _GIT_SHA = re.compile(r"[a-f0-9]{40}")
@@ -181,7 +182,7 @@ class NativeReviewPlan:
                         for group in candidate
                     )
                     + PART_RESPONSE_FRAMING_BYTES
-                    + ROOT_OPEN_METADATA_BYTES
+                    + EXISTING_ROOT_PROJECTION_BYTES
                     <= MAX_GITHUB_RESPONSE_BYTES
                 )
                 and (
@@ -190,6 +191,16 @@ class NativeReviewPlan:
                         sum(items[index].selected_upper_bound for index in group)
                         for group in candidate
                     )[1]
+                    + PART_RESPONSE_FRAMING_BYTES
+                    + ROOT_OPEN_METADATA_BYTES
+                    <= MAX_GITHUB_RESPONSE_BYTES
+                )
+                and (
+                    len(candidate) < 3
+                    or sorted(
+                        sum(items[index].selected_upper_bound for index in group)
+                        for group in candidate
+                    )[2]
                     + PART_RESPONSE_FRAMING_BYTES
                     + MIDDLE_METADATA_BYTES
                     <= MAX_GITHUB_RESPONSE_BYTES
@@ -578,4 +589,13 @@ def full_inline_envelope() -> dict[str, int]:
         "body_calls": 8,
         "largest_body_response_bytes": packet,
         "body_response_margin_bytes": MAX_GITHUB_RESPONSE_BYTES - packet,
+        "smallest_with_old_roots_bytes": (total + 7) // 8
+        + PART_RESPONSE_FRAMING_BYTES
+        + EXISTING_ROOT_PROJECTION_BYTES,
+        "second_with_root_opening_bytes": (total + largest + 7) // 8
+        + PART_RESPONSE_FRAMING_BYTES
+        + ROOT_OPEN_METADATA_BYTES,
+        "third_with_middle_bytes": (total + 2 * largest + 7) // 8
+        + PART_RESPONSE_FRAMING_BYTES
+        + MIDDLE_METADATA_BYTES,
     }

@@ -43,6 +43,14 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
         ]
 
     previous = matching()
+    from .publication_recovery import _publication_transport
+
+    guard = getattr(
+        _publication_transport(run.http), "_quarantine_capacity_guard", None
+    )
+    update_id = getattr(guard, "command_receipt_update_id", None)
+    if update_id is not None and (len(previous) != 1 or previous[0]["id"] != update_id):
+        raise ReviewInputError("original command receipt update target changed")
     if len(previous) > 1:
         raise ReviewInputError("current command receipt is duplicated")
     if previous and previous[0]["body"].strip() == text.strip():

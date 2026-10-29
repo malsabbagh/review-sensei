@@ -217,16 +217,18 @@ def prepare_quarantine_target(run, authority, command, app, permission):
             "current quarantine assessment publication is unavailable"
         )
     selected = max(candidates, key=lambda r: r["id"])
+    human_reader = app._human_inventory_reader(
+        token=run.ledger.token,
+        repository=run.identity.repository,
+        pull_request=run.identity.pull_request,
+        head_sha=run.head_sha,
+        app_slug="reviewsensei[bot]",
+        budget=run.caller.budget_view,
+    )
     eligibility = approval_eligibility_from_body(
         selected["body"],
-        human_inventory_reader=app._human_inventory_reader(
-            token=run.ledger.token,
-            repository=run.identity.repository,
-            pull_request=run.identity.pull_request,
-            head_sha=run.head_sha,
-            app_slug="reviewsensei[bot]",
-            budget=run.caller.budget_view,
-        ),
+        human_inventory_reader=human_reader,
+        native_union_reader=human_reader.native_union_reader(selected),
     )
     if (
         not isinstance(eligibility, ReviewApprovalEligibility)

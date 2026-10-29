@@ -364,7 +364,15 @@ def build_human_inventory_context(
         _retained_source,
         transaction,
     )
-    _transaction(ledger, context, loaded=_loaded)
+    from .api_run_requests import ApiRunSessionLedger
+
+    _transaction(
+        ledger,
+        context,
+        loaded=loaded
+        if isinstance(ledger, ApiRunSessionLedger) and ledger._quarantine_required
+        else _loaded,
+    )
     _live_pr(transport, token, context)
     return context
 
@@ -475,8 +483,91 @@ class HumanInventoryStore:
             self._authenticated_snapshot = snapshot
         return document
 
-    def _authority(self) -> None:
-        _transaction(self.ledger, self.context)
+    def _complete_snapshot(self):
+        """Share one fresh complete native read across this inventory operation.
+
+        The native ledger still performs its full discovery and original-source
+        authentication. Its just-read bodies also feed the inventory decoder;
+        no prior operation's content or incomplete listing is reused.
+        """
+        from .api_run_requests import ApiRunSessionLedger
+
+        if (
+            not isinstance(self.ledger, ApiRunSessionLedger)
+            or not self.ledger._quarantine_required
+        ):
+            return None, None
+        identity = SessionIdentity(
+            self.context.repository,
+            self.context.pull_request,
+            self.context.repository_id,
+        )
+        loaded = self.ledger.load(identity)
+        caller = self.ledger.caller
+        caller._require_ledger(self.ledger, identity)
+        if (
+            loaded.status != "ok"
+            or loaded.record is None
+            or loaded.record.record_sha256 != caller._root
+            or caller._checkpoint is not None
+            or not self.ledger._inventory_complete
+        ):
+            raise ReviewInputError(
+                "default human inventory complete snapshot conflicts"
+            )
+        self._complete_read_record = loaded.record
+        self._complete_read_binding = (caller, caller._block, caller._root)
+        self.port.prime(list(self.ledger._cached_comments()))
+        self._complete_read_comments = self.port.list_comments()
+        return loaded, self._complete_read_comments
+
+    def transaction_after_read(self):
+        """The actual record from this operation's fresh complete admission read."""
+        from .api_run_requests import ApiRunSessionLedger
+
+        if not isinstance(self.ledger, ApiRunSessionLedger):
+            return self.ledger.load(
+                SessionIdentity(
+                    self.context.repository,
+                    self.context.pull_request,
+                    self.context.repository_id,
+                )
+            ).record
+        caller = self.ledger.caller
+        record = getattr(self, "_complete_read_record", None)
+        if (
+            record is None
+            or getattr(self, "_complete_read_binding", None)
+            != (caller, caller._block, caller._root)
+            or caller._checkpoint is not None
+            or record.record_sha256 != caller._root
+        ):
+            raise ReviewInputError("native publication just-read transaction changed")
+        return record
+
+    def comments_after_read(self):
+        from .api_run_requests import ApiRunSessionLedger
+
+        if not isinstance(self.ledger, ApiRunSessionLedger):
+            return None
+        self.transaction_after_read()
+        comments = getattr(self, "_complete_read_comments", None)
+        if comments is None:
+            raise ReviewInputError(
+                "native publication complete admission census is absent"
+            )
+        return comments
+
+    def checkpoint_source_after_read(self):
+        comments = self.comments_after_read()
+        return (
+            self._checkpoint_source()
+            if comments is None
+            else self._checkpoint_source(comments)
+        )
+
+    def _authority(self, *, loaded=None) -> None:
+        _transaction(self.ledger, self.context, loaded=loaded)
         _live(self.http, self.token, self.context)
 
     def revalidate_authority(self) -> None:
@@ -491,6 +582,53 @@ class HumanInventoryStore:
         before every read-only scan within the same finite operation.
         """
         _transaction(self.ledger, self.context)
+        _live_pr(self.http, self.token, self.context)
+
+    def revalidate_native_snapshot(self):
+        """Close this read's complete census with its exact owned ledger root.
+
+        This is usable only after this native proof's fresh complete admission
+        read. It cannot discover a root, select another lineage, or authorize a
+        mutation; later operations must complete their own opening again.
+        """
+        from .api_run_requests import ApiRunSessionLedger
+        from .session_ledger import parse_session_comment
+
+        if not isinstance(self.ledger, ApiRunSessionLedger):
+            return self.revalidate_snapshot()
+        record = self.transaction_after_read()
+        identity = SessionIdentity(
+            self.context.repository,
+            self.context.pull_request,
+            self.context.repository_id,
+        )
+        roots = []
+        for comment in self.comments_after_read():
+            if (
+                comment.user_id != self.context.producer_id
+                or comment.user_type != "Bot"
+            ):
+                continue
+            parsed = parse_session_comment(comment.body, identity=identity)
+            if parsed is not None and parsed.record_sha256 == record.record_sha256:
+                roots.append(comment)
+        if len(roots) != 1:
+            raise ReviewInputError("native publication exact closing root is ambiguous")
+        root = roots[0]
+        status, value = _get(
+            self.http,
+            self.token,
+            self.http.repository_path(
+                self.context.repository, f"/issues/comments/{root.comment_id}"
+            ),
+        )
+        if status != 200 or not isinstance(value, dict):
+            raise ReviewInputError(
+                "native publication exact closing root is unavailable"
+            )
+        self.ledger._part_owner(value, identity)
+        if value.get("id") != root.comment_id or value.get("body") != root.body:
+            raise ReviewInputError("native publication exact closing root changed")
         _live_pr(self.http, self.token, self.context)
 
     def _document(self, document: object) -> dict[str, object]:
@@ -567,7 +705,7 @@ class HumanInventoryStore:
         # Return a detached canonical snapshot, not the caller's mutable object.
         return json.loads(canonical_bytes(document))
 
-    def _payload(self, document: object) -> bytes:
+    def _payload(self, document: object, *, comments=None) -> bytes:
         from .publication_recovery import _publication_transport
 
         guard = getattr(
@@ -577,7 +715,12 @@ class HumanInventoryStore:
             from .retention_projection import inventory_projection
 
             document = self._document(document)
-            reference, source = self._checkpoint_source()
+            if (
+                comments is None
+                and getattr(self, "_complete_read_comments", None) is not None
+            ):
+                comments = self.comments_after_read()
+            reference, source = self._checkpoint_source(comments)
             return inventory_projection(
                 source, document, self.context.binding(), reference
             )
@@ -722,11 +865,13 @@ class HumanInventoryStore:
             raise ReviewInputError("retained published inventory permits reads only")
         if not isinstance(allow_start, bool):
             raise ReviewInputError("default human inventory start authority is invalid")
+        loaded, comments = self._complete_snapshot()
         payload = self._payload(document)
         digest = hashlib.sha256(payload).hexdigest()
         reference = HumanInventoryReference(self.context.event_key, digest)
-        self._authority()
-        comments = self.port.list_comments()
+        self._authority(loaded=loaded)
+        if comments is None:
+            comments = self.port.list_comments()
         intent = self._intent(comments)
         available = self._parts(comments).read_available(event_key=reference.event_key)
         if intent is not None:
@@ -818,8 +963,10 @@ class HumanInventoryStore:
     def _read_available(
         self,
     ) -> tuple[HumanInventoryReference, dict[str, object]] | None:
-        self._authority()
-        comments = self.port.list_comments()
+        loaded, comments = self._complete_snapshot()
+        self._authority(loaded=loaded)
+        if comments is None:
+            comments = self.port.list_comments()
         intent = self._intent(comments)
         if intent is None:
             return None
@@ -851,8 +998,10 @@ class HumanInventoryStore:
             or reference.event_key != self.context.event_key
         ):
             raise ReviewInputError("default human inventory reference scope conflicts")
-        self._authority()
-        comments = self.port.list_comments()
+        loaded, comments = self._complete_snapshot()
+        self._authority(loaded=loaded)
+        if comments is None:
+            comments = self.port.list_comments()
         intent = self._intent(comments)
         if intent is None or intent["payload_digest"] != reference.payload_digest:
             raise ReviewInputError(

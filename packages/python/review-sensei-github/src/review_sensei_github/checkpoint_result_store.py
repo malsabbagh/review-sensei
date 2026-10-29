@@ -17,8 +17,9 @@ from .accepted_result import (
 from .operation_comments import ResultPartStore
 from .retention_projection import (
     CHECKPOINT_VERSION,
+    GROUPED_NATIVE_RENDER_FORMAT,
     MAX_CHECKPOINT_PROJECTION_BYTES,
-    NATIVE_RENDER_FORMAT,
+    NATIVE_RENDER_FORMATS,
     checkpoint_projection,
     restore_checkpoint_projection,
 )
@@ -26,7 +27,7 @@ from .retention_projection import (
 _READ_FORMATS: WeakKeyDictionary = WeakKeyDictionary()
 
 
-def uses_literal_publication(http, result):
+def publication_format(http, result):
     """A successfully authenticated descriptor selects its exact native format.
 
     This cache retains no response bytes and grants no authority. Raw legacy
@@ -34,15 +35,20 @@ def uses_literal_publication(http, result):
     """
     transaction = result.transaction
     if http is None or transaction is None:
-        return False
+        return None
     from .publication_recovery import _publication_transport
 
-    return (
-        _READ_FORMATS.get(_publication_transport(http), {}).get(
-            (transaction.transaction_id, transaction.result_sha256)
-        )
-        == NATIVE_RENDER_FORMAT
+    return _READ_FORMATS.get(_publication_transport(http), {}).get(
+        (transaction.transaction_id, transaction.result_sha256)
     )
+
+
+def uses_literal_publication(http, result):
+    return publication_format(http, result) in NATIVE_RENDER_FORMATS
+
+
+def uses_grouped_publication(http, result):
+    return publication_format(http, result) == GROUPED_NATIVE_RENDER_FORMAT
 
 
 class CheckpointResultStore(ResultPartStore):
@@ -107,9 +113,16 @@ class CheckpointResultStore(ResultPartStore):
             selected = _READ_FORMATS.setdefault(_publication_transport(self.http), {})
             selected[
                 self.transaction.transaction_id, self.transaction.result_sha256
-            ] = NATIVE_RENDER_FORMAT
+            ] = value["native_render_format"]
             return restored
-        # Legacy canonical full results keep their original independent checks.
+        # A raw legacy read must not inherit another descriptor's renderer in
+        # this process, including when the logical transaction identity agrees.
+        from .publication_recovery import _publication_transport
+
+        if self.transaction is not None:
+            _READ_FORMATS.get(_publication_transport(self.http), {}).pop(
+                (self.transaction.transaction_id, self.transaction.result_sha256), None
+            )
         return payload
 
     def read_available_with_carriers(self, *, event_key):
@@ -174,7 +187,7 @@ class CheckpointResultStore(ResultPartStore):
         captured = selected_accepted_result(
             self.http, self.transaction, app_id=self.app_id
         )
-        if captured.native_format != NATIVE_RENDER_FORMAT:
+        if captured.native_format not in NATIVE_RENDER_FORMATS:
             raise ReviewInputError(
                 "compact checkpoint cannot change the original producer format"
             )
@@ -182,7 +195,12 @@ class CheckpointResultStore(ResultPartStore):
         if original != captured.payload:
             raise ReviewInputError("original accepted result changed before checkpoint")
         bound = ReviewResult.from_dict(json.loads(result))
-        descriptor = checkpoint_projection(original, bound, captured.reference)
+        descriptor = checkpoint_projection(
+            original,
+            bound,
+            captured.reference,
+            native_render_format=captured.native_format,
+        )
         self._raw.write(
             event_key=event_key, result=descriptor, _check_existing=_check_existing
         )

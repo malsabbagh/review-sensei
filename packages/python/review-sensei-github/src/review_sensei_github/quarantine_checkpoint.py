@@ -27,6 +27,50 @@ from .errors import GitHubPublicationError, GitHubPublicationTransientError
 from .session_ledger import parse_session_comment
 
 _ISSUED: weakref.WeakSet[Any] = weakref.WeakSet()
+_CONFIRMED: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True)
+class _ConfirmedCheckpoint:
+    ledger_ref: Any
+    identity: Any
+    block: str
+    record: Any
+    comment_id: int
+    body: str
+
+
+def _remember_confirmation(snapshot, record):
+    # Called only after the existing exact owned GET validated the complete
+    # candidate. This is a process-local receipt, never serialized authority.
+    _CONFIRMED[snapshot.caller] = _ConfirmedCheckpoint(
+        weakref.ref(snapshot.ledger),
+        snapshot.identity,
+        snapshot.block,
+        record,
+        snapshot.comment_id,
+        snapshot.candidate_body,
+    )
+    return record
+
+
+def take_confirmed_checkpoint(caller, ledger, identity, *, staging):
+    receipt = _CONFIRMED.pop(caller, None)
+    if (
+        type(receipt) is not _ConfirmedCheckpoint
+        or receipt.ledger_ref() is not ledger
+        or receipt.identity != identity
+        or caller._block != receipt.block
+        or caller._checkpoint is not None
+        or caller._root != receipt.record.record_sha256
+        or receipt.record.publication_staging != staging
+        or ledger.caller is not caller
+    ):
+        raise ReviewInputError(
+            "native publication own checkpoint receipt is unavailable"
+        )
+    caller._require_ledger(ledger, identity)
+    return receipt
 
 
 @dataclass(frozen=True, eq=False)
@@ -284,7 +328,7 @@ def replace_quarantine_checkpoint(caller, ledger, identity, mutate, *, now=None)
                 )
             raise GitHubPublicationError("quarantine checkpoint update failed")
         snapshot.validate(payload, record=updated, body=body)
-        return snapshot.get(candidate=True)
+        return _remember_confirmation(snapshot, snapshot.get(candidate=True))
     except BaseException:
         if not operation.write_attempted:
             expire(snapshot)
@@ -310,4 +354,4 @@ def reconcile_quarantine_checkpoint(caller, ledger, identity):
         raise ReviewInputError(
             "quarantine checkpoint reconciliation has no issued snapshot"
         )
-    return snapshot.get(candidate=True)
+    return _remember_confirmation(snapshot, snapshot.get(candidate=True))

@@ -128,8 +128,10 @@ def is_readonly_census(request, api_url):
         CLOSE_MIDDLE_QUERY,
         CLOSE_QUERY,
         MIDDLE_QUERY,
+        OLD_QUERY,
         OPEN_QUERY,
         PART_MIDDLE_QUERY,
+        PART_OLD_QUERY,
         PART_ROOTS_QUERY,
         ROOT_OPEN_QUERY,
         source_query_variables,
@@ -137,6 +139,8 @@ def is_readonly_census(request, api_url):
 
     operation = {
         OPEN_QUERY: "NativePublicationOpening",
+        OLD_QUERY: "NativeExistingRoots",
+        PART_OLD_QUERY: "NativeReviewPartWithOldRoots",
         ROOT_OPEN_QUERY: "NativeRootOpening",
         PART_ROOTS_QUERY: "NativeReviewPartWithOpening",
         MIDDLE_QUERY: "NativePublicationMiddle",

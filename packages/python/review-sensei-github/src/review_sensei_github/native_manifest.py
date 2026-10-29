@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
+from review_sensei.models import ReviewTransaction
 from review_sensei.publication_staging import PublicationReceipt
 from review_sensei.session import SessionIdentity
 
@@ -200,3 +201,239 @@ class NativeManifestStore:
         return PublicationReceipt(
             "issue:" + str(matches[0]), hashlib.sha256(expected.encode()).hexdigest()
         )
+
+    def select(
+        self, transaction: ReviewTransaction, *, result_digest: str
+    ) -> tuple[NativeUnionReceipt, PublicationReceipt] | None:
+        """Discover a cold receipt from independently selected original state.
+
+        The manifest never chooses a transaction or grants publication. Both
+        logical subject and physical checkpoint source must match; a second
+        owned version, including one with another source digest, withholds.
+        """
+        if self.port._primed is not None:
+            raise ReviewInputError("native manifest original selection is invalid")
+        return self._select_comments(
+            transaction, result_digest=result_digest, comments=self.port.list_comments()
+        )
+
+    def select_after_admission(self, transaction, *, result_digest, store):
+        from .default_human_inventory import HumanInventoryStore
+
+        if type(store) is not HumanInventoryStore or store.port is not self.port:
+            raise ReviewInputError("native manifest admission reader changed")
+        comments = store.comments_after_read()
+        if comments is None:
+            return self.select(transaction, result_digest=result_digest)
+        return self._select_comments(
+            transaction, result_digest=result_digest, comments=comments
+        )
+
+    def _select_comments(self, transaction, *, result_digest, comments):
+        if (
+            type(transaction) is not ReviewTransaction
+            or not isinstance(result_digest, str)
+            or _SHA.fullmatch(result_digest) is None
+            or self.port._primed is not None
+        ):
+            raise ReviewInputError("native manifest original selection is invalid")
+        matches = []
+        for comment in comments:
+            if (
+                comment.user_id != self.producer_id
+                or comment.user_type != "Bot"
+                or not comment.body.startswith(_PREFIX)
+            ):
+                continue
+            source, candidate = parse_manifest_body(comment.body)
+            self._scope(candidate)
+            if (
+                source != self.source_sha256
+                and candidate.transaction_id != transaction.transaction_id
+            ):
+                continue
+            if (
+                source != self.source_sha256
+                or candidate.transaction_id != transaction.transaction_id
+                or candidate.result_sha256 != transaction.result_sha256
+                or candidate.result_digest != result_digest
+                or candidate.head_sha != transaction.head_sha
+                or candidate.base_sha != transaction.base_sha
+            ):
+                raise ReviewInputError("native manifest original selection conflicts")
+            matches.append(
+                (
+                    candidate,
+                    PublicationReceipt(
+                        "issue:" + str(comment.comment_id),
+                        hashlib.sha256(comment.body.encode()).hexdigest(),
+                    ),
+                )
+            )
+        if len(matches) > 1:
+            raise ReviewInputError("native manifest original selection is duplicated")
+        return matches[0] if matches else None
+
+
+@dataclass(frozen=True)
+class NativePublicationReader:
+    """Cold union read bound to independently authenticated original admission.
+
+    The host selects the current review and qualifies historical thread targets
+    before constructing this reader. Neither a manifest nor this read permits a
+    write, narrows conversation/report-conflict readers, or settles old effects.
+    Every invocation rereads source, admission, manifest and the complete union.
+    """
+
+    store: object
+    review_bytes: bytes
+    old_root_nodes: tuple[tuple[int, str], ...] = ()
+
+    @classmethod
+    def for_review(cls, store, review, *, old_root_nodes=None):
+        from .default_human_inventory import HumanInventoryStore
+
+        if type(store) is not HumanInventoryStore or not isinstance(review, dict):
+            raise ReviewInputError("native publication reader source is invalid")
+        targets = {} if old_root_nodes is None else dict(old_root_nodes)
+        return cls(store, canonical_bytes(review), tuple(sorted(targets.items())))
+
+    def __call__(self, receipt: NativeUnionReceipt):
+        from review_sensei.models import ReviewResult
+
+        from .checkpoint_result_store import uses_grouped_publication
+        from .default_human_inventory import HumanInventoryStore
+        from .default_human_reader import restore_admitted_document
+        from .native_review_census import read_publication_union
+        from .native_review_groups import NativeWalkBudget
+        from .native_union import native_union_frame_document
+        from .publication import parse_finding_index
+
+        store = self.store
+        if (
+            type(store) is not HumanInventoryStore
+            or type(receipt) is not NativeUnionReceipt
+        ):
+            raise ReviewInputError(
+                "native publication reader original source is invalid"
+            )
+        context = store.context
+        available = store.read_available()
+        if available is None:
+            raise ReviewInputError(
+                "native publication original admission is unavailable"
+            )
+        # _checkpoint_source authenticates the physical checkpoint carriers and
+        # their accepted-operation source against the independently selected
+        # store transaction. The manifest cannot choose any of those inputs.
+        source_reference, payload = store.checkpoint_source_after_read()
+        original = ReviewResult.from_dict(json.loads(payload))
+        transaction = original.transaction
+        if (
+            transaction is None
+            or transaction.transaction_id != context.transaction_id
+            or original.content_digest() != context.original_content_digest
+            or not uses_grouped_publication(store.http, original)
+            or (receipt.repository_id, receipt.pull_request, receipt.producer_id)
+            != (context.repository_id, context.pull_request, context.producer_id)
+            or receipt.transaction_id != transaction.transaction_id
+            or receipt.result_sha256 != transaction.result_sha256
+            or receipt.result_digest != context.publication_digest
+            or (receipt.head_sha, receipt.base_sha)
+            != (context.head_sha, context.base_sha)
+        ):
+            raise ReviewInputError("native publication original checkpoint conflicts")
+        _, admitted = available
+        restored = restore_admitted_document(original, store, admitted)
+        index = parse_finding_index(
+            admitted["finding_index"],
+            repository_id=context.repository_id,
+            pull_request=context.pull_request,
+            head_sha=context.head_sha,
+        )
+        if index is None:
+            raise ReviewInputError("native publication original index is unavailable")
+        manifest_store = NativeManifestStore(
+            store.port,
+            SessionIdentity(
+                context.repository, context.pull_request, context.repository_id
+            ),
+            context.producer_id,
+            hashlib.sha256(canonical_bytes(source_reference)).hexdigest(),
+        )
+        selected = manifest_store.select_after_admission(
+            transaction, result_digest=context.publication_digest, store=store
+        )
+        if selected is None or selected[0] != receipt:
+            raise ReviewInputError("native publication original manifest conflicts")
+        review = json.loads(self.review_bytes)
+        from review_sensei.publication_staging import PublicationStaging
+
+        record = store.transaction_after_read()
+        frontier = (
+            None
+            if record is None or record.publication_staging is None
+            else PublicationStaging.from_document(record.publication_staging)
+        )
+        if (
+            record is None
+            or record.transaction is None
+            or not record.transaction.logical_identity_matches(transaction)
+            or frontier is None
+            or frontier.final_receipt is None
+            or frontier.plan_sha256 != receipt.plan_sha256
+            or frontier.final_receipt.native_id != str(review.get("id"))
+        ):
+            raise ReviewInputError(
+                "native publication original final review identity changed"
+            )
+        user = review.get("user")
+        if (
+            type(review.get("id")) is not int
+            or review["id"] <= 0
+            or review.get("state") not in {"COMMENTED", "CHANGES_REQUESTED"}
+            or review.get("commit_id") != context.head_sha
+            or not isinstance(user, dict)
+            or user.get("type") != "Bot"
+            or type(user.get("id")) is not int
+            or user["id"] != context.producer_id
+            or not isinstance(user.get("login"), str)
+            or user["login"].casefold() != context.app_slug.casefold()
+            or review.get("pull_request_url")
+            != store.http.api_url
+            + store.http.repository_path(
+                context.repository, f"/pulls/{context.pull_request}"
+            )
+        ):
+            raise ReviewInputError("native publication selected review scope conflicts")
+        # A later legitimate assessment may change the current authority frame.
+        # Bind this fresh complete frame, while part receipts remain original.
+        document = native_union_frame_document(review.get("body"), receipt)
+        published_index = parse_finding_index(
+            review["body"],
+            repository_id=context.repository_id,
+            pull_request=context.pull_request,
+            head_sha=context.head_sha,
+        )
+        if published_index != index:
+            raise ReviewInputError("native publication selected review index conflicts")
+        plan = receipt.reconstruct_plan(restored, index, main_body=review["body"])
+        evidence = read_publication_union(
+            store.http,
+            token=store.token,
+            repository=context.repository,
+            plan=plan,
+            producer_id=context.producer_id,
+            group_review_ids=tuple(int(part.native_id) for part in receipt.parts),
+            main_review_id=review["id"],
+            main_body=review["body"],
+            main_state=review["state"],
+            old_root_nodes=dict(self.old_root_nodes),
+            budget=NativeWalkBudget(),
+        )
+        receipt.require_evidence(
+            evidence,
+            document_sha256=hashlib.sha256(canonical_bytes(document)).hexdigest(),
+        )
+        store.revalidate_native_snapshot()
+        return evidence
