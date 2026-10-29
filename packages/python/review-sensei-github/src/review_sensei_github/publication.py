@@ -1779,13 +1779,16 @@ class _ScopedHumanInventoryReader:
         return factory(review) if callable(factory) else None
 
     def native_thread_nodes(self):
-        # Legacy factory construction remains lazy. Only an already completed
-        # native proof can supply this operation's complete root view.
-        if self.reader is None:
+        from .default_human_reader import DefaultHumanInventoryReader
+
+        # Custom and legacy readers retain the ordinary paginated path. Only
+        # the source-owned reader validates the issued complete native proof.
+        if type(self.reader) is not DefaultHumanInventoryReader:
             return None
         self.budget.check()
-        method = getattr(self.reader, "native_thread_nodes", None)
-        return method() if callable(method) else None
+        nodes = self.reader.native_thread_nodes()
+        self.budget.check()
+        return nodes
 
     def confirmed_native_root(self, eligibility):
         self.budget.check()

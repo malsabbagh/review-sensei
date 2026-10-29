@@ -237,9 +237,16 @@ class NativeManifestTests(unittest.TestCase):
             "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
             "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/7",
         }
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
         reader = object.__new__(DefaultHumanInventoryReader)
+        reader.budget = EvidenceReadBudget()
+        reader._native_root_read_budget = reader.budget
         reader.store = SimpleNamespace(
-            transaction_after_read=lambda: backend.ledger.load(IDENTITY, now=NOW).record
+            context=SimpleNamespace(budget=reader.budget),
+            transaction_after_read=lambda: (
+                backend.ledger.load(IDENTITY, now=NOW).record
+            ),
         )
         reader._native_root_read = (canonical_bytes(expected), evidence)
         for field, changed in (

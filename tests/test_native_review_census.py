@@ -323,6 +323,268 @@ class NativeCensusBackend:
 
 
 class NativeReviewCensusTests(unittest.TestCase):
+    def test_scoped_native_shortcut_requires_the_source_owned_proof_reader(self):
+        from unittest.mock import Mock
+
+        from review_sensei_github.default_human_reader import (
+            DefaultHumanInventoryReader,
+        )
+        from review_sensei_github.publication import _ScopedHumanInventoryReader
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        factory = Mock()
+        scoped = _ScopedHumanInventoryReader(
+            factory,
+            token="synthetic",
+            repository="owner/repo",
+            pull_request=1,
+            head_sha="b" * 40,
+            app_slug="reviewsensei[bot]",
+            budget=EvidenceReadBudget(),
+        )
+        self.assertIsNone(scoped.native_thread_nodes())
+        factory.assert_not_called()
+        custom = Mock()
+        custom.native_thread_nodes.return_value = ({"unproved": "partial view"},)
+        scoped.reader = custom
+        self.assertIsNone(scoped.native_thread_nodes())
+        custom.native_thread_nodes.assert_not_called()
+        original = DefaultHumanInventoryReader.__new__(DefaultHumanInventoryReader)
+        original._native_root_read = None
+        scoped.reader = original
+        self.assertIsNone(scoped.native_thread_nodes())
+        factory.assert_not_called()
+
+    def test_root_id_first_last_overlap_and_middle_cover_boundary_counts(self):
+        from review_sensei_github.native_review_census import _RootIds
+
+        for count in (99, 100, 101, 199, 200, 201, 250, 300):
+            with self.subTest(count=count):
+                rows = [
+                    {"i": "opaque:" + str(i), "x": {"nodes": [{"n": str(i + 1)}]}}
+                    for i in range(count)
+                ]
+                ids = _RootIds(count, {})
+
+                def page(selected, *, first, end=100):
+                    return {
+                        "totalCount": count,
+                        "nodes": selected,
+                        "pageInfo": (
+                            {
+                                "hasNextPage": end < count,
+                                "endCursor": "cursor:" + str(end),
+                            }
+                            if first
+                            else {"hasPreviousPage": count > 100}
+                        ),
+                    }
+
+                ids.accept(
+                    page(rows[:100], first=True, end=min(100, count)),
+                    first=True,
+                    requested=100,
+                )
+                ids.accept(page(rows[-100:], first=False), first=False, requested=100)
+                if ids.missing:
+                    missing = ids.missing
+                    ids.accept(
+                        page(rows[100 : 100 + missing], first=True, end=100 + missing),
+                        first=True,
+                        requested=missing,
+                    )
+                self.assertEqual(ids.missing, 0)
+                self.assertEqual(
+                    ids.ids, {i + 1: row["i"] for i, row in enumerate(rows)}
+                )
+
+    def test_native_root_refreshes_spend_the_original_shared_request_budget(self):
+        from review_sensei_github.native_review_census import (
+            refresh_native_thread_nodes,
+        )
+        from review_sensei_github.publication_recovery import publication_http
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from review_sensei.errors import EvidenceBudgetExhausted
+
+        backend = NativeCensusBackend()
+        budget = EvidenceReadBudget()
+        backend.http = publication_http(backend.http, budget)
+        evidence = backend.read()
+        initial = len(backend.calls)
+        self.assertEqual(budget.calls, initial)
+        remaining = budget.ordinary_remaining()
+        for _ in range(remaining):
+            refresh_native_thread_nodes(
+                backend.http,
+                token="synthetic",
+                repository="owner/repo",
+                evidence=evidence,
+                app_slug="reviewsensei[bot]",
+                producer_id=999,
+            )
+        self.assertEqual(budget.calls, initial + remaining)
+        self.assertEqual(len(backend.calls), budget.calls)
+        with self.assertRaises(EvidenceBudgetExhausted):
+            refresh_native_thread_nodes(
+                backend.http,
+                token="synthetic",
+                repository="owner/repo",
+                evidence=evidence,
+                app_slug="reviewsensei[bot]",
+                producer_id=999,
+            )
+        self.assertEqual(len(backend.calls), initial + remaining)
+        self.assertEqual(evidence.physical_reads, initial)
+
+    def test_native_root_view_retains_the_budget_that_funded_its_read(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from review_sensei_github.default_human_reader import (
+            DefaultHumanInventoryReader,
+        )
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        reader = DefaultHumanInventoryReader.__new__(DefaultHumanInventoryReader)
+        original = EvidenceReadBudget()
+        reader.budget = original
+        reader.store = SimpleNamespace(
+            http=GitHubHttp(),
+            token="synthetic",
+            context=SimpleNamespace(budget=original),
+        )
+        reader.repository = "owner/repo"
+        reader.app_slug = "reviewsensei[bot]"
+        evidence = object()
+        with (
+            patch("review_sensei_github.native_union.native_union_frame_document"),
+            patch(
+                "review_sensei_github.native_manifest.NativePublicationReader.for_review",
+                return_value=lambda _receipt: evidence,
+            ),
+        ):
+            reader.native_union_reader({"body": "native-frame"})(None)
+        # Rebinding both visible references must not manufacture the original
+        # operation's budget identity or authorize a fresh closing request.
+        reader.budget = reader.store.context.budget = EvidenceReadBudget()
+        reader.store.context.producer_id = 999
+        with (
+            patch(
+                "review_sensei_github.native_review_census.refresh_native_thread_nodes"
+            ) as refresh,
+            self.assertRaisesRegex(ReviewInputError, "original budget changed"),
+        ):
+            reader.native_thread_nodes()
+        refresh.assert_not_called()
+
+    def native_frontier_reader(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        from review_sensei_github.caller_operation import CallerOperation
+        from review_sensei_github.default_human_reader import (
+            DefaultHumanInventoryReader,
+        )
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
+
+        reader = DefaultHumanInventoryReader.__new__(DefaultHumanInventoryReader)
+        budget, evidence, review = (
+            EvidenceReadBudget(),
+            object(),
+            {"body": "native-frame"},
+        )
+        reader.budget = budget
+        reader.store = SimpleNamespace(
+            http=GitHubHttp(),
+            token="synthetic",
+            context=SimpleNamespace(budget=budget),
+            transaction_after_read=Mock(),
+            revalidate_snapshot=Mock(
+                side_effect=ReviewInputError("fresh context required")
+            ),
+        )
+        reader.document, reader.inventory = {}, object()
+        reader._owned_review = lambda _review: True
+        reader.native_union_reader = lambda _review: None
+        reader._native_root_read = (canonical_bytes(review), evidence)
+        reader._native_root_read_budget = budget
+        caller = SimpleNamespace(
+            _block="hosted-review",
+            _root=object(),
+            _active_operation=CallerOperation(10),
+            observations=[],
+        )
+        reader._native_root_frontier = (
+            caller,
+            caller._block,
+            caller._root,
+            caller._active_operation,
+            len(caller.observations),
+            evidence,
+        )
+        return reader, caller, review
+
+    def test_native_adjacent_frontier_is_consumed_before_a_failed_proof_check(self):
+        from unittest.mock import patch
+
+        reader, caller, review = self.native_frontier_reader()
+        with (
+            patch(
+                "review_sensei_github.caller_operation.caller_for_http",
+                return_value=caller,
+            ),
+            patch(
+                "review_sensei_github.native_review_census.require_native_root_evidence",
+                side_effect=ReviewInputError("invalid proof"),
+            ),
+            self.assertRaisesRegex(ReviewInputError, "invalid proof"),
+        ):
+            reader._original_review(review, [review])
+        self.assertIsNone(reader._native_root_frontier)
+        reader.store.revalidate_snapshot.assert_not_called()
+
+    def test_native_frontier_rejects_rebound_budget_equal_operation_and_intervening_io(
+        self,
+    ):
+        from unittest.mock import patch
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        for changed in ("budget", "operation", "request", "root"):
+            reader, caller, review = self.native_frontier_reader()
+            if changed == "budget":
+                reader.budget = reader.store.context.budget = EvidenceReadBudget()
+            elif changed == "operation":
+                caller._active_operation = copy.copy(caller._active_operation)
+            elif changed == "root":
+                # Equality is not identity: a separately installed root must
+                # take the ordinary fresh authentication path.
+                caller._root = {"same": "value"}
+                frontier = list(reader._native_root_frontier)
+                frontier[2] = {"same": "value"}
+                reader._native_root_frontier = tuple(frontier)
+            else:
+                caller.observations.append(object())
+            with (
+                self.subTest(changed=changed),
+                patch(
+                    "review_sensei_github.caller_operation.caller_for_http",
+                    return_value=caller,
+                ),
+                patch(
+                    "review_sensei_github.native_review_census.require_native_root_evidence",
+                    side_effect=AssertionError("stale frontier reused"),
+                ) as require,
+                self.assertRaisesRegex(ReviewInputError, "fresh context required"),
+            ):
+                reader._original_review(review, [review])
+            require.assert_not_called()
+            self.assertIsNone(reader._native_root_frontier)
+
     def test_issued_evidence_does_not_keep_its_transport_or_caller_alive(self):
         import gc
         import tempfile
