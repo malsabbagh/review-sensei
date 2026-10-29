@@ -323,6 +323,51 @@ class NativeCensusBackend:
 
 
 class NativeReviewCensusTests(unittest.TestCase):
+    def test_issued_evidence_does_not_keep_its_transport_or_caller_alive(self):
+        import gc
+        import tempfile
+        import weakref
+        from pathlib import Path
+
+        from review_sensei_github.api_run_requests import ApiRunRequestTransport
+        from test_api_work_persistence import PLAN, RUN
+
+        def read(directory, metered):
+            backend = NativeCensusBackend()
+            caller = None
+            if metered:
+                caller = ApiRunRequestTransport(
+                    directory=Path(directory),
+                    run=RUN,
+                    plan=PLAN,
+                    attempt=1,
+                    opener=backend.opened,
+                )
+                caller._quarantine_census_api_url = backend.http.api_url
+                backend.http = GitHubHttp(
+                    api_url=backend.http.api_url, opener=caller.open
+                )
+            evidence = backend.read()
+            return (
+                evidence,
+                weakref.ref(backend.http),
+                weakref.ref(backend),
+                None if caller is None else weakref.ref(caller),
+            )
+
+        for metered in (False, True):
+            with (
+                self.subTest(metered=metered),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                evidence, transport, backend, caller = read(directory, metered)
+                gc.collect()
+                self.assertTrue(evidence.root_bodies)
+                self.assertIsNone(transport())
+                self.assertIsNone(backend())
+                if caller is not None:
+                    self.assertIsNone(caller())
+
     def test_root_id_join_covers_every_part_count_and_root_order(self):
         items = NativeCensusBackend().plan.items
         for expected, count in enumerate((0, 1, 32, 48, 64, 80, 96, 160, 250)):

@@ -716,7 +716,11 @@ class NativePublicationEvidence:
 _ISSUED_ROOT_EVIDENCE: dict[
     int,
     tuple[
-        weakref.ReferenceType[NativePublicationEvidence], str, GitHubHttp, str, object
+        weakref.ReferenceType[NativePublicationEvidence],
+        str,
+        weakref.ReferenceType[GitHubHttp],
+        str,
+        weakref.ReferenceType[object] | None,
     ],
 ] = {}
 
@@ -749,6 +753,7 @@ def _remember_root_evidence(
     from .caller_operation import caller_for_http
 
     identifier = id(value)
+    caller = caller_for_http(http)
 
     def expire(reference):
         current = _ISSUED_ROOT_EVIDENCE.get(identifier)
@@ -758,9 +763,9 @@ def _remember_root_evidence(
     _ISSUED_ROOT_EVIDENCE[identifier] = (
         weakref.ref(value, expire),
         _root_evidence_digest(value),
-        http,
+        weakref.ref(http),
         hashlib.sha256(token.encode()).hexdigest(),
-        caller_for_http(http),
+        None if caller is None else weakref.ref(caller),
     )
     return value
 
@@ -1257,13 +1262,15 @@ def require_native_root_evidence(http: GitHubHttp, *, token, evidence):
             "native root consumer requires a complete original union"
         )
     issued = _ISSUED_ROOT_EVIDENCE.get(id(evidence))
+    caller = caller_for_http(http)
     if (
         issued is None
         or issued[0]() is not evidence
         or issued[1] != _root_evidence_digest(evidence)
-        or issued[2] is not http
+        or issued[2]() is not http
         or issued[3] != hashlib.sha256(token.encode()).hexdigest()
-        or issued[4] is not caller_for_http(http)
+        or (issued[4] is None and caller is not None)
+        or (issued[4] is not None and (caller is None or issued[4]() is not caller))
     ):
         raise ReviewInputError(
             "native root consumer evidence was reconstructed or changed"
