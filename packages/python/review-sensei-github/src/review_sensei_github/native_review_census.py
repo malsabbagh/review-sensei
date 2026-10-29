@@ -8,13 +8,16 @@ Every mutable resolution and body/version fence is read in this same walk.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
-from dataclasses import dataclass
+import weakref
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
 
+from .http import GitHubHttp
 from .native_review_groups import (
     EXISTING_ROOT_PROJECTION_BYTES,
     MIDDLE_METADATA_BYTES,
@@ -23,7 +26,6 @@ from .native_review_groups import (
     NativeReviewPlan,
     NativeWalkBudget,
     _native_number,
-    read_complete_group,
     verify_complete_group_response,
     wire_bytes,
 )
@@ -156,6 +158,213 @@ CLOSE_MIDDLE_QUERY = (
 )
 
 
+# Opaque IDs remain bounded at2048 ASCII bytes. They are fetched as a separate
+# projection in spare space, not repeated in every body/closing metadata row.
+ROOT_ID_ITEM_BYTES = 2112
+ROOT_ID_FRAME_BYTES = 2400
+_ID_NODES = "nodes{i:id x:comments(first:1){nodes{n:fullDatabaseId}}}"
+_ID_FORWARD = (
+    "g:reviewThreads(first:$u,after:$v){totalCount pageInfo{hasNextPage endCursor}"
+    + _ID_NODES
+    + "}"
+)
+_ID_LAST = (
+    "g:reviewThreads(last:$u){totalCount pageInfo{hasPreviousPage}" + _ID_NODES + "}"
+)
+_ID_FIRST_LAST = (
+    "g:reviewThreads(first:100){totalCount pageInfo{hasNextPage endCursor}"
+    + _ID_NODES
+    + "}"
+    "j:reviewThreads(last:100){totalCount pageInfo{hasPreviousPage}" + _ID_NODES + "}"
+)
+ROOT_IDS_QUERY = (
+    "query NativeRootIds($owner:String!,$name:String!,$number:Int!){"
+    + _REPOSITORY_SCOPE
+    + _ID_FIRST_LAST
+    + "}}}"
+)
+ROOT_IDS_FORWARD_QUERY = (
+    "query NativeRootIdsNext($owner:String!,$name:String!,$number:Int!,$u:Int!,$v:String){"
+    + _REPOSITORY_SCOPE
+    + _ID_FORWARD
+    + "}}}"
+)
+
+
+def _with_root_ids(query: str, *, tail: bool = False) -> str:
+    header, separator, body = query.partition("){")
+    if not separator:
+        raise ReviewInputError("native root ID query template changed")
+    scope = ",$owner:String!,$name:String!,$number:Int!" if query == PART_QUERY else ""
+    additions = ",$u:Int!" + ("" if tail else ",$v:String")
+    selected = _REPOSITORY_SCOPE + (_ID_LAST if tail else _ID_FORWARD) + "}}"
+    value = header + scope + additions + "){" + body[:-1] + selected + "}"
+    # Only trusted source syntax is compacted. Opaque IDs and variables are
+    # serialized unchanged; no query text supplied by a caller is admitted.
+    value = (
+        value.replace("NativeClosingRoot", "R")
+        .replace("NativePublicationClosingWithMiddle", "C")
+        .replace("NativePublicationClosing", "C")
+    )
+    return re.sub(r"\s*([{}():!,])\s*", r"\1", value)
+
+
+ROOT_ID_QUERIES = {
+    _with_root_ids(query, tail=tail): (query, tail)
+    for query, tail in (
+        (PART_QUERY, False),
+        (PART_OLD_QUERY, False),
+        (PART_ROOTS_QUERY, False),
+        (PART_MIDDLE_QUERY, False),
+        (CLOSE_QUERY, True),
+        (CLOSE_MIDDLE_QUERY, True),
+    )
+}
+
+
+def root_ids_base_query(query: str) -> str:
+    return ROOT_ID_QUERIES.get(query, (query, False))[0]
+
+
+def root_id_schedule_certificate(
+    total: int, largest: int, *, source_bytes: int, findings: int
+) -> dict[str, int]:
+    from .http import MAX_GITHUB_RESPONSE_BYTES
+    from .native_review_groups import PART_RESPONSE_FRAMING_BYTES
+
+    space = (
+        MAX_GITHUB_RESPONSE_BYTES - PART_RESPONSE_FRAMING_BYTES - ROOT_ID_FRAME_BYTES
+    )
+    companions = (
+        EXISTING_ROOT_PROJECTION_BYTES
+        + ROOT_OPEN_METADATA_BYTES
+        + MIDDLE_METADATA_BYTES
+    )
+    # Sum floor(x_i) >= floor(sum(x_i)) -(k-1). If a packet reaches100
+    # IDs, sorted round-robin balance bounds each other group by its body
+    # plus one largest item; one such capped packet already yields>=300.
+    body = (8 * space - companions - total) // ROOT_ID_ITEM_BYTES - 7
+    closing = (
+        MAX_GITHUB_RESPONSE_BYTES - closing_envelope_bound() - ROOT_ID_FRAME_BYTES
+    ) // ROOT_ID_ITEM_BYTES
+    capped = (
+        100
+        + (7 * (100 * ROOT_ID_ITEM_BYTES - largest) - companions) // ROOT_ID_ITEM_BYTES
+        - 6
+    )
+    if findings != 250:
+        raise ReviewInputError("native root ID source finding envelope changed")
+    per_finding = (total - 2 * source_bytes) // findings
+    seven = (
+        7 * space - companions - (2 * source_bytes + 7 * 32 * per_finding)
+    ) // ROOT_ID_ITEM_BYTES - 6
+    if body + closing < MAX_ROOTS or capped < MAX_ROOTS or seven < 74:
+        raise ReviewInputError(
+            "native root ID schedule no longer covers the full output envelope"
+        )
+    return {
+        "root_id_item_bytes": ROOT_ID_ITEM_BYTES,
+        "root_id_frame_bytes": ROOT_ID_FRAME_BYTES,
+        "eight_body_id_capacity": body,
+        "closing_id_capacity": closing,
+        "one_capped_body_id_capacity": capped,
+        "seven_body_id_capacity": seven,
+    }
+
+
+class _RootIds:
+    def __init__(self, count: int, old: dict[int, str]):
+        self.count, self.old = count, old
+        self.ids: dict[int, str] = {}
+        self.cursor: str | None = None
+        self.position = 0
+        self.cursors: set[str] = set()
+
+    @property
+    def missing(self) -> int:
+        return self.count - len(self.ids)
+
+    def capacity(self, body_bound: int) -> int:
+        return min(
+            100,
+            max(0, (524_288 - body_bound - ROOT_ID_FRAME_BYTES) // ROOT_ID_ITEM_BYTES),
+        )
+
+    def accept(self, connection, *, first: bool, requested: int) -> None:
+        try:
+            rows, page = connection["nodes"], connection["pageInfo"]
+            expected = (
+                min(requested, self.count - self.position)
+                if first
+                else min(requested, self.count)
+            )
+            if (
+                connection["totalCount"] != self.count
+                or not isinstance(rows, list)
+                or len(rows) != expected
+            ):
+                raise ReviewInputError("native root ID membership is incomplete")
+            if (
+                wire_bytes(connection)
+                > requested * ROOT_ID_ITEM_BYTES + ROOT_ID_FRAME_BYTES
+            ):
+                raise ReviewInputError(
+                    "native root ID packet exceeds its admitted bound"
+                )
+            seen = set()
+            for row in rows:
+                if (
+                    set(row) != {"i", "x"}
+                    or not _opaque(row["i"])
+                    or wire_bytes(row) + 1 > ROOT_ID_ITEM_BYTES
+                ):
+                    raise ReviewInputError("native root ID projection is invalid")
+                nodes = row["x"]["nodes"]
+                if (
+                    not isinstance(nodes, list)
+                    or len(nodes) != 1
+                    or set(nodes[0]) != {"n"}
+                ):
+                    raise ReviewInputError("native root ID association is incomplete")
+                root = _native_number(nodes[0]["n"])
+                if root in seen or root in self.old and self.old[root] != row["i"]:
+                    raise ReviewInputError("native root ID association changed")
+                if root in self.ids and self.ids[root] != row["i"]:
+                    raise ReviewInputError("native root ID overlap changed")
+                if row["i"] in self.ids.values() and self.ids.get(root) != row["i"]:
+                    raise ReviewInputError("native root ID association is duplicated")
+                self.ids[root] = row["i"]
+                seen.add(root)
+            if first:
+                self.position += len(rows)
+                if type(page["hasNextPage"]) is not bool or page["hasNextPage"] != (
+                    self.position < self.count
+                ):
+                    raise ReviewInputError("native root ID cursor membership changed")
+                cursor = page["endCursor"]
+                if rows and (not _opaque(cursor) or cursor in self.cursors):
+                    raise ReviewInputError("native root ID cursor is incomplete")
+                if cursor is not None:
+                    self.cursors.add(cursor)
+                self.cursor = cursor
+            elif type(page["hasPreviousPage"]) is not bool or page[
+                "hasPreviousPage"
+            ] != (requested < self.count):
+                raise ReviewInputError("native root ID closing membership changed")
+        except (KeyError, TypeError, AttributeError) as error:
+            raise ReviewInputError("native root ID response is incomplete") from error
+
+
+def _without_root_ids(payload):
+    data = dict(payload["data"])
+    repository = dict(data["repository"])
+    repository["p"] = {
+        key: value for key, value in repository["p"].items() if key not in {"g", "j"}
+    }
+    data["repository"] = repository
+    return {"data": data}
+
+
 def _opaque(value: object) -> bool:
     return (
         isinstance(value, str)
@@ -169,6 +378,42 @@ def source_query_variables(query: str, variables: object) -> bool:
     """Exact source templates only; arbitrary GraphQL remains a mutation charge."""
     if not isinstance(variables, dict):
         return False
+    if query in ROOT_ID_QUERIES:
+        base, tail = ROOT_ID_QUERIES[query]
+        extra = {"u"} if tail else {"u", "v"}
+        if (
+            not extra <= variables.keys()
+            or type(variables["u"]) is not int
+            or not 1 <= variables["u"] <= 100
+        ):
+            return False
+        if not tail and variables["v"] is not None and not _opaque(variables["v"]):
+            return False
+        remainder = {key: value for key, value in variables.items() if key not in extra}
+        if base == PART_QUERY:
+            return (
+                set(remainder) == {"id", "owner", "name", "number"}
+                and _opaque(remainder["id"])
+                and source_query_variables(
+                    OPEN_QUERY,
+                    {key: value for key, value in remainder.items() if key != "id"},
+                )
+            )
+        return source_query_variables(base, remainder)
+    if query in {ROOT_IDS_QUERY, ROOT_IDS_FORWARD_QUERY}:
+        extra = {"u", "v"} if query == ROOT_IDS_FORWARD_QUERY else set()
+        if extra and (
+            not extra <= variables.keys()
+            or type(variables["u"]) is not int
+            or not 1 <= variables["u"] <= 100
+            or variables["v"] is not None
+            and not _opaque(variables["v"])
+        ):
+            return False
+        return source_query_variables(
+            OPEN_QUERY,
+            {key: value for key, value in variables.items() if key not in extra},
+        )
     fields = {"owner", "name", "number"}
     if query in {MIDDLE_QUERY, PART_MIDDLE_QUERY, CLOSE_MIDDLE_QUERY}:
         fields.update(("first", "after"))
@@ -461,6 +706,68 @@ class NativePublicationEvidence:
     main_state: str
     document_sha256: str | None
     approvals: tuple[dict[str, Any], ...] = ()
+    thread_ids: tuple[tuple[int, str], ...] = ()
+    root_bodies: tuple[dict[str, Any], ...] = ()
+    plan: NativeReviewPlan | None = None
+    closing_bytes: bytes = b""
+    review_states: tuple[tuple[int, str], ...] = ()
+
+
+_ISSUED_ROOT_EVIDENCE: dict[
+    int,
+    tuple[
+        weakref.ReferenceType[NativePublicationEvidence],
+        str,
+        weakref.ReferenceType[GitHubHttp],
+        str,
+        weakref.ReferenceType[object] | None,
+    ],
+] = {}
+
+
+def _root_evidence_digest(value: NativePublicationEvidence) -> str:
+    return hashlib.sha256(
+        canonical_bytes(
+            {
+                "context": value.context_sha256,
+                "main": value.main_review_id,
+                "main_body": value.main_body,
+                "main_state": value.main_state,
+                "document": value.document_sha256,
+                "approvals": value.approvals,
+                "groups": [group.receipt_digest for group in value.groups],
+                "roots": [asdict(root) for root in value.roots],
+                "ids": value.thread_ids,
+                "bodies": value.root_bodies,
+                "plan": None if value.plan is None else value.plan.sha256,
+                "closing": value.closing_bytes.decode("ascii"),
+                "states": value.review_states,
+            }
+        )
+    ).hexdigest()
+
+
+def _remember_root_evidence(
+    value: NativePublicationEvidence, *, http, token
+) -> NativePublicationEvidence:
+    from .caller_operation import caller_for_http
+
+    identifier = id(value)
+    caller = caller_for_http(http)
+
+    def expire(reference):
+        current = _ISSUED_ROOT_EVIDENCE.get(identifier)
+        if current is not None and current[0] is reference:
+            _ISSUED_ROOT_EVIDENCE.pop(identifier, None)
+
+    _ISSUED_ROOT_EVIDENCE[identifier] = (
+        weakref.ref(value, expire),
+        _root_evidence_digest(value),
+        weakref.ref(http),
+        hashlib.sha256(token.encode()).hexdigest(),
+        None if caller is None else weakref.ref(caller),
+    )
+    return value
 
 
 def closing_envelope_bound() -> int:
@@ -529,24 +836,82 @@ def read_publication_union(
     selected_ids = (*group_review_ids, main_review_id)
     if any(identifier not in opening.review_nodes for identifier in selected_ids):
         raise ReviewInputError("native publication selected review is absent")
+    root_ids = _RootIds(len(old_root_nodes) + len(plan.items), old_root_nodes)
+    order = sorted(range(len(plan.groups)), key=plan.response_upper_bound)
+    companions = [MAX_EXISTING_ROOT_PROJECTION_BYTES, ROOT_OPEN_METADATA_BYTES]
+    companions.append(MIDDLE_METADATA_BYTES if root_ids.count > 200 else 0)
+    capacity = sum(
+        root_ids.capacity(
+            plan.response_upper_bound(ordinal)
+            + (companions[position] if position < 3 else 0)
+        )
+        for position, ordinal in enumerate(order)
+    )
+    stream_only = capacity >= root_ids.count
+    if not plan.items:
+        root_ids.ids.update(old_root_nodes)
+    elif len(plan.groups) <= 7 and not stream_only:
+        id_payload = budget.request(
+            http, token=token, query=ROOT_IDS_QUERY, variables=opening.scope_variables
+        )
+        id_scope = _scope(id_payload, plan)
+        root_ids.accept(id_scope["g"], first=True, requested=100)
+        root_ids.accept(id_scope["j"], first=False, requested=100)
+        if root_ids.missing and len(plan.groups) <= 6:
+            requested = min(100, root_ids.missing)
+            id_payload = budget.request(
+                http,
+                token=token,
+                query=ROOT_IDS_FORWARD_QUERY,
+                variables={
+                    **opening.scope_variables,
+                    "u": requested,
+                    "v": root_ids.cursor,
+                },
+            )
+            root_ids.accept(
+                _scope(id_payload, plan)["g"], first=True, requested=requested
+            )
+
+    def part_request(query, variables, ordinal, companion=0):
+        requested = (
+            min(
+                root_ids.missing,
+                root_ids.capacity(plan.response_upper_bound(ordinal) + companion),
+            )
+            if len(plan.groups) >= 7 or stream_only
+            else 0
+        )
+        if requested:
+            query = _with_root_ids(query)
+            variables = {
+                **opening.scope_variables,
+                **variables,
+                "u": requested,
+                "v": root_ids.cursor,
+            }
+        payload = budget.request(http, token=token, query=query, variables=variables)
+        if requested:
+            root_ids.accept(_scope(payload, plan)["g"], first=True, requested=requested)
+        return payload
+
     groups: list[NativeGroupEvidence | None] = [None] * len(plan.groups)
     middle = None
     root_open = None
     old_threads = None
-    order = sorted(range(len(plan.groups)), key=plan.response_upper_bound)
     for position, ordinal in enumerate(order):
         review_id = group_review_ids[ordinal]
         node = opening.review_nodes[review_id]
         if position == 0:
-            payload = budget.request(
-                http,
-                token=token,
+            payload = part_request(
                 query=PART_OLD_QUERY,
                 variables={
                     **opening.scope_variables,
                     "id": node["i"],
                     "roots": list(old_root_nodes.values()),
                 },
+                ordinal=ordinal,
+                companion=MAX_EXISTING_ROOT_PROJECTION_BYTES,
             )
             _scope(payload, plan)
             old_threads = payload["data"]["old"]
@@ -560,14 +925,22 @@ def read_publication_union(
                 producer_id=producer_id,
             )
         elif position == 1:
-            payload = budget.request(
-                http,
-                token=token,
+            payload = part_request(
                 query=PART_ROOTS_QUERY,
                 variables={**opening.scope_variables, "id": node["i"]},
+                ordinal=ordinal,
+                companion=ROOT_OPEN_METADATA_BYTES,
             )
             if (
-                wire_bytes({"data": {"repository": payload["data"]["repository"]}})
+                wire_bytes(
+                    {
+                        "data": {
+                            "repository": _without_root_ids(payload)["data"][
+                                "repository"
+                            ]
+                        }
+                    }
+                )
                 > ROOT_OPEN_METADATA_BYTES
             ):
                 raise ReviewInputError(
@@ -584,9 +957,7 @@ def read_publication_union(
                 producer_id=producer_id,
             )
         elif root_open is not None and root_open.root_count > 200 and middle is None:
-            payload = budget.request(
-                http,
-                token=token,
+            payload = part_request(
                 query=PART_MIDDLE_QUERY,
                 variables={
                     **opening.scope_variables,
@@ -594,10 +965,20 @@ def read_publication_union(
                     "after": root_open.first_cursor,
                     "first": root_open.root_count - 200,
                 },
+                ordinal=ordinal,
+                companion=MIDDLE_METADATA_BYTES,
             )
             pr = _scope(payload, plan)
             if (
-                wire_bytes({"data": {"repository": payload["data"]["repository"]}})
+                wire_bytes(
+                    {
+                        "data": {
+                            "repository": _without_root_ids(payload)["data"][
+                                "repository"
+                            ]
+                        }
+                    }
+                )
                 > MIDDLE_METADATA_BYTES
             ):
                 raise ReviewInputError(
@@ -616,15 +997,13 @@ def read_publication_union(
                 producer_id=producer_id,
             )
         else:
-            groups[ordinal] = read_complete_group(
-                http,
-                token=token,
+            payload = part_request(PART_QUERY, {"id": node["i"]}, ordinal)
+            groups[ordinal] = verify_complete_group_response(
+                payload,
                 plan=plan,
                 ordinal=ordinal,
-                node_id=node["i"],
                 expected_review_id=review_id,
                 producer_id=producer_id,
-                budget=budget,
             )
     if old_threads is None:
         payload = budget.request(
@@ -685,11 +1064,23 @@ def read_publication_union(
     if needs_middle:
         variables.update(after=root_open.first_cursor, first=root_open.root_count - 200)
         query = CLOSE_MIDDLE_QUERY
+    closing_ids = root_ids.missing
+    if closing_ids:
+        if len(plan.groups) != 8 or closing_ids > root_ids.capacity(
+            closing_envelope_bound()
+        ):
+            raise ReviewInputError(
+                "native root ID schedule cannot complete its original walk"
+            )
+        query = _with_root_ids(query, tail=True)
+        variables["u"] = closing_ids
     if not source_query_variables(query, variables):
         raise ReviewInputError("native publication closing request is unsupported")
     payload = budget.request(http, token=token, query=query, variables=variables)
     try:
         pr = _scope(payload, plan)
+        if closing_ids:
+            root_ids.accept(pr["g"], first=False, requested=closing_ids)
         selected = _review_union(pr, opaque=False)
         if {identifier: row["s"] for identifier, row in selected.items()} != {
             identifier: row["s"] for identifier, row in opening.review_nodes.items()
@@ -821,6 +1212,8 @@ def read_publication_union(
             old.append(row)
         if observed_old != set(old_root_nodes):
             raise ReviewInputError("native historical thread closure omits a root")
+        if set(root_ids.ids) != set(closed_roots):
+            raise ReviewInputError("native complete root ID join omits or adds a root")
         from .native_union import native_union_frame_document
 
         try:
@@ -829,7 +1222,7 @@ def read_publication_union(
             ).hexdigest()
         except ReviewInputError:
             document_sha256 = None
-        return NativePublicationEvidence(
+        evidence = NativePublicationEvidence(
             main_review_id,
             confirmed,
             tuple(closed_roots.values()),
@@ -840,8 +1233,191 @@ def read_publication_union(
             main["s"],
             document_sha256,
             approval_rows,
+            tuple(sorted(root_ids.ids.items())),
+            tuple(old) + tuple(row for group in confirmed for row in group.root_rows),
+            plan,
+            canonical_bytes(
+                {key: value for key, value in variables.items() if key != "u"}
+            ),
+            tuple(
+                sorted(
+                    (identifier, row["s"])
+                    for identifier, row in opening.review_nodes.items()
+                )
+            ),
         )
+        return _remember_root_evidence(evidence, http=http, token=token)
     except (KeyError, TypeError, AttributeError, ValueError) as exc:
         raise ReviewInputError(
             "native publication complete closing response is invalid"
         ) from exc
+
+
+def require_native_root_evidence(http: GitHubHttp, *, token, evidence):
+    """Check original in-process evidence identity without another HTTP read."""
+    from .caller_operation import caller_for_http
+
+    if type(evidence) is not NativePublicationEvidence or evidence.plan is None:
+        raise ReviewInputError(
+            "native root consumer requires a complete original union"
+        )
+    issued = _ISSUED_ROOT_EVIDENCE.get(id(evidence))
+    caller = caller_for_http(http)
+    if (
+        issued is None
+        or issued[0]() is not evidence
+        or issued[1] != _root_evidence_digest(evidence)
+        or issued[2]() is not http
+        or issued[3] != hashlib.sha256(token.encode()).hexdigest()
+        or (issued[4] is None and caller is not None)
+        or (issued[4] is not None and (caller is None or issued[4]() is not caller))
+    ):
+        raise ReviewInputError(
+            "native root consumer evidence was reconstructed or changed"
+        )
+    return evidence.plan
+
+
+def refresh_native_thread_nodes(
+    http: GitHubHttp, *, token, repository, evidence, app_slug, producer_id
+):
+    """Fence a completed same-operation union before a root consumer uses it.
+
+    Every body in evidence was fetched completely in this finite operation.
+    This single source-owned closing read checks membership, body versions,
+    mutable resolutions and the actual authority frame again. It cannot finish
+    an interrupted walk, authenticate a serialized hash, or fund another scan.
+    The ordinary caller/EvidenceReadBudget remains attached to the transport.
+    """
+    from .caller_operation import http_read_operation
+
+    plan = require_native_root_evidence(http, token=token, evidence=evidence)
+    variables = json.loads(evidence.closing_bytes)
+    owner, separator, name = repository.partition("/")
+    query = CLOSE_MIDDLE_QUERY if "after" in variables else CLOSE_QUERY
+    if (
+        not separator
+        or (variables.get("owner"), variables.get("name")) != (owner, name)
+        or not source_query_variables(query, variables)
+    ):
+        raise ReviewInputError("native root consumer scope changed")
+    with http_read_operation(
+        http, "native-root-consumer:" + str(evidence.document_sha256)
+    ):
+        status, payload = http.request(
+            "POST",
+            "/graphql",
+            token=token,
+            body={"query": query, "variables": variables},
+        )
+    if (
+        status != 200
+        or not isinstance(payload, dict)
+        or payload.get("errors") not in (None, [])
+    ):
+        raise ReviewInputError("native root consumer closing is unavailable")
+    pr = _scope(payload, plan)
+    selected = _review_union(pr, opaque=False)
+    if (
+        tuple(sorted((key, row["s"]) for key, row in selected.items()))
+        != evidence.review_states
+    ):
+        raise ReviewInputError("native root consumer review membership changed")
+    windows = []
+    for key in ("f", "l", "m") if "after" in variables else ("f", "l"):
+        _, rows = _window(pr[key], expected_count=len(evidence.roots))
+        windows.append(rows)
+    closed = _join(tuple(windows), expected_count=len(evidence.roots), complete=True)
+    previous = {row.comment_id: row for row in evidence.roots}
+    ids = dict(evidence.thread_ids)
+    bodies = {_native_number(row["n"]): row for row in evidence.root_bodies}
+    if (
+        set(closed) != set(previous)
+        or set(ids) != set(closed)
+        or set(bodies) != set(closed)
+    ):
+        raise ReviewInputError("native root consumer complete membership changed")
+    frames = payload["data"]["frames"]
+    if not isinstance(frames, list):
+        raise ReviewInputError("native root consumer authority frames are incomplete")
+    by_id = {_native_number(row["n"]): row for row in frames}
+    expected_frames = {
+        evidence.main_review_id,
+        *(_native_number(row["n"]) for row in evidence.approvals),
+    }
+    if len(by_id) != len(frames) or set(by_id) != expected_frames:
+        raise ReviewInputError("native root consumer authority membership changed")
+    main = by_id[evidence.main_review_id]
+    producer = producer_id
+    if (
+        evidence.context_sha256
+        != hashlib.sha256(canonical_bytes(plan.context(producer))).hexdigest()
+    ):
+        raise ReviewInputError("native root consumer original producer changed")
+    if (
+        main.get("b"),
+        main.get("s"),
+        main.get("a"),
+        main.get("c"),
+        main.get("p"),
+        main.get("x"),
+    ) != (
+        evidence.main_body,
+        evidence.main_state,
+        {"t": "Bot", "n": producer},
+        {"o": plan.head_sha},
+        {"n": plan.pull_request, "r": {"n": plan.repository_id}},
+        {"totalCount": 0},
+    ):
+        raise ReviewInputError("native root consumer authority frame changed")
+    if any(by_id[_native_number(row["n"])] != row for row in evidence.approvals):
+        raise ReviewInputError("native root consumer approval frame changed")
+    result = []
+    for identifier, current in closed.items():
+        old = previous[identifier]
+        if (
+            current.comment_id,
+            current.review_id,
+            current.producer_id,
+            current.side,
+            current.subject_type,
+            current.head_sha,
+            current.updated_at,
+        ) != (
+            old.comment_id,
+            old.review_id,
+            old.producer_id,
+            old.side,
+            old.subject_type,
+            old.head_sha,
+            old.updated_at,
+        ):
+            raise ReviewInputError(
+                "native root consumer body version or association changed"
+            )
+        row = bodies[identifier]
+        if (
+            row["u"] != current.updated_at
+            or _native_number(row["r"]["n"]) != current.review_id
+            or row["a"] != {"t": "Bot", "n": current.producer_id}
+            or row["c"] != {"o": current.head_sha}
+        ):
+            raise ReviewInputError("native root consumer body proof conflicts")
+        result.append(
+            {
+                "id": ids[identifier],
+                "isResolved": current.resolved,
+                "comments": {
+                    "nodes": [
+                        {
+                            "databaseId": identifier,
+                            "body": row["b"],
+                            "path": row["p"],
+                            "line": row["l"],
+                            "author": {"login": app_slug, "__typename": "Bot"},
+                        }
+                    ]
+                },
+            }
+        )
+    return tuple(result)

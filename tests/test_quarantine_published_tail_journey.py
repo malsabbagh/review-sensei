@@ -310,6 +310,11 @@ class NativePublishedTailJourneyFixture(PublishedTailJourneyFixture):
             submitted = json.loads(request.data)
             query, variables = submitted.get("query"), submitted.get("variables")
             if query == PART_QUERY or source_query_variables(query, variables):
+                from review_sensei_github.native_review_census import (
+                    root_ids_base_query,
+                )
+
+                query = root_ids_base_query(query)
                 self._meter(request)
                 assert self.accounted.observations[-1]["mutation"] is False
                 snapshot = object.__new__(NativeCensusBackend)
@@ -416,6 +421,11 @@ class NativePublishedTailJourneyFixture(PublishedTailJourneyFixture):
                         snapshot.old_rows.append(row)
                         snapshot.old_nodes[comment["id"]] = thread
                 snapshot.main_id, snapshot.main_body = 1, ""
+                snapshot.thread_ids = {
+                    int(row["x"]["nodes"][0]["n"]): "PRRT_"
+                    + str(row["x"]["nodes"][0]["n"])
+                    for row in snapshot.roots
+                }
                 snapshot.change = None
                 if query in {CLOSE_QUERY, CLOSE_MIDDLE_QUERY}:
                     frames = [

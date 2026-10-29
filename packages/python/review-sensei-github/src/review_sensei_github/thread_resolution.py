@@ -165,6 +165,59 @@ def _check_resolution_permission(status: int, payload: Any) -> None:
         raise _ResolutionPermissionDenied("thread resolution permission denied")
 
 
+def _resolution_candidates(
+    nodes,
+    *,
+    repository_id,
+    pull_request,
+    head_sha,
+    base_sha,
+    app_slug,
+    instances,
+    supersede,
+):
+    from .publication import (
+        finding_fingerprint_from_body,
+        finding_instance_from_body,
+        finding_publication_scope,
+    )
+
+    candidates = []
+    for node in nodes:
+        if not isinstance(node, dict) or type(node.get("isResolved")) is not bool:
+            raise ValueError
+        roots = node["comments"]["nodes"]
+        if not isinstance(roots, list) or len(roots) != 1:
+            raise ValueError
+        root = roots[0]
+        author = root.get("author")
+        if not isinstance(author, dict):
+            raise ValueError
+        if not graphql_app_author(author, app_slug):
+            continue
+        scope = finding_publication_scope(root.get("body"))
+        instance = finding_instance_from_body(root.get("body"))
+        concern = finding_fingerprint_from_body(root.get("body"))
+        if scope is None or scope[:2] != (repository_id, pull_request):
+            continue
+        current = scope[2:4] == (head_sha, base_sha) and instance in instances
+        old = bool(
+            supersede
+            and node.get("id") in supersede
+            and supersede[node["id"]] == concern
+            and scope[2] != head_sha
+        )
+        if current or old:
+            if (
+                not isinstance(node.get("id"), str)
+                or not node["id"]
+                or type(root.get("databaseId")) is not int
+            ):
+                raise ValueError
+            candidates.append((node, root, instance, old))
+    return candidates
+
+
 class FindingThreadResolver:
     def __init__(self, http: GitHubHttp) -> None:
         self.http = http
@@ -274,12 +327,8 @@ class FindingThreadResolver:
         cleanup_budget: EvidenceReadBudget | None = None,
         observer: OperationObserver | None = None,
         cleanup_token_provider: Callable[[], str] | None = None,
+        root_reader: Callable[[], Sequence[Mapping[str, Any]] | None] | None = None,
     ) -> ThreadResolutionResult:
-        from .publication import (
-            finding_fingerprint_from_body,
-            finding_instance_from_body,
-            finding_publication_scope,
-        )
 
         if not instances and not supersede:
             return ThreadResolutionResult()
@@ -289,90 +338,85 @@ class FindingThreadResolver:
         after = None
         candidates = []
         seen_cursors: set[str] = set()
-        # Complete discovery before any mutation. An incomplete scan grants nothing.
-        pages = BoundedGraphQLPages(self.http, max_requests=10)
-        for _ in range(10):
-            status, payload = pages.request(
-                "POST",
-                "/graphql",
-                token=token,
-                body={
-                    "operationName": "FindingResolutionThreads",
-                    "query": _QUERY,
-                    "variables": {
-                        "owner": owner,
-                        "name": name,
-                        "number": pull_request,
-                        "after": after,
-                    },
-                },
-            )
+        native_nodes = root_reader() if root_reader is not None else None
+        if native_nodes is not None:
             try:
-                if (
-                    status != 200
-                    or not isinstance(payload, dict)
-                    or payload.get("errors") not in (None, [])
-                ):
-                    raise ValueError
-                threads = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
-                nodes, page = threads["nodes"], threads["pageInfo"]
-                if (
-                    not isinstance(nodes, list)
-                    or len(nodes) > pages.page_size
-                    or type(page["hasNextPage"]) is not bool
-                ):
-                    raise ValueError
-                for node in nodes:
-                    if (
-                        not isinstance(node, dict)
-                        or type(node.get("isResolved")) is not bool
-                    ):
-                        raise ValueError
-                    roots = node["comments"]["nodes"]
-                    if not isinstance(roots, list) or len(roots) != 1:
-                        raise ValueError
-                    root = roots[0]
-                    author = root.get("author")
-                    if not isinstance(author, dict):
-                        raise ValueError
-                    if not graphql_app_author(author, app_slug):
-                        continue
-                    scope = finding_publication_scope(root.get("body"))
-                    instance = finding_instance_from_body(root.get("body"))
-                    concern = finding_fingerprint_from_body(root.get("body"))
-                    if scope is None or scope[:2] != (repository_id, pull_request):
-                        continue
-                    current = (
-                        scope[2:4] == (head_sha, base_sha) and instance in instances
-                    )
-                    old = bool(
-                        supersede
-                        and node.get("id") in supersede
-                        and supersede[node["id"]] == concern
-                        and scope[2] != head_sha
-                    )
-                    if current or old:
-                        if (
-                            not isinstance(node.get("id"), str)
-                            or not node["id"]
-                            or type(root.get("databaseId")) is not int
-                        ):
-                            raise ValueError
-                        candidates.append((node, root, instance, old))
-                if not page["hasNextPage"]:
-                    break
-                after = page["endCursor"]
-                if not isinstance(after, str) or not after or after in seen_cursors:
-                    raise ValueError
-                seen_cursors.add(after)
-            except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                candidates = _resolution_candidates(
+                    native_nodes,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    app_slug=app_slug,
+                    instances=instances,
+                    supersede=supersede,
+                )
+            except (KeyError, TypeError, ValueError, AttributeError) as error:
                 raise GitHubPublicationError(
                     "thread resolution lookup is unconfirmed"
-                ) from exc
+                ) from error
         else:
-            raise GitHubPublicationError(
-                "thread resolution pagination exceeded configured limit"
-            )
+            # Complete discovery before any mutation. An incomplete scan grants nothing.
+            pages = BoundedGraphQLPages(self.http, max_requests=10)
+            for _ in range(10):
+                status, payload = pages.request(
+                    "POST",
+                    "/graphql",
+                    token=token,
+                    body={
+                        "operationName": "FindingResolutionThreads",
+                        "query": _QUERY,
+                        "variables": {
+                            "owner": owner,
+                            "name": name,
+                            "number": pull_request,
+                            "after": after,
+                        },
+                    },
+                )
+                try:
+                    if (
+                        status != 200
+                        or not isinstance(payload, dict)
+                        or payload.get("errors") not in (None, [])
+                    ):
+                        raise ValueError
+                    threads = payload["data"]["repository"]["pullRequest"][
+                        "reviewThreads"
+                    ]
+                    nodes, page = threads["nodes"], threads["pageInfo"]
+                    if (
+                        not isinstance(nodes, list)
+                        or len(nodes) > pages.page_size
+                        or type(page["hasNextPage"]) is not bool
+                    ):
+                        raise ValueError
+                    candidates.extend(
+                        _resolution_candidates(
+                            nodes,
+                            repository_id=repository_id,
+                            pull_request=pull_request,
+                            head_sha=head_sha,
+                            base_sha=base_sha,
+                            app_slug=app_slug,
+                            instances=instances,
+                            supersede=supersede,
+                        )
+                    )
+                    if not page["hasNextPage"]:
+                        break
+                    after = page["endCursor"]
+                    if not isinstance(after, str) or not after or after in seen_cursors:
+                        raise ValueError
+                    seen_cursors.add(after)
+                except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                    raise GitHubPublicationError(
+                        "thread resolution lookup is unconfirmed"
+                    ) from exc
+            else:
+                raise GitHubPublicationError(
+                    "thread resolution pagination exceeded configured limit"
+                )
         resolved, unconfirmed = [], []
         found = {instance for _, _, instance, old in candidates if not old}
         if observer is not None and instances - found:
