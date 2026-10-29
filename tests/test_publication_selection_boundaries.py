@@ -261,3 +261,9 @@ class InactivePublicationBoundaryTests(unittest.TestCase):
             self.assertEqual(code, 1, stderr.getvalue())
             self.assertIn("selection is inactive", stderr.getvalue())
             self.assertEqual(artifact.read_bytes(), before)
+
+    def test_malformed_direct_verdict_rejects_before_selection_validation(self):
+        result = self.fixture.freeze()
+        for invalid in (False, 1, {}, object()):
+            with self.subTest(verdict=invalid), self.assertRaises(ReviewInputError):
+                replace(result, review_verdict=invalid)

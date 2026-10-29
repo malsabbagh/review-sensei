@@ -1444,6 +1444,11 @@ class ReviewResult:
     publication_selection: PublicationSelectionHandoff | None = None
 
     def __post_init__(self) -> None:
+        if (
+            self.review_verdict is not None
+            and type(self.review_verdict) is not ReviewVerdict
+        ):
+            raise ReviewInputError("review result verdict is invalid")
         if self.publication_selection is not None:
             from .publication_selection import PublicationSelectionHandoff
 
@@ -1451,8 +1456,6 @@ class ReviewResult:
                 raise ReviewInputError("review result publication selection is invalid")
             self.publication_selection.require_result(self)
         if self.review_verdict is not None:
-            if type(self.review_verdict) is not ReviewVerdict:
-                raise ReviewInputError("review result verdict is invalid")
             if self.review_verdict.selected_comments_sha256 != comment_selection_digest(
                 self.comments
             ):
