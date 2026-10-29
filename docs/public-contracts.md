@@ -1587,3 +1587,28 @@ The bare opt-in human-file-review adapter uses inline roots unless the trusted
 host supplies an eligibility reader. Hosted media composition supplies the
 existing independent schema 5 reader with current ledger, scope and root/prose
 proof. Partitioned schema 4 roots remain unsupported.
+
+
+## Inactive publication selection
+
+`publication-selection.schema.json` describes optional trusted
+`ReviewResult.publication_selection`. Its `inactive-publication-selection-v1`
+record binds the source result and original admission criteria, selected result
+projection, policy, exact occupancy, supplied finite N and ordered target actions.
+Only selected actions retain identities and comment hashes; no unselected queue
+or public deferred count is present. Source validation requires independent
+original candidates and occupancy. These hashes alone authenticate no census,
+disposition or native transition.
+
+Selected action records use `create`, `reuse` or `reopen`. Existing targets bind
+state and proof; uncertain targets must reconcile first. Reopening from released
+state consumes a slot. Contingent reopening is only inert intent backed by an
+existing reservation, and requires separate native transition proof before any
+future implementation can execute it. Every current publisher refuses all
+handoff-bearing results before effects, including create-only and empty plans.
+
+The explicit `reviewsensei:review-content:publication-selection:v1` digest domain
+includes the whole handoff and its selected result projection. Accepted-operation
+cold replay preserves bytes without reselection. Old bytes and digest domains
+remain unchanged when the field is absent. This is not an enabled strict cap or
+complete lifecycle qualification; see proposed ADR 0119.

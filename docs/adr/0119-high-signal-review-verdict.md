@@ -5,7 +5,7 @@ Date: 2026-10-29
 Decision owner: ReviewSensei maintainers
 Reviewers: implementation owner and independent policy reviewer
 GitHub issue: Not assigned; user-directed strict published-comment policy request
-Pull request: Pending separate policy draft
+Pull request: https://github.com/malsabbagh/review-sensei/pull/392
 
 ## Context
 
@@ -120,3 +120,33 @@ lifecycle. Authenticate physical occupancy and unknown writes, freeze concrete
 selection before accepted retention, implement stable native target updates,
 qualify reopening reservations and public-entry journeys, and include all added
 verdict bytes in capacity certification before enabling strict publication.
+
+
+## Proposed inactive handoff amendment
+
+Before retention, `freeze_publication_selection` requires an unsealed result
+with trusted high-signal admission and candidates exactly covering that result.
+The frozen optional handoff binds source, original admission criteria, policy,
+occupancy, selected result and ordered target actions. Validation against the
+original independent source is separate from cold result parsing. A digest is
+not authority to invent dispositions or missing admission criteria.
+
+The new `reviewsensei:review-content:publication-selection:v1` domain binds the
+complete handoff around the existing selected-result digest. Validation uses a
+pure projection and never removes a field from a sealed result temporarily.
+Old result digests are unchanged without a handoff. Accepted replay retains
+selection; it does not repeat discovery, selection or provider execution.
+
+All handoff-bearing results are inactive at both publication entry points,
+including empty and create-only plans, and fail before effects. An active target
+has reuse intent; released targets must reacquire a slot. A contingent target
+retains its reservation but reopening intent remains inert and needs separately
+authenticated transition evidence. No inherited overflow exception exists.
+
+An independent sidecar was considered, but would separate accepted replay from
+its target intent and permit ordinary create fallback. Storing the closed record
+inside the accepted result binds that intent locally. No production caller,
+default N, native revision protocol or enlarged census is introduced. Rollback
+must retain these bytes or refuse; dropping the handoff invalidates a sealed
+transaction. Focused tests cover cold replay, closed parsing, source/criteria
+binding, immutable obligations, target proofs, tampering and zero-effect refusal.

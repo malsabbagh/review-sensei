@@ -971,6 +971,10 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     read_bounded_utf8(args.result, maximum=2_097_152, label="result")
                 )
             )
+        if result.publication_selection is not None:
+            raise ReviewInputError(
+                "publication selection is inactive; native revision protocol required"
+            )
         if args.admission_context is not None:
             if configuration_context is None:
                 # The identity-bound transaction is what makes the admission

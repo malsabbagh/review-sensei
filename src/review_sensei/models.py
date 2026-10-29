@@ -5,7 +5,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 from urllib.parse import urlsplit
 
 from .coverage import CoverageManifest
@@ -20,6 +20,9 @@ from .validation import (
     validate_bounded_text,
     validate_repository_path,
 )
+
+if TYPE_CHECKING:
+    from .publication_selection import PublicationSelectionHandoff
 
 _LEARNING_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -1438,8 +1441,15 @@ class ReviewResult:
     # Its owning service compares the exact current request before reusing work.
     continuation_scope_digest: str | None = None
     review_verdict: ReviewVerdict | None = None
+    publication_selection: PublicationSelectionHandoff | None = None
 
     def __post_init__(self) -> None:
+        if self.publication_selection is not None:
+            from .publication_selection import PublicationSelectionHandoff
+
+            if type(self.publication_selection) is not PublicationSelectionHandoff:
+                raise ReviewInputError("review result publication selection is invalid")
+            self.publication_selection.require_result(self)
         if self.review_verdict is not None:
             if type(self.review_verdict) is not ReviewVerdict:
                 raise ReviewInputError("review result verdict is invalid")
@@ -1642,6 +1652,18 @@ class ReviewResult:
         projection.
         """
 
+        projection_digest = self._content_digest_without_selection()
+        if self.publication_selection is None:
+            return projection_digest
+        value = {
+            "domain": "reviewsensei:review-content:publication-selection:v1",
+            "selected_result_sha256": projection_digest,
+            "publication_selection": self.publication_selection.to_document(),
+        }
+        return hashlib.sha256(_json_compact(value).encode("utf-8")).hexdigest()
+
+    def _content_digest_without_selection(self) -> str:
+        """Pure legacy/verdict projection; never remove a sealed envelope."""
         serialized = self.to_dict()
         missing = set(_CONTENT_DIGEST_REQUIRED_FIELDS) - set(serialized)
         if missing:
@@ -1733,6 +1755,8 @@ class ReviewResult:
             value["continuation_scope_digest"] = self.continuation_scope_digest
         if self.review_verdict is not None:
             value["review_verdict"] = self.review_verdict.to_dict()
+        if self.publication_selection is not None:
+            value["publication_selection"] = self.publication_selection.to_document()
         if self.transaction is not None:
             value["transaction"] = self.transaction.to_dict()
         return value
@@ -1920,6 +1944,13 @@ class ReviewResult:
             if "review_verdict" in value
             else None
         )
+        from .publication_selection import PublicationSelectionHandoff
+
+        selection = (
+            PublicationSelectionHandoff.from_document(value["publication_selection"])
+            if "publication_selection" in value
+            else None
+        )
         restored_comments = (
             verdict.restore_comments(tuple(comment_values))
             if verdict is not None
@@ -1948,6 +1979,7 @@ class ReviewResult:
                 str | None, value.get("continuation_scope_digest")
             ),
             review_verdict=verdict,
+            publication_selection=selection,
         )
 
 

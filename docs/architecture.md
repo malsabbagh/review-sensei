@@ -1325,3 +1325,22 @@ Explicit remaining-coverage admission and checkpoint accounting are specified in
 [Proposed ADR 0107](adr/0107-bounded-remaining-coverage.md). Productive windows
 keep their partial status and independent approval obligations. Strict progress
 receipts affect checkpoint accounting.
+
+
+### Inactive publication selection handoff (PR392)
+
+The pure selector can freeze an optional `ReviewResult.publication_selection`
+before accepted-result retention. The closed record binds the independent
+source result, trusted admission criteria, policy, exact occupancy and selected
+result projection to an ordered create/reuse/reopen intent. It retains no
+unselected candidate queue. Its explicit digest domain includes every handoff
+byte, while historical results without the field keep their previous digest.
+Cold accepted-operation replay retains these intents without selection or reads.
+
+Both ordinary and partitioned publishers reject this inactive record before
+network or host effects. Even a create-only or empty selection is inactive.
+The occupancy digest authenticates no state on its own: an independent complete
+host inventory and original criteria remain required. A contingent reservation
+records count liability, not authority to reopen. Native revision/readback,
+reopening proof, numeric capacity certification and activation remain unfinished.
+See the proposed [ADR 0119](adr/0119-high-signal-review-verdict.md).

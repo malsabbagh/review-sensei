@@ -5071,6 +5071,10 @@ class ReviewPublisher:
         allow_human_inventory_start: bool = False,
         narrative_archive: Callable[[], ConfirmedNarrativeArchive] | None = None,
     ) -> PublicationResult:
+        if result.publication_selection is not None:
+            raise ReviewInputError(
+                "publication selection is inactive; native revision protocol required"
+            )
         self._quarantine_context = dict(
             token=token,
             repository=repository,

@@ -184,6 +184,10 @@ def publish_partitioned(
     )
     from .qualification import TrustedOpenRouterQualification
 
+    if result.publication_selection is not None:
+        raise ReviewInputError(
+            "publication selection is inactive; native revision protocol required"
+        )
     plan = getattr(host, "plan", None)
     if not isinstance(plan, PartitionedPublicationPlan) or any(
         not callable(getattr(host, name, None))

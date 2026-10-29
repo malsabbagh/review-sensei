@@ -529,6 +529,10 @@ class GitHubApplication:
         broker = self.broker
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
+        if result.publication_selection is not None:
+            raise ReviewInputError(
+                "publication selection is inactive; native revision protocol required"
+            )
         if options.operation_entry not in {"enabled", "disabled"}:
             raise GitHubPublicationError("operation entry mode is invalid")
         prior_budget = (
