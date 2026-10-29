@@ -10,8 +10,10 @@ from fake_github_http import json_response
 from review_sensei_github.errors import GitHubPublicationTransientError
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.native_group_publication import NativeGroupPublication
+from review_sensei_github.native_manifest import NativeManifestStore
 from review_sensei_github.native_review_groups import NativeInline, NativeReviewPlan
 from review_sensei_github.native_union import NativeUnionReceipt
+from review_sensei_github.operation_comments import GitHubIssueCommentOperationPort
 from review_sensei_github.publication import ReviewPublisher
 from review_sensei_github.quarantine_capacity import NativeCapacityGuard
 from test_native_review_census import NativeCensusBackend
@@ -108,6 +110,10 @@ class GroupWriterBackend(NativeCensusBackend):
         self.old_rows, self.old_nodes = [], {}
         self.main_id, self.main_body = 2**63 - 1000, ""
         self.post_count = 0
+        self.manifest_posts = 0
+        self.manifest_comment = None
+        self.extra_manifest_comments = []
+        self.manifest_pending = None
         self.change = None
         self.pending = None
         self.http = GitHubHttp(api_url="https://api.github.test", opener=self.opened)
@@ -126,6 +132,19 @@ class GroupWriterBackend(NativeCensusBackend):
             admission=lambda plan: self.assert_plan(plan),
             authority_fence=lambda: True,
             now=NOW,
+            manifest_store=NativeManifestStore(
+                GitHubIssueCommentOperationPort(
+                    self.http,
+                    token="synthetic",
+                    repository=IDENTITY.repository,
+                    pull_request=IDENTITY.pull_request,
+                    app_user_id=999,
+                    strict_association=True,
+                ),
+                IDENTITY,
+                999,
+                "a" * 64,
+            ),
         )
 
     def assert_plan(self, plan):
@@ -153,6 +172,22 @@ class GroupWriterBackend(NativeCensusBackend):
         self.roots.extend(self.root(comment) for comment in node["x"]["nodes"])
 
     def opened(self, request, timeout):
+        if urlsplit(request.full_url).path.endswith(
+            f"/issues/{IDENTITY.pull_request}/comments"
+        ):
+            if request.get_method() == "GET":
+                return json_response(
+                    ([self.manifest_comment] if self.manifest_comment else [])
+                    + self.extra_manifest_comments
+                )
+            if request.get_method() == "POST":
+                self.manifest_posts += 1
+                self.manifest_pending = json.loads(request.data)["body"]
+                if self.fault != "manifest_absent":
+                    self.materialize_manifest()
+                if self.fault in {"manifest_absent", "manifest_stored"}:
+                    raise TimeoutError("synthetic manifest acknowledgement unavailable")
+                return json_response(self.manifest_comment, 201)
         if request.get_method() == "POST" and urlsplit(request.full_url).path.endswith(
             "/reviews"
         ):
@@ -173,6 +208,17 @@ class GroupWriterBackend(NativeCensusBackend):
             return json_response({"id": int(self.reviews[0]["n"])}, 201)
         return super().opened(request, timeout)
 
+    def materialize_manifest(self):
+        self.manifest_comment = {
+            "id": 1234000,
+            "body": self.manifest_pending,
+            "user": {"id": 999, "type": "Bot", "login": "reviewsensei[bot]"},
+            "issue_url": self.http.api_url
+            + self.http.repository_path(
+                IDENTITY.repository, f"/issues/{IDENTITY.pull_request}"
+            ),
+        }
+
     def materialize_final(self):
         self.reviews.append(
             {
@@ -187,9 +233,34 @@ class GroupWriterBackend(NativeCensusBackend):
 
     @staticmethod
     def body_for_receipt(receipt: NativeUnionReceipt):
-        # Exact final-frame construction is independently tested by the v8
-        # codec. This component fixture exercises the durable physical writer.
-        return json.dumps(receipt.to_document(), sort_keys=True)
+        from dataclasses import replace
+
+        from review_sensei_github.approval import (
+            ApprovalFacts,
+            ReviewApprovalEligibility,
+        )
+        from review_sensei_github.publication import approval_eligibility_marker
+
+        from review_sensei.presentation import MAINTAINER_RESPONSE_INSTRUCTIONS
+
+        current = ReviewApprovalEligibility(
+            head_sha=receipt.head_sha,
+            result_digest=receipt.result_digest,
+            facts=ApprovalFacts(
+                enabled=False,
+                app_authored=False,
+                review_status="complete",
+                evidence_policy="legacy",
+                has_blocking_findings=False,
+                has_human_adjudication_findings=False,
+                coverage_blocker=None,
+            ),
+        )
+        return (
+            MAINTAINER_RESPONSE_INSTRUCTIONS
+            + "\n\n"
+            + approval_eligibility_marker(replace(current, native_union=receipt))
+        )
 
     def publish_final(self):
         return self.host.publish_final(
@@ -200,8 +271,25 @@ class GroupWriterBackend(NativeCensusBackend):
 
 
 class NativeGroupPublicationTests(unittest.TestCase):
+    def test_manifest_unknown_never_reposts_or_dispatches_the_final_frame(self):
+        backend = GroupWriterBackend("manifest_absent")
+        for attempt in range(2):
+            with (
+                self.subTest(attempt=attempt),
+                self.assertRaises(GitHubPublicationTransientError),
+            ):
+                backend.publish_final()
+            self.assertEqual(backend.post_count, 1)
+            self.assertEqual(backend.manifest_posts, 1)
+        backend.materialize_manifest()
+        state, _ = backend.publish_final()
+        self.assertTrue(state.complete)
+        self.assertEqual(state.manifest_receipt.native_id, "issue:1234000")
+        self.assertEqual(backend.post_count, 2)
+        self.assertEqual(backend.manifest_posts, 1)
+
     def test_final_frame_reconciles_original_union_without_reposting(self):
-        for fault in (None, "final_stored"):
+        for fault in (None, "final_stored", "manifest_stored"):
             with self.subTest(fault=fault):
                 backend = GroupWriterBackend(fault)
                 state, evidence = backend.publish_final()

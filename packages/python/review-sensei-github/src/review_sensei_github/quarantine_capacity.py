@@ -45,13 +45,18 @@ def full_review_comment_tail():
     flag and instance without duplicating prose. Their maxima are reserved
     before startup; no later full-copy fallback is admitted.
     """
+    from .native_manifest import MANIFEST_WIRE_BOUND
+    from .native_operation_envelope import (
+        OPERATION_WIRE_BOUND,
+        operation_envelope_certificate,
+    )
     from .operation_comments import _MAX_RESULT_BYTES, result_part_bodies
-    from .operation_host import _COMMENT_BOUND
     from .retention_projection import (
         MAX_CHECKPOINT_PROJECTION_BYTES,
         MAX_INVENTORY_PROJECTION_BYTES,
     )
 
+    operation_envelope_certificate()
     result = tuple(
         _wire({"body": body})
         for body in result_part_bodies(
@@ -69,8 +74,9 @@ def full_review_comment_tail():
     # operation fallback and both independently authenticated projections.
     return (
         MAX_PART_BYTES + _RESPONSE_METADATA_BYTES,
-        2 * _COMMENT_BOUND + 1024,
+        OPERATION_WIRE_BOUND,
         8192,
+        MANIFEST_WIRE_BOUND,
         *result,
         *projection(MAX_CHECKPOINT_PROJECTION_BYTES),
         *projection(MAX_INVENTORY_PROJECTION_BYTES),
@@ -111,6 +117,7 @@ class NativeCapacityGuard:
         closure_wire=0,
         reply=False,
         complete_tail=False,
+        comment_plan=None,
     ):
         self.identity, self.reserve = identity, deepcopy(reserve)
         self.future_parts, self.future_bytes = future_parts, future_bytes
@@ -118,6 +125,10 @@ class NativeCapacityGuard:
         self.cursor = cursor
         self.closure_wire = closure_wire
         self.complete_tail = complete_tail
+        self.comment_plan = comment_plan
+        self.comment_read_calls = (
+            comment_plan.worst_read_calls() if comment_plan is not None else None
+        )
         self.issue_update_bytes = 2 * closure_wire
         self.comment_bounds = (
             list(comment_bounds) if comment_bounds is not None else None
@@ -277,11 +288,24 @@ class NativeCapacityGuard:
                         "quarantine current-check transaction capacity exceeded"
                     )
                 continue
-            pages = (
-                cold_cursor_requests(count, size, largest)
-                if surface == "issue_comments" and self.cursor
-                else cold_rest_requests(count, largest)
-            )
+            if surface == "issue_comments" and self.comment_plan is not None:
+                if count > len(self.comment_plan.known) + len(
+                    self.comment_plan.unknown
+                ):
+                    raise ReviewInputError(
+                        "quarantine comment allocation membership exceeds admission"
+                    )
+                pages = (
+                    self.comment_read_calls
+                    if self.comment_read_calls is not None
+                    else MAX_PAGINATION_PAGES + 1
+                )
+            else:
+                pages = (
+                    cold_cursor_requests(count, size, largest)
+                    if surface == "issue_comments" and self.cursor
+                    else cold_rest_requests(count, largest)
+                )
             if surface == "issue_comments" and not self.cursor:
                 pages = max(
                     pages, cold_rest_requests(count, largest, (100, 50, 20, 10, 5, 1))
@@ -295,7 +319,9 @@ class NativeCapacityGuard:
                 "encoded_bytes_upper_bound": size,
                 "largest_upper_bound": largest,
                 "physical_reads_upper_bound": pages,
-                "reader": "closed-comment-cursor"
+                "reader": "packed-comments"
+                if surface == "issue_comments" and self.comment_plan is not None
+                else "closed-comment-cursor"
                 if surface == "issue_comments" and self.cursor
                 else "cold-rest",
             }
@@ -382,6 +408,15 @@ class NativeCapacityGuard:
             surface = "reactions"
         if surface is None:
             return
+        if surface == "issue_comments" and self.complete_tail:
+            from .native_operation_envelope import require_operation_envelope
+            from .operation_host import OPERATION_COMMENT_MARKER
+
+            text = body.get("body")
+            if isinstance(text, str) and text.startswith(
+                OPERATION_COMMENT_MARKER + "\n"
+            ):
+                require_operation_envelope(text)
         candidate = deepcopy(self.stats)
         # A review POST is one physical write, but its comments are separate
         # persisted objects. The review-list response does not contain the
@@ -393,6 +428,15 @@ class NativeCapacityGuard:
             else body
         )
         object_wire = _wire(object_body)
+        if (
+            surface == "issue_comments"
+            and self.comment_plan is not None
+            and identifier in self.comment_plan.known
+            and object_wire > self.comment_plan.known[identifier]
+        ):
+            raise ReviewInputError(
+                "quarantine retained comment exceeds its admitted final size"
+            )
         size = object_wire + _RESPONSE_METADATA_BYTES
         new = identifier is None and method == "POST"
         old_tail = (
@@ -521,8 +565,106 @@ class NativeCapacityGuard:
         self._pending_create = None
 
 
+def _comment_allocation_plan(
+    ledger, receipt, comment_bounds, closure_wire, root_slot, *, identity
+):
+    """Issue capacity from the complete census and authenticated source bounds.
+
+    The qualified old writers PATCH only session/operation roots. Result,
+    inventory-intent and evidence carriers are append-only; their known native
+    IDs retain their complete observed sizes. Old allocations remain reserved
+    even when other old objects are already visible. No hint selects membership.
+    """
+    from .operation_host import OPERATION_COMMENT_MARKER
+    from .packed_comment_census import NODE_METADATA_BYTES, CommentAllocationPlan
+    from .session_ledger import SESSION_MARKER_ANY_VERSION
+
+    if not ledger._inventory_complete:
+        raise ReviewInputError(
+            "quarantine native capacity needs the complete comment census"
+        )
+    isolation = receipt.get("execution_isolation", receipt)
+    surfaces = isolation["qualification"]["exposure"]["surfaces"]
+    ordinary, parts = surfaces["issue_comments"], surfaces["evidence_parts"]
+    # Source allocations use this configured Bot and this exact repository/PR.
+    # BigInt and numeric author IDs have at most16digits; selected DateTime
+    # strings are ASCII and at most64characters. No finding prose, label or
+    # mention is present in this projection. Other retained authors retain the
+    # generic1024-byte envelope. Fresh walks enforce every declared envelope.
+    slug = ledger.app_slug
+    if not isinstance(slug, str) or not slug.isascii():
+        raise ReviewInputError("quarantine comment metadata capacity is unsupported")
+    metadata_bound = _wire(
+        {
+            "fullDatabaseId": "9" * 16,
+            "createdAt": "x" * 64,
+            "updatedAt": "x" * 64,
+            "author": {
+                "__typename": "Bot",
+                "login": slug,
+                "databaseId": "9" * 16,
+            },
+            "pullRequest": {
+                "number": identity.pull_request,
+                "repository": {
+                    "databaseId": identity.repository_id,
+                    "nameWithOwner": identity.repository,
+                },
+            },
+        }
+    )
+    aliases = {slug.casefold(), slug.removesuffix("[bot]").casefold()}
+    known = {}
+    metadata_known = {}
+    for row in ledger._cached_comments():
+        identifier, body = row.get("id"), row.get("body")
+        if type(identifier) is not int or identifier <= 0 or not isinstance(body, str):
+            raise ReviewInputError("quarantine comment allocation census is invalid")
+        if identifier in known:
+            raise ReviewInputError("quarantine comment allocation census duplicates ID")
+        amount = _wire({"body": body})
+        if SESSION_MARKER_ANY_VERSION in body or body.startswith(
+            OPERATION_COMMENT_MARKER + "\n"
+        ):
+            amount = max(amount, ordinary["max_object_wire_bytes"], closure_wire)
+        known[identifier] = amount
+        author = row.get("user")
+        metadata_known[identifier] = (
+            metadata_bound
+            if isinstance(author, dict)
+            and author.get("type") == "Bot"
+            and isinstance(author.get("login"), str)
+            and author["login"].isascii()
+            and author["login"].casefold() in aliases
+            else NODE_METADATA_BYTES
+        )
+    current = list(comment_bounds)
+    if root_slot is not None:
+        if type(root_slot) is not int or not 0 <= root_slot < len(current):
+            raise ReviewInputError("quarantine mutable root allocation is invalid")
+        current[root_slot] = max(current[root_slot], closure_wire)
+    return CommentAllocationPlan(
+        known,
+        (
+            *(parts["max_object_wire_bytes"],) * parts["new_objects"],
+            *(ordinary["max_object_wire_bytes"],) * ordinary["new_objects"],
+            *current,
+        ),
+        metadata_known=metadata_known,
+        metadata_unknown=metadata_bound,
+    )
+
+
 def install_capacity(
-    ledger, identity, receipt, *, token, future_parts, future_bytes, comment_bounds=None
+    ledger,
+    identity,
+    receipt,
+    *,
+    token,
+    future_parts,
+    future_bytes,
+    comment_bounds=None,
+    root_slot=None,
 ):
     from .http import GitHubHttp
     from .publication_recovery import _publication_transport
@@ -530,6 +672,18 @@ def install_capacity(
     reserve = native_reserve(receipt)
     if reserve is None:
         return None
+    if ledger._quarantine_native_comment_bounds is not None:
+        from .native_operation_envelope import require_operation_envelope
+        from .operation_host import OPERATION_COMMENT_MARKER
+
+        # The complete current census is independently authenticated below;
+        # this profile check supplies no ownership or source-selection proof.
+        for row in ledger._cached_comments():
+            body = row.get("body")
+            if isinstance(body, str) and body.startswith(
+                OPERATION_COMMENT_MARKER + "\n"
+            ):
+                require_operation_envelope(body)
     transport = _publication_transport(ledger.http)
     if type(transport) is not GitHubHttp:
         raise ReviewInputError("quarantine capacity transport is not audited")
@@ -556,6 +710,9 @@ def install_capacity(
             if future_parts == 3
             else [closure_wire] * future_parts
         )
+    comment_plan = _comment_allocation_plan(
+        ledger, receipt, comment_bounds, closure_wire, root_slot, identity=identity
+    )
     guard = NativeCapacityGuard(
         identity=identity,
         reserve=reserve,
@@ -566,6 +723,7 @@ def install_capacity(
         closure_wire=closure_wire,
         reply=ledger._quarantine_native_tail_parts == 8,
         complete_tail=ledger._quarantine_native_comment_bounds is not None,
+        comment_plan=comment_plan,
     )
     if not ledger._inventory_complete:
         raise ReviewInputError(

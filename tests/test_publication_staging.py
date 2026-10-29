@@ -8,6 +8,36 @@ from review_sensei.publication_staging import PublicationStaging
 
 
 class PublicationStagingTests(unittest.TestCase):
+    def test_required_manifest_is_a_separate_durable_unknown_frontier(self):
+        from dataclasses import replace
+
+        initial = replace(self.initial(0), manifest_required=True)
+        with self.assertRaises(ReviewInputError):
+            initial.attempt_final()
+        attempted = initial.attempt_manifest()
+        initial.require_successor(attempted)
+        self.assertFalse(attempted.complete)
+        for operation in (attempted.attempt_manifest, attempted.attempt_final):
+            with self.assertRaises(ReviewInputError):
+                operation()
+        confirmed = attempted.confirm_manifest(
+            native_id="issue:7", content_sha256="d" * 64
+        )
+        attempted.require_successor(confirmed)
+        self.assertEqual(
+            confirmed.confirm_manifest(native_id="issue:7", content_sha256="d" * 64),
+            confirmed,
+        )
+        with self.assertRaises(ReviewInputError):
+            confirmed.confirm_manifest(native_id="issue:8", content_sha256="d" * 64)
+        final = confirmed.attempt_final()
+        confirmed.require_successor(final)
+        complete = final.confirm_final(native_id="8", content_sha256="e" * 64)
+        self.assertTrue(complete.complete)
+        self.assertEqual(
+            PublicationStaging.from_document(complete.to_document()), complete
+        )
+
     def test_stale_callers_cannot_share_an_attempt_claim(self):
         from test_review_transaction import IDENTITY, NOW, _checkpoint
 

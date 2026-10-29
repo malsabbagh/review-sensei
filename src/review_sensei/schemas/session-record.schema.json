@@ -781,11 +781,15 @@
         "receipts",
         "final_attempted",
         "final_token",
-        "final_receipt"
+        "final_receipt",
+        "manifest_required",
+        "manifest_attempted",
+        "manifest_token",
+        "manifest_receipt"
       ],
       "properties": {
         "schema_version": {
-          "const": "publication-staging-v1"
+          "const": "publication-staging-v2"
         },
         "transaction_id": {
           "type": "string",
@@ -843,6 +847,27 @@
         "final_token": {
           "anyOf": [
             {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+            {"type": "null"}
+          ]
+        },
+        "manifest_required": {"type": "boolean"},
+        "manifest_attempted": {"type": "boolean"},
+        "manifest_token": {
+          "anyOf": [
+            {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+            {"type": "null"}
+          ]
+        },
+        "manifest_receipt": {
+          "anyOf": [
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["native_id", "content_sha256"],
+              "properties": {
+                "native_id": {"type": "string", "pattern": "^[A-Za-z0-9_:.=-]{1,64}$"},
+                "content_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+              }
+            },
             {"type": "null"}
           ]
         },

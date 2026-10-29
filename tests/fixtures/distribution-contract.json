@@ -158,6 +158,8 @@
         "tests/test_native_group_publication.py",
         "tests/test_native_union.py",
         "tests/test_native_reader_projection.py",
+        "tests/test_native_manifest.py",
+        "tests/test_native_operation_envelope.py",
         "tests/test_packed_comment_census.py",
         "tests/test_retention_projection.py",
         "tests/test_accepted_result.py",

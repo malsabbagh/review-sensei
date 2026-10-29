@@ -128,6 +128,8 @@ include tests/test_native_review_census.py
 include tests/test_native_group_publication.py
 include tests/test_native_union.py
 include tests/test_native_reader_projection.py
+include tests/test_native_manifest.py
+include tests/test_native_operation_envelope.py
 include tests/test_packed_comment_census.py
 include tests/test_retention_projection.py
 include tests/test_accepted_result.py

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Mapping
@@ -385,7 +386,12 @@ class ReviewApprovalEligibility:
                 raise ReviewInputError(
                     "native union requires its complete scoped reader"
                 )
-            receipt.require_evidence(native_union_reader(receipt))
+            from review_sensei.bounded_evidence import canonical_bytes
+
+            receipt.require_evidence(
+                native_union_reader(receipt),
+                document_sha256=hashlib.sha256(canonical_bytes(value)).hexdigest(),
+            )
             return replace(current, native_union=receipt)
         if isinstance(value, Mapping) and value.get("schema_version") == "7":
             from review_sensei.quarantine_assessments import validate_view

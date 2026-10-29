@@ -310,6 +310,8 @@ def _body(part):
 
 
 def _stage(prepared, document, binding, count):
+    from .session_ledger import retained_carrier_body
+
     ledger, identity = prepared.ledger, prepared.identity
     parts = partition_evidence(document, binding=binding, item_count=count)
     bodies = [_body(part) for part in parts]
@@ -319,9 +321,7 @@ def _stage(prepared, document, binding, count):
     retained = [
         item
         for item in items
-        if isinstance(item, dict)
-        and isinstance(item.get("body"), str)
-        and item["body"].endswith("<!-- reviewsensei:evidence-part:v1 -->")
+        if isinstance(item, dict) and retained_carrier_body(item.get("body"))
     ]
     from .quarantine_published_tail import late_growth
 
@@ -586,12 +586,12 @@ def plan_quarantine(prepared):
         pull_request=prepared.identity.pull_request,
         record=record,
     )
+    from .session_ledger import retained_carrier_body
+
     retained = [
         item
         for item in ledger._cached_comments()
-        if isinstance(item, dict)
-        and isinstance(item.get("body"), str)
-        and item["body"].endswith("<!-- reviewsensei:evidence-part:v1 -->")
+        if isinstance(item, dict) and retained_carrier_body(item.get("body"))
     ]
     parts = source_parts + origin_parts
     wire_bytes += origin_parts * MAX_PART_BYTES
@@ -599,8 +599,10 @@ def plan_quarantine(prepared):
     # decision, and four reserved normal review/verification carriers. No hold
     # item, reason, old reservation or existing part is removed to make room.
     obligations = sum(len(item["inventory"]["assessments"]) for item in sources)
-    future_parts = 2 * obligations + 4
-    future_bytes = future_parts * MAX_PART_BYTES
+    from .native_manifest import MANIFEST_WIRE_BOUND
+
+    future_parts = 2 * obligations + 5
+    future_bytes = (future_parts - 1) * MAX_PART_BYTES + MANIFEST_WIRE_BOUND
     stored_bytes = sum(len(item["body"].encode()) for item in retained)
     from .quarantine_published_tail import late_growth
 
@@ -629,6 +631,7 @@ def plan_quarantine(prepared):
         future_parts=len(comment_bounds),
         future_bytes=sum(comment_bounds),
         comment_bounds=comment_bounds,
+        root_slot=parts,
     )
     return {
         "parts": parts,

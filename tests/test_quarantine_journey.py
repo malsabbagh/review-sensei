@@ -36,9 +36,13 @@ class JourneyFixture(CreationFixture, CommandEntryFixture):
         path, method = urlsplit(request.full_url).path, request.get_method()
         if method == "POST" and path == "/graphql":
             payload = json.loads(request.data)
+            from review_sensei_github.packed_comment_census import (
+                CLOSING_QUERY,
+                METADATA_QUERY,
+            )
             from review_sensei_github.quarantine_census import QUERY
 
-            if payload.get("query") == QUERY:
+            if payload.get("query") in {QUERY, METADATA_QUERY, CLOSING_QUERY}:
                 import base64
 
                 self._meter(request)
@@ -47,15 +51,18 @@ class JourneyFixture(CreationFixture, CommandEntryFixture):
                 rows = ([self.comment] if self.comment else []) + list(
                     self.extra_comments.values()
                 )
-                after = variables["after"]
+                after = variables.get("after")
                 offset = (
                     int(base64.b64decode(after).decode().split(":")[1]) if after else 0
                 )
-                selected = rows[offset : offset + variables["first"]]
+                selected = (
+                    rows[offset : offset + variables["first"]]
+                    if payload["query"] == QUERY
+                    else rows
+                )
+                end = offset + min(variables.get("first", 100), len(rows) - offset)
                 cursor = (
-                    base64.b64encode(
-                        f"position:{offset + len(selected)}".encode()
-                    ).decode()
+                    base64.b64encode(f"position:{end}".encode()).decode()
                     if selected
                     else None
                 )
@@ -63,54 +70,78 @@ class JourneyFixture(CreationFixture, CommandEntryFixture):
                     "number": 7,
                     "repository": {"databaseId": 123, "nameWithOwner": "owner/repo"},
                 }
-                return json_response(
-                    {
-                        "data": {
-                            "repository": {
-                                "databaseId": 123,
-                                "nameWithOwner": "owner/repo",
-                                "pullRequest": {
-                                    "number": 7,
-                                    "comments": {
-                                        "totalCount": len(rows),
-                                        "pageInfo": {
-                                            "hasNextPage": offset + len(selected)
-                                            < len(rows),
-                                            "endCursor": cursor,
-                                        },
-                                        "nodes": [
-                                            {
-                                                "fullDatabaseId": str(item["id"]),
-                                                "body": item["body"],
-                                                "createdAt": item.get(
-                                                    "created_at", "2026-10-28T00:00:00Z"
-                                                ),
-                                                "updatedAt": item.get(
-                                                    "updated_at", "2026-10-28T00:00:00Z"
-                                                ),
-                                                "author": None
-                                                if item.get("user") is None
-                                                else {
-                                                    "__typename": item["user"]["type"],
-                                                    "login": item["user"]["login"],
-                                                    "databaseId": item["user"]["id"],
-                                                },
-                                                "pullRequest": subject
-                                                if item.get(
-                                                    "issue_url",
-                                                    "https://api.github.test/repos/owner/repo/issues/7",
-                                                )
-                                                == "https://api.github.test/repos/owner/repo/issues/7"
-                                                else {**subject, "number": 8},
-                                            }
-                                            for item in selected
-                                        ],
+                response = {
+                    "data": {
+                        "repository": {
+                            "databaseId": 123,
+                            "nameWithOwner": "owner/repo",
+                            "pullRequest": {
+                                "number": 7,
+                                "headRefOid": self.live_head,
+                                "baseRefOid": self.live_base,
+                                "comments": {
+                                    "totalCount": len(rows),
+                                    "pageInfo": {
+                                        "hasNextPage": end < len(rows),
+                                        "endCursor": cursor,
                                     },
+                                    "nodes": [
+                                        {
+                                            "fullDatabaseId": str(item["id"]),
+                                            "body": item["body"],
+                                            "createdAt": item.get(
+                                                "created_at", "2026-10-28T00:00:00Z"
+                                            ),
+                                            "updatedAt": item.get(
+                                                "updated_at", "2026-10-28T00:00:00Z"
+                                            ),
+                                            "author": None
+                                            if item.get("user") is None
+                                            else {
+                                                "__typename": item["user"]["type"],
+                                                "login": item["user"]["login"],
+                                                "databaseId": item["user"]["id"],
+                                            },
+                                            "pullRequest": subject
+                                            if item.get(
+                                                "issue_url",
+                                                "https://api.github.test/repos/owner/repo/issues/7",
+                                            )
+                                            == "https://api.github.test/repos/owner/repo/issues/7"
+                                            else {**subject, "number": 8},
+                                        }
+                                        for item in selected
+                                    ],
                                 },
-                            }
+                            },
                         }
                     }
-                )
+                }
+                if payload["query"] in {METADATA_QUERY, CLOSING_QUERY}:
+                    pr = response["data"]["repository"]["pullRequest"]
+                    full_nodes = pr["comments"]["nodes"]
+                    nodes = [
+                        {key: value for key, value in node.items() if key != "body"}
+                        for node in full_nodes
+                    ]
+                    if payload["query"] == METADATA_QUERY:
+                        del pr["comments"]
+                    else:
+                        pr["comments"]["nodes"] = full_nodes[offset:end]
+                    pr["f"] = {
+                        "totalCount": len(rows),
+                        "pageInfo": {
+                            "hasNextPage": len(rows) > 100,
+                            "endCursor": cursor,
+                        },
+                        "nodes": nodes[:100],
+                    }
+                    pr["l"] = {
+                        "totalCount": len(rows),
+                        "pageInfo": {"hasPreviousPage": len(rows) > 100},
+                        "nodes": nodes[-100:],
+                    }
+                return json_response(response)
         if (
             self.creation_run is not None
             and self.attempt == 2

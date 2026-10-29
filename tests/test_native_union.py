@@ -41,8 +41,11 @@ class NativeUnionTests(unittest.TestCase):
             receipt.reconstruct_plan(backend.result, altered)
 
     def fixture(self):
+        from review_sensei_github.native_review_groups import (
+            verify_complete_group_response,
+        )
+
         backend = NativeCensusBackend()
-        evidence = backend.read()
         plan = backend.plan
         state = PublicationStaging.prepare(
             transaction_id=plan.transaction_id,
@@ -50,7 +53,17 @@ class NativeUnionTests(unittest.TestCase):
             plan_sha256=plan.sha256,
             part_count=len(plan.groups),
         )
-        for ordinal, group in enumerate(evidence.groups):
+        groups = tuple(
+            verify_complete_group_response(
+                response,
+                plan=plan,
+                ordinal=ordinal,
+                expected_review_id=int(backend.reviews[ordinal]["n"]),
+                producer_id=999,
+            )
+            for ordinal, response in enumerate(backend.group_payloads)
+        )
+        for ordinal, group in enumerate(groups):
             state = state.attempt_part(ordinal).confirm_part(
                 ordinal,
                 native_id=str(group.review_id),
@@ -70,6 +83,10 @@ class NativeUnionTests(unittest.TestCase):
                 coverage_blocker=None,
             ),
         )
+        backend.main_body += "\n\n" + approval_eligibility_marker(
+            replace(current, native_union=receipt)
+        )
+        evidence = backend.read()
         return backend, evidence, state, receipt, current
 
     def test_unaware_and_incomplete_readers_withhold_but_exact_reader_keeps_facts(self):
@@ -89,6 +106,15 @@ class NativeUnionTests(unittest.TestCase):
         )
         self.assertEqual(loaded, value)
         self.assertTrue(loaded.facts.has_blocking_findings)
+        changed = replace(
+            value, facts=replace(value.facts, has_blocking_findings=False)
+        )
+        self.assertIsNone(
+            approval_eligibility_from_body(
+                approval_eligibility_marker(changed),
+                native_union_reader=lambda union: evidence,
+            )
+        )
         self.assertIsNone(
             approval_eligibility_from_body(
                 body,

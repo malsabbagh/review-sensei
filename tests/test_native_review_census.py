@@ -217,7 +217,14 @@ class NativeCensusBackend:
                 "p": {"n": self.plan.pull_request, "r": {"n": self.plan.repository_id}},
                 "x": {"totalCount": 0},
             }
-            data["old"] = copy.deepcopy(self.old_rows)
+            data["old"] = [
+                {
+                    "i": self.old_nodes[int(row["n"])],
+                    **self.root(row),
+                    "x": {"totalCount": 1, "nodes": [copy.deepcopy(row)]},
+                }
+                for row in self.old_rows
+            ]
         result = {"data": data}
         if self.change:
             self.change(query, result)

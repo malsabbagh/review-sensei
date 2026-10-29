@@ -98,19 +98,20 @@ PART_MIDDLE_QUERY = (
     + "}"
 )
 _MAIN = "main:node(id:$main){... on PullRequestReview{n:fullDatabaseId b:body s:state a:author{t:__typename ... on Bot{n:databaseId}} c:commit{o:oid} p:pullRequest{n:number r:repository{n:databaseId}} x:comments(first:1){totalCount}}}"
-_OLD = "old:nodes(ids:$roots){... on PullRequestReviewComment{n:fullDatabaseId b:body p:path l:line o:originalLine a:author{t:__typename ... on Bot{n:databaseId}} c:commit{o:oid} z:originalCommit{o:oid} r:pullRequestReview{n:fullDatabaseId} q:replyTo{n:fullDatabaseId} u:updatedAt}}"
+_OLD = "old:nodes(ids:$roots){... on PullRequestReviewThread{i:id s:isResolved d:diffSide t:subjectType x:comments(first:1){totalCount nodes{n:fullDatabaseId b:body p:path l:line o:originalLine a:author{t:__typename ... on Bot{n:databaseId}} c:commit{o:oid} z:originalCommit{o:oid} r:pullRequestReview{n:fullDatabaseId} q:replyTo{n:fullDatabaseId} u:updatedAt}}}}"
+_CLOSE_FRAGMENT = "fragment NativeClosingRoot on PullRequestReviewThread{" + _ROOT + "}"
 _CLOSE_SCOPE = (
     "repository(owner:$owner,name:$name){n:databaseId p:pullRequest(number:$number){"
     + _SCOPE
     + " r:reviews(first:100){totalCount pageInfo{hasNextPage} nodes{n:fullDatabaseId s:state}}v:reviews(last:100){totalCount pageInfo{hasPreviousPage} nodes{n:fullDatabaseId s:state}} f:reviewThreads(first:$front){totalCount pageInfo{hasNextPage endCursor} nodes{"
-    + _ROOT
+    + "...NativeClosingRoot"
     + "}} l:reviewThreads(last:$back){totalCount pageInfo{hasPreviousPage} nodes{"
-    + _ROOT
+    + "...NativeClosingRoot"
     + "}}"
 )
 _CLOSE_MIDDLE = (
     "m:reviewThreads(first:$first,after:$after){totalCount pageInfo{hasNextPage} nodes{"
-    + _ROOT
+    + "...NativeClosingRoot"
     + "}}"
 )
 _CLOSE_VARS = "$owner:String!,$name:String!,$number:Int!,$front:Int!,$back:Int!,$main:ID!,$roots:[ID!]!"
@@ -123,6 +124,7 @@ CLOSE_QUERY = (
     + _MAIN
     + _OLD
     + "}"
+    + _CLOSE_FRAGMENT
 )
 CLOSE_MIDDLE_QUERY = (
     "query NativePublicationClosingWithMiddle("
@@ -134,6 +136,7 @@ CLOSE_MIDDLE_QUERY = (
     + _MAIN
     + _OLD
     + "}"
+    + _CLOSE_FRAGMENT
 )
 
 
@@ -426,6 +429,9 @@ class NativePublicationEvidence:
     old_root_bodies: tuple[dict[str, Any], ...]
     physical_reads: int
     context_sha256: str
+    main_body: str
+    main_state: str
+    document_sha256: str | None
 
 
 def closing_envelope_bound() -> int:
@@ -468,7 +474,7 @@ def read_publication_union(
     producer_id: int,
     group_review_ids: tuple[int, ...],
     main_review_id: int,
-    main_body: str,
+    main_body: str | None,
     main_state: str,
     old_root_nodes: dict[int, str],
     budget: NativeWalkBudget,
@@ -634,7 +640,9 @@ def read_publication_union(
         main = payload["data"]["main"]
         if (
             _native_number(main["n"]) != main_review_id
-            or main["b"] != main_body
+            or not isinstance(main["b"], str)
+            or main_body is not None
+            and main["b"] != main_body
             or main["s"] != main_state
             or main["a"]["t"] != "Bot"
             or _native_number(main["a"]["n"]) != producer_id
@@ -670,16 +678,60 @@ def read_publication_union(
             raise ReviewInputError(
                 "native publication root union contains an unselected source"
             )
-        old = payload["data"]["old"]
+        old_threads = payload["data"]["old"]
         if (
-            not isinstance(old, list)
-            or len(old) != len(old_root_nodes)
-            or wire_bytes(old) > MAX_EXISTING_ROOT_PROJECTION_BYTES
-            or {_native_number(row["n"]) for row in old} != set(old_root_nodes)
+            not isinstance(old_threads, list)
+            or len(old_threads) != len(old_root_nodes)
+            or wire_bytes(old_threads) > MAX_EXISTING_ROOT_PROJECTION_BYTES
         ):
             raise ReviewInputError(
                 "native publication existing root body closure is incomplete"
             )
+        old = []
+        observed_old = set()
+        for thread in old_threads:
+            comments = thread["x"]
+            if (
+                type(comments["totalCount"]) is not int
+                or not 1 <= comments["totalCount"] <= 1000
+                or not isinstance(comments["nodes"], list)
+                or len(comments["nodes"]) != 1
+            ):
+                raise ReviewInputError("native historical thread root is incomplete")
+            row = comments["nodes"][0]
+            identifier = _native_number(row["n"])
+            root = closed_roots.get(identifier)
+            if (
+                identifier in observed_old
+                or identifier not in old_root_nodes
+                or thread["i"] != old_root_nodes[identifier]
+                or root is None
+                or thread["s"] is not root.resolved
+                or thread["d"] != root.side
+                or thread["t"] != root.subject_type
+                or row["q"] is not None
+                or _native_number(row["r"]["n"]) != root.review_id
+                or row["a"]["t"] != "Bot"
+                or _native_number(row["a"]["n"]) != root.producer_id
+                or row["c"]["o"] != root.head_sha
+                or row["u"] != root.updated_at
+                or not isinstance(row["b"], str)
+            ):
+                raise ReviewInputError(
+                    "native historical thread identity or association changed"
+                )
+            observed_old.add(identifier)
+            old.append(row)
+        if observed_old != set(old_root_nodes):
+            raise ReviewInputError("native historical thread closure omits a root")
+        from .native_union import native_union_frame_document
+
+        try:
+            document_sha256 = hashlib.sha256(
+                canonical_bytes(native_union_frame_document(main["b"]))
+            ).hexdigest()
+        except ReviewInputError:
+            document_sha256 = None
         return NativePublicationEvidence(
             main_review_id,
             confirmed,
@@ -687,6 +739,9 @@ def read_publication_union(
             tuple(old),
             budget.used,
             hashlib.sha256(canonical_bytes(plan.context(producer_id))).hexdigest(),
+            main["b"],
+            main["s"],
+            document_sha256,
         )
     except (KeyError, TypeError, AttributeError, ValueError) as exc:
         raise ReviewInputError(

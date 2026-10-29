@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 from .bounded_evidence import canonical_bytes
 from .errors import ReviewInputError
 
-STAGING_VERSION = "publication-staging-v1"
+STAGING_VERSION = "publication-staging-v2"
 MAX_PUBLICATION_PARTS = 8
 MAX_STAGING_BYTES = 4096
 _DIGEST = re.compile(r"[a-f0-9]{64}")
@@ -63,6 +63,10 @@ class PublicationStaging:
     final_attempted: bool = False
     final_token: str | None = None
     final_receipt: PublicationReceipt | None = None
+    manifest_required: bool = False
+    manifest_attempted: bool = False
+    manifest_token: str | None = None
+    manifest_receipt: PublicationReceipt | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -101,11 +105,33 @@ class PublicationStaging:
                 type(self.final_receipt) is not PublicationReceipt
                 or not self.final_attempted
             )
+            or type(self.manifest_required) is not bool
+            or type(self.manifest_attempted) is not bool
+            or self.manifest_attempted != (self.manifest_token is not None)
+            or self.manifest_attempted
+            and (not self.manifest_required or len(self.receipts) != self.part_count)
+            or self.manifest_token is not None
+            and (
+                not isinstance(self.manifest_token, str)
+                or _CLAIM.fullmatch(self.manifest_token) is None
+                or self.manifest_token in self.attempt_tokens
+                or self.manifest_token == self.final_token
+            )
+            or self.manifest_receipt is not None
+            and (
+                type(self.manifest_receipt) is not PublicationReceipt
+                or not self.manifest_attempted
+            )
+            or self.final_attempted
+            and self.manifest_required
+            and self.manifest_receipt is None
         ):
             raise ReviewInputError("publication staging frontier is invalid")
         native_ids = [receipt.native_id for receipt in self.receipts]
         if self.final_receipt is not None:
             native_ids.append(self.final_receipt.native_id)
+        if self.manifest_receipt is not None:
+            native_ids.append(self.manifest_receipt.native_id)
         if len(native_ids) != len(set(native_ids)):
             raise ReviewInputError("publication staging reuses a native identity")
         if len(canonical_bytes(self.to_document())) > MAX_STAGING_BYTES:
@@ -119,8 +145,15 @@ class PublicationStaging:
         result_sha256: str,
         plan_sha256: str,
         part_count: int,
+        manifest_required: bool = False,
     ) -> PublicationStaging:
-        return cls(transaction_id, result_sha256, plan_sha256, part_count)
+        return cls(
+            transaction_id,
+            result_sha256,
+            plan_sha256,
+            part_count,
+            manifest_required=manifest_required,
+        )
 
     @property
     def outstanding_part(self) -> int | None:
@@ -139,6 +172,7 @@ class PublicationStaging:
             or ordinal >= self.part_count
             or self.outstanding_part is not None
             or self.final_attempted
+            or self.manifest_attempted
         ):
             raise ReviewInputError(
                 "publication part is already attempted or out of order"
@@ -166,8 +200,41 @@ class PublicationStaging:
             return self
         return replace(self, receipts=(*self.receipts, receipt))
 
+    def attempt_manifest(self, *, token: str | None = None) -> PublicationStaging:
+        if (
+            not self.manifest_required
+            or self.manifest_attempted
+            or self.final_attempted
+            or len(self.receipts) != self.part_count
+        ):
+            raise ReviewInputError(
+                "publication manifest cannot be attempted at this frontier"
+            )
+        return replace(
+            self,
+            manifest_attempted=True,
+            manifest_token=secrets.token_hex(16) if token is None else token,
+        )
+
+    def confirm_manifest(
+        self, *, native_id: str, content_sha256: str
+    ) -> PublicationStaging:
+        receipt = PublicationReceipt(native_id, content_sha256)
+        if not self.manifest_attempted:
+            raise ReviewInputError("publication manifest was not attempted")
+        if self.manifest_receipt is not None:
+            if self.manifest_receipt != receipt:
+                raise ReviewInputError("publication manifest receipt conflicts")
+            return self
+        return replace(self, manifest_receipt=receipt)
+
     def attempt_final(self, *, token: str | None = None) -> PublicationStaging:
-        if self.final_attempted or len(self.receipts) != self.part_count:
+        if (
+            self.final_attempted
+            or len(self.receipts) != self.part_count
+            or self.manifest_required
+            and self.manifest_receipt is None
+        ):
             raise ReviewInputError(
                 "publication final frame is already attempted or parts are unconfirmed"
             )
@@ -197,6 +264,7 @@ class PublicationStaging:
         if (
             self.outstanding_part is None
             and not self.final_attempted
+            and not self.manifest_attempted
             and self.attempted_parts < self.part_count
             and len(after.attempt_tokens) == self.attempted_parts + 1
         ):
@@ -216,8 +284,27 @@ class PublicationStaging:
                 )
             )
         if (
+            self.manifest_required
+            and not self.manifest_attempted
+            and len(self.receipts) == self.part_count
+            and after.manifest_token is not None
+        ):
+            candidates.append(self.attempt_manifest(token=after.manifest_token))
+        if (
+            self.manifest_attempted
+            and self.manifest_receipt is None
+            and after.manifest_receipt is not None
+        ):
+            receipt = after.manifest_receipt
+            candidates.append(
+                self.confirm_manifest(
+                    native_id=receipt.native_id, content_sha256=receipt.content_sha256
+                )
+            )
+        if (
             len(self.receipts) == self.part_count
             and not self.final_attempted
+            and (not self.manifest_required or self.manifest_receipt is not None)
             and after.final_token is not None
         ):
             candidates.append(self.attempt_final(token=after.final_token))
@@ -252,6 +339,12 @@ class PublicationStaging:
             "final_receipt": self.final_receipt.to_document()
             if self.final_receipt is not None
             else None,
+            "manifest_required": self.manifest_required,
+            "manifest_attempted": self.manifest_attempted,
+            "manifest_token": self.manifest_token,
+            "manifest_receipt": self.manifest_receipt.to_document()
+            if self.manifest_receipt is not None
+            else None,
         }
 
     @classmethod
@@ -268,6 +361,10 @@ class PublicationStaging:
             "final_attempted",
             "final_token",
             "final_receipt",
+            "manifest_required",
+            "manifest_attempted",
+            "manifest_token",
+            "manifest_receipt",
         }
         if (
             not isinstance(value, Mapping)
@@ -293,6 +390,12 @@ class PublicationStaging:
             final_receipt=PublicationReceipt.from_document(value["final_receipt"])
             if value["final_receipt"] is not None
             else None,
+            manifest_required=value["manifest_required"],  # type: ignore[arg-type]
+            manifest_attempted=value["manifest_attempted"],  # type: ignore[arg-type]
+            manifest_token=value["manifest_token"],  # type: ignore[arg-type]
+            manifest_receipt=PublicationReceipt.from_document(value["manifest_receipt"])
+            if value["manifest_receipt"] is not None
+            else None,
         )
 
 
@@ -315,6 +418,7 @@ def require_staging_successor(before: object, after: object) -> None:
             result_sha256=new.result_sha256,
             plan_sha256=new.plan_sha256,
             part_count=new.part_count,
+            manifest_required=new.manifest_required,
         ):
             raise ReviewInputError(
                 "publication staging must begin before its first attempt"

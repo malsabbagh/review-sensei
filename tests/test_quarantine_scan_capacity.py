@@ -25,12 +25,14 @@ from review_sensei.errors import ReviewInputError
 
 
 class ColdCapacityReaderTests(unittest.TestCase):
-    def test_unknown_full_review_lower_envelope_refuses_before_creation_effects(self):
-        # This proves safe refusal, not the supported heavy-journey gate.
-        # The independent positive heavy14 test must still complete before
-        # this candidate can be qualified for activation.
+    def test_unreadable_unknown_full_review_envelope_refuses_before_creation_effects(
+        self,
+    ):
+        # The supported envelope is exercised by the positive heavy14 journey.
+        # An extra carrier exceeding one complete response must still refuse
+        # before creating a root, staging a part or invoking the provider.
         bounds = full_review_comment_tail()
-        self.assertEqual(len(bounds), 30)
+        self.assertEqual(len(bounds), 31)
         self.assertGreater(sum(bounds), 1_500_000)
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -41,7 +43,13 @@ class ColdCapacityReaderTests(unittest.TestCase):
             before = copy.deepcopy(fixture.extra_comments)
             predecessor, calls = fixture.comment["body"], fixture.provider_calls
             start = len(fixture.trace)
-            with registered_resource([registration]):
+            with (
+                registered_resource([registration]),
+                patch(
+                    "review_sensei_github.quarantine_capacity.full_review_comment_tail",
+                    return_value=(*bounds, 512 * 1024),
+                ),
+            ):
                 self.assertEqual(fixture.invoke(), 1, fixture.error)
             self.assertIn("capacity", fixture.error)
             self.assertEqual(fixture.provider_calls, calls)

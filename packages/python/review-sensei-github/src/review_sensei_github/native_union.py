@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,6 +25,45 @@ UNION_VERSION = "native-review-union-v1"
 MAX_UNION_BYTES = 4096
 _SHA = re.compile(r"[a-f0-9]{64}")
 _GIT_SHA = re.compile(r"[a-f0-9]{40}")
+
+
+def native_union_frame_document(
+    body: object, receipt: NativeUnionReceipt | None = None
+) -> dict:
+    """Decode framing only; full original admission and native proof are separate."""
+    from .publication import (
+        _APPROVAL_ELIGIBILITY_RE,
+        APPROVAL_ELIGIBILITY_MARKER_PREFIX,
+    )
+
+    if not isinstance(body, str) or body.count(APPROVAL_ELIGIBILITY_MARKER_PREFIX) != 1:
+        raise ReviewInputError("native union requires one final eligibility frame")
+    match = _APPROVAL_ELIGIBILITY_RE.search(body)
+    if match is None:
+        raise ReviewInputError("native union final eligibility marker is invalid")
+    try:
+        encoded = match.group("payload").rstrip("=")
+        raw = base64.b64decode(
+            (encoded + "=" * (-len(encoded) % 4)).encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+        document = json.loads(raw)
+        if (
+            not isinstance(document, dict)
+            or set(document) != {"schema_version", "current", "native_union"}
+            or document["schema_version"] != "8"
+            or canonical_bytes(document) != raw
+        ):
+            raise ValueError("native union frame is unsupported")
+        selected = NativeUnionReceipt.from_document(document["native_union"])
+        if receipt is not None and selected != receipt:
+            raise ValueError("native union frame names different parts")
+        return document
+    except (ValueError, TypeError, UnicodeError, KeyError) as error:
+        raise ReviewInputError(
+            "native union final eligibility frame conflicts"
+        ) from error
 
 
 @dataclass(frozen=True)
@@ -195,7 +236,9 @@ class NativeUnionReceipt:
             }
         )
 
-    def require_evidence(self, evidence: NativePublicationEvidence) -> None:
+    def require_evidence(
+        self, evidence: NativePublicationEvidence, *, document_sha256: str | None = None
+    ) -> None:
         from .native_review_census import NativePublicationEvidence
 
         if (
@@ -207,6 +250,8 @@ class NativeUnionReceipt:
             or type(evidence.physical_reads) is not int
             or not 1 <= evidence.physical_reads <= 10
             or len(evidence.groups) != len(self.parts)
+            or document_sha256 is not None
+            and evidence.document_sha256 != document_sha256
         ):
             raise ReviewInputError("native union complete read evidence conflicts")
         seen: set[int] = set()

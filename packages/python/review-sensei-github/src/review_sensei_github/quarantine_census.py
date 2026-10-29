@@ -89,7 +89,12 @@ def is_readonly_census(request, api_url):
         return False
     if value["query"] == QUERY:
         return set(value) == {"query", "variables"} and _variables(value["variables"])
-    from .packed_comment_census import METADATA_QUERY, is_metadata_query
+    from .packed_comment_census import (
+        CLOSING_QUERY,
+        METADATA_QUERY,
+        is_closing_query,
+        is_metadata_query,
+    )
 
     if value["query"] == METADATA_QUERY:
         return (
@@ -98,6 +103,14 @@ def is_readonly_census(request, api_url):
             and value.get("operationName", "PackedCommentMembership")
             == "PackedCommentMembership"
             and is_metadata_query(value["query"], value.get("variables"))
+        )
+    if value["query"] == CLOSING_QUERY:
+        return (
+            set(value)
+            in ({"query", "variables"}, {"query", "variables", "operationName"})
+            and value.get("operationName", "PackedCommentClosing")
+            == "PackedCommentClosing"
+            and is_closing_query(value["query"], value.get("variables"))
         )
     from .native_review_groups import PART_QUERY
 
@@ -272,6 +285,25 @@ def fetch_comments(
     observe_request=None,
 ):
     """Complete bounded census; every failed adaptive attempt spends a call."""
+    from .publication_recovery import _publication_transport
+
+    guard = getattr(
+        _publication_transport(ledger.http), "_quarantine_capacity_guard", None
+    )
+    if guard is not None and guard.comment_plan is not None:
+        from .packed_comment_census import fetch_packed_comments
+
+        if guard.identity != identity:
+            raise ReviewInputError("packed comment capacity scope changed")
+        return fetch_packed_comments(
+            ledger,
+            identity,
+            plan=guard.comment_plan,
+            max_requests=max_requests,
+            timeout_seconds=timeout_seconds,
+            before_read=before_read,
+            observe_request=observe_request,
+        )
     owner, name = identity.repository.split("/", 1)
     profiles = getattr(ledger, "_quarantine_census_sizes", None)
     if profiles is None:

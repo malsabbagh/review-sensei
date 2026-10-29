@@ -12,7 +12,8 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import lru_cache
 from types import MappingProxyType
 from typing import Any
 
@@ -33,6 +34,15 @@ METADATA_QUERY = (
     "f:comments(first:100){" + _CONNECTION + "} "
     "l:comments(last:100){totalCount pageInfo{hasPreviousPage} nodes{" + _META + "}}}}}"
 )
+CLOSING_QUERY = (
+    "query PackedCommentClosing($owner:String!,$name:String!,$number:Int!,$first:Int!,$after:String){"
+    "repository(owner:$owner,name:$name){databaseId nameWithOwner "
+    "pullRequest(number:$number){number headRefOid baseRefOid "
+    "f:comments(first:100){" + _CONNECTION + "} "
+    "l:comments(last:100){totalCount pageInfo{hasPreviousPage} nodes{" + _META + "}} "
+    "comments(first:$first,after:$after){totalCount pageInfo{hasNextPage endCursor} "
+    "nodes{body " + _META + "}}}}}"
+)
 
 
 def wire(value: object) -> int:
@@ -50,11 +60,19 @@ class CommentAllocationPlan:
 
     known: Mapping[int, int]
     unknown: tuple[int, ...]
+    metadata_known: Mapping[int, int] = field(default_factory=dict)
+    metadata_unknown: int = NODE_METADATA_BYTES
 
     def __post_init__(self) -> None:
         if (
             not isinstance(self.known, Mapping)
             or not isinstance(self.unknown, tuple)
+            or not isinstance(self.metadata_known, Mapping)
+            or set(self.metadata_known) - set(self.known)
+            or any(
+                type(value) is not int or not 0 < value <= NODE_METADATA_BYTES
+                for value in (*self.metadata_known.values(), self.metadata_unknown)
+            )
             or len(self.known) + len(self.unknown) > MAX_COMMENTS
             or any(type(key) is not int or key <= 0 for key in self.known)
             or any(
@@ -65,8 +83,116 @@ class CommentAllocationPlan:
                 for bound in (*self.known.values(), *self.unknown)
             )
         ):
-            raise ReviewInputError("packed comment allocation plan is invalid")
+            raise ReviewInputError("packed comment allocation capacity plan is invalid")
         object.__setattr__(self, "known", MappingProxyType(dict(self.known)))
+        object.__setattr__(
+            self, "metadata_known", MappingProxyType(dict(self.metadata_known))
+        )
+
+    def worst_read_calls(self) -> int:
+        # Each window contains at most100nodes, including overlap. Twice the
+        # largest100possible node envelopes bounds both complete windows.
+        metadata = sorted(
+            [self.metadata_known.get(key, NODE_METADATA_BYTES) for key in self.known]
+            + [self.metadata_unknown] * len(self.unknown),
+            reverse=True,
+        )
+        return packed_request_bound(
+            tuple(self.known.values()),
+            self.unknown,
+            closing_metadata_bytes=2 * sum(metadata[:100]),
+        )
+
+
+def packed_request_bound(
+    known: tuple[int, ...],
+    unknown: tuple[int, ...],
+    *,
+    closing_metadata_bytes: int | None = None,
+) -> int:
+    """Certify the actual prefix algorithm under every unknown interleaving.
+
+    Known native identities retain their observed relative order. All possible
+    unknown slots may interleave anywhere. Matching an observed unknown body
+    removes its smallest fitting slot; removing the smallest slot regardless
+    of that body leaves a componentwise greater remaining capacity multiset.
+    That dominating case suffices for the maximum number of subsequent pages.
+
+    For a page, cost depends only on how many ordered known and unknown items
+    it contains. Enumerate every maximal page boundary: a next known or unknown
+    item must fail to fit, unless this is the final page. Memoized boundaries
+    thus cover all interleavings without treating aggregate bytes as packing.
+    Opening and fresh closing are included. Excess local proof work refuses.
+    """
+    rejected = MAX_PAGINATION_PAGES + 1
+    framing_calls = 2 if closing_metadata_bytes is None else 1
+    if len(known) + len(unknown) > MAX_COMMENTS:
+        return rejected
+    prefix = [0]
+    for bound in known:
+        prefix.append(prefix[-1] + bound)
+    largest = sorted(unknown, reverse=True)
+    upper = [0]
+    for bound in largest:
+        upper.append(upper[-1] + bound)
+    work = 0
+
+    class ProofWorkExceeded(Exception):
+        pass
+
+    @lru_cache(maxsize=40_401)
+    def pages(ki: int, ui: int) -> int:
+        nonlocal work
+        if ki == len(known) and ui == len(unknown):
+            return 0 if closing_metadata_bytes is None else 1
+        worst = 0
+        for end_known in range(ki, len(known) + 1):
+            known_cost = prefix[end_known] - prefix[ki]
+            for added_unknown in range(len(unknown) - ui + 1):
+                work += 1
+                if work > 500_000:
+                    raise ProofWorkExceeded
+                count = end_known - ki + added_unknown
+                if count > 100:
+                    break
+                cost = (
+                    OUTER_BYTES
+                    + NODE_METADATA_BYTES * count
+                    + known_cost
+                    + upper[added_unknown]
+                )
+                if cost > MAX_GITHUB_RESPONSE_BYTES:
+                    break
+                if not count:
+                    continue
+                end_unknown = ui + added_unknown
+                terminal = end_known == len(known) and end_unknown == len(unknown)
+                next_known_fails = (
+                    end_known < len(known)
+                    and cost + NODE_METADATA_BYTES + known[end_known]
+                    > MAX_GITHUB_RESPONSE_BYTES
+                )
+                next_unknown_fails = (
+                    end_unknown < len(unknown)
+                    and cost + NODE_METADATA_BYTES + largest[added_unknown]
+                    > MAX_GITHUB_RESPONSE_BYTES
+                )
+                if terminal or count == 100 or next_known_fails or next_unknown_fails:
+                    finish = (
+                        1
+                        + int(cost + closing_metadata_bytes > MAX_GITHUB_RESPONSE_BYTES)
+                        if terminal and closing_metadata_bytes is not None
+                        else 1 + pages(end_known, end_unknown)
+                    )
+                    worst = max(worst, finish)
+                    if worst + framing_calls > MAX_PAGINATION_PAGES:
+                        return rejected
+        return worst if worst else rejected
+
+    try:
+        return min(rejected, framing_calls + pages(0, 0))
+    except ProofWorkExceeded:
+        return rejected
 
 
 def is_metadata_query(query: object, variables: object) -> bool:
@@ -80,7 +206,13 @@ def is_metadata_query(query: object, variables: object) -> bool:
     )
 
 
-def _membership(payload: Any, ledger: Any, identity: Any):
+def is_closing_query(query: object, variables: object) -> bool:
+    from .quarantine_census import _variables
+
+    return query == CLOSING_QUERY and _variables(variables)
+
+
+def _membership(payload: Any, ledger: Any, identity: Any, plan: CommentAllocationPlan):
     try:
         repository = payload["data"]["repository"]
         _repository(repository, identity)
@@ -109,10 +241,15 @@ def _membership(payload: Any, ledger: Any, identity: Any):
         for window in (first["nodes"], last["nodes"]):
             window_ids = set()
             for node in window:
-                if wire(node) > NODE_METADATA_BYTES:
-                    raise ReviewInputError("packed comment metadata exceeds its bound")
                 normalized = _comment({**node, "body": ""}, ledger, identity)
                 identifier = normalized["id"]
+                bound = (
+                    plan.metadata_known.get(identifier, NODE_METADATA_BYTES)
+                    if identifier in plan.known
+                    else plan.metadata_unknown
+                )
+                if wire(node) > bound:
+                    raise ReviewInputError("packed comment metadata exceeds its bound")
                 if identifier in window_ids:
                     raise ReviewInputError(
                         "packed comment metadata duplicates a native identity"
@@ -189,7 +326,18 @@ def fetch_packed_comments(
         return response
 
     opening = read(METADATA_QUERY, scope)
-    order, metadata, original_scope = _membership(opening, ledger, identity)
+    order, metadata, original_scope = _membership(opening, ledger, identity, plan)
+    # A closing frame must repeat these exact metadata windows. Co-fetching
+    # the final complete body page is optional and cannot increase the older
+    # separate-closing certificate's physical request count.
+    windows = opening["data"]["repository"]["pullRequest"]
+    closing_metadata_wire = sum(
+        wire(node) for name in ("f", "l") for node in windows[name]["nodes"]
+    )
+    if tuple(identifier for identifier in order if identifier in plan.known) != tuple(
+        plan.known
+    ):
+        raise ReviewInputError("packed comment retained identity order changed")
     unknown = sorted(plan.unknown)
     if sum(identifier not in plan.known for identifier in order) > len(unknown):
         raise ReviewInputError(
@@ -217,9 +365,18 @@ def fetch_packed_comments(
             if bound > MAX_GITHUB_RESPONSE_BYTES:
                 break
             first = count
-        if not first or calls + 1 >= requests:  # Keep closing in this same budget.
+        if not first:
             raise ReviewInputError("packed comment bodies do not fit the admitted walk")
-        response = read(QUERY, {**scope, "first": first, "after": cursor})
+        combined_closing = (
+            offset + first == len(order)
+            and bound + closing_metadata_wire <= MAX_GITHUB_RESPONSE_BYTES
+        )
+        if calls + int(not combined_closing) >= requests:
+            raise ReviewInputError("packed comment bodies do not fit the admitted walk")
+        response = read(
+            CLOSING_QUERY if combined_closing else QUERY,
+            {**scope, "first": first, "after": cursor},
+        )
         try:
             repository = response["data"]["repository"]
             _repository(repository, identity)
@@ -233,7 +390,10 @@ def fetch_packed_comments(
                 or len(nodes) != first
                 or info["hasNextPage"] is not (offset + first < len(order))
                 or not _cursor(info["endCursor"])
-                or wire(response) - sum(wire(node) for node in nodes) > OUTER_BYTES
+                or wire(response)
+                - sum(wire(node) for node in nodes)
+                - (closing_metadata_wire if combined_closing else 0)
+                > OUTER_BYTES
             ):
                 raise ReviewInputError("packed comment body membership changed")
             for identifier, node in zip(
@@ -269,11 +429,18 @@ def fetch_packed_comments(
                     unknown.pop(match)
                 collected.append(_comment(node, ledger, identity))
             cursor, offset = info["endCursor"], offset + first
+            if combined_closing:
+                closing = _membership(response, ledger, identity, plan)
+                if closing != (order, metadata, original_scope):
+                    raise ReviewInputError(
+                        "packed comment fresh closing membership changed"
+                    )
+                return collected
         except (KeyError, TypeError, ValueError) as error:
             raise ReviewInputError(
                 "packed comment complete body page is malformed"
             ) from error
-    closing = _membership(read(METADATA_QUERY, scope), ledger, identity)
+    closing = _membership(read(METADATA_QUERY, scope), ledger, identity, plan)
     if closing != (order, metadata, original_scope):
         raise ReviewInputError("packed comment fresh closing membership changed")
     return collected

@@ -98,6 +98,16 @@ _UPDATED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _PART_PREFIX = "ReviewSensei immutable evidence part v1\n"
 
 
+def retained_carrier_body(body: object) -> bool:
+    """Count native-union manifests in the same immutable storage ceiling."""
+    return isinstance(body, str) and body.endswith(
+        (
+            "<!-- reviewsensei:evidence-part:v1 -->",
+            "<!-- reviewsensei:native-manifest:v1 -->",
+        )
+    )
+
+
 def _since_margin(value: str) -> str | None:
     """Server timestamp of a read, moved back so a same-second write is included."""
 
@@ -481,10 +491,8 @@ class GitHubIssueCommentSessionLedger:
     def _owned_carrier_items(self, items, identity):
         """The shared exact carrier selector for planning and staging."""
         for item in items:
-            if (
-                not isinstance(item, dict)
-                or not isinstance(item.get("body"), str)
-                or not item["body"].endswith("<!-- reviewsensei:evidence-part:v1 -->")
+            if not isinstance(item, dict) or not retained_carrier_body(
+                item.get("body")
             ):
                 continue
             author = item.get("user")

@@ -460,10 +460,12 @@ class DefaultHumanInventoryPublisherTests(unittest.TestCase):
         self.assertEqual(self.state.parts, [])
 
     def test_store_scope_and_original_budget_must_match_publication(self):
+        with self.assertRaisesRegex(ReviewInputError, "selected transaction conflicts"):
+            replace(self.context, transaction_id="0" * 64)
         for context in (
             replace(self.context, publication_digest="0" * 64),
             replace(self.context, budget=EvidenceReadBudget()),
-            replace(self.context, transaction_id="0" * 64),
+            replace(self.context, transaction_id="0" * 64, selected_transaction=None),
         ):
             store = HumanInventoryStore(
                 self.state.http, "synthetic", self.ledger, context
