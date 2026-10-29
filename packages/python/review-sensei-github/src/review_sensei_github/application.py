@@ -361,6 +361,17 @@ class GitHubApplication:
         self.replier = replier
         self.session_ledger = session_ledger
         self.enable_disposition_snapshot_writes = enable_disposition_snapshot_writes
+        self._quarantine_hold_readers: dict[tuple[str, int], Any] = {}
+        self._human_inventory_readers: dict[tuple, Any] = {}
+        if getattr(
+            getattr(session_ledger, "caller", None),
+            "_has_quarantine_assessments",
+            False,
+        ):
+            for publisher in (reviewer, replier):
+                publisher.finalizer.quarantine_reader_factory = (
+                    self._quarantine_hold_reader
+                )
         # Every ordinary fresh application can reconstruct supported default
         # inventories from its independently selected durable ledger.
         for publisher in (reviewer, replier):
@@ -368,6 +379,18 @@ class GitHubApplication:
                 publisher.finalizer.human_inventory_reader_factory = (
                     self._human_inventory_reader
                 )
+
+    def _quarantine_hold_reader(self, *, token, repository, pull_request, head_sha):
+        from .quarantine_holds import QuarantineHoldReader
+
+        key = repository, pull_request
+        if key not in self._quarantine_hold_readers:
+            self._quarantine_hold_readers[key] = QuarantineHoldReader(
+                ledger=self.session_ledger,
+                repository=repository,
+                pull_request=pull_request,
+            )
+        return self._quarantine_hold_readers[key]
 
     def _human_inventory_reader(
         self,
@@ -379,15 +402,32 @@ class GitHubApplication:
         app_slug: str,
         budget: EvidenceReadBudget,
     ) -> Any:
+        import hashlib
+
         from .default_human_reader import DefaultHumanInventoryReader
         from .session_ledger import GitHubIssueCommentSessionLedger
 
+        key = (
+            hashlib.sha256(token.encode()).hexdigest(),
+            repository,
+            pull_request,
+            head_sha,
+            app_slug.casefold(),
+            id(budget),
+        )
+        from .api_run_requests import ApiRunSessionLedger
+
         ledger = self.session_ledger
+        native_scoped = (
+            isinstance(ledger, ApiRunSessionLedger) and ledger._quarantine_required
+        )
+        if native_scoped and key in self._human_inventory_readers:
+            return self._human_inventory_readers[key]
         if ledger is None:
             ledger = GitHubIssueCommentSessionLedger(
                 self.http, token=token, app_slug=app_slug, evidence_budget=budget
             )
-        return DefaultHumanInventoryReader(
+        reader = DefaultHumanInventoryReader(
             http=self.http,
             ledger=ledger,
             token=token,
@@ -397,6 +437,15 @@ class GitHubApplication:
             app_slug=app_slug,
             budget=budget,
         )
+        # One application is one finite caller operation. Only the original
+        # scoped context/immutable admission is shared; every native callback
+        # still rereads its source, manifest, complete union and mutable fences.
+        if native_scoped:
+            self._human_inventory_readers[key] = reader
+            current_read = self._quarantine_hold_readers.get((repository, pull_request))
+            if current_read is not None:
+                reader.attach_current_read(current_read)
+        return reader
 
     def recover_retained_review_result(
         self,
@@ -915,8 +964,19 @@ class GitHubApplication:
         # verification result.  Once a verification round has already been
         # completed, publishing without both trusted admission inputs would
         # silently downgrade the result to a fresh review.
-        verification_transaction_recovery_required = (
+        from review_sensei.quarantine_lineage import is_full_analysis_transaction
+
+        quarantine_full_analysis = (
             validated_transaction_recovery
+            and transaction_record is not None
+            and baseline is None
+            and current_key is not None
+            and is_full_analysis_transaction(transaction_record, current_key)
+            and result.coverage_mode == "full"
+        )
+        verification_transaction_recovery_required = (
+            not quarantine_full_analysis
+            and validated_transaction_recovery
             and transaction_record is not None
             and (
                 transaction_record.completed_verification_rounds > 0
@@ -1487,6 +1547,38 @@ class GitHubApplication:
 
                 if is_rescan_transaction(transaction_record):
                     publisher_arguments["explicit_reanalysis"] = True
+            if (
+                isinstance(reviewer, ReviewPublisher)
+                and options.complete_inventory
+                and result_retained
+                and retention_context_required
+                and ledger is not None
+                and budget is not None
+                and result.transaction is not None
+                and configuration_context is not None
+                and evidence_context is not None
+            ):
+                from .publication_recovery import confirm_retained_narrative
+
+                # Called only after ordinary complete-frame fitting fails. Read
+                # the existing exact carriers using this invocation's meter;
+                # compaction never stages replacement parts or resets work.
+                publisher_arguments["narrative_archive"] = lambda: (
+                    confirm_retained_narrative(
+                        http=transport,
+                        token=token,
+                        result=publisher_result,
+                        identity=identity,
+                        base_sha=base_sha,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        ledger=ledger,
+                        configuration_context=configuration_context,
+                        evidence_context=evidence_context,
+                        policy=policy,
+                        budget=budget,
+                    )
+                )
             if publisher_has_prepare:
                 publisher_arguments["prepared_review"] = prepared_publishable
             if retained_eligibility is not None:

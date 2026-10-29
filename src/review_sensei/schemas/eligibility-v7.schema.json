@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/eligibility-v7.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "current",
+    "quarantine_assessments"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "7"
+    },
+    "current": {
+      "type": "object",
+      "required": [
+        "schema_version"
+      ],
+      "properties": {
+        "schema_version": {
+          "enum": [
+            "1",
+            "2.0",
+            "3",
+            "4",
+            "5"
+          ]
+        }
+      }
+    },
+    "quarantine_assessments": {
+      "$ref": "https://reviewsensei.dev/schemas/v1/quarantine-assessment-view.schema.json"
+    }
+  }
+}

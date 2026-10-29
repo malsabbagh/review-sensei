@@ -608,6 +608,11 @@ def run_actions_analysis(
     trigger: str = "full-review",
     delivery_id: str | None = None,
     grant: str | None = None,
+    source_base_sha: str | None = None,
+    source_head_sha: str | None = None,
+    source_policy_digest: str | None = None,
+    source_configuration_digest: str | None = None,
+    source_evidence_digest: str | None = None,
 ) -> HostedProviderResult | OperationRefusal:
     """Open the pull-request operation record and run one Actions provider call."""
 
@@ -646,7 +651,8 @@ def run_actions_analysis(
     port.prime(listed)
     store = GitHubCommentOperationStore(port, app_user_id=user_id)
     started = 1_000
-    return run_hosted_provider(
+    parts = ResultPartStore(port, app_user_id=user_id)
+    admitted = run_hosted_provider(
         store,
         trigger=trigger,
         repository_id=repository_id,
@@ -661,9 +667,41 @@ def run_actions_analysis(
         server_started_ms=started,
         execute=execute,
         encode=encode,
-        parts=ResultPartStore(port, app_user_id=user_id),
+        parts=parts,
         now=lambda: started,
     )
+    if (
+        isinstance(admitted, HostedProviderResult)
+        and admitted.operation is not None
+        and admitted.fresh is not None
+        and source_base_sha is not None
+        and source_head_sha is not None
+        and source_policy_digest is not None
+        and source_configuration_digest is not None
+        and source_evidence_digest is not None
+    ):
+        from .accepted_result import remember_accepted_result
+
+        remember_accepted_result(
+            http,
+            store,
+            parts,
+            admitted,
+            encode(admitted.fresh),
+            repository_id=repository_id,
+            pull_request=pull_request,
+            base_sha=source_base_sha,
+            head_sha=source_head_sha,
+            run_id=run_id,
+            run_attempt=run_attempt,
+            app_id=app_id,
+            producer_id=user_id,
+            reservation_id=reservation_id,
+            policy_digest=source_policy_digest,
+            configuration_digest=source_configuration_digest,
+            evidence_digest=source_evidence_digest,
+        )
+    return admitted
 
 
 _V2_FINGERPRINT = re.compile(

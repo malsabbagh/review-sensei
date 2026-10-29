@@ -218,7 +218,10 @@ class CallerRunnerInputContractTests(unittest.TestCase):
             "comment_actor_type",
             "comment_association",
         }
-        self.assertEqual(runner_inputs, invocation_inputs | {"hosted_runner"})
+        self.assertEqual(
+            runner_inputs,
+            invocation_inputs | {"hosted_runner", "quarantine_predecessor_comment_id"},
+        )
         # The optional label changes hosted infrastructure only. Callers cannot
         # restate inference or policy, and generated callers retain the default.
         for retired in (

@@ -72,6 +72,7 @@ class TrustedRecoveryWorkflowTests(unittest.TestCase):
                 "recover_publication": "boolean",
                 "recovery_policy_commit": "string",
                 "recovery_expected_head": "string",
+                "quarantine_predecessor_comment_id": "string",
             },
         )
         for caller in (

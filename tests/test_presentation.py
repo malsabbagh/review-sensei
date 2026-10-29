@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from review_sensei.models import ReviewComment, ReviewResult
@@ -257,6 +258,37 @@ class EscapingTests(unittest.TestCase):
         sanitized = sanitize_finding_markdown("```python\nprint('x')")
         self.assertNotIn("```", sanitized)
         self.assertIn(r"\`\`\`", sanitized)
+        sanitized = sanitize_finding_markdown(
+            "```python\nprint('x')", literal_malformed_fences=True
+        )
+        self.assertEqual(sanitized, "\n\n    ```python\n    print('x')\n\n")
+
+    def test_malformed_fences_preserve_complete_prose_with_bounded_wire_growth(self):
+        cases = [
+            "`" * 16_000,
+            "~" * 16_000,
+            "`" * 4000 + "\n" + "~" * 4000 + "\n```",
+            "```\n" + "\n" * 8000,
+            "```\n" + "<!-- @owner [unsafe](javascript:run()) -->\n" * 200,
+            "```\n" + "漢💥\\\x00\t" * 1000,
+        ]
+        for body in cases:
+            with self.subTest(size=len(body)):
+                rendered = sanitize_finding_markdown(
+                    body, literal_malformed_fences=True
+                )
+                wire = len(json.dumps(rendered).encode())
+                original = len(json.dumps(body).encode())
+                self.assertLessEqual(3 * wire, 5 * original + 120)
+                self.assertNotIn("<!--", rendered)
+                # Every original character remains, apart from the existing
+                # metadata-prefix neutralization and literal indentation.
+                content = rendered[2:-2].replace("<\\!--", "<!--")
+                if content.startswith("    "):
+                    content = "\n".join(line[4:] for line in content.split("\n"))
+                else:
+                    content = "\n".join(content.split("\n")[1:-1])
+                self.assertEqual(content, body)
 
     def test_keeps_balanced_fences_verbatim(self):
         body = "```\ncode\n```"

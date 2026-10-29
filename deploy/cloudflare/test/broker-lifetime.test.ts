@@ -42,6 +42,31 @@ describe("uncontrolled broker upstream lifetime", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("does not treat an early timer as an upstream timeout before the control deadline", async () => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const deadline = started + 40;
+    const control = new BrokerDispatchControl({schema_version:"1.0",operation_id:"a".repeat(64),request_id:"b".repeat(64),deadline_unix_ms:deadline,max_dispatches:1});
+    const beforeDispatch = vi.spyOn(control, "beforeDispatch");
+    let signal: AbortSignal | undefined;
+    let settled = false;
+    vi.stubGlobal("fetch", vi.fn((_url, init) => { signal = init.signal; return new Promise(() => {}); }));
+    const result = new GitHubApi(env, control).request("GET", "/fixture", undefined).catch(error => { settled = true; return error.message; });
+    await vi.advanceTimersByTimeAsync(39);
+    // The timer clock reaches its tick before the wall clock advances a millisecond.
+    const wallClock = vi.spyOn(Date, "now").mockReturnValue(started + 39);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(false);
+    expect(signal?.aborted).toBe(false);
+    wallClock.mockRestore();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toBe("broker_control_deadline_exhausted");
+    expect(signal?.aborted).toBe(true);
+    expect(control.request.deadline_unix_ms).toBe(deadline);
+    expect(beforeDispatch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("preserves controlled deadline precedence when the caller header is equal", async () => {
     vi.useFakeTimers();
     const deadline = Date.now() + 40;

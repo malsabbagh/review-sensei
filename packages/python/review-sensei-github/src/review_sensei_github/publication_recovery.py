@@ -13,7 +13,7 @@ import json
 import re
 from contextlib import contextmanager
 from copy import copy
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterator, Mapping
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from weakref import WeakKeyDictionary
@@ -29,6 +29,7 @@ from review_sensei.session import (
     load_review_transaction_for_publication,
     mark_review_publication_unconfirmed,
 )
+from review_sensei.validation import DEFAULT_REVIEW_LIMITS
 
 from .errors import (
     GitHubHTTPError,
@@ -46,6 +47,186 @@ from .operation_diagnostics import OperationObserver
 # Metadata dies with the original budget. No response bytes, credentials or
 # authority decisions are retained; distinct physical transports stay isolated.
 _PAGINATION_OBSERVATIONS: WeakKeyDictionary = WeakKeyDictionary()
+_NARRATIVE_CONFIRMATION = object()
+
+
+@dataclass(frozen=True)
+class ConfirmedNarrativeArchive:
+    """Read-only confirmation of original narrative retention, not a grant."""
+
+    identity: SessionIdentity
+    base_sha: str
+    head_sha: str
+    transaction_id: str
+    content_digest: str
+    payload_digest: str
+    summary_digest: str
+    carrier_ids: tuple[int, ...]
+    _confirmation: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._confirmation is _NARRATIVE_CONFIRMATION:
+            object.__setattr__(
+                self, "_confirmation", (_NARRATIVE_CONFIRMATION, self._fields_digest())
+            )
+
+    def _fields_digest(self) -> str:
+        return hashlib.sha256(
+            canonical_bytes(
+                {
+                    "repository": self.identity.repository,
+                    "repository_id": self.identity.repository_id,
+                    "pull_request": self.identity.pull_request,
+                    "base_sha": self.base_sha,
+                    "head_sha": self.head_sha,
+                    "transaction_id": self.transaction_id,
+                    "content_digest": self.content_digest,
+                    "payload_digest": self.payload_digest,
+                    "summary_digest": self.summary_digest,
+                    "carrier_ids": list(self.carrier_ids),
+                }
+            )
+        ).hexdigest()
+
+    def excerpt(
+        self,
+        result: ReviewResult,
+        *,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        base_sha: str,
+        head_sha: str,
+    ) -> str:
+        """Render a labelled UTF-8 excerpt with every confirmed carrier link."""
+        transaction = result.transaction
+        if (
+            self._confirmation != (_NARRATIVE_CONFIRMATION, self._fields_digest())
+            or self.identity != SessionIdentity(repository, pull_request, repository_id)
+            or self.base_sha != base_sha
+            or self.head_sha != head_sha
+            or transaction is None
+            or transaction.transaction_id != self.transaction_id
+            or result.content_digest() != self.content_digest
+            or hashlib.sha256(result.summary.encode("utf-8")).hexdigest()
+            != self.summary_digest
+            or not self.carrier_ids
+            or len(self.carrier_ids) > 32
+            or len(set(self.carrier_ids)) != len(self.carrier_ids)
+            or any(
+                type(value) is not int or not 0 < value < 2**63
+                for value in self.carrier_ids
+            )
+        ):
+            raise ReviewInputError("retained narrative confirmation conflicts")
+        links = ", ".join(
+            f"[part {index + 1}]"
+            f"(https://github.com/{repository}/pull/{pull_request}#issuecomment-{identifier})"
+            for index, identifier in enumerate(self.carrier_ids)
+        )
+        prefix = (
+            "Excerpt; the complete original provider narrative remains in the "
+            "authenticated immutable result parts. Finding explanations and "
+            "approval requirements are unchanged.\n\n"
+        )
+        suffix = (
+            "…\n\n"
+            f"Retained content SHA-256: `{self.content_digest}`. "
+            f"Carrier payload SHA-256: `{self.payload_digest}`.\n\n{links}"
+        )
+        original = result.summary.encode("utf-8")
+        available = len(original) - len((prefix + suffix).encode("utf-8")) - 1
+        if available < 1:
+            raise ReviewInputError("retained narrative framing cannot shrink overview")
+        excerpt = original[: min(1024, available)].decode("utf-8", errors="ignore")
+        return prefix + excerpt + suffix
+
+
+def confirm_retained_narrative(
+    *,
+    http: GitHubHttp,
+    token: str,
+    result: ReviewResult,
+    identity: SessionIdentity,
+    base_sha: str,
+    head_sha: str,
+    app_slug: str,
+    ledger: SessionLedger,
+    configuration_context: Mapping[str, object],
+    evidence_context: Mapping[str, object],
+    policy: ReviewConvergencePolicy,
+    budget: EvidenceReadBudget,
+) -> ConfirmedNarrativeArchive:
+    """Confirm existing exact result parts without writing or reopening work.
+
+    Use the caller's original shared budget. A changed ledger, missing part,
+    foreign producer or unconfirmed payload cannot authorize compaction.
+    """
+    if not isinstance(budget, EvidenceReadBudget):
+        raise ReviewInputError("retained narrative requires the original read budget")
+    budget.check()
+    before = ledger.load(identity)
+    if before.status != "ok" or before.record is None:
+        raise ReviewInputError("retained narrative ledger is unavailable")
+    validated = _validate(
+        result,
+        ledger=ledger,
+        identity=identity,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        configuration_context=configuration_context,
+        evidence_context=evidence_context,
+        policy=policy,
+        loaded=before,
+    )
+    assert validated.transaction is not None
+    store = _store(
+        publication_http(http, budget),
+        token=token,
+        identity=identity,
+        app_slug=app_slug,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        transaction=validated.transaction,
+        source_app_id=getattr(ledger, "authenticated_app_id", None),
+    )
+    available = store.read_available_with_carriers(
+        event_key=_event_key(identity, validated.transaction)
+    )
+    if available is None:
+        raise ReviewInputError("retained narrative original parts are missing")
+    digest, payload, carriers = available
+    document = json.loads(payload)
+    if not isinstance(document, dict):
+        raise ReviewInputError("retained narrative result is invalid")
+    retained = ReviewResult.from_dict(document)
+    if (
+        _payload(retained, projected=store.last_read_was_projection) != payload
+        or retained.content_digest() != validated.content_digest()
+        or retained.summary != result.summary
+        or retained.transaction is None
+        or retained.transaction.transaction_id != validated.transaction.transaction_id
+    ):
+        raise ReviewInputError("retained narrative original result conflicts")
+    after = ledger.load(identity)
+    if (
+        after.status != "ok"
+        or after.record is None
+        or after.record.record_sha256 != before.record.record_sha256
+    ):
+        raise ReviewInputError("retained narrative ledger changed during confirmation")
+    budget.check()
+    return ConfirmedNarrativeArchive(
+        identity=identity,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        transaction_id=validated.transaction.transaction_id,
+        content_digest=validated.content_digest(),
+        payload_digest=digest,
+        summary_digest=hashlib.sha256(result.summary.encode("utf-8")).hexdigest(),
+        carrier_ids=carriers,
+        _confirmation=_NARRATIVE_CONFIRMATION,
+    )
 
 
 def _page_scope(path: str) -> tuple[str, int, int] | None:
@@ -458,14 +639,20 @@ def publication_recovery_read_phase(
         phase.close()
 
 
-def _payload(result: ReviewResult) -> bytes:
+def _payload(result: ReviewResult, *, projected: bool = False) -> bytes:
     document = result.to_dict()
     validate_public_document(document, "review-result")
     restored = ReviewResult.from_dict(document)
     if restored.to_dict() != document:
         raise ReviewInputError("retained result is not canonical")
     payload = canonical_bytes(document)
-    ensure_result_part_capacity(len(payload))
+    if projected:
+        if len(payload) > DEFAULT_REVIEW_LIMITS.max_result_bytes:
+            raise ReviewInputError(
+                "retained logical result exceeds the core result limit"
+            )
+    else:
+        ensure_result_part_capacity(len(payload))
     return payload
 
 
@@ -500,6 +687,9 @@ def _store(
     base_sha: str,
     head_sha: str,
     primed_comments: list[Any] | None = None,
+    transaction: ReviewTransaction | None = None,
+    source_app_id: int | None = None,
+    compact_write: bool = False,
 ) -> ResultPartStore:
     if (
         not isinstance(app_slug, str)
@@ -555,7 +745,17 @@ def _store(
     )
     if primed_comments is not None:
         port.prime(primed_comments)
-    return ResultPartStore(port, app_user_id=user_id)
+    from .checkpoint_result_store import CheckpointResultStore
+
+    return CheckpointResultStore(
+        port,
+        app_user_id=user_id,
+        http=http,
+        identity=identity,
+        transaction=transaction,
+        app_id=source_app_id,
+        compact_write=compact_write,
+    )
 
 
 def _validate(
@@ -570,7 +770,9 @@ def _validate(
     policy: ReviewConvergencePolicy,
     loaded: Any = None,
 ) -> ReviewResult:
-    _payload(result)
+    _payload(
+        result, projected=bool(getattr(ledger, "_quarantine_capacity_cursor", False))
+    )
     record = load_review_transaction_for_publication(
         ledger,
         identity,
@@ -652,6 +854,8 @@ def recover_retained_review_result(
             base_sha=base_sha,
             head_sha=head_sha,
             primed_comments=primed_comments,
+            transaction=transaction,
+            source_app_id=getattr(ledger, "authenticated_app_id", None),
         )
         available = store.read_available(event_key=_event_key(identity, transaction))
         if available is None:
@@ -667,7 +871,7 @@ def recover_retained_review_result(
         if not isinstance(document, dict):
             raise ReviewInputError("retained result is invalid")
         result = ReviewResult.from_dict(document)
-        if _payload(result) != payload:
+        if _payload(result, projected=store.last_read_was_projection) != payload:
             raise ReviewInputError("retained result is not canonical")
         return _validate(
             result,
@@ -698,6 +902,7 @@ def retain_checkpoint_review_result(
     configuration_context: Mapping[str, object] | None = None,
     evidence_context: Mapping[str, object] | None = None,
     policy: ReviewConvergencePolicy | None = None,
+    source_app_id: int | None = None,
 ) -> ReviewResult:
     """Durably retain and readback-verify canonical result bytes before committing publication_pending."""
     try:
@@ -728,7 +933,11 @@ def retain_checkpoint_review_result(
         if pending_transaction.result_sha256 != result_digest:
             raise ReviewInputError("review result digest does not match transaction")
         bound = replace(result, transaction=pending_transaction)
-        payload = _payload(bound)
+        projected = (
+            getattr(_publication_transport(http), "_quarantine_capacity_guard", None)
+            is not None
+        )
+        payload = _payload(bound, projected=projected)
         event_key = _event_key(identity, pending_transaction)
         store = _store(
             http,
@@ -737,15 +946,18 @@ def retain_checkpoint_review_result(
             app_slug=app_slug,
             base_sha=base_sha,
             head_sha=head_sha,
+            transaction=pending_transaction,
+            source_app_id=source_app_id,
+            compact_write=True,
         )
         available = store.read_available(event_key=event_key)
         if available is None:
+            parts = store.physical_part_count(payload)
             budget = getattr(http, "publication_budget", None)
             if isinstance(budget, EvidenceReadBudget):
                 from .api_run_budget import CallerRunBudget
                 from .api_run_plan import READ_OPERATION_REQUESTS
 
-                parts = ensure_result_part_capacity(len(payload))
                 liability = 2 * parts + (
                     READ_OPERATION_REQUESTS
                     if isinstance(budget, CallerRunBudget)
@@ -775,7 +987,8 @@ def retain_checkpoint_review_result(
                 raise ReviewInputError("retained result is invalid")
             prior = ReviewResult.from_dict(document)
             if (
-                _payload(prior) != existing_payload
+                _payload(prior, projected=store.last_read_was_projection)
+                != existing_payload
                 or prior.content_digest() != bound.content_digest()
             ):
                 raise ReviewInputError("retained result differs from checkpoint")
@@ -823,6 +1036,26 @@ def retain_review_result(
                 )
             return
         event_key = _event_key(identity, validated.transaction)
+        primed_comments = None
+        from .api_run_requests import ApiRunSessionLedger
+
+        if isinstance(ledger, ApiRunSessionLedger) and ledger._quarantine_required:
+            authenticated = getattr(ledger, "_quarantine_authenticated", None)
+            if (
+                _loaded is not None
+                and _loaded.status == "ok"
+                and _loaded.record is not None
+                and authenticated is not None
+                and ledger._inventory_complete
+                and ledger.caller._checkpoint is None
+                and _loaded.record.record_sha256
+                == authenticated.record_sha256
+                == ledger.caller._root
+            ):
+                # The application just completed this full native load. Feed
+                # the same bodies to retention in this finite operation; every
+                # subsequent effect retains its independent complete CAS fence.
+                primed_comments = list(ledger._cached_comments())
         store = _store(
             http,
             token=token,
@@ -830,6 +1063,9 @@ def retain_review_result(
             app_slug=app_slug,
             base_sha=base_sha,
             head_sha=head_sha,
+            transaction=validated.transaction,
+            source_app_id=getattr(ledger, "authenticated_app_id", None),
+            primed_comments=primed_comments,
         )
         available = store.read_available(event_key=event_key)
         if available is None:
@@ -839,7 +1075,14 @@ def retain_review_result(
                     "do not recreate uncertain writes; use the original result "
                     "with the explicit operation-entry opt-out"
                 )
-            payload = _payload(validated)
+            projected = (
+                getattr(
+                    _publication_transport(http), "_quarantine_capacity_guard", None
+                )
+                is not None
+            )
+            payload = _payload(validated, projected=projected)
+            parts = store.physical_part_count(payload)
             budget = getattr(http, "publication_budget", None)
             if isinstance(budget, EvidenceReadBudget):
                 # Before any part POST, admit every bounded listing/readback
@@ -847,7 +1090,6 @@ def retain_review_result(
                 from .api_run_budget import CallerRunBudget
                 from .api_run_plan import READ_OPERATION_REQUESTS
 
-                parts = ensure_result_part_capacity(len(payload))
                 liability = 2 * parts + (
                     READ_OPERATION_REQUESTS
                     if isinstance(budget, CallerRunBudget)
@@ -883,7 +1125,7 @@ def retain_review_result(
                 raise ReviewInputError("retained result is invalid")
             prior = ReviewResult.from_dict(document)
             if (
-                _payload(prior) != payload
+                _payload(prior, projected=store.last_read_was_projection) != payload
                 or prior.content_digest() != validated.content_digest()
             ):
                 raise ReviewInputError("retained result differs from checkpoint")
@@ -896,6 +1138,7 @@ def retain_review_result(
                 configuration_context=configuration_context,
                 evidence_context=evidence_context,
                 policy=policy,
+                loaded=_loaded if primed_comments is not None else None,
             )
             if validated.transaction.phase == "publication_pending":
                 mark_review_publication_unconfirmed(

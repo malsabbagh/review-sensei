@@ -119,6 +119,28 @@ class DefaultHumanInventoryPublisherTests(unittest.TestCase):
         arguments.update(overrides)
         return self.publisher.publish(**arguments)
 
+    def test_grouped_producer_refuses_before_effects_without_complete_startup_admission(
+        self,
+    ):
+        before = len(self.state.calls)
+        with (
+            patch(
+                "review_sensei_github.checkpoint_result_store.uses_grouped_publication",
+                return_value=True,
+            ),
+            self.assertRaisesRegex(
+                ReviewInputError, "complete startup admission is unavailable"
+            ),
+        ):
+            self.publish()
+        self.assertIsNone(self.store.authenticated_reference)
+        self.assertFalse(
+            any(
+                method in {"POST", "PATCH", "PUT"} and "/repos/" in path
+                for method, path, _ in self.state.calls[before:]
+            )
+        )
+
     def test_scoped_reader_reuses_admitted_store_under_remaining_original_budget(self):
         from review_sensei_github.default_human_reader import (
             DefaultHumanInventoryReader,
@@ -460,10 +482,12 @@ class DefaultHumanInventoryPublisherTests(unittest.TestCase):
         self.assertEqual(self.state.parts, [])
 
     def test_store_scope_and_original_budget_must_match_publication(self):
+        with self.assertRaisesRegex(ReviewInputError, "selected transaction conflicts"):
+            replace(self.context, transaction_id="0" * 64)
         for context in (
             replace(self.context, publication_digest="0" * 64),
             replace(self.context, budget=EvidenceReadBudget()),
-            replace(self.context, transaction_id="0" * 64),
+            replace(self.context, transaction_id="0" * 64, selected_transaction=None),
         ):
             store = HumanInventoryStore(
                 self.state.http, "synthetic", self.ledger, context

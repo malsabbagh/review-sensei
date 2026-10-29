@@ -12,7 +12,7 @@ import json
 import os
 import re
 import time
-from typing import Any, Mapping, cast
+from typing import Any, Callable, Mapping, cast
 
 from .errors import GitHubBrokerClientError
 
@@ -282,8 +282,10 @@ class VerifiedRunAction:
         self.fence()
         return cast(Mapping[str, Any], document["actor"])
 
-    def fence(self) -> None:
-        """Fresh source/head read before an action's native business mutation."""
+    def fence(
+        self, *, validate_pull: Callable[[Mapping[str, Any]], None] | None = None
+    ) -> Mapping[str, Any]:
+        """Fresh source/head read; return the authenticated source observation."""
         run, document = self.run, self.document
         if run.caller.accounting.owner != self.owner:
             raise GitHubBrokerClientError("Current action owner changed")
@@ -328,3 +330,8 @@ class VerifiedRunAction:
                 or pull.get("state") != "open"
             ):
                 raise GitHubBrokerClientError("Current action head changed")
+            if validate_pull is not None:
+                # Add stricter consumer facts to this same fresh observation;
+                # a callback cannot weaken the action's source/head checks.
+                validate_pull(pull)
+        return cast(Mapping[str, Any], current)

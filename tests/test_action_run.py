@@ -345,6 +345,9 @@ class CommandEntryFixture(EntryFixture):
         def capture_run(*args, **kwargs):
             run = original_bootstrap(*args, **kwargs)
             fixture.selected = run
+            after_bootstrap = getattr(fixture, "after_action_bootstrap", None)
+            if after_bootstrap is not None:
+                after_bootstrap(run)
             return run
 
         environment = {

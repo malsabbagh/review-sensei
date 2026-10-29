@@ -3413,6 +3413,26 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                                     + f":partial-continue:{prior.failed_attempts}:{prior.generation}"
                                 ),
                             )
+                if (
+                    current_key is not None
+                    and loaded.status in {"ok", "migrated"}
+                    and loaded.record is not None
+                    and loaded.record.quarantine_lineage is not None
+                    and rescan_request is None
+                ):
+                    from .quarantine_lineage import full_analysis_reservation
+
+                    inherited = read_session_baseline(ledger, loaded.record)
+                    quarantine_lineage = loaded.record.quarantine_lineage
+                    manifest = quarantine_lineage["origin_manifest"]
+                    assert isinstance(manifest, dict)
+                    if (
+                        inherited is not None
+                        and inherited.generation < manifest["binding"]["generation"]
+                    ):
+                        reservation = full_analysis_reservation(
+                            quarantine_lineage["scope_sha256"], reservation
+                        )
                 prepared_round = prepare_review_transaction(
                     ledger,
                     identity,
@@ -3497,6 +3517,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
         incremental = None
         verification_scope = None
         admission_baseline = None
+        quarantine_full_analysis = False
         # F3 durable-baseline enforcement is explicitly opted into by the
         # identity-bound transaction/artifact request. Legacy operator runs
         # keep their prior full-review behavior until that flag is selected.
@@ -3539,12 +3560,22 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             # so the publication boundary of the same run needs the exact
             # baseline and current key this analysis admitted with. The
             # transaction alone cannot reconstruct either.
+            from .quarantine_lineage import is_full_analysis_transaction
+
+            quarantine_full_analysis = is_full_analysis_transaction(
+                prepared_round.record, current_key
+            )
+            # The complete inherited baseline is authenticated and retained,
+            # including all original counters/history. Its findings belong to
+            # the unresolved origin, not fresh lifecycle inference. The first
+            # new review therefore performs a full pass; the independent hold
+            # remains mandatory for every approval consumer.
             consumed_gen = (
                 irrecoverable_grant.get("consumed_generation")
                 if irrecoverable_grant is not None
                 else None
             )
-            if (
+            if quarantine_full_analysis or (
                 isinstance(consumed_gen, int)
                 and persisted_baseline.generation == consumed_gen - 1
                 and prepared_round.record.completed_initial_reviews == 1
@@ -3564,8 +3595,10 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 profile=effective_profile,
             )
             if (
-                rescan_request is None or remaining_requested
-            ) and irrecoverable_grant is None:
+                not quarantine_full_analysis
+                and (rescan_request is None or remaining_requested)
+                and irrecoverable_grant is None
+            ):
                 scope = plan_verification_scope(
                     policy=policy,
                     baseline=persisted_baseline,

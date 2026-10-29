@@ -150,6 +150,8 @@ class ApiRunRequestTransport:
         self._checkpoint: SessionRecord | None = None
         self._last_method: str | None = None
         self._activation_readback_attempted = False
+        self._quarantine_census_api_url: str | None = None
+        self._quarantine_checkpoint_snapshot: Any = None
         self._checkpoint_readback_attempted = False
         self._producer: str | None = None
         self._reservation_started = False
@@ -361,12 +363,19 @@ class ApiRunRequestTransport:
         deadline = int((self._clock() + timeout) * 1000)
         request_deadline = self._monotonic() + timeout
         self._sequence += 1
+        from .quarantine_census import is_readonly_census
+
+        read_only_census = is_readonly_census(request, self._quarantine_census_api_url)
+        is_mutation = (
+            request.get_method() in {"POST", "PUT", "PATCH", "DELETE"}
+            and not read_only_census
+        )
         pending: PendingApiRequest | None = None
         if self._state is None:
             if self.startup_dispatches >= len(self._slot.requests):
                 raise EvidenceBudgetExhausted("startup caller allowance is exhausted")
             if (
-                request.get_method() in {"POST", "PATCH"}
+                is_mutation
                 and self._activation is not None
                 and len(self._slot.requests) - self.startup_dispatches
                 < WRITE_CONFIRMATION_TAIL
@@ -379,7 +388,7 @@ class ApiRunRequestTransport:
             request_id = f"startup-{self.run.repository_id}-{self.run.run_id}-{self.attempt}-{self._sequence}"
         else:
             if self._active_operation is not None:
-                mutation = request.get_method() in {"POST", "PUT", "PATCH", "DELETE"}
+                mutation = is_mutation
                 if self._staged_part_operation is not None:
                     self._staged_part_operation.consume(mutation=mutation)
                     # The root allocation is not replenished by a child write.
@@ -396,7 +405,7 @@ class ApiRunRequestTransport:
                 )
             path = urlsplit(request.full_url).path
             if (
-                request.get_method() in {"POST", "PUT", "PATCH", "DELETE"}
+                is_mutation
                 and (path.startswith("/repos/") or path == "/graphql")
                 and self.usable < WRITE_CONFIRMATION_TAIL
             ):
@@ -420,12 +429,7 @@ class ApiRunRequestTransport:
             "deadline_unix_ms": deadline,
             "outcome": "unknown",
         }
-        observation["mutation"] = request.get_method() in {
-            "POST",
-            "PUT",
-            "PATCH",
-            "DELETE",
-        }
+        observation["mutation"] = is_mutation
         self.observations.append(observation)
         if observation["mutation"]:
             if self._checkpoint is not None and request.get_method() == "PATCH":
@@ -515,6 +519,7 @@ class ApiRunRequestTransport:
         block = next((b for b in state.blocks if b.block_id == block_id), None)
         if block is None or block.issued_by != state.owner:
             raise ReviewInputError("confirmed caller reservation owner conflicts")
+        self._has_quarantine_assessments = record.quarantine_lineage is not None
         self._state, self._block, self._root = state, block_id, record.record_sha256
         if self._activation_write_request_id is not None:
             self._reconciled_mutations.add(self._activation_write_request_id)
@@ -674,7 +679,19 @@ class ApiRunRequestTransport:
                 )
                 or (old.analysis_abort is not None and record.transaction is not None)
             ):
-                raise ReviewInputError("previous caller run is not terminal")
+                phase = (
+                    record.transaction.phase
+                    if record.transaction is not None
+                    else "no-transaction"
+                )
+                raise ReviewInputError(
+                    "previous caller run is not terminal: "
+                    f"run={old.identity.run_id} root={record.record_sha256} phase={phase}; "
+                    "terminal accounting or action completion is unconfirmed; "
+                    "installed recovery classifiers: literal-blocker-path-prepublication-v1, "
+                    "body-limit-prepublication-v1, published-tail-reply-isolation-v1; "
+                    "each requires its own authenticated source and activation"
+                )
             if old.action is not None:
                 from .api_run_history import read_action_result
 
@@ -707,7 +724,14 @@ class ApiRunRequestTransport:
             self._activation = updated, "hosted-review"
             return updated
 
-        confirmed = ledger.replace(identity, prepare)
+        if previous.quarantine_lineage is not None:
+            from .quarantine_rollover import replace_quarantine_rollover
+
+            confirmed = replace_quarantine_rollover(
+                self, ledger, identity, previous, prepare
+            )
+        else:
+            confirmed = ledger.replace(identity, prepare)
         result = self._accept_activation(ledger, confirmed)
         self.bind_terminal_reservation("hosted-terminal")
         return result
@@ -1169,9 +1193,18 @@ class ApiRunRequestTransport:
         ) as operation:
             self._checkpoint_operation = operation
             try:
-                confirmed = GitHubIssueCommentSessionLedger.replace(
-                    ledger, identity, prepare, now=now
-                )
+                if isinstance(ledger, ApiRunSessionLedger) and getattr(
+                    ledger, "_quarantine_required", False
+                ):
+                    from .quarantine_checkpoint import replace_quarantine_checkpoint
+
+                    confirmed = replace_quarantine_checkpoint(
+                        self, ledger, identity, prepare, now=now
+                    )
+                else:
+                    confirmed = GitHubIssueCommentSessionLedger.replace(
+                        ledger, identity, prepare, now=now
+                    )
                 self._accept_checkpoint(ledger, confirmed)
                 operation.confirmed = True
                 self._checkpoint_operation = None
@@ -1196,6 +1229,9 @@ class ApiRunRequestTransport:
             raise ReviewInputError("caller checkpoint publication is unconfirmed")
         persisted = ApiRunAccounting.from_document(record.api_run_accounting)
         persisted.require_successor(self.accounting)
+        from .quarantine_checkpoint import expire
+
+        expire(getattr(self, "_quarantine_checkpoint_snapshot", None))
         self._root, self._checkpoint = record.record_sha256, None
         if (
             self._analysis_boundary is None
@@ -1225,15 +1261,23 @@ class ApiRunRequestTransport:
         operation = self._checkpoint_operation
         assert operation is not None
         with self._operation(operation.key, 0, retained=operation):
-            loaded = ledger.load(identity)
-            if loaded.status != "ok" or loaded.record is None:
-                raise ReviewInputError("caller checkpoint publication is unconfirmed")
-            self._accept_checkpoint(ledger, loaded.record)
+            if getattr(self, "_quarantine_checkpoint_snapshot", None) is not None:
+                from .quarantine_checkpoint import reconcile_quarantine_checkpoint
+
+                record = reconcile_quarantine_checkpoint(self, ledger, identity)
+            else:
+                loaded = ledger.load(identity)
+                if loaded.status != "ok" or loaded.record is None:
+                    raise ReviewInputError(
+                        "caller checkpoint publication is unconfirmed"
+                    )
+                record = loaded.record
+            self._accept_checkpoint(ledger, record)
             if self._checkpoint_write_request_id is not None:
                 self._reconciled_mutations.add(self._checkpoint_write_request_id)
             operation.confirmed = True
             self._checkpoint_operation = None
-            return loaded.record
+            return record
 
 
 class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
@@ -1253,6 +1297,8 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         caller.accounting
         self.__dict__.update(native.__dict__)
         self.caller = caller
+        if self._quarantine_required:
+            caller._quarantine_census_api_url = self.http.api_url
         self.evidence_budget = caller.budget_view
         self._terminal_claimed = False
         self._part_staging_identity: SessionIdentity | None = None
@@ -1268,6 +1314,11 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
     ) -> dict[str, object]:
         if self._part_staging_identity is not None:
             raise ReviewInputError("immutable part staging cannot nest")
+        snapshot = getattr(self, "_quarantine_checkpoint_snapshot", None)
+        if snapshot is not None:
+            snapshot.preflight_staging(
+                document, binding, item_count, max_manifest_bytes
+            )
         self._part_staging_identity = identity
         try:
             return super().stage_evidence(
@@ -1315,6 +1366,9 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 )
             self._part_owner(payload, identity)
             operation.confirmed = True
+            snapshot = getattr(self, "_quarantine_checkpoint_snapshot", None)
+            if snapshot is not None:
+                snapshot.note_staged(payload)
             return status, payload
 
     def load(self, identity: SessionIdentity, **kwargs: Any) -> Any:

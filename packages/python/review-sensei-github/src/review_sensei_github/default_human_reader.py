@@ -61,6 +61,15 @@ def restore_admitted_result(
             "complete publication admission evidence is missing; retain the original result and do not infer clean obligations"
         )
     _reference, document = available
+    return restore_admitted_document(result, store, document)
+
+
+def restore_admitted_document(result, store, document):
+    """Pure restoration from this operation's already authenticated admission.
+
+    This supplies no source or native authority; callers still authenticate the
+    store read and the actual complete publication independently.
+    """
     context = store.context
     index = parse_finding_index(
         document["finding_index"],
@@ -214,6 +223,33 @@ class DefaultHumanInventoryReader:
             self.store, self.document = admitted, document
             self.reference, self.inventory = reference, inventory
             return inventory
+        store = self._cold_store()
+        context = store.context
+        document = store.read(reference)
+        inventory = inventory_from_result_document(
+            document["human_inventory"],
+            result_digest=context.publication_digest,
+            base_sha=context.base_sha,
+        )
+        self.store, self.document = store, document
+        self.reference, self.inventory = reference, inventory
+        return inventory
+
+    def attach_current_read(self, reader):
+        from .api_run_requests import ApiRunSessionLedger
+        from .quarantine_holds import QuarantineHoldReader
+
+        if (
+            type(reader) is QuarantineHoldReader
+            and isinstance(self.ledger, ApiRunSessionLedger)
+            and isinstance(reader.ledger, ApiRunSessionLedger)
+            and reader.ledger.caller is self.ledger.caller
+            and (reader.repository, reader.pull_request)
+            == (self.repository, self.pull_request)
+        ):
+            self._current_read = reader
+
+    def _cold_store(self) -> HumanInventoryStore:
         status, pr = self.http.request(
             "GET",
             self.http.repository_path(self.repository, f"/pulls/{self.pull_request}"),
@@ -229,7 +265,20 @@ class DefaultHumanInventoryReader:
                 "default human inventory repository identity unavailable"
             )
         identity = SessionIdentity(self.repository, self.pull_request, repository_id)
-        loaded = self.ledger.load(identity)
+        loaded = None
+        current_read = getattr(self, "_current_read", None)
+        if current_read is not None:
+            try:
+                record = current_read.record_after_read()
+            except ReviewInputError:
+                pass  # A changed root must perform fresh context discovery.
+            else:
+                if record.identity() == identity:
+                    from review_sensei.session import SessionLoadResult
+
+                    loaded = SessionLoadResult(status="ok", record=record)
+        if loaded is None:
+            loaded = self.ledger.load(identity)
         transaction = (
             self._retained_source.select(loaded)
             if self._retained_source is not None
@@ -254,18 +303,63 @@ class DefaultHumanInventoryReader:
             configuration_digest=transaction.configuration_digest,
             evidence_digest=transaction.evidence_digest,
             budget=self.budget,
+            _loaded=(
+                loaded if getattr(self.ledger, "_quarantine_required", False) else None
+            ),
             _retained_source=self._retained_source,
         )
-        store = HumanInventoryStore(self.http, self.token, self.ledger, context)
-        document = store.read(reference)
-        inventory = inventory_from_result_document(
-            document["human_inventory"],
-            result_digest=context.publication_digest,
-            base_sha=context.base_sha,
-        )
-        self.store, self.document = store, document
-        self.reference, self.inventory = reference, inventory
-        return inventory
+        return HumanInventoryStore(self.http, self.token, self.ledger, context)
+
+    def native_union_reader(self, review):
+        """Select the union reader only from an actual version-eight frame.
+
+        Source/admission selection remains independent of that frame. Historical
+        target projection must be supplied by the qualified recovery host; an
+        unknown extra root causes the complete union read to refuse.
+        """
+        from .native_manifest import NativePublicationReader
+        from .native_union import native_union_frame_document
+
+        try:
+            native_union_frame_document(review.get("body"))
+        except ReviewInputError:
+            return None
+
+        def read(receipt):
+            store = self.store or self._admitted_store or self._cold_store()
+            from .publication_recovery import _publication_transport
+
+            guard = getattr(
+                _publication_transport(store.http), "_quarantine_capacity_guard", None
+            )
+            targets = getattr(guard, "native_old_root_nodes", None)
+            evidence = NativePublicationReader.for_review(
+                store, review, old_root_nodes=targets
+            )(receipt)
+            self.store = store
+            self._native_root_read = (canonical_bytes(review), evidence)
+            return evidence
+
+        return read
+
+    def confirmed_native_root(self, eligibility):
+        """Expected main bytes from a complete proof, never a mutation grant."""
+        import json
+
+        value = getattr(self, "_native_root_read", None)
+        if value is None or self.store is None or eligibility.native_union is None:
+            return None
+        raw, evidence = value
+        if (
+            evidence.document_sha256
+            != hashlib.sha256(canonical_bytes(eligibility.to_dict())).hexdigest()
+        ):
+            return None
+        self.store.transaction_after_read()
+        selected = json.loads(raw)
+        if selected.get("id") != evidence.main_review_id:
+            raise ReviewInputError("native publication confirmed root identity changed")
+        return selected
 
     def _owned_review(self, review: object) -> bool:
         if self.store is None or not isinstance(review, dict):
@@ -294,7 +388,7 @@ class DefaultHumanInventoryReader:
 
     def _original_review(
         self, review: object, reviews: list[Any]
-    ) -> tuple[FindingIndex, dict[str, Any]]:
+    ) -> tuple[FindingIndex, dict[str, Any], Any]:
         if self.store is None or self.document is None or self.inventory is None:
             raise ReviewInputError("default human inventory was not authenticated")
         self.store.revalidate_snapshot()
@@ -307,7 +401,9 @@ class DefaultHumanInventoryReader:
         # already authenticated inventory; never recurse through the reader or
         # perform another remote scan while checking the envelope.
         eligibility = approval_eligibility_from_body(
-            review["body"], human_inventory_reader=lambda _reference: inventory
+            review["body"],
+            human_inventory_reader=lambda _reference: inventory,
+            native_union_reader=self.native_union_reader(review),
         )
         if (
             eligibility is None
@@ -343,7 +439,7 @@ class DefaultHumanInventoryReader:
         if not originals:
             raise ReviewInputError("default human inventory original root unavailable")
         if self._retained_source is None:
-            return expected, originals[0]
+            return expected, originals[0], eligibility
         original = next(
             (
                 item
@@ -356,11 +452,17 @@ class DefaultHumanInventoryReader:
             raise ReviewInputError(
                 "retained inventory published receipt root unavailable"
             )
-        return expected, original
+        return expected, original, eligibility
 
     def validate_root(self, review: object, reviews: list[Any]) -> None:
         """A decision cannot replace its original complete visible explanation."""
-        expected, original = self._original_review(review, reviews)
+        expected, original, eligibility = self._original_review(review, reviews)
+        # _original_review just authenticated the complete original native
+        # union, including all admitted inline/body explanations and their
+        # physical parent IDs. A legacy main-review-only REST scan cannot
+        # replace or strengthen that already completed proof.
+        if eligibility.native_union is not None:
+            return
         assert self.store is not None and self.inventory is not None
         context = self.store.context
         # Initial inference, decision persistence and final approval all use

@@ -1,0 +1,101 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "predecessor_comment_id",
+    "predecessor_record_sha256",
+    "creation_run_id",
+    "registration_sha256",
+    "origin_manifest",
+    "origin_count",
+    "scope_sha256",
+    "assessment_state_manifest"
+  ],
+  "properties": {
+    "schema_version": {
+      "enum": [
+        "quarantine-lineage-v1",
+        "quarantine-published-tail-v1"
+      ]
+    },
+    "predecessor_comment_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "predecessor_record_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "creation_run_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "registration_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "origin_manifest": {
+      "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+    },
+    "origin_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2
+    },
+    "scope_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "assessment_state_manifest": {
+      "anyOf": [
+        {
+          "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "encoding",
+            "binding",
+            "item_count",
+            "sha256",
+            "document"
+          ],
+          "properties": {
+            "encoding": {
+              "const": "inline-json-v1"
+            },
+            "binding": {
+              "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json#/properties/binding"
+            },
+            "item_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 200
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "document": {
+              "anyOf": [
+                {
+                  "$ref": "https://reviewsensei.dev/schemas/v1/quarantine-assessment-state.schema.json"
+                },
+                {
+                  "$ref": "https://reviewsensei.dev/schemas/v1/quarantine-assessment-cursor.schema.json"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/quarantine-lineage.schema.json",
+  "description": "Unresolved isolated predecessor and complete carried assessment origin. No completion/settlement claim or restored allowance. Hosted reader authenticates complete carriers and creation slot; runtime additionally enforces domain, digest, byte and retention invariants."
+}

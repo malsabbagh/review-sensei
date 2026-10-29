@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/eligibility-v8.schema.json",
+  "title": "Union-aware native publication eligibility v8",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "current",
+    "native_union"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "8"
+    },
+    "current": {
+      "type": "object",
+      "required": [
+        "schema_version"
+      ],
+      "properties": {
+        "schema_version": {
+          "enum": [
+            "1",
+            "2.0",
+            "3",
+            "4",
+            "5",
+            "7"
+          ]
+        }
+      }
+    },
+    "native_union": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "repository_id",
+        "pull_request",
+        "producer_id",
+        "head_sha",
+        "base_sha",
+        "transaction_id",
+        "result_sha256",
+        "plan_sha256",
+        "inline_count",
+        "parts"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "native-review-union-v1"
+        },
+        "repository_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "pull_request": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "producer_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "base_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "transaction_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "result_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "plan_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "inline_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 250
+        },
+        "parts": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "native_id",
+              "content_sha256",
+              "finding_count"
+            ],
+            "properties": {
+              "native_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,18}$"
+              },
+              "content_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "finding_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 32
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

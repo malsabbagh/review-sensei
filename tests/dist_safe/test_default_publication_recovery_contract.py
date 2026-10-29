@@ -24,6 +24,7 @@ sys.path.insert(0, str(_TESTS.parent))
 import test_bounded_v1_publication  # noqa: E402
 import test_checkpoint_publication_acceptance  # noqa: E402
 import test_default_publication_cli_journey  # noqa: E402
+import test_narrative_archive  # noqa: E402
 import test_publication_cli_recovery  # noqa: E402
 import test_publication_recovery  # noqa: E402
 import test_trusted_publication_recovery  # noqa: E402
@@ -32,6 +33,10 @@ import test_trusted_publication_recovery  # noqa: E402
 class InstalledCompleteInventoryTests(
     test_bounded_v1_publication.CompleteInventoryPublicationTests
 ):
+    pass
+
+
+class InstalledNarrativeArchiveTests(test_narrative_archive.NarrativeArchiveTests):
     pass
 
 

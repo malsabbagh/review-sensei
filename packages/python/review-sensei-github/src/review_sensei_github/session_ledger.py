@@ -98,6 +98,16 @@ _UPDATED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _PART_PREFIX = "ReviewSensei immutable evidence part v1\n"
 
 
+def retained_carrier_body(body: object) -> bool:
+    """Count native-union manifests in the same immutable storage ceiling."""
+    return isinstance(body, str) and body.endswith(
+        (
+            "<!-- reviewsensei:evidence-part:v1 -->",
+            "<!-- reviewsensei:native-manifest:v1 -->",
+        )
+    )
+
+
 def _since_margin(value: str) -> str | None:
     """Server timestamp of a read, moved back so a same-second write is included."""
 
@@ -109,7 +119,7 @@ def _since_margin(value: str) -> str | None:
 
 SESSION_MARKER_PREFIX = "<!-- reviewsensei:session:v1"
 SESSION_MARKER_RE = re.compile(
-    r"(?m)^<!-- reviewsensei:session:v1 repo=(?P<repository_id>[1-9][0-9]*) "
+    r"(?m)^<!-- reviewsensei:session:v(?P<marker_version>[12]) repo=(?P<repository_id>[1-9][0-9]*) "
     r"pr=(?P<pull_request>[1-9][0-9]*) gen=(?P<generation>0|[1-9][0-9]*) "
     r"digest=(?P<digest>[a-f0-9]{64}) -->$"
 )
@@ -157,8 +167,13 @@ def _marker_shaped(body: str) -> bool:
 def session_marker(
     *, repository_id: int, pull_request: int, record: SessionRecord
 ) -> str:
+    prefix = (
+        SESSION_MARKER_PREFIX
+        if record.quarantine_lineage is None
+        else "<!-- reviewsensei:session:v2"
+    )
     return (
-        f"{SESSION_MARKER_PREFIX} repo={repository_id} pr={pull_request} "
+        f"{prefix} repo={repository_id} pr={pull_request} "
         f"gen={record.generation} digest={record.record_sha256} -->"
     )
 
@@ -238,6 +253,8 @@ def parse_session_comment(
             SessionLoadReason.INTEGRITY_FAILED,
             f"session comment record is invalid: {exc}",
         ) from exc
+    if (marker["marker_version"] == "2") != (record.quarantine_lineage is not None):
+        return None
     if record.record_sha256 != marker["digest"]:
         raise SessionLoadError(
             SessionLoadReason.INTEGRITY_FAILED,
@@ -348,6 +365,21 @@ class GitHubIssueCommentSessionLedger:
         self._verified_parts: dict[str, AuthenticatedPart] = {}
         self._part_digests: dict[str, str] = {}
         self._reuse_listed_parts = False
+        self._quarantine_origin_reader: Any | None = None
+        self._quarantine_check_token_provider: Callable[[], str] | None = None
+        self._quarantine_rollover_snapshot: Any | None = None
+        self._quarantine_creation_slot: Any | None = None
+        self._quarantine_policy_branch: str | None = None
+        self._quarantine_full_discovery = False
+        self._quarantine_required = False
+        self._quarantine_capacity_cursor = False
+        self._quarantine_native_tail_parts = 2
+        self._quarantine_command_receipt_marker: str | None = None
+        self._quarantine_native_comment_bounds: tuple[int, ...] | None = None
+        self._quarantine_checkpoint_snapshot: Any = None
+        self._quarantine_complete_read = False
+        self._quarantine_authenticated: Any | None = None
+        self._quarantine_decision_permit: Any | None = None
         if session_grant is not None:
             self._bound_tail_grants.add(
                 hashlib.sha256(session_grant.encode()).hexdigest()
@@ -457,6 +489,24 @@ class GitHubIssueCommentSessionLedger:
             )
         return item
 
+    def _owned_carrier_items(self, items, identity):
+        """The shared exact carrier selector for planning and staging."""
+        for item in items:
+            if not isinstance(item, dict) or not retained_carrier_body(
+                item.get("body")
+            ):
+                continue
+            author = item.get("user")
+            if (
+                not isinstance(author, dict)
+                or author.get("id") != self._evidence_author_id
+                or author.get("type") != "Bot"
+            ):
+                continue
+            if type(item.get("id")) is not int or not 1 <= item["id"] < 10**19:
+                raise ReviewInputError("GitHub partition storage identity is invalid")
+            yield self._part_owner(item, identity)
+
     def _part_is_listed(self, storage_id: str) -> bool:
         if not storage_id.isdigit():
             return False
@@ -510,6 +560,9 @@ class GitHubIssueCommentSessionLedger:
             raise ReviewInputError("activation part identity changed")
         if not re.fullmatch(r"[1-9][0-9]{0,18}", storage_id):
             raise ReviewInputError("GitHub partition identity is invalid")
+        snapshot = getattr(self, "_quarantine_checkpoint_snapshot", None)
+        if snapshot is not None and snapshot.ledger is self:
+            snapshot.require_part(storage_id)
         # One activation verifies a part once. Later reads in that activation
         # reuse the verified body. A later call fetches again, so a part that
         # disappeared or changed owner is still refused.
@@ -520,6 +573,10 @@ class GitHubIssueCommentSessionLedger:
             if self._part_is_listed(storage_id):
                 listed = self._comments_by_id[int(storage_id)]
                 return self._part_from_item(listed, identity, storage_id)
+        if getattr(self, "_quarantine_complete_read", False):
+            raise ReviewInputError(
+                "quarantine complete listing is missing a required carrier"
+            )
         path = self.http.repository_path(
             identity.repository, f"/issues/comments/{storage_id}"
         )
@@ -597,26 +654,18 @@ class GitHubIssueCommentSessionLedger:
         existing: dict[str, str] = {}
         stored_bytes = 0
         stored_count = 0
-        for item in items:
-            if (
-                not isinstance(item, dict)
-                or not isinstance(item.get("body"), str)
-                or not item["body"].endswith("<!-- reviewsensei:evidence-part:v1 -->")
-            ):
-                continue
-            author = item.get("user")
-            if (
-                not isinstance(author, dict)
-                or author.get("id") != self._evidence_author_id
-                or author.get("type") != "Bot"
-            ):
-                continue
-            self._part_owner(item, identity)
+        for item in self._owned_carrier_items(items, identity):
             body = item["body"]
             stored_bytes += len(body.encode())
             stored_count += 1
             existing[body] = str(item["id"])
-        if stored_count > MAX_STORED_PARTS or stored_bytes > MAX_STORED_PART_BYTES:
+        from .quarantine_published_tail import retained_storage_reserve
+
+        reserve_parts, reserve_bytes = retained_storage_reserve(self)
+        if (
+            stored_count + reserve_parts > MAX_STORED_PARTS
+            or stored_bytes + reserve_bytes > MAX_STORED_PART_BYTES
+        ):
             raise ReviewInputError("GitHub partition retention capacity exceeded")
         prospective_parts = partition_evidence(
             document, binding=binding, item_count=item_count
@@ -628,13 +677,22 @@ class GitHubIssueCommentSessionLedger:
             for part in prospective_parts
         ]
         missing_bodies = [body for body in prospective_bodies if body not in existing]
+        from .publication_recovery import _publication_transport
+
+        capacity = getattr(
+            _publication_transport(self.http), "_quarantine_capacity_guard", None
+        )
+        if capacity is not None:
+            capacity.admit_comment_batch(missing_bodies)
         if self._tail_scan_pages is not None and not self._inventory_complete:
             raise ReviewInputError(
                 "activation future metadata exceeds sealed page bound"
             )
         if (
-            stored_count + len(missing_bodies) > MAX_STORED_PARTS
-            or stored_bytes + sum(len(body.encode()) for body in missing_bodies)
+            stored_count + len(missing_bodies) + reserve_parts > MAX_STORED_PARTS
+            or stored_bytes
+            + sum(len(body.encode()) for body in missing_bodies)
+            + reserve_bytes
             > MAX_STORED_PART_BYTES
         ):
             raise ReviewInputError(
@@ -650,8 +708,10 @@ class GitHubIssueCommentSessionLedger:
             if body in existing:
                 return existing[body]
             if (
-                len(existing) >= MAX_STORED_PARTS
-                or sum(len(old.encode()) for old in existing) + len(body.encode())
+                len(existing) + reserve_parts >= MAX_STORED_PARTS
+                or sum(len(old.encode()) for old in existing)
+                + len(body.encode())
+                + reserve_bytes
                 > MAX_STORED_PART_BYTES
                 or len(body.encode()) > MAX_PART_BYTES
             ):
@@ -769,6 +829,18 @@ class GitHubIssueCommentSessionLedger:
         self, identity: SessionIdentity, *, since: str | None
     ) -> list[Any]:
         """Read a comment list with falling page sizes that step back up."""
+        if self._quarantine_required or self._quarantine_full_discovery:
+            from .caller_operation import caller_for_http
+            from .quarantine_census import fetch_comments
+
+            caller = caller_for_http(self.http)
+            if caller is None:
+                raise ReviewInputError(
+                    "registered quarantine census requires its physical caller"
+                )
+            caller._require_ledger(self, identity)
+            caller._quarantine_census_api_url = self.http.api_url
+            return fetch_comments(self, identity)
 
         collected: list[Any] = []
         page_size_index = 0
@@ -853,6 +925,18 @@ class GitHubIssueCommentSessionLedger:
         """
 
         limit = self._tail_scan_pages if self._tail_scan_pages is not None else 1
+        if self._quarantine_required or self._quarantine_full_discovery:
+            from .caller_operation import caller_for_http
+            from .quarantine_census import fetch_comments
+
+            caller = caller_for_http(self.http)
+            if caller is None:
+                raise ReviewInputError(
+                    "registered quarantine census requires its physical caller"
+                )
+            caller._require_ledger(self, identity)
+            caller._quarantine_census_api_url = self.http.api_url
+            return fetch_comments(self, identity)
         collected: list[Any] = []
         page_size_index = 0
         used = 0
@@ -1133,6 +1217,11 @@ class GitHubIssueCommentSessionLedger:
         self, identity: SessionIdentity, *, now: datetime | None = None
     ) -> tuple[int | None, SessionRecord | None]:
         self._observed_consumed_grants = set()
+        if getattr(self, "_quarantine_full_discovery", False) or getattr(
+            self, "_quarantine_required", False
+        ):
+            self._inventory_complete = False
+            self._list_refresh = True
         repository_id = self._require_identity(identity)
         try:
             items = (
@@ -1216,6 +1305,14 @@ class GitHubIssueCommentSessionLedger:
                     SessionLoadReason.CONFLICT,
                     "session comment repository_id does not match",
                 )
+            if (
+                record.quarantine_lineage is not None
+                and getattr(self, "_quarantine_origin_reader", None) is None
+            ):
+                raise SessionLoadError(
+                    SessionLoadReason.INTEGRITY_FAILED,
+                    "quarantine lineage requires authenticated provenance",
+                )
             found.append((comment_id, record))
             author_id = author.get("id") if isinstance(author, dict) else None
             if (
@@ -1239,6 +1336,16 @@ class GitHubIssueCommentSessionLedger:
                 and author_id > 0
             ):
                 self._evidence_author_id = author_id
+        from .quarantine_selection import select_quarantine
+
+        try:
+            selected = select_quarantine(self, identity, items, found)
+        except ReviewInputError as error:
+            raise SessionLoadError(
+                SessionLoadReason.INTEGRITY_FAILED, str(error)
+            ) from error
+        if selected is not None:
+            found = [selected]
         if len(found) > 1:
             raise SessionLoadError(
                 SessionLoadReason.CONFLICT, "multiple session comments are present"
@@ -1417,6 +1524,10 @@ class GitHubIssueCommentSessionLedger:
         self._mutation_active = True
         try:
             updated = mutate(record)
+            if record.quarantine_lineage is not None:
+                from .quarantine_action import require_native_decision
+
+                require_native_decision(self, record, updated)
             _validate_queue_retention(record, updated)
             read_session_baseline(self, updated)
             read_session_dispositions(self, updated)
@@ -2042,6 +2153,10 @@ class GitHubIssueCommentSessionLedger:
         if comment_id is None or record is None or not record.expired(now=now):
             raise ReviewInputError(
                 "only an expired or witness-only session can be re-enrolled"
+            )
+        if record.quarantine_lineage is not None:
+            raise ReviewInputError(
+                "quarantine lineage requires retained authority and cannot be re-enrolled"
             )
         if record.assessment_queue is not None:
             raise ReviewInputError(

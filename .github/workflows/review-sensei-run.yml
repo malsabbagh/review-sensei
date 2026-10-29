@@ -37,6 +37,11 @@ on:
         required: false
         default: review
         type: string
+      quarantine_predecessor_comment_id:
+        description: Explicit registered first-dispatch quarantine intent; empty uses ordinary admission
+        required: false
+        default: ''
+        type: string
       recover_publication:
         description: Retired; true is rejected before business HTTP
         required: false
@@ -927,6 +932,7 @@ jobs:
         id: provider-review
         if: inputs.operation == 'review'
         env:
+          QUARANTINE_PREDECESSOR_COMMENT_ID: ${{ inputs.quarantine_predecessor_comment_id }}
           GITHUB_TOKEN: ${{ github.token }}
           POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
           REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
@@ -1014,10 +1020,14 @@ jobs:
           # Python's cleanup (releasing this run's reservation) can run.
           # Arm the forwarding trap before launching Python so a cancel
           # landing in the launch window still reaches the child.
+          lifecycle_args=()
+          if [[ -n "$QUARANTINE_PREDECESSOR_COMMENT_ID" ]]; then
+            lifecycle_args+=(--quarantine-predecessor-comment-id "$QUARANTINE_PREDECESSOR_COMMENT_ID")
+          fi
           review_pid=""
           trap 'if [[ -n "$review_pid" ]]; then kill -TERM "$review_pid" 2>/dev/null || true; fi' TERM INT
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review-run \
-            --policy-commit "$POLICY_COMMIT" --run-directory "$RUNNER_TEMP" \
+            --policy-commit "$POLICY_COMMIT" --run-directory "$RUNNER_TEMP" "${lifecycle_args[@]}" \
             --publication-outcome publication-outcome.json -- "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --output review.json --outcome outcome.json &
@@ -1365,6 +1375,7 @@ jobs:
         id: provider-review
         if: inputs.operation == 'review'
         env:
+          QUARANTINE_PREDECESSOR_COMMENT_ID: ${{ inputs.quarantine_predecessor_comment_id }}
           GITHUB_TOKEN: ${{ github.token }}
           POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
           REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
@@ -1448,10 +1459,14 @@ jobs:
           # Python's cleanup (releasing this run's reservation) can run.
           # Arm the forwarding trap before launching Python so a cancel
           # landing in the launch window still reaches the child.
+          lifecycle_args=()
+          if [[ -n "$QUARANTINE_PREDECESSOR_COMMENT_ID" ]]; then
+            lifecycle_args+=(--quarantine-predecessor-comment-id "$QUARANTINE_PREDECESSOR_COMMENT_ID")
+          fi
           review_pid=""
           trap 'if [[ -n "$review_pid" ]]; then kill -TERM "$review_pid" 2>/dev/null || true; fi' TERM INT
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review-run \
-            --policy-commit "$POLICY_COMMIT" --run-directory "$RUNNER_TEMP" \
+            --policy-commit "$POLICY_COMMIT" --run-directory "$RUNNER_TEMP" "${lifecycle_args[@]}" \
             --publication-outcome publication-outcome.json -- "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --output review.json --outcome outcome.json &

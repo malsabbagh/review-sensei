@@ -1,0 +1,62 @@
+name: ReviewSensei isolated quarantine
+
+# Intentionally disabled. Publishing code is not activation. A separate reviewed
+# change must pin this workflow's numeric ID and enabled blob in the append-only
+# packaged registry after the compatible v5 runner has been qualified/promoted.
+# Never dispatch this disabled workflow as a test: only its pinned registered
+# positive run number at attempt1 can own the one-shot slot; deletion grants no retry.
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Exact registered pull request number
+        required: true
+        type: string
+      predecessor_comment_id:
+        description: Exact registered unresolved root comment
+        required: true
+        type: string
+      predecessor_record_sha256:
+        description: Exact registered original record digest
+        required: true
+        type: string
+      transaction_id:
+        description: Exact registered original transaction
+        required: true
+        type: string
+      base_sha:
+        description: Exact registered current base
+        required: true
+        type: string
+      head_sha:
+        description: Exact registered changed current head
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  review-or-reply:
+    if: ${{ false }}
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5
+    with:
+      operation: review
+      mode: manual
+      repository: ${{ github.repository }}
+      repository_id: ${{ github.repository_id }}
+      pull_request_number: ${{ inputs.pull_request }}
+      quarantine_predecessor_comment_id: ${{ inputs.predecessor_comment_id }}
+      base_ref: ${{ github.event.repository.default_branch }}
+      base_sha: ${{ inputs.base_sha }}
+      head_ref: ${{ inputs.head_sha }}
+      head_sha: ${{ inputs.head_sha }}
+    secrets:
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

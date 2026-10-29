@@ -120,7 +120,9 @@ class EntryFixture(LifecycleFixture):
             tx.HostedAnalysisCliTests.ANALYSIS_DIFF, encoding="utf-8", newline="\n"
         )
         self.live_head = HEAD
+        self.live_base = BASE
         self.requested_head = HEAD
+        self.requested_base = BASE
         self.before_provider = None
         self.before_entry = None
         self.after_engine = None
@@ -128,9 +130,11 @@ class EntryFixture(LifecycleFixture):
         self.selected = None
         self.provider_calls = 0
         self.provider_comments = None
+        self.provider_summary = None
         self.event_name = "pull_request"
         self.event_document = None
         self.review_intent = None
+        self.quarantine_predecessor_comment_id = None
         self.overlap = False
         self.refuse_broker = False
         self.run_id = 456
@@ -313,6 +317,8 @@ class EntryFixture(LifecycleFixture):
         if path.endswith("/pulls/7"):
             pull = json.loads(response.read(524288))
             pull["head"]["sha"] = self.live_head
+            pull["head"]["repo"]["id"] = 123
+            pull["base"]["sha"] = self.live_base
             return json_response(pull)
         if path.endswith("/actions/runs/456"):
             run = json.loads(response.read(524288))
@@ -424,7 +430,10 @@ class EntryFixture(LifecycleFixture):
                     comments = fixture.provider_comments
                 return ProviderResponse(
                     text=json.dumps(
-                        {"summary": "Complete review.", "comments": comments}
+                        {
+                            "summary": fixture.provider_summary or "Complete review.",
+                            "comments": comments,
+                        }
                     ),
                     provider=self.name,
                     model=self.model,
@@ -518,6 +527,14 @@ class EntryFixture(LifecycleFixture):
                         str(self.root),
                         "--publication-outcome",
                         str(self.root / "publication.json"),
+                        *(
+                            [
+                                "--quarantine-predecessor-comment-id",
+                                str(self.quarantine_predecessor_comment_id),
+                            ]
+                            if self.quarantine_predecessor_comment_id is not None
+                            else []
+                        ),
                         "--",
                         "--diff",
                         str(self.root / "review.patch"),
@@ -528,7 +545,7 @@ class EntryFixture(LifecycleFixture):
                         "--pull-request",
                         "7",
                         "--base-sha",
-                        BASE,
+                        self.requested_base,
                         "--head-sha",
                         self.requested_head,
                         "--config",
@@ -1198,6 +1215,77 @@ os._exit(92)
             self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
             self.assertIsNotNone(f.accounted.accounting.terminal_transaction)
             self.assertEqual(f.accounted._terminal_reason, "already-published")
+
+    def test_published_unconfirmed_cleanup_reports_terminal_pending_and_refuses_next_run(
+        self,
+    ):
+        import json
+        from unittest.mock import patch
+
+        from review_sensei_github.publication import ReviewPublisher
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            with patch.object(
+                ReviewPublisher,
+                "_finish_thread_cleanup",
+                lambda _, value: replace(value, thread_resolution="unconfirmed"),
+            ):
+                self.assertEqual(f.invoke(human=True), 1, f.error)
+            outcome = json.loads((f.root / "publication.json").read_text())
+            self.assertEqual(outcome["status"], "published_terminal_pending")
+            self.assertEqual(outcome["publication_status"], "published")
+            self.assertFalse(outcome["accounting_terminal"])
+            self.assertEqual(outcome["terminal_reason"], "thread_cleanup_unconfirmed")
+            old = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(old.transaction.phase, "publication_succeeded")
+            self.assertIsNone(old.api_run_accounting["terminal_transaction"])
+            f.next_run()
+            self.assertEqual(f.invoke(human=True), 1)
+            self.assertIn("previous caller run is not terminal", f.error)
+            self.assertEqual(f.provider_calls, 1)
+
+    def test_close_refusal_reports_terminal_pending_for_published_and_skipped(self):
+        import json
+        from unittest.mock import patch
+
+        from review_sensei_github.api_run_requests import ApiRunRequestTransport
+
+        from review_sensei.errors import ReviewInputError
+
+        for skipped, method in (
+            (False, "finish_review_run"),
+            (True, "finish_review_run"),
+            (True, "begin_terminal"),
+        ):
+            with (
+                self.subTest(skipped=skipped, method=method),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = EntryFixture(directory)
+                if skipped:
+                    self.assertEqual(f.invoke(), 0, f.error)
+                    f.next_run()
+                    f.requested_head = f.live_head = HEAD
+                with patch.object(
+                    ApiRunRequestTransport,
+                    method,
+                    side_effect=ReviewInputError(
+                        "synthetic close acknowledgment unknown"
+                    ),
+                ):
+                    self.assertEqual(f.invoke(), 1, f.error)
+                outcome = json.loads((f.root / "publication.json").read_text())
+                self.assertEqual(outcome["status"], "published_terminal_pending")
+                self.assertEqual(
+                    outcome["publication_status"],
+                    "already_published" if skipped else "published",
+                )
+                self.assertFalse(outcome["accounting_terminal"])
+                self.assertEqual(
+                    outcome["terminal_reason"], "terminal_close_unconfirmed"
+                )
 
     def test_unresolved_mutation_response_cannot_close_or_roll_over_run(self):
         from fake_github_http import json_response

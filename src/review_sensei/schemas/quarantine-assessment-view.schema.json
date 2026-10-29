@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/quarantine-assessment-view.schema.json",
+  "description": "Integrity view only. Complete authenticated origin membership, decision chain and fresh authority are independently required by every consuming host.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "scope_sha256",
+    "state_sha256",
+    "origins",
+    "pending",
+    "fresh_human_pending"
+  ],
+  "properties": {
+    "scope_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "state_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "origins": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope_sha256",
+          "kind",
+          "inventory_sha256",
+          "item_count"
+        ],
+        "properties": {
+          "scope_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "kind": {
+            "enum": [
+              "retained-result",
+              "published-assessment",
+              "published-current",
+              "published-earlier"
+            ]
+          },
+          "inventory_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "item_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          }
+        }
+      }
+    },
+    "pending": {
+      "type": "array",
+      "maxItems": 200,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "origin_scope_sha256",
+          "instance"
+        ],
+        "properties": {
+          "origin_scope_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "instance": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      }
+    },
+    "fresh_human_pending": {
+      "type": "boolean"
+    }
+  }
+}
