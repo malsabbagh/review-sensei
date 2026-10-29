@@ -2473,28 +2473,92 @@ def _reconcile_hosted_result(
     *,
     admission_baseline: object,
     verification_scope: object,
+    convergence_policy: object | None = None,
+    changed_lines: Mapping[str, frozenset[int]] | None = None,
+    deleted_lines: Mapping[str, frozenset[int]] | None = None,
+    current_key: Any = None,
+    changed_paths: tuple[str, ...] = (),
+    prior_partial: object | None = None,
 ) -> object:
-    """Preserve prior concerns when fresh analysis cannot prove resolution."""
+    """Reconcile prior obligations and freeze trusted verdict before retention."""
 
+    from .convergence import ReviewConvergencePolicy, admit_review_result
     from .models import ReviewResult
+    from .review_verdict import (
+        ReviewVerdict,
+        bind_review_verdict,
+        comment_admission,
+        comment_selection_digest,
+    )
 
     def adjust(run: object) -> object:
         result = getattr(run, "result", None)
+        if not isinstance(result, ReviewResult):
+            return run
+        reconciled = result
         coverage = getattr(verification_scope, "coverage_mode", None)
-        if (
-            not isinstance(result, ReviewResult)
-            or not isinstance(admission_baseline, ReviewBaseline)
-            or not isinstance(coverage, str)
-            or verification_scope is None
-        ):
-            return run
-        if coverage not in {"incremental", "fallback-full"}:
-            return run
-        reconciled = reconcile_overflow_review(
-            result,
-            admission_baseline,
-            coverage_mode=coverage,
+        baseline = (
+            admission_baseline
+            if isinstance(admission_baseline, ReviewBaseline)
+            else None
         )
+        if (
+            isinstance(convergence_policy, ReviewConvergencePolicy)
+            and convergence_policy.quality == "high-signal"
+            and baseline is not None
+        ):
+            coverage = "full" if coverage in {None, "incremental"} else coverage
+        if baseline is not None and coverage in {
+            "incremental",
+            "fallback-full",
+            "full",
+        }:
+            reconciled = reconcile_overflow_review(
+                result,
+                baseline,
+                coverage_mode=coverage,
+                retain_matched_obligations=isinstance(
+                    convergence_policy, ReviewConvergencePolicy
+                )
+                and convergence_policy.quality == "high-signal",
+            )
+        if (
+            isinstance(convergence_policy, ReviewConvergencePolicy)
+            and convergence_policy.quality == "high-signal"
+        ):
+            reconciled = admit_review_result(
+                reconciled,
+                convergence_policy,
+                baseline=baseline,
+                current_key=current_key,
+                changed_paths=changed_paths,
+                changed_lines=changed_lines,
+                deleted_lines=deleted_lines,
+            )
+            if (
+                isinstance(prior_partial, ReviewResult)
+                and prior_partial.review_verdict is not None
+            ):
+                prior = prior_partial.review_verdict
+                prior.require_policy(convergence_policy)
+                current = reconciled.review_verdict
+                if current is not None:
+                    current.require_policy(convergence_policy)
+                reconciled = replace(
+                    reconciled,
+                    review_verdict=ReviewVerdict(
+                        convergence_policy.digest(),
+                        comment_selection_digest(reconciled.comments),
+                        prior.unselected_blocking_defect
+                        or bool(current and current.unselected_blocking_defect),
+                        prior.unselected_human_decision
+                        or bool(current and current.unselected_human_decision),
+                        selected_admission=comment_admission(reconciled.comments),
+                    ),
+                )
+            reconciled = bind_review_verdict(reconciled, policy=convergence_policy)
+        if reconciled is result:
+            return run
         status, diagnostic = service._run_outcome_for_result(reconciled)  # type: ignore[attr-defined]
         return replace(
             run,  # type: ignore[type-var]
@@ -2886,7 +2950,8 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
         )
 
         policy = resolve_review_convergence_policy(
-            mode=getattr(args, "review_mode", None)
+            mode=getattr(args, "review_mode", None),
+            quality=work_configuration.review.quality,
         )
         # Normalize the caller-supplied snapshot identity once.  The live
         # inference request intentionally remains unbound; these values are
@@ -3624,6 +3689,14 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                     )
                 verification_scope = scope
                 incremental = scope.incremental
+                if policy.quality == "high-signal":
+                    # Excluded requirements have no retained candidate queue.
+                    # Each new review must discover across the complete input,
+                    # not clear its verdict through narrowed/no-provider reuse.
+                    # The baseline still reconciles prior obligations below.
+                    # Partial continuations reuse only their authenticated work
+                    # coverage under this same full-input execution identity.
+                    incremental = None
         if rescan_request is not None:
             # Reinspect the full snapshot; retain the baseline only for
             # publication classification, never for inference reuse.
@@ -3777,6 +3850,12 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                     service,
                     admission_baseline=admission_baseline,
                     verification_scope=verification_scope,
+                    convergence_policy=policy,
+                    changed_lines=analysis.changed_lines,
+                    deleted_lines=analysis.deleted_lines,
+                    current_key=current_key,
+                    changed_paths=tuple(changed_paths),
+                    prior_partial=prior_partial,
                 ),
             )
             ledger = completion_ledger(ledger)

@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-10-28
+Last updated: 2026-10-29
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0119](0119-high-signal-review-verdict.md) | Proposed | Preserve high-signal completion and required review verdicts across selection and replay | User-directed strict publication policy | Opt-in quality and durable verdict slice; numeric cap, occupancy and native reuse remain unfinished |
 | [0116](0116-published-tail-quarantine.md) | Proposed | Isolate an incomplete published review and its discussion executions | User-directed PR37 recovery | Two independent published origins, source-qualified finite native exposure and permanent capacity reserves |
 | [0113](0113-archive-backed-provider-narrative-excerpts.md) | Proposed | Confirm retained narrative before publishing a labelled excerpt | PR #380 | Minimum prevention integrated with recovery; historical PR obligations remain independent |
 | [0115](0115-quarantined-review-lineage.md) | Proposed | Isolate an unresolved review predecessor in a separately authenticated ledger | User-authorized PR387 correction | One registered creation slot, preserved accounting and independent historical holds; local qualification only |

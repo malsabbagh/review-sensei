@@ -1338,6 +1338,7 @@ def reconcile_overflow_review(
     baseline: ReviewBaseline,
     *,
     coverage_mode: str = "fallback-full",
+    retain_matched_obligations: bool = False,
 ) -> ReviewResult:
     """Reconcile fresh recovery analysis without treating omission as a fix.
 
@@ -1379,6 +1380,13 @@ def reconcile_overflow_review(
         lifecycles.setdefault(
             fingerprint, FindingLifecycleRecord(fingerprint, "still-present")
         )
+    if retain_matched_obligations:
+        for comment, _prior in pairs:
+            fingerprint = finding_lifecycle_for_comment(comment).fingerprint
+            if lifecycles[fingerprint].state == "new":
+                lifecycles[fingerprint] = FindingLifecycleRecord(
+                    fingerprint, "still-present"
+                )
     for finding in (*omitted, *downgraded, *multiply_claimed):
         lifecycles[finding.fingerprint] = FindingLifecycleRecord(
             finding.fingerprint, "uncertain"
@@ -1480,6 +1488,7 @@ def classify_later_finding(
     on_changed_path: bool = False,
     is_preference_or_optional: bool = False,
     has_contradictory_evidence: bool = False,
+    high_signal: bool = False,
 ) -> LaterFindingClassification:
     """Classify a later finding against the last complete compatible review."""
 
@@ -1490,9 +1499,31 @@ def classify_later_finding(
     if not isinstance(scope, VerificationScope):
         raise ReviewInputError("verification scope is invalid")
     _require_bool(evidence_confirmed, label="evidence_confirmed")
+    _require_bool(high_signal, label="high_signal")
     lifecycle = finding_lifecycle_for_comment(comment)
     if scope.status != "verify":
         if scope.status in {"incompatible", "incomplete-baseline"}:
+            if (
+                high_signal
+                and is_preference_or_optional
+                and not has_contradictory_evidence
+                and not comment.needs_human
+                and not comment.blocks_approval
+                and (comment.severity or "").strip().casefold()
+                not in {"high", "critical"}
+            ):
+                matched, ambiguous = _baseline_match_candidates(comment, baseline)
+                if matched is None and not ambiguous:
+                    # An absent compatible baseline cannot turn a new optional
+                    # observation into a consequential human decision. Prior or
+                    # ambiguous obligations still take the conservative path.
+                    return LaterFindingClassification(
+                        fingerprint=lifecycle.fingerprint,
+                        classification="new-on-initial-pass",
+                        is_late_relative_to_baseline=False,
+                        is_duplicate=False,
+                        attribution="pr-change" if on_changed_path else "unattributed",
+                    )
             # A fallback-full pass has no compatible baseline facts from which
             # to prove that a finding was missed. Keep the result explicitly
             # human-adjudicated rather than minting the strong

@@ -79,6 +79,8 @@ LEARNING_MODES = ("disabled", "proposals", "pull-requests")
 ARTIFACT_MODES = ("none", "diagnostics")
 OPERATION_ENTRY_MODES = ("enabled", "disabled")
 PUBLICATION_INVENTORIES = ("legacy", "complete")
+REVIEW_QUALITIES = ("current", "balanced", "high-signal")
+REVIEW_FIELDS = ("quality",)
 
 _KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _INTEGER_PATTERN = re.compile(r"^-?\d+$")
@@ -90,7 +92,14 @@ _RETIRED_REPLACEMENT_PATTERN = re.compile(r"^[a-z][a-z0-9_.]*$")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _OPENAI_DEFAULT_HOSTNAME = "api.openai.com"
 
-ROOT_FIELDS = ("schema", "api_request_limit", "inference", "github", "advanced")
+ROOT_FIELDS = (
+    "schema",
+    "api_request_limit",
+    "inference",
+    "github",
+    "review",
+    "advanced",
+)
 INFERENCE_FIELDS = ("backend", "model")
 GITHUB_FIELDS = (
     "automatic_reviews",
@@ -435,6 +444,11 @@ class AdvancedSection:
 
 
 @dataclass(frozen=True)
+class ReviewSection:
+    quality: str = "current"
+
+
+@dataclass(frozen=True)
 class ProductConfiguration:
     """A validated configuration document plus its provenance."""
 
@@ -446,6 +460,7 @@ class ProductConfiguration:
     root: Path
     declared: Mapping[str, int]
     api_request_limit: int = DEFAULT_API_REQUEST_LIMIT
+    review: ReviewSection = field(default_factory=ReviewSection)
 
     def is_declared(self, field_path: str) -> bool:
         return field_path in self.declared
@@ -981,6 +996,7 @@ def _build_configuration(
         values.get("inference"), lines, source=source, fail=fail
     )
     github = _build_github(values.get("github"), lines, source=source, fail=fail)
+    review = _build_review(values.get("review"), lines, source=source, fail=fail)
     advanced = _build_advanced(values.get("advanced"), lines, source=source, fail=fail)
     api_request_limit = values.get("api_request_limit", DEFAULT_API_REQUEST_LIMIT)
     if (
@@ -1000,6 +1016,7 @@ def _build_configuration(
         root=root,
         declared=dict(lines),
         api_request_limit=api_request_limit,
+        review=review,
     )
 
 
@@ -1118,6 +1135,24 @@ def _enum_field(
             f"{', '.join(allowed)}",
         )
     return value
+
+
+def _build_review(
+    value: Any, lines: Mapping[str, int], *, source: str, fail: Any
+) -> ReviewSection:
+    mapping = _mapping_field(value, "review", source=source, fail=fail)
+    _reject_unknown_fields(
+        mapping, ("review",), lines, source=source, supported=REVIEW_FIELDS
+    )
+    return ReviewSection(
+        quality=_enum_field(
+            mapping.get("quality"),
+            "review.quality",
+            REVIEW_QUALITIES,
+            "current",
+            fail=fail,
+        )
+    )
 
 
 def _build_inference(
@@ -2517,6 +2552,11 @@ def render_configuration(
             f"  timeout: {resolved.timeout_seconds:g}s"
             f"{_format_provenance(provenance, explain)}"
         )
+    lines.append("review:")
+    lines.append(
+        f"  quality: {configuration.review.quality}"
+        f"{_yaml_provenance(configuration, 'review.quality', explain)}"
+    )
     lines.append("github:")
     for field_name in GITHUB_FIELDS:
         value = getattr(configuration.github, field_name)
@@ -2632,6 +2672,7 @@ _DEFAULT_FIELD_VALUES: Mapping[str, Any] = {
     "api_request_limit": DEFAULT_API_REQUEST_LIMIT,
     "inference.backend": "local-ollama",
     "inference.model": "packaged default for the selected backend",
+    "review.quality": "current",
     "github.automatic_reviews": True,
     "github.writes": False,
     "github.reviews": "auto-approve",
@@ -2697,6 +2738,8 @@ __all__ = [
     "ProductConfiguration",
     "Provenance",
     "REVIEW_POLICIES",
+    "REVIEW_QUALITIES",
+    "ReviewSection",
     "ResolvedInference",
     "ResourceSection",
     "RoutingSection",

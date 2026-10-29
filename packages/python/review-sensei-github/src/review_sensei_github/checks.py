@@ -20,6 +20,7 @@ from typing import Mapping
 from review_sensei.configuration import REVIEW_POLICIES
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewResult
+from review_sensei.review_verdict import ReviewVerdict
 from review_sensei.validation import validate_bounded_text
 
 from .approval import has_blocking_findings, has_human_adjudication_findings
@@ -82,6 +83,7 @@ def review_check_outcome(
     required_decisions: bool = False,
     mixed_coverage_satisfied: bool = False,
     coverage_uncertainty_accepted: bool = False,
+    review_verdict: ReviewVerdict | None = None,
 ) -> CheckOutcome:
     """Map one review outcome onto the documented gate conclusions."""
 
@@ -89,8 +91,21 @@ def review_check_outcome(
         raise ReviewInputError("review policy mode is invalid")
     if review_status not in {"complete", "partial", "incomplete", "summary-only"}:
         raise ReviewInputError("review status is invalid")
-    bounded_required = required_fixes is True
-    bounded_decisions = required_decisions is True
+    if review_verdict is not None and not isinstance(review_verdict, ReviewVerdict):
+        raise ReviewInputError("check outcome review verdict is invalid")
+    unselected_fixes = bool(
+        review_verdict and review_verdict.unselected_blocking_defect
+    )
+    unselected_decisions = bool(
+        review_verdict and review_verdict.unselected_human_decision
+    )
+    bounded_required = required_fixes is True or unselected_fixes
+    bounded_decisions = required_decisions is True or unselected_decisions
+    required_guidance = (
+        "A qualifying review must establish that these requirements are satisfied."
+        if unselected_fixes or unselected_decisions
+        else "They are listed in the ReviewSensei review comments."
+    )
     bounded_mixed = mixed_coverage_satisfied is True
     bounded_coverage_accepted = coverage_uncertainty_accepted is True
     if policy == "advisory":
@@ -132,8 +147,7 @@ def review_check_outcome(
                 title="Required fixes and human decisions remain",
                 summary=(
                     "The completed review reported required fixes and findings "
-                    "that require a human decision for this head. "
-                    "They are listed in the ReviewSensei review comments."
+                    "that require a human decision for this head. " + required_guidance
                 ),
             )
         return CheckOutcome(
@@ -141,7 +155,7 @@ def review_check_outcome(
             title="Required fixes remain",
             summary=(
                 "The completed review reported required fixes for this head. "
-                "They are listed in the ReviewSensei review comments."
+                + required_guidance
             ),
         )
     if bounded_decisions:
@@ -257,6 +271,7 @@ def check_outcome_for_result(
             else required_decisions
         ),
         mixed_coverage_satisfied=mixed_coverage_satisfied,
+        review_verdict=result.review_verdict,
     )
     if result.persistence_status == "capacity-exceeded":
         detail = "Analysis completed, but complete evidence could not fit the durable baseline. Publication retains the full validated finding inventory."

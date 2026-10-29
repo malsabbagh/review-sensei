@@ -595,7 +595,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         ):
             local_explicit_mode = "advisory"
         local_convergence_policy = resolve_review_convergence_policy(
-            mode=local_explicit_mode
+            mode=local_explicit_mode, quality=local_configuration.review.quality
         )
         from review_sensei.disposition import incomplete_coverage_from_result
 
@@ -797,6 +797,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             print(outcome.status)
             return run_outcome_exit_code(outcome.status)
         publication_configuration = load_configuration(args.config)
+        convergence_policy = resolve_review_convergence_policy(
+            mode=explicit_mode, quality=publication_configuration.review.quality
+        )
         publication_inventory = (
             args.publication_inventory
             or publication_configuration.github.publication_inventory

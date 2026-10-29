@@ -690,6 +690,20 @@ policy commit. Every other policy decision is a field of `.reviewsensei.yml`:
 requests no Variables permission and never creates the customer-owned
 `OLLAMA_API_KEY` secret.
 
+The optional `review.quality` field accepts `current`, `balanced`, or
+`high-signal`. Omission keeps `current` behavior; `balanced` currently retains
+those completion rules. With `high-signal`, completed duplicate filtering,
+rejected excerpts checked against available source, and out-of-diff filtering
+do not alone make a review incomplete or add candidate counts to its summary.
+Missing or invalid evidence and unfinished review coverage still withhold
+approval. A new optional observation does not become a human decision solely
+because the prior baseline is incompatible; existing and ambiguous concerns
+remain held. This setting is YAML-only, appears in `config show --explain`,
+and is bound to the review policy used by analysis and publication. Each new
+high-signal review runs full discovery within the existing work budgets, which
+can cost more than an incremental pass. Exact partial continuations reuse their
+authenticated completed work and preserve required current-review verdicts.
+
 Reusable-workflow callers can optionally set `with.hosted_runner` to one
 Ubuntu-compatible Linux runner label, such as `ubicloud-standard-2` or an
 operator-owned label. Omitted and empty inputs use `ubuntu-latest`. Labels must

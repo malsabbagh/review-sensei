@@ -3149,6 +3149,7 @@ class ReviewApprovalFinalizer:
                 required_fixes=has_blocking,
                 required_decisions=has_human,
                 coverage_uncertainty_accepted=coverage_accepted,
+                review_verdict=adjusted.facts.review_verdict,
             )
             if check_token or check_token_provider is not None
             else None
@@ -3929,6 +3930,7 @@ class ReviewApprovalFinalizer:
                             review_status=eligibility.facts.review_status,
                             required_fixes=has_open_fixes,
                             required_decisions=has_open_decisions,
+                            review_verdict=eligibility.facts.review_verdict,
                         ),
                     )
                     check_confirmed = (
