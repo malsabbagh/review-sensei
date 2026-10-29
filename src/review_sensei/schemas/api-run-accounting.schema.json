@@ -163,13 +163,13 @@
       }
     },
     "completed": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/request"
-      }
+      "type": "array"
     },
     "version": {
-      "const": "caller-requests-v1"
+      "enum": [
+        "caller-requests-v1",
+        "caller-requests-v2"
+      ]
     },
     "previous_record": {
       "oneOf": [
@@ -555,6 +555,61 @@
           "minimum": 1
         }
       }
+    },
+    "request-pair": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "version": {
+            "const": "caller-requests-v1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "completed": {
+            "items": {
+              "$ref": "#/$defs/request"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "version": {
+            "const": "caller-requests-v2"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "completed": {
+            "items": {
+              "$ref": "#/$defs/request-pair"
+            }
+          }
+        }
+      }
+    }
+  ]
 }

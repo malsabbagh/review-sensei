@@ -1001,7 +1001,11 @@ def bootstrap(
                 or evidence.ceased_owner(identity, previous.owner) != stopped
             ):
                 raise ReviewInputError("review predecessor or checkpoint changed")
-            allocation = owner_allocations(frozen.limit, caller.plan.liability)
+            allocation = owner_allocations(
+                frozen.limit,
+                previous.startup.liability,
+                legacy=previous.version == "caller-requests-v1",
+            )
             state = (
                 previous.claim_startup(owner)
                 .reserve("successor-review", allocation.successor_work)

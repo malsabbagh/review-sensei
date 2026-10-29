@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-10-28
+Last updated: 2026-10-29
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0118](0118-finite-recovery-accounting-and-snapshot-batches.md) | Proposed | Preserve finite caller accounting and preflight lossless decision batches | User-directed recovery capacity correction | Monotone per-owner funding, complete activation reads, production v1 retained; unchanged storage/census limits |
 | [0116](0116-published-tail-quarantine.md) | Proposed | Isolate an incomplete published review and its discussion executions | User-directed PR37 recovery | Two independent published origins, source-qualified finite native exposure and permanent capacity reserves |
 | [0113](0113-archive-backed-provider-narrative-excerpts.md) | Proposed | Confirm retained narrative before publishing a labelled excerpt | PR #380 | Minimum prevention integrated with recovery; historical PR obligations remain independent |
 | [0115](0115-quarantined-review-lineage.md) | Proposed | Isolate an unresolved review predecessor in a separately authenticated ledger | User-authorized PR387 correction | One registered creation slot, preserved accounting and independent historical holds; local qualification only |

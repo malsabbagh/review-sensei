@@ -10,7 +10,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from review_sensei.api_work import StartupPlan, StartupSlot
+from review_sensei.api_work import LEGACY_ACCOUNTING_VERSION, StartupPlan, StartupSlot
 from review_sensei.configuration import MAX_CONFIG_BYTES
 from review_sensei.errors import ReviewInputError
 from review_sensei.rescan import AuthorizedRescan
@@ -136,20 +136,27 @@ class ApiRunReviewHooks:
             raise ReviewInputError(
                 "caller provider phase does not own the admitted run"
             )
-        from .api_run_plan import TERMINAL_REQUESTS
+        from .api_run_plan import terminal_requests
 
+        state = self.ledger.caller.accounting
         terminal = next(
             (
                 b
-                for b in self.ledger.caller.accounting.blocks
+                for b in state.blocks
                 if b.block_id == self.ledger.caller._terminal_block
             ),
             None,
         )
         if (
             terminal is None
-            or terminal.issued_by != self.ledger.caller.accounting.owner
-            or terminal.undispatched != TERMINAL_REQUESTS
+            or terminal.issued_by != state.owner
+            or terminal.undispatched
+            != terminal_requests(
+                self.configuration.limit,
+                startup=state.startup.liability,
+                successor=state.owner.run_attempt > 1,
+                legacy=state.version == LEGACY_ACCOUNTING_VERSION,
+            )
         ):
             raise ReviewInputError("provider has no original protected terminal tail")
         # Attempt metadata within the existing work tranche; terminal cleanup is

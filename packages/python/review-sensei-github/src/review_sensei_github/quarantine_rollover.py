@@ -8,7 +8,9 @@ rollover. Discovery and later consumers still take fresh complete censuses.
 from __future__ import annotations
 
 import weakref
+from copy import deepcopy
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from review_sensei.bounded_evidence import canonical_bytes
@@ -43,6 +45,7 @@ class _StartupSnapshot:
     body: str
     digest: str
     lineage: bytes
+    listed: Any
 
     def require(self):
         caller, ledger = self.caller, self.ledger
@@ -98,12 +101,12 @@ class _StartupSnapshot:
 
 
 def retention_preflight(ledger, previous):
-    """Exact tail bound only for this issued inline-state startup transaction.
+    """Exact tail bound for this issued startup and its selected decision parts.
 
-    Archive POST + complete unknown-response census + part readback, then one
+    Archive POST + complete unknown-response census + archive readback, then
     exact old-root GET, current-PR GET, PATCH and at most two exact readbacks.
-    The generic path still reserves its three complete-root scans. External
-    baseline/decision/queue references keep that conservative generic bound.
+    Selected decision parts reuse only this startup's authenticated census.
+    External baseline/queue state retains the generic three-complete-scan bound.
     """
     snapshot = getattr(ledger, "_quarantine_rollover_snapshot", None)
     if snapshot is None:
@@ -116,13 +119,49 @@ def retention_preflight(ledger, previous):
     history = previous.convergence_history
     baseline = history.get("baseline") if history is not None else None
     if (
-        previous.disposition_snapshot is not None
-        or previous.assessment_queue is not None
+        previous.assessment_queue is not None
         or isinstance(baseline, dict)
         and baseline.get("encoding") == "partitioned-json-v1"
     ):
         return None
+    if previous.disposition_snapshot is not None:
+        manifest = previous.disposition_snapshot["state_manifest"]
+        if manifest["encoding"] == "partitioned-json-v1":
+            # All selected old parts came from this startup's complete native
+            # census. Read the pinned bodies through the ordinary owner/hash
+            # validator; do not borrow a previous operation's verified cache.
+            if any(
+                int(part["storage_id"]) not in snapshot.listed
+                for part in manifest["parts"]
+            ):
+                raise ReviewInputError(
+                    "quarantine rollover decision carrier is missing"
+                )
+        elif manifest["encoding"] != "inline-json-v1":
+            raise ReviewInputError("quarantine rollover decision codec changed")
     return 1 + MAX_PAGINATION_PAGES + 1 + 1 + 1 + 1 + 2
+
+
+def read_startup_part(ledger, identity, storage_id):
+    """Use only this issued startup's fresh census, including exact ownership.
+
+    A newly created archive is absent from the snapshot and still requires its
+    separate readback. The receipt expires at the end of this one rollover.
+    """
+    snapshot = getattr(ledger, "_quarantine_rollover_snapshot", None)
+    if snapshot is None:
+        return None
+    if type(snapshot) is not _StartupSnapshot or snapshot not in _ISSUED:
+        raise ReviewInputError("quarantine rollover part proof is foreign")
+    snapshot.require()
+    if snapshot.ledger is not ledger or snapshot.identity != identity:
+        raise ReviewInputError("quarantine rollover part scope changed")
+    item = snapshot.listed.get(int(storage_id))
+    return (
+        None
+        if item is None
+        else ledger._part_from_item(deepcopy(item), identity, storage_id)
+    )
 
 
 def replace_quarantine_rollover(
@@ -170,6 +209,7 @@ def replace_quarantine_rollover(
         item["body"],
         record.record_sha256,
         canonical_bytes(record.quarantine_lineage),
+        MappingProxyType(deepcopy(ledger._comments_by_id)),
     )
     reader = ledger._quarantine_origin_reader
     if reader is None:
