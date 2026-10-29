@@ -11,6 +11,7 @@ from review_sensei_github.native_review_census import (
     CLOSE_MIDDLE_QUERY,
     CLOSE_QUERY,
     MAX_EXISTING_ROOT_IDS_BYTES,
+    MIDDLE_QUERY,
     OLD_QUERY,
     OPEN_QUERY,
     PART_MIDDLE_QUERY,
@@ -36,7 +37,7 @@ from review_sensei.presentation import MAINTAINER_RESPONSE_INSTRUCTIONS
 
 
 class NativeCensusBackend:
-    def __init__(self):
+    def __init__(self, *, items=None, old_count=14):
         _, assembled = grouping_fixture.maximum_mixture()
         self.plan = NativeReviewPlan.prepare(
             repository_id=1,
@@ -48,7 +49,9 @@ class NativeCensusBackend:
             items=tuple(
                 NativeInline.from_prepared(comment, body, anchor=anchor)
                 for comment, _, body, anchor in assembled.inline_comments
-            ),
+            )
+            if items is None
+            else items,
         )
         fixture = grouping_fixture.NativeReviewPlanTests()
         self.group_payloads = [
@@ -79,7 +82,7 @@ class NativeCensusBackend:
             }
         )
         self.roots, self.old_rows, self.old_nodes = [], [], {}
-        for ordinal in range(14):
+        for ordinal in range(old_count):
             identifier = 1_000_000 + ordinal
             comment = {
                 "n": str(identifier),
@@ -150,6 +153,18 @@ class NativeCensusBackend:
         assert len(request.data) <= 8192
         value = json.loads(request.data)
         query, variables = value["query"], value["variables"]
+        from review_sensei_github.native_review_census import (
+            ROOT_ID_QUERIES,
+            ROOT_IDS_FORWARD_QUERY,
+            ROOT_IDS_QUERY,
+            root_ids_base_query,
+        )
+
+        actual_query = query
+        if not hasattr(self, "requests"):
+            self.requests = []
+        self.requests.append(copy.deepcopy(value))
+        query = root_ids_base_query(query)
         self.calls.append(query)
         data = {}
         if query in {PART_QUERY, PART_MIDDLE_QUERY, PART_ROOTS_QUERY, PART_OLD_QUERY}:
@@ -179,7 +194,7 @@ class NativeCensusBackend:
                     "l": self.window(self.roots[-100:], last=True),
                 },
             }
-        if query == PART_MIDDLE_QUERY:
+        if query in {PART_MIDDLE_QUERY, MIDDLE_QUERY}:
             data["repository"] = {
                 "n": self.plan.repository_id,
                 "p": {
@@ -236,6 +251,51 @@ class NativeCensusBackend:
                 }
                 for row in self.old_rows
             ]
+        if actual_query in {*ROOT_ID_QUERIES, ROOT_IDS_QUERY, ROOT_IDS_FORWARD_QUERY}:
+            pr = data.setdefault(
+                "repository", {"n": self.plan.repository_id, "p": self.scope()}
+            )["p"]
+            ids = getattr(self, "thread_ids", {})
+
+            def id_window(rows, *, first, offset=0):
+                nodes = []
+                for row in rows:
+                    root = int(row["x"]["nodes"][0]["n"])
+                    nodes.append(
+                        {
+                            "i": ids.get(
+                                root, self.old_nodes.get(root, "thread:" + str(root))
+                            ),
+                            "x": {"nodes": [{"n": str(root)}]},
+                        }
+                    )
+                count = len(self.roots)
+                page = (
+                    {
+                        "hasNextPage": offset + len(rows) < count,
+                        "endCursor": "ids:" + str(offset + len(rows)) if rows else None,
+                    }
+                    if first
+                    else {"hasPreviousPage": len(rows) < count}
+                )
+                return {"totalCount": count, "nodes": nodes, "pageInfo": page}
+
+            if actual_query == ROOT_IDS_QUERY:
+                pr["g"] = id_window(self.roots[:100], first=True)
+                pr["j"] = id_window(self.roots[-100:], first=False)
+            elif actual_query in ROOT_ID_QUERIES and ROOT_ID_QUERIES[actual_query][1]:
+                pr["g"] = id_window(self.roots[-variables["u"] :], first=False)
+            else:
+                offset = (
+                    0
+                    if variables["v"] is None
+                    else int(variables["v"].rsplit(":", 1)[1])
+                )
+                pr["g"] = id_window(
+                    self.roots[offset : offset + variables["u"]],
+                    first=True,
+                    offset=offset,
+                )
         result = {"data": data}
         if self.change:
             self.change(query, result)
@@ -263,6 +323,308 @@ class NativeCensusBackend:
 
 
 class NativeReviewCensusTests(unittest.TestCase):
+    def test_root_id_join_covers_every_part_count_and_root_order(self):
+        items = NativeCensusBackend().plan.items
+        for expected, count in enumerate((0, 1, 32, 48, 64, 80, 96, 160, 250)):
+            for reverse in (False, True):
+                with self.subTest(parts=expected, reverse=reverse):
+                    backend = NativeCensusBackend(items=items[:count], old_count=50)
+                    self.assertEqual(len(backend.plan.groups), expected)
+                    if reverse:
+                        backend.roots.reverse()
+                    backend.thread_ids = {
+                        int(row["x"]["nodes"][0]["n"]): (
+                            "opaque-" + row["x"]["nodes"][0]["n"]
+                        ).ljust(2048, "X")
+                        for row in backend.roots
+                        if int(row["x"]["nodes"][0]["n"]) not in backend.old_nodes
+                    }
+                    evidence = backend.read()
+                    self.assertEqual(
+                        dict(evidence.thread_ids),
+                        {
+                            **backend.old_nodes,
+                            **backend.thread_ids,
+                        },
+                    )
+                    self.assertEqual(len(evidence.root_bodies), count + 50)
+                    self.assertLessEqual(evidence.physical_reads, 10)
+
+    def test_root_consumer_rejects_foreign_transport_or_credential_before_read(self):
+        from review_sensei_github.native_review_census import (
+            refresh_native_thread_nodes,
+        )
+
+        backend = NativeCensusBackend()
+        evidence = backend.read()
+        initial = len(backend.calls)
+        for http, token in ((backend.http, "foreign"), (GitHubHttp(), "synthetic")):
+            with self.subTest(token=token), self.assertRaises(ReviewInputError):
+                refresh_native_thread_nodes(
+                    http,
+                    token=token,
+                    repository="owner/repo",
+                    evidence=evidence,
+                    app_slug="reviewsensei[bot]",
+                    producer_id=999,
+                )
+        self.assertEqual(len(backend.calls), initial)
+
+    def test_three_public_consumers_use_the_complete_maximum_root_view(self):
+        from review_sensei_github.native_review_census import (
+            refresh_native_thread_nodes,
+        )
+        from review_sensei_github.publication import (
+            ReviewApprovalFinalizer,
+            ReviewPublisher,
+        )
+        from review_sensei_github.thread_resolution import FindingThreadResolver
+
+        backend = NativeCensusBackend(old_count=50)
+        for root in backend.roots:
+            root["s"] = True
+        backend.root = lambda row: {**NativeCensusBackend.root(row), "s": True}
+        evidence = backend.read()
+        self.assertEqual(len(evidence.root_bodies), 300)
+        initial = len(backend.calls)
+        scope = dict(
+            token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha="b" * 40,
+            base_sha="a" * 40,
+            app_slug="reviewsensei[bot]",
+        )
+
+        def roots(**kwargs):
+            return refresh_native_thread_nodes(
+                backend.http,
+                token="synthetic",
+                repository="owner/repo",
+                evidence=evidence,
+                app_slug="reviewsensei[bot]",
+                producer_id=999,
+            )
+
+        publisher = ReviewPublisher(http=backend.http)
+        publisher.finalizer._native_thread_nodes = roots
+        suppression = publisher._published_finding_suppression(**scope)
+        self.assertEqual(
+            set(suppression.by_instance), {item.instance for item in backend.plan.items}
+        )
+        finalizer = ReviewApprovalFinalizer(http=backend.http)
+        finalizer._native_thread_nodes = roots
+        blocking, resolved = finalizer._scan_blocking_threads(**scope)
+        self.assertFalse(blocking)
+        self.assertEqual(resolved, {item.instance for item in backend.plan.items})
+        cleanup = FindingThreadResolver(backend.http).resolve(
+            **scope,
+            instances=frozenset(item.instance for item in backend.plan.items),
+            fence=lambda: self.fail(
+                "already resolved roots must not gain mutation authority"
+            ),
+            skip_resolved=True,
+            root_reader=roots,
+        )
+        self.assertEqual(
+            set(cleanup.resolved), {item.instance for item in backend.plan.items}
+        )
+        self.assertFalse(cleanup.unconfirmed)
+        # A successful complete proof is shared only inside this operation;
+        # each consumer still performs its own fresh complete closing fence.
+        self.assertEqual(len(backend.calls) - initial, 3)
+        self.assertEqual(evidence.physical_reads, 10)
+
+    def test_root_consumer_rejects_changed_or_reconstructed_evidence_before_read(self):
+        from dataclasses import replace
+
+        from review_sensei_github.native_review_census import (
+            refresh_native_thread_nodes,
+        )
+
+        backend = NativeCensusBackend()
+        evidence = backend.read()
+        initial = len(backend.calls)
+
+        def read(value):
+            return refresh_native_thread_nodes(
+                backend.http,
+                token="synthetic",
+                repository="owner/repo",
+                evidence=value,
+                app_slug="reviewsensei[bot]",
+                producer_id=999,
+            )
+
+        with self.assertRaises(ReviewInputError):
+            read(replace(evidence))
+        evidence.root_bodies[0]["b"] += " Changed after complete proof."
+        with self.assertRaises(ReviewInputError):
+            read(evidence)
+        self.assertEqual(len(backend.calls), initial)
+
+    def test_root_consumer_closing_rejects_changed_body_version_head_or_main(self):
+        from review_sensei_github.native_review_census import (
+            refresh_native_thread_nodes,
+        )
+
+        for changed in ("version", "head", "main"):
+            backend = NativeCensusBackend()
+            evidence = backend.read()
+
+            def change(query, response):
+                pr = response["data"]["repository"]["p"]
+                if changed == "version":
+                    pr["f"]["nodes"][0]["x"]["nodes"][0]["u"] = "2026-10-29T00:00:00Z"
+                elif changed == "head":
+                    pr["h"] = "e" * 40
+                else:
+                    response["data"]["frames"][0]["b"] += " Changed."
+
+            backend.change = change
+            with self.subTest(changed=changed), self.assertRaises(ReviewInputError):
+                refresh_native_thread_nodes(
+                    backend.http,
+                    token="synthetic",
+                    repository="owner/repo",
+                    evidence=evidence,
+                    app_slug="reviewsensei[bot]",
+                    producer_id=999,
+                )
+
+    def test_root_id_fragment_envelope_covers_full_existing_field_widths(self):
+        from review_sensei_github.native_review_census import (
+            ROOT_ID_FRAME_BYTES,
+            ROOT_ID_ITEM_BYTES,
+        )
+
+        frame = {
+            "data": {
+                "repository": {
+                    "n": str(2**63 - 1),
+                    "p": {
+                        "n": 2**31 - 1,
+                        "h": "h" * 40,
+                        "b": "b" * 40,
+                        "g": {
+                            "totalCount": 300,
+                            "pageInfo": {"hasNextPage": False, "endCursor": "c" * 2048},
+                            "nodes": [],
+                        },
+                    },
+                }
+            }
+        }
+        row = {"i": "i" * 2048, "x": {"nodes": [{"n": str(2**63 - 1)}]}}
+        self.assertLessEqual(wire_bytes(frame), ROOT_ID_FRAME_BYTES)
+        self.assertLessEqual(wire_bytes(row) + 1, ROOT_ID_ITEM_BYTES)
+
+    def test_complete_union_returns_real_opaque_ids_and_every_body_within_ten_reads(
+        self,
+    ):
+        from review_sensei_github.native_review_census import (
+            root_id_schedule_certificate,
+        )
+        from review_sensei_github.native_review_groups import full_inline_envelope
+
+        backend = NativeCensusBackend(old_count=50)
+        backend.thread_ids = {
+            int(row["x"]["nodes"][0]["n"]): (
+                "opaque-" + row["x"]["nodes"][0]["n"]
+            ).ljust(2048, "X")
+            for row in backend.roots
+            if int(row["x"]["nodes"][0]["n"]) not in backend.old_nodes
+        }
+        evidence = backend.read()
+        expected = {**backend.old_nodes, **backend.thread_ids}
+        self.assertEqual(dict(evidence.thread_ids), expected)
+        self.assertEqual(len(evidence.root_bodies), len(backend.roots))
+        self.assertEqual(evidence.physical_reads, 10)
+        self.assertEqual(len(backend.requests), 10)
+        bound = full_inline_envelope()
+        proof = root_id_schedule_certificate(
+            bound["selected_total_bytes"],
+            bound["largest_selected_item_bytes"],
+            source_bytes=bound["accepted_source_bytes"],
+            findings=bound["findings"],
+        )
+        self.assertGreaterEqual(
+            proof["eight_body_id_capacity"] + proof["closing_id_capacity"], 300
+        )
+        self.assertGreaterEqual(proof["one_capped_body_id_capacity"], 300)
+        self.assertGreaterEqual(proof["seven_body_id_capacity"], 74)
+
+    def test_root_id_join_rejects_a_reparented_or_duplicate_opaque_identity(self):
+        for duplicate in (False, True):
+            backend = NativeCensusBackend()
+
+            def change(query, response):
+                pr = response.get("data", {}).get("repository", {}).get("p", {})
+                window = pr.get("g")
+                if window and len(window["nodes"]) >= 2:
+                    if duplicate:
+                        window["nodes"][1]["i"] = window["nodes"][0]["i"]
+                    else:
+                        window["nodes"][0]["x"]["nodes"][0]["n"] = "999999"
+
+            backend.change = change
+            with self.subTest(duplicate=duplicate), self.assertRaises(ReviewInputError):
+                backend.read()
+
+    def test_opaque_id_closing_query_keeps_full_original_request_widths(self):
+        from review_sensei_github.native_review_census import _with_root_ids
+
+        query = _with_root_ids(CLOSE_MIDDLE_QUERY, tail=True)
+        variables = {
+            "owner": "o" * 256,
+            "name": "n" * 256,
+            "number": 2**31 - 1,
+            "front": 100,
+            "back": 100,
+            "frames": ["a" * 2048, "b" * 2048],
+            "after": "c" * 2048,
+            "first": 100,
+            "u": 45,
+        }
+        self.assertTrue(source_query_variables(query, variables))
+        self.assertLessEqual(wire_bytes({"query": query, "variables": variables}), 8192)
+        variables["u"] = 101
+        self.assertFalse(source_query_variables(query, variables))
+
+    def test_all_augmented_packets_fit_maximum_original_variable_widths(self):
+        from review_sensei_github.native_review_census import ROOT_ID_QUERIES
+
+        roots = [f"{number:02}" + "x" * 25 for number in range(49)] + ["49" + "x" * 60]
+        self.assertEqual(wire_bytes(roots), MAX_EXISTING_ROOT_IDS_BYTES)
+        for query, (base, tail) in ROOT_ID_QUERIES.items():
+            variables = {
+                "owner": "o" * 256,
+                "name": "n" * 256,
+                "number": 2**31 - 1,
+                "u": 100,
+            }
+            if not tail:
+                variables["v"] = "v" * 2048
+            if base in {
+                PART_QUERY,
+                PART_OLD_QUERY,
+                PART_ROOTS_QUERY,
+                PART_MIDDLE_QUERY,
+            }:
+                variables["id"] = "i" * 2048
+            if base == PART_OLD_QUERY:
+                variables["roots"] = roots
+            if base in {PART_MIDDLE_QUERY, CLOSE_MIDDLE_QUERY}:
+                variables.update(first=100, after="a" * 2048)
+            if base in {CLOSE_QUERY, CLOSE_MIDDLE_QUERY}:
+                variables.update(front=100, back=100, frames=["f" * 2048, "g" * 2048])
+            with self.subTest(base=base):
+                self.assertTrue(source_query_variables(query, variables))
+                self.assertLessEqual(
+                    wire_bytes({"query": query, "variables": variables}), 8192
+                )
+
     def test_actual_closing_request_fits_with_maximum_ids_cursors_and_names(self):
         roots = [f"{number:02}" + "x" * 25 for number in range(49)] + ["49" + "x" * 60]
         variables = {

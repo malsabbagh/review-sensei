@@ -1554,6 +1554,165 @@ class _BudgetedReviewPagination(GitHubHttp):
             ) from None
 
 
+def _blocking_root_facts(
+    nodes,
+    *,
+    repository_id,
+    pull_request,
+    head_sha,
+    base_sha,
+    app_slug,
+    honored_instances=None,
+):
+    open_blocking = False
+    resolved_instances: set[str] = set()
+    for node in nodes:
+        if not isinstance(node, dict) or not isinstance(node.get("isResolved"), bool):
+            raise GitHubPublicationError("review thread response was invalid")
+        comments = node.get("comments")
+        roots = comments.get("nodes") if isinstance(comments, dict) else None
+        if (
+            not isinstance(roots, list)
+            or len(roots) != 1
+            or not isinstance(roots[0], dict)
+        ):
+            if node["isResolved"]:
+                continue
+            raise GitHubPublicationError("review thread response was invalid")
+        root = roots[0]
+        author = root.get("author")
+        if not graphql_app_author(author, app_slug):
+            continue
+        body = root.get("body")
+        instance = finding_instance_from_body(body)
+        scope = finding_publication_scope(body)
+        if scope is not None:
+            (
+                repo_id,
+                pr_number,
+                marker_head,
+                marker_base,
+                blocking_bit,
+                _human,
+            ) = scope
+            this_head = (
+                repo_id == repository_id
+                and pr_number == pull_request
+                and marker_head == head_sha
+                and marker_base == base_sha
+            )
+            if not this_head:
+                continue
+            if node["isResolved"]:
+                if blocking_bit and instance is not None:
+                    resolved_instances.add(instance)
+                continue
+            if (
+                honored_instances
+                and instance is not None
+                and instance in honored_instances
+            ):
+                continue
+            if blocking_bit:
+                open_blocking = True
+            continue
+        if node["isResolved"]:
+            continue
+        if honored_instances and instance is not None and instance in honored_instances:
+            continue
+        blocking = finding_blocks_approval(
+            body=body,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            base_sha=base_sha,
+        )
+        if blocking is not False:
+            open_blocking = True
+    return open_blocking, frozenset(resolved_instances)
+
+
+def _suppression_root_facts(
+    nodes, *, repository_id, pull_request, head_sha, base_sha, app_slug
+):
+    by_fingerprint: dict[str, bool] = {}
+    by_location: dict[tuple[str, int], bool] = {}
+    by_instance: dict[str, PublishedInstance] = {}
+    superseded: list[tuple[str, str]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise GitHubPublicationError("review thread response was invalid")
+        comments = node.get("comments")
+        if not isinstance(comments, dict):
+            # An unreadable thread may already carry a finding marker,
+            # so skipping it would risk publishing a duplicate.
+            raise GitHubPublicationError("review thread response was invalid")
+        roots = comments.get("nodes")
+        if not isinstance(roots, list):
+            raise GitHubPublicationError("review thread response was invalid")
+        if not roots:
+            continue
+        if not isinstance(roots[0], dict):
+            raise GitHubPublicationError("review thread response was invalid")
+        root = roots[0]
+        author = root.get("author")
+        if not isinstance(author, dict):
+            # A root whose author cannot be read may still be an
+            # App-authored finding, so skipping it would risk opening a
+            # duplicate thread for a fingerprint already published.
+            raise GitHubPublicationError("review thread response was invalid")
+        login = author.get("login")
+        if login is not None and not isinstance(login, str):
+            raise GitHubPublicationError("review thread response was invalid")
+        # GitHub logins are case-insensitive, so a configured slug that
+        # differs only in case must still match its own findings.
+        if not graphql_app_author(author, app_slug):
+            continue
+        resolved = node.get("isResolved")
+        if not isinstance(resolved, bool):
+            raise GitHubPublicationError("review thread response was invalid")
+        body = root.get("body")
+        scope = finding_publication_scope(body)
+        if scope is None:
+            continue
+        repo_id, pr_number, marker_head, marker_base, blocking, needs_human = scope
+        thread_id = node.get("id")
+        if thread_id is not None and not isinstance(thread_id, str):
+            raise GitHubPublicationError("review thread response was invalid")
+        fingerprint = finding_fingerprint_from_body(body)
+        instance = finding_instance_from_body(body)
+        same_pull = repo_id == repository_id and pr_number == pull_request
+        if (
+            same_pull
+            and marker_head != head_sha
+            and isinstance(thread_id, str)
+            and thread_id
+            and not resolved
+            and fingerprint is not None
+        ):
+            superseded.append((thread_id, fingerprint))
+        if (
+            same_pull
+            and marker_head == head_sha
+            and marker_base == base_sha
+            and instance is not None
+        ):
+            by_instance[instance] = PublishedInstance(
+                blocking=blocking,
+                needs_human=needs_human,
+                head_sha=marker_head,
+                base_sha=marker_base,
+                resolved=resolved,
+                thread_id=thread_id if isinstance(thread_id, str) else None,
+                concern=fingerprint,
+            )
+        if fingerprint is not None and marker_head == head_sha:
+            by_fingerprint[fingerprint] = blocking
+    return PublishedFindingSuppression(
+        by_fingerprint, by_location, by_instance, superseded_threads=tuple(superseded)
+    )
+
+
 class _ScopedHumanInventoryReader:
     """Bind one lazy reader to independently supplied operation scope and budget."""
 
@@ -1618,6 +1777,15 @@ class _ScopedHumanInventoryReader:
         self.budget.check()
         factory = getattr(self._reader(), "native_union_reader", None)
         return factory(review) if callable(factory) else None
+
+    def native_thread_nodes(self):
+        # Legacy factory construction remains lazy. Only an already completed
+        # native proof can supply this operation's complete root view.
+        if self.reader is None:
+            return None
+        self.budget.check()
+        method = getattr(self.reader, "native_thread_nodes", None)
+        return method() if callable(method) else None
 
     def confirmed_native_root(self, eligibility):
         self.budget.check()
@@ -2597,7 +2765,12 @@ class ReviewApprovalFinalizer:
         compact_rows = required_section is not None and re.search(
             r"(?m)^- \*\*RS-[A-F0-9]{6,64}\*\*$", required_section[1]
         )
-        if (
+        # A verified grouped native union already binds each summary entry to
+        # its complete original explanation in the actual part review. The
+        # legacy compactor requires those comments on the main review itself.
+        # Keep native frames on the exact-root and fresh union fences below;
+        # the same final body-size check still applies before any PUT.
+        if eligibility.native_union is None and (
             len(new_body.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES
             or compact_rows
         ):
@@ -3548,6 +3721,13 @@ class ReviewApprovalFinalizer:
                     records=records,
                     fence=fence,
                     skip_resolved=_skip_resolved,
+                    root_reader=lambda: self._native_thread_nodes(
+                        token=token,
+                        repository=repository,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                    ),
                     observer=self._operation_observer,
                     cleanup_token_provider=self._thread_cleanup_token_provider,
                 )
@@ -3831,6 +4011,19 @@ class ReviewApprovalFinalizer:
         }
         return required <= resolved_instances
 
+    def _native_thread_nodes(
+        self, *, token, repository, pull_request, head_sha, app_slug
+    ):
+        reader = self._human_reader_for_scope(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+        )
+        method = getattr(reader, "native_thread_nodes", None)
+        return method() if callable(method) else None
+
     def _scan_blocking_threads(
         self,
         *,
@@ -3850,6 +4043,24 @@ class ReviewApprovalFinalizer:
         marker that belongs to another head is ignored. An unreadable App root
         withholds.
         """
+
+        native_nodes = self._native_thread_nodes(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+        )
+        if native_nodes is not None:
+            return _blocking_root_facts(
+                native_nodes,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                app_slug=app_slug,
+                honored_instances=honored_instances,
+            )
 
         owner, separator, name = repository.partition("/")
         if not separator or not owner or not name:
@@ -3903,75 +4114,17 @@ class ReviewApprovalFinalizer:
                 or not isinstance(page_info, dict)
             ):
                 raise GitHubPublicationError("review thread response was invalid")
-            for node in nodes:
-                if not isinstance(node, dict) or not isinstance(
-                    node.get("isResolved"), bool
-                ):
-                    raise GitHubPublicationError("review thread response was invalid")
-                comments = node.get("comments")
-                roots = comments.get("nodes") if isinstance(comments, dict) else None
-                if (
-                    not isinstance(roots, list)
-                    or len(roots) != 1
-                    or not isinstance(roots[0], dict)
-                ):
-                    if node["isResolved"]:
-                        continue
-                    raise GitHubPublicationError("review thread response was invalid")
-                root = roots[0]
-                author = root.get("author")
-                if not graphql_app_author(author, app_slug):
-                    continue
-                body = root.get("body")
-                instance = finding_instance_from_body(body)
-                scope = finding_publication_scope(body)
-                if scope is not None:
-                    (
-                        repo_id,
-                        pr_number,
-                        marker_head,
-                        marker_base,
-                        blocking_bit,
-                        _human,
-                    ) = scope
-                    this_head = (
-                        repo_id == repository_id
-                        and pr_number == pull_request
-                        and marker_head == head_sha
-                        and marker_base == base_sha
-                    )
-                    if not this_head:
-                        continue
-                    if node["isResolved"]:
-                        if blocking_bit and instance is not None:
-                            resolved_instances.add(instance)
-                        continue
-                    if (
-                        honored_instances
-                        and instance is not None
-                        and instance in honored_instances
-                    ):
-                        continue
-                    if blocking_bit:
-                        open_blocking = True
-                    continue
-                if node["isResolved"]:
-                    continue
-                if (
-                    honored_instances
-                    and instance is not None
-                    and instance in honored_instances
-                ):
-                    continue
-                blocking = finding_blocks_approval(
-                    body=body,
-                    repository_id=repository_id,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    base_sha=base_sha,
-                )
-                if blocking is not False:
-                    open_blocking = True
+            page_open, page_resolved = _blocking_root_facts(
+                nodes,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                app_slug=app_slug,
+                honored_instances=honored_instances,
+            )
+            open_blocking |= page_open
+            resolved_instances.update(page_resolved)
             has_next = page_info.get("hasNextPage")
             if not isinstance(has_next, bool):
                 raise GitHubPublicationError("review thread response was invalid")
@@ -6509,6 +6662,13 @@ class ReviewPublisher:
                 supersede=matching,
                 fence=fence,
                 skip_resolved=True,
+                root_reader=lambda: self.finalizer._native_thread_nodes(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                ),
                 cleanup_budget=getattr(self.http, "publication_budget", None),
             )
             return resolution.diagnostic
@@ -6533,6 +6693,23 @@ class ReviewPublisher:
         a new comment. An older head is recorded for supersession and does not
         suppress the current head.
         """
+
+        native_nodes = self.finalizer._native_thread_nodes(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+        )
+        if native_nodes is not None:
+            return _suppression_root_facts(
+                native_nodes,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                app_slug=app_slug,
+            )
 
         owner, separator, name = repository.partition("/")
         if not separator or not owner or not name:
@@ -6597,77 +6774,18 @@ class ReviewPublisher:
                 or not isinstance(page_info, dict)
             ):
                 raise GitHubPublicationError("review thread response was invalid")
-            for node in nodes:
-                if not isinstance(node, dict):
-                    raise GitHubPublicationError("review thread response was invalid")
-                comments = node.get("comments")
-                if not isinstance(comments, dict):
-                    # An unreadable thread may already carry a finding marker,
-                    # so skipping it would risk publishing a duplicate.
-                    raise GitHubPublicationError("review thread response was invalid")
-                roots = comments.get("nodes")
-                if not isinstance(roots, list):
-                    raise GitHubPublicationError("review thread response was invalid")
-                if not roots:
-                    continue
-                if not isinstance(roots[0], dict):
-                    raise GitHubPublicationError("review thread response was invalid")
-                root = roots[0]
-                author = root.get("author")
-                if not isinstance(author, dict):
-                    # A root whose author cannot be read may still be an
-                    # App-authored finding, so skipping it would risk opening a
-                    # duplicate thread for a fingerprint already published.
-                    raise GitHubPublicationError("review thread response was invalid")
-                login = author.get("login")
-                if login is not None and not isinstance(login, str):
-                    raise GitHubPublicationError("review thread response was invalid")
-                # GitHub logins are case-insensitive, so a configured slug that
-                # differs only in case must still match its own findings.
-                if not graphql_app_author(author, app_slug):
-                    continue
-                resolved = node.get("isResolved")
-                if not isinstance(resolved, bool):
-                    raise GitHubPublicationError("review thread response was invalid")
-                body = root.get("body")
-                scope = finding_publication_scope(body)
-                if scope is None:
-                    continue
-                repo_id, pr_number, marker_head, marker_base, blocking, needs_human = (
-                    scope
-                )
-                thread_id = node.get("id")
-                if thread_id is not None and not isinstance(thread_id, str):
-                    raise GitHubPublicationError("review thread response was invalid")
-                fingerprint = finding_fingerprint_from_body(body)
-                instance = finding_instance_from_body(body)
-                same_pull = repo_id == repository_id and pr_number == pull_request
-                if (
-                    same_pull
-                    and marker_head != head_sha
-                    and isinstance(thread_id, str)
-                    and thread_id
-                    and not resolved
-                    and fingerprint is not None
-                ):
-                    superseded.append((thread_id, fingerprint))
-                if (
-                    same_pull
-                    and marker_head == head_sha
-                    and marker_base == base_sha
-                    and instance is not None
-                ):
-                    by_instance[instance] = PublishedInstance(
-                        blocking=blocking,
-                        needs_human=needs_human,
-                        head_sha=marker_head,
-                        base_sha=marker_base,
-                        resolved=resolved,
-                        thread_id=thread_id if isinstance(thread_id, str) else None,
-                        concern=fingerprint,
-                    )
-                if fingerprint is not None and marker_head == head_sha:
-                    by_fingerprint[fingerprint] = blocking
+            page = _suppression_root_facts(
+                nodes,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                app_slug=app_slug,
+            )
+            by_fingerprint.update(page.by_fingerprint)
+            by_location.update(page.by_location)
+            by_instance.update(page.by_instance)
+            superseded.extend(page.superseded_threads)
             has_next = page_info.get("hasNextPage")
             if not isinstance(has_next, bool):
                 raise GitHubPublicationError("review thread response was invalid")

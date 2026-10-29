@@ -416,7 +416,11 @@ class ApiRunRequestTransport:
                     "caller business write/readback tail is unfunded"
                 )
             phase = "ordinary"
-            request_id = f"caller-{self.run.repository_id}-{self.run.run_id}-{self._state.owner.generation}-{self._sequence}"
+            # Repository/run identity is already authenticated by this accounting
+            # root. Preserve one exact request/deadline receipt per dispatch,
+            # using its owner generation and physical sequence without repeating
+            # that outer scope in every receipt. Existing IDs remain untouched.
+            request_id = f"c-{self._state.owner.generation:x}-{self._sequence:x}"
             pending = PendingApiRequest(request_id, deadline)
             assert self._block is not None
             if self.usable <= 0:
