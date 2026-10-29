@@ -7,6 +7,7 @@ never an inference from absence, time, cancellation, or a failed response.
 from __future__ import annotations
 
 import re
+import secrets
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Mapping
 
@@ -23,6 +24,7 @@ STAGING_VERSION = "publication-staging-v1"
 MAX_PUBLICATION_PARTS = 8
 MAX_STAGING_BYTES = 4096
 _DIGEST = re.compile(r"[a-f0-9]{64}")
+_CLAIM = re.compile(r"[a-f0-9]{32}")
 
 
 @dataclass(frozen=True)
@@ -56,8 +58,10 @@ class PublicationStaging:
     plan_sha256: str
     part_count: int
     attempted_parts: int = 0
+    attempt_tokens: tuple[str, ...] = ()
     receipts: tuple[PublicationReceipt, ...] = ()
     final_attempted: bool = False
+    final_token: str | None = None
     final_receipt: PublicationReceipt | None = None
 
     def __post_init__(self) -> None:
@@ -70,12 +74,26 @@ class PublicationStaging:
             or not 0 <= self.part_count <= MAX_PUBLICATION_PARTS
             or type(self.attempted_parts) is not int
             or not 0 <= self.attempted_parts <= self.part_count
+            or not isinstance(self.attempt_tokens, tuple)
+            or len(self.attempt_tokens) != self.attempted_parts
+            or any(
+                not isinstance(value, str) or _CLAIM.fullmatch(value) is None
+                for value in self.attempt_tokens
+            )
+            or len(set(self.attempt_tokens)) != len(self.attempt_tokens)
             or not isinstance(self.receipts, tuple)
             or any(type(value) is not PublicationReceipt for value in self.receipts)
             or not self.attempted_parts - 1
             <= len(self.receipts)
             <= self.attempted_parts
             or type(self.final_attempted) is not bool
+            or self.final_attempted != (self.final_token is not None)
+            or self.final_token is not None
+            and (
+                not isinstance(self.final_token, str)
+                or _CLAIM.fullmatch(self.final_token) is None
+                or self.final_token in self.attempt_tokens
+            )
             or self.final_attempted
             and len(self.receipts) != self.part_count
             or self.final_receipt is not None
@@ -112,7 +130,9 @@ class PublicationStaging:
     def complete(self) -> bool:
         return self.final_receipt is not None
 
-    def attempt_part(self, ordinal: int) -> PublicationStaging:
+    def attempt_part(
+        self, ordinal: int, *, token: str | None = None
+    ) -> PublicationStaging:
         if (
             type(ordinal) is not int
             or ordinal != self.attempted_parts
@@ -123,7 +143,14 @@ class PublicationStaging:
             raise ReviewInputError(
                 "publication part is already attempted or out of order"
             )
-        return replace(self, attempted_parts=self.attempted_parts + 1)
+        return replace(
+            self,
+            attempted_parts=self.attempted_parts + 1,
+            attempt_tokens=(
+                *self.attempt_tokens,
+                secrets.token_hex(16) if token is None else token,
+            ),
+        )
 
     def confirm_part(
         self, ordinal: int, *, native_id: str, content_sha256: str
@@ -139,12 +166,16 @@ class PublicationStaging:
             return self
         return replace(self, receipts=(*self.receipts, receipt))
 
-    def attempt_final(self) -> PublicationStaging:
+    def attempt_final(self, *, token: str | None = None) -> PublicationStaging:
         if self.final_attempted or len(self.receipts) != self.part_count:
             raise ReviewInputError(
                 "publication final frame is already attempted or parts are unconfirmed"
             )
-        return replace(self, final_attempted=True)
+        return replace(
+            self,
+            final_attempted=True,
+            final_token=secrets.token_hex(16) if token is None else token,
+        )
 
     def confirm_final(
         self, *, native_id: str, content_sha256: str
@@ -167,8 +198,11 @@ class PublicationStaging:
             self.outstanding_part is None
             and not self.final_attempted
             and self.attempted_parts < self.part_count
+            and len(after.attempt_tokens) == self.attempted_parts + 1
         ):
-            candidates.append(self.attempt_part(self.attempted_parts))
+            candidates.append(
+                self.attempt_part(self.attempted_parts, token=after.attempt_tokens[-1])
+            )
         if (
             self.outstanding_part is not None
             and len(after.receipts) == len(self.receipts) + 1
@@ -181,8 +215,12 @@ class PublicationStaging:
                     content_sha256=receipt.content_sha256,
                 )
             )
-        if len(self.receipts) == self.part_count and not self.final_attempted:
-            candidates.append(self.attempt_final())
+        if (
+            len(self.receipts) == self.part_count
+            and not self.final_attempted
+            and after.final_token is not None
+        ):
+            candidates.append(self.attempt_final(token=after.final_token))
         if (
             self.final_attempted
             and self.final_receipt is None
@@ -207,8 +245,10 @@ class PublicationStaging:
             "plan_sha256": self.plan_sha256,
             "part_count": self.part_count,
             "attempted_parts": self.attempted_parts,
+            "attempt_tokens": list(self.attempt_tokens),
             "receipts": [value.to_document() for value in self.receipts],
             "final_attempted": self.final_attempted,
+            "final_token": self.final_token,
             "final_receipt": self.final_receipt.to_document()
             if self.final_receipt is not None
             else None,
@@ -223,8 +263,10 @@ class PublicationStaging:
             "plan_sha256",
             "part_count",
             "attempted_parts",
+            "attempt_tokens",
             "receipts",
             "final_attempted",
+            "final_token",
             "final_receipt",
         }
         if (
@@ -232,6 +274,7 @@ class PublicationStaging:
             or set(value) != fields
             or value["schema_version"] != STAGING_VERSION
             or not isinstance(value["receipts"], list)
+            or not isinstance(value["attempt_tokens"], list)
             or len(value["receipts"]) > MAX_PUBLICATION_PARTS
         ):
             raise ReviewInputError("publication staging document is unsupported")
@@ -241,10 +284,12 @@ class PublicationStaging:
             plan_sha256=value["plan_sha256"],  # type: ignore[arg-type]
             part_count=value["part_count"],  # type: ignore[arg-type]
             attempted_parts=value["attempted_parts"],  # type: ignore[arg-type]
+            attempt_tokens=tuple(value["attempt_tokens"]),
             receipts=tuple(
                 PublicationReceipt.from_document(item) for item in value["receipts"]
             ),
             final_attempted=value["final_attempted"],  # type: ignore[arg-type]
+            final_token=value["final_token"],  # type: ignore[arg-type]
             final_receipt=PublicationReceipt.from_document(value["final_receipt"])
             if value["final_receipt"] is not None
             else None,

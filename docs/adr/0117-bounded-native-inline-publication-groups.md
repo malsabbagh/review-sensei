@@ -34,6 +34,9 @@ unconfirmed group. Unknown, absent, cancelled or failed observations never permi
 a replacement POST, a subsequent group or the final frame. A later exact positive
 read may confirm the same original attempt. Receipts and plan are immutable.
 Reserve complete future staging growth alongside baseline, queue and decisions.
+Each part and final attempt carries its own durable random claim token. Storage
+ACK reconciliation can repeat that exact proposal; a second stale caller mints
+a different claim and cannot inherit permission to dispatch the first attempt.
 
 The final review must require a union-aware eligibility version. It can become
 authority only after complete exact group reconciliation and a fresh closing

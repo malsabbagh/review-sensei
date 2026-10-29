@@ -246,7 +246,7 @@ class NativeCensusBackend:
 
 class NativeReviewCensusTests(unittest.TestCase):
     def test_actual_closing_request_fits_with_maximum_ids_cursors_and_names(self):
-        roots = ["x" * 27] * 49 + ["x" * 62]
+        roots = [f"{number:02}" + "x" * 25 for number in range(49)] + ["49" + "x" * 60]
         variables = {
             "owner": "x" * 256,
             "name": "y" * 256,

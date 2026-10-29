@@ -7,10 +7,12 @@ Every mutable resolution and body/version fence is read in this same walk.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Any
 
+from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
 
 from .native_review_groups import (
@@ -423,6 +425,7 @@ class NativePublicationEvidence:
     roots: tuple[RootMetadata, ...]
     old_root_bodies: tuple[dict[str, Any], ...]
     physical_reads: int
+    context_sha256: str
 
 
 def closing_envelope_bound() -> int:
@@ -469,6 +472,7 @@ def read_publication_union(
     main_state: str,
     old_root_nodes: dict[int, str],
     budget: NativeWalkBudget,
+    opening: Opening | None = None,
 ) -> NativePublicationEvidence:
     """Exact selected union with one physical ten-call counter and no fallback.
 
@@ -483,9 +487,10 @@ def read_publication_union(
         or wire_bytes(list(old_root_nodes.values())) > MAX_EXISTING_ROOT_IDS_BYTES
     ):
         raise ReviewInputError("native publication selected union is invalid")
-    opening = open_publication_census(
-        http, token=token, repository=repository, plan=plan, budget=budget
-    )
+    if opening is None:
+        opening = open_publication_census(
+            http, token=token, repository=repository, plan=plan, budget=budget
+        )
     selected_ids = (*group_review_ids, main_review_id)
     if any(identifier not in opening.review_nodes for identifier in selected_ids):
         raise ReviewInputError("native publication selected review is absent")
@@ -681,6 +686,7 @@ def read_publication_union(
             tuple(closed_roots.values()),
             tuple(old),
             budget.used,
+            hashlib.sha256(canonical_bytes(plan.context(producer_id))).hexdigest(),
         )
     except (KeyError, TypeError, AttributeError, ValueError) as exc:
         raise ReviewInputError(

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         PartitionReader,
         VisibleReader,
     )
+    from .native_union import NativeUnionReader, NativeUnionReceipt
 
 APPROVAL_ELIGIBILITY_SCHEMA_VERSION = "1"
 APPROVAL_FACTS_SCHEMA_VERSION = "2"
@@ -233,8 +234,23 @@ class ReviewApprovalEligibility:
     partitioned_root: PartitionedEligibilityRoot | None = None
     human_inventory_reference: HumanInventoryReference | None = None
     quarantine_assessments: dict[str, Any] | None = None
+    native_union: NativeUnionReceipt | None = None
 
     def to_dict(self) -> dict[str, object]:
+        if self.native_union is not None:
+            from .native_union import NativeUnionReceipt
+
+            if (
+                type(self.native_union) is not NativeUnionReceipt
+                or self.native_union.head_sha != self.head_sha
+                or self.native_union.result_digest != self.result_digest
+            ):
+                raise ReviewInputError("native union eligibility identity conflicts")
+            return {
+                "schema_version": "8",
+                "current": replace(self, native_union=None).to_dict(),
+                "native_union": self.native_union.to_document(),
+            }
         if self.quarantine_assessments is not None:
             from review_sensei.quarantine_assessments import validate_view
 
@@ -340,7 +356,37 @@ class ReviewApprovalEligibility:
         partition_reader: PartitionReader | None = None,
         expected_context: PartitionedEligibilityContext | None = None,
         visible_reader: VisibleReader | None = None,
+        native_union_reader: NativeUnionReader | None = None,
     ) -> "ReviewApprovalEligibility":
+        if isinstance(value, Mapping) and value.get("schema_version") == "8":
+            from .native_union import NativeUnionReceipt
+
+            if (
+                set(value) != {"schema_version", "current", "native_union"}
+                or not isinstance(value["current"], Mapping)
+                or value["current"].get("schema_version")
+                not in {"1", "2.0", "3", "4", "5", "7"}
+            ):
+                raise ReviewInputError("native union eligibility envelope is invalid")
+            validate_public_document(value, "eligibility-v8")
+            receipt = NativeUnionReceipt.from_document(value["native_union"])
+            current = cls.from_dict(
+                value["current"],
+                human_inventory_reader=human_inventory_reader,
+                partition_reader=partition_reader,
+                expected_context=expected_context,
+                visible_reader=visible_reader,
+            )
+            if (
+                receipt.head_sha != current.head_sha
+                or receipt.result_digest != current.result_digest
+                or native_union_reader is None
+            ):
+                raise ReviewInputError(
+                    "native union requires its complete scoped reader"
+                )
+            receipt.require_evidence(native_union_reader(receipt))
+            return replace(current, native_union=receipt)
         if isinstance(value, Mapping) and value.get("schema_version") == "7":
             from review_sensei.quarantine_assessments import validate_view
 

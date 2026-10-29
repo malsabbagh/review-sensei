@@ -11,6 +11,7 @@ from review_sensei_github.errors import GitHubPublicationTransientError
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.native_group_publication import NativeGroupPublication
 from review_sensei_github.native_review_groups import NativeInline, NativeReviewPlan
+from review_sensei_github.native_union import NativeUnionReceipt
 from review_sensei_github.publication import ReviewPublisher
 from review_sensei_github.quarantine_capacity import NativeCapacityGuard
 from test_native_review_census import NativeCensusBackend
@@ -103,6 +104,8 @@ class GroupWriterBackend(NativeCensusBackend):
         )
         self.fault = fault
         self.calls, self.reviews, self.group_payloads, self.roots = [], [], [], []
+        self.old_rows, self.old_nodes = [], {}
+        self.main_id, self.main_body = 2**63 - 1000, ""
         self.post_count = 0
         self.change = None
         self.pending = None
@@ -154,16 +157,79 @@ class GroupWriterBackend(NativeCensusBackend):
         ):
             self.post_count += 1
             self.pending = json.loads(request.data)
+            if self.pending["comments"] == []:
+                self.main_body = self.pending["body"]
+                if self.fault != "final_absent":
+                    self.materialize_final()
+                if self.fault in {"final_absent", "final_stored"}:
+                    raise TimeoutError("synthetic final acknowledgement unavailable")
+                return json_response({"id": self.main_id}, 201)
             assert self.pending == self.plan.part_payload(0)
             if self.fault != "absent":
                 self.materialize()
-            if self.fault:
+            if self.fault in {"absent", "stored"}:
                 raise TimeoutError("synthetic native acknowledgement unavailable")
             return json_response({"id": int(self.reviews[0]["n"])}, 201)
         return super().opened(request, timeout)
 
+    def materialize_final(self):
+        self.reviews.append(
+            {
+                "i": "main",
+                "n": str(self.main_id),
+                "s": "COMMENTED",
+                "a": {"t": "Bot", "n": 999},
+                "c": {"o": self.plan.head_sha},
+                "x": {"totalCount": 0, "nodes": []},
+            }
+        )
+
+    @staticmethod
+    def body_for_receipt(receipt: NativeUnionReceipt):
+        # Exact final-frame construction is independently tested by the v8
+        # codec. This component fixture exercises the durable physical writer.
+        return json.dumps(receipt.to_document(), sort_keys=True)
+
+    def publish_final(self):
+        return self.host.publish_final(
+            body_for_receipt=self.body_for_receipt,
+            event="COMMENT",
+            old_root_nodes={},
+        )
+
 
 class NativeGroupPublicationTests(unittest.TestCase):
+    def test_final_frame_reconciles_original_union_without_reposting(self):
+        for fault in (None, "final_stored"):
+            with self.subTest(fault=fault):
+                backend = GroupWriterBackend(fault)
+                state, evidence = backend.publish_final()
+                self.assertTrue(state.complete)
+                self.assertEqual(evidence.main_review_id, backend.main_id)
+                self.assertEqual(backend.post_count, 2)
+                self.assertLessEqual(evidence.physical_reads, 10)
+                charges = copy.deepcopy(backend.guard.stats)
+                again, _ = backend.publish_final()
+                self.assertEqual(again, state)
+                self.assertEqual(backend.post_count, 2)
+                self.assertEqual(backend.guard.stats, charges)
+
+    def test_absent_final_never_reposts_and_late_union_can_confirm(self):
+        backend = GroupWriterBackend("final_absent")
+        for attempt in range(2):
+            with (
+                self.subTest(attempt=attempt),
+                self.assertRaises(GitHubPublicationTransientError),
+            ):
+                backend.publish_final()
+            self.assertEqual(backend.post_count, 2)
+        charges = copy.deepcopy(backend.guard.stats)
+        backend.materialize_final()
+        state, _ = backend.publish_final()
+        self.assertTrue(state.complete)
+        self.assertEqual(backend.post_count, 2)
+        self.assertEqual(backend.guard.stats, charges)
+
     def test_stored_lost_ack_confirms_the_original_without_another_post(self):
         for fault in (None, "stored"):
             backend = GroupWriterBackend(fault)

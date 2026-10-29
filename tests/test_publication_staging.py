@@ -8,6 +8,54 @@ from review_sensei.publication_staging import PublicationStaging
 
 
 class PublicationStagingTests(unittest.TestCase):
+    def test_stale_callers_cannot_share_an_attempt_claim(self):
+        from test_review_transaction import IDENTITY, NOW, _checkpoint
+
+        from review_sensei.publication_staging import checkpoint_publication_staging
+        from review_sensei.session import InMemorySessionLedger
+
+        ledger = InMemorySessionLedger()
+        transaction = _checkpoint(ledger).transaction
+        initial = PublicationStaging.prepare(
+            transaction_id=transaction.transaction_id,
+            result_sha256=transaction.result_sha256,
+            plan_sha256="c" * 64,
+            part_count=1,
+        )
+        checkpoint_publication_staging(
+            ledger, IDENTITY, transaction, expected=None, after=initial, now=NOW
+        )
+        first, second = initial.attempt_part(0), initial.attempt_part(0)
+        self.assertNotEqual(first.attempt_tokens, second.attempt_tokens)
+        checkpoint_publication_staging(
+            ledger, IDENTITY, transaction, expected=initial, after=first, now=NOW
+        )
+        # The same unique proposal can reconcile a lost storage ACK.
+        self.assertEqual(
+            checkpoint_publication_staging(
+                ledger, IDENTITY, transaction, expected=initial, after=first, now=NOW
+            ),
+            first,
+        )
+        # A separately minted claim from the same stale frontier cannot POST.
+        with self.assertRaisesRegex(ReviewInputError, "expected frontier changed"):
+            checkpoint_publication_staging(
+                ledger, IDENTITY, transaction, expected=initial, after=second, now=NOW
+            )
+        settled = first.confirm_part(0, native_id="9", content_sha256="d" * 64)
+        checkpoint_publication_staging(
+            ledger, IDENTITY, transaction, expected=first, after=settled, now=NOW
+        )
+        final_a, final_b = settled.attempt_final(), settled.attempt_final()
+        self.assertNotEqual(final_a.final_token, final_b.final_token)
+        checkpoint_publication_staging(
+            ledger, IDENTITY, transaction, expected=settled, after=final_a, now=NOW
+        )
+        with self.assertRaisesRegex(ReviewInputError, "expected frontier changed"):
+            checkpoint_publication_staging(
+                ledger, IDENTITY, transaction, expected=settled, after=final_b, now=NOW
+            )
+
     def test_actual_ledger_round_trip_preserves_unknown_and_blocks_false_success(self):
         from test_review_transaction import IDENTITY, NOW, _checkpoint
 

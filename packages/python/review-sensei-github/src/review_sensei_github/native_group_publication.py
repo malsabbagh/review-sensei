@@ -7,10 +7,12 @@ Parts remain nonauthoritative until a separately verified final union frame.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
+from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewTransaction
 from review_sensei.publication_staging import (
@@ -21,7 +23,11 @@ from review_sensei.session import SessionIdentity, SessionLedger, SessionRecord
 
 from .errors import GitHubHTTPTransientError, GitHubPublicationTransientError
 from .http import GitHubHttp
-from .native_review_census import open_publication_census
+from .native_review_census import (
+    NativePublicationEvidence,
+    open_publication_census,
+    read_publication_union,
+)
 from .native_review_groups import (
     NativeGroupEvidence,
     NativeReviewPlan,
@@ -29,6 +35,7 @@ from .native_review_groups import (
     _native_number,
     read_complete_group,
 )
+from .native_union import NativeUnionReceipt
 
 
 @dataclass
@@ -81,6 +88,11 @@ class NativeGroupPublication:
             after=after,
             now=self.now,
         )
+
+    def require_claim(self, state: PublicationStaging) -> None:
+        """Only the caller that durably claimed this attempt may dispatch it."""
+        if self.state() != state:
+            raise ReviewInputError("native publication attempt claim changed")
 
     def reconcile_part(
         self, ordinal: int, *, known_review_id: int | None = None
@@ -197,7 +209,7 @@ class NativeGroupPublication:
             if state.outstanding_part is None:
                 attempted = state.attempt_part(ordinal)
                 state = self.checkpoint(state, attempted)
-                self.fence()
+                self.require_claim(state)
                 try:
                     status, response = self.http.request(
                         "POST",
@@ -209,7 +221,10 @@ class NativeGroupPublication:
                         body=self.plan.part_payload(ordinal),
                     )
                     if status in {200, 201} and isinstance(response, dict):
-                        known = _native_number(response.get("id"))
+                        try:
+                            known = _native_number(response.get("id"))
+                        except ReviewInputError:
+                            pass  # Malformed acknowledgements still require a fresh read.
                 except GitHubHTTPTransientError:
                     # The only legal continuation is positive reconciliation of
                     # this exact original attempt. An absent read grants no POST.
@@ -222,3 +237,110 @@ class NativeGroupPublication:
             )
             state = self.checkpoint(state, confirmed)
         return state
+
+    def publish_final(
+        self,
+        *,
+        body_for_receipt: Callable[[NativeUnionReceipt], str],
+        event: str,
+        old_root_nodes: dict[int, str],
+    ) -> tuple[PublicationStaging, NativePublicationEvidence]:
+        """Confirm the entire selected union before acknowledging its main frame.
+
+        An attempted final frame is never posted again. A cold invocation uses
+        the same durable part receipts and exact original frame to reconcile it.
+        The final native receipt does not complete caller accounting or cleanup.
+        """
+        if event not in {"COMMENT", "REQUEST_CHANGES"}:
+            raise ReviewInputError("native final publication event is unsupported")
+        state = self.publish_parts()
+        receipt = NativeUnionReceipt.from_staging(
+            self.plan, state, producer_id=self.producer_id
+        )
+        body = body_for_receipt(receipt)
+        if not isinstance(body, str) or not 0 < len(body.encode()) <= 65_536:
+            raise ReviewInputError("native final frame exceeds its reserved bound")
+        payload: dict[str, object] = {
+            "body": body,
+            "event": event,
+            "commit_id": self.plan.head_sha,
+            "comments": [],
+        }
+        digest = hashlib.sha256(canonical_bytes(payload)).hexdigest()
+        known = None
+        if not state.final_attempted:
+            state = self.checkpoint(state, state.attempt_final())
+            self.require_claim(state)
+            try:
+                status, response = self.http.request(
+                    "POST",
+                    self.http.repository_path(
+                        self.identity.repository,
+                        f"/pulls/{self.identity.pull_request}/reviews",
+                    ),
+                    token=self.token,
+                    body=payload,
+                )
+                if status in {200, 201} and isinstance(response, dict):
+                    try:
+                        known = _native_number(response.get("id"))
+                    except ReviewInputError:
+                        pass
+            except GitHubHTTPTransientError:
+                pass
+        if state.final_receipt is not None:
+            if state.final_receipt.content_sha256 != digest:
+                raise ReviewInputError("native original final frame changed")
+            known = _native_number(state.final_receipt.native_id)
+        budget = NativeWalkBudget()
+        opening = open_publication_census(
+            self.http,
+            token=self.token,
+            repository=self.identity.repository,
+            plan=self.plan,
+            budget=budget,
+        )
+        expected_state = "COMMENTED" if event == "COMMENT" else "CHANGES_REQUESTED"
+        candidates = []
+        for identifier, row in opening.review_nodes.items():
+            if known is not None and identifier != known:
+                continue
+            author, comments = row.get("a"), row.get("x")
+            if (
+                identifier not in {int(item.native_id) for item in state.receipts}
+                and isinstance(author, dict)
+                and author.get("t") == "Bot"
+                and _native_number(author.get("n")) == self.producer_id
+                and row.get("c") == {"o": self.plan.head_sha}
+                and row.get("s") == expected_state
+                and isinstance(comments, dict)
+                and comments.get("totalCount") == 0
+                and comments.get("nodes") == []
+            ):
+                candidates.append(identifier)
+        if len(candidates) != 1:
+            raise GitHubPublicationTransientError(
+                "native final publication remains unconfirmed; no replacement was dispatched"
+            )
+        # Reuse this complete opening within the same physical ten-call walk.
+        evidence = read_publication_union(
+            self.http,
+            token=self.token,
+            repository=self.identity.repository,
+            plan=self.plan,
+            producer_id=self.producer_id,
+            group_review_ids=tuple(int(item.native_id) for item in state.receipts),
+            main_review_id=candidates[0],
+            main_body=body,
+            main_state=expected_state,
+            old_root_nodes=old_root_nodes,
+            budget=budget,
+            opening=opening,
+        )
+        receipt.require_evidence(evidence)
+        self.fence()
+        confirmed = state.confirm_final(
+            native_id=str(evidence.main_review_id), content_sha256=digest
+        )
+        state = self.checkpoint(state, confirmed)
+        return state, evidence

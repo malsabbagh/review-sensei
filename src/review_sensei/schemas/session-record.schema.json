@@ -777,8 +777,10 @@
         "plan_sha256",
         "part_count",
         "attempted_parts",
+        "attempt_tokens",
         "receipts",
         "final_attempted",
+        "final_token",
         "final_receipt"
       ],
       "properties": {
@@ -807,6 +809,12 @@
           "minimum": 0,
           "maximum": 8
         },
+        "attempt_tokens": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-f0-9]{32}$"}
+        },
         "receipts": {
           "type": "array",
           "maxItems": 8,
@@ -831,6 +839,12 @@
         },
         "final_attempted": {
           "type": "boolean"
+        },
+        "final_token": {
+          "anyOf": [
+            {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+            {"type": "null"}
+          ]
         },
         "final_receipt": {
           "anyOf": [

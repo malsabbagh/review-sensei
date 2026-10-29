@@ -14,7 +14,11 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 from urllib.parse import quote
 
 from review_sensei.baseline import ReviewBaseline
-from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
+from review_sensei.bounded_evidence import (
+    MAX_PART_READS,
+    EvidenceReadBudget,
+    canonical_bytes,
+)
 from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from review_sensei.convergence import (
     LEGACY_REVIEW_MODE,
@@ -1267,6 +1271,7 @@ def approval_eligibility_from_body(
     partition_reader: PartitionReader | None = None,
     expected_context: PartitionedEligibilityContext | None = None,
     visible_reader: VisibleReader | None = None,
+    native_union_reader: Any = None,
 ) -> ReviewApprovalEligibility | None:
     """Read back one persisted eligibility document, failing closed to ``None``.
 
@@ -1287,6 +1292,12 @@ def approval_eligibility_from_body(
             (payload + "=" * (-len(payload) % 4)).encode("ascii")
         )
         document = json.loads(raw.decode("utf-8"))
+        if (
+            isinstance(document, dict)
+            and document.get("schema_version") == "8"
+            and raw != canonical_bytes(document)
+        ):
+            return None
     except (ValueError, UnicodeDecodeError, binascii.Error):
         return None
     try:
@@ -1296,6 +1307,7 @@ def approval_eligibility_from_body(
             partition_reader=partition_reader,
             expected_context=expected_context,
             visible_reader=visible_reader,
+            native_union_reader=native_union_reader,
         )
     except EvidenceBudgetExhausted:
         raise

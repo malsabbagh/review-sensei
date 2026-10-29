@@ -247,6 +247,19 @@ class NativeReviewPlan:
             "part_count": len(self.ordinals),
         }
 
+    def context(self, producer_id: int) -> dict[str, object]:
+        return {
+            "repository_id": self.repository_id,
+            "pull_request": self.pull_request,
+            "producer_id": producer_id,
+            "base_sha": self.base_sha,
+            "head_sha": self.head_sha,
+            "transaction_id": self.transaction_id,
+            "result_sha256": self.result_sha256,
+            "plan_sha256": self.sha256,
+            "inline_count": len(self.items),
+        }
+
     def part_body(self, ordinal: int) -> str:
         if type(ordinal) is not int or not 0 <= ordinal < len(self.ordinals):
             raise ReviewInputError("native review part ordinal is invalid")
