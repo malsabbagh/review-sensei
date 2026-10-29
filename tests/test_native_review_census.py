@@ -323,6 +323,28 @@ class NativeCensusBackend:
 
 
 class NativeReviewCensusTests(unittest.TestCase):
+    def test_direct_custom_reader_cannot_supply_an_unproved_native_shortcut(self):
+        from unittest.mock import Mock
+
+        from review_sensei_github.publication import ReviewApprovalFinalizer
+
+        custom = Mock()
+        custom.native_thread_nodes.return_value = ()
+        finalizer = ReviewApprovalFinalizer(
+            http=GitHubHttp(),
+            human_inventory_reader=custom,
+        )
+        self.assertIsNone(
+            finalizer._native_thread_nodes(
+                token="synthetic",
+                repository="owner/repo",
+                pull_request=1,
+                head_sha="b" * 40,
+                app_slug="reviewsensei[bot]",
+            )
+        )
+        custom.native_thread_nodes.assert_not_called()
+
     def test_scoped_native_shortcut_requires_the_source_owned_proof_reader(self):
         from unittest.mock import Mock
 

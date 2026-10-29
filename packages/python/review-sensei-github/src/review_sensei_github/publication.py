@@ -4017,6 +4017,8 @@ class ReviewApprovalFinalizer:
     def _native_thread_nodes(
         self, *, token, repository, pull_request, head_sha, app_slug
     ):
+        from .default_human_reader import DefaultHumanInventoryReader
+
         reader = self._human_reader_for_scope(
             token=token,
             repository=repository,
@@ -4024,8 +4026,14 @@ class ReviewApprovalFinalizer:
             head_sha=head_sha,
             app_slug=app_slug,
         )
-        method = getattr(reader, "native_thread_nodes", None)
-        return method() if callable(method) else None
+        # Explicitly supplied custom readers must retain the same legacy path
+        # as custom factories; a method name is not a complete native proof.
+        if (
+            type(reader) is not DefaultHumanInventoryReader
+            and type(reader) is not _ScopedHumanInventoryReader
+        ):
+            return None
+        return reader.native_thread_nodes()
 
     def _scan_blocking_threads(
         self,
