@@ -98,21 +98,18 @@ class HistoricalAssessmentReader:
 
     def attach(self, eligibility, *, head_sha):
         view = hold_view(self.read(head_sha=head_sha))
-        old = eligibility.historical_assessments
-        fresh = (
-            bool(eligibility.human_review.pending)
-            if eligibility.human_review is not None
-            else old["fresh_human_pending"]
-            if old is not None
-            else eligibility.facts.has_human_adjudication_findings
-        )
+        fresh = eligibility.fresh_human_pending
         view["fresh_human_pending"] = fresh
         return replace(
             eligibility,
             historical_assessments=view,
             facts=replace(
                 eligibility.facts,
-                has_human_adjudication_findings=(fresh or bool(view["pending"])),
+                has_human_adjudication_findings=(
+                    fresh
+                    or bool(view["pending"])
+                    or bool((eligibility.quarantine_assessments or {}).get("pending"))
+                ),
             ),
         )
 

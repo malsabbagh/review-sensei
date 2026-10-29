@@ -867,6 +867,8 @@ class SessionRecord:
     disposition_snapshot: Mapping[str, object] | None = None
     api_run_accounting: Mapping[str, object] | None = None
     historical_assessments: Mapping[str, object] | None = None
+    quarantine_lineage: Mapping[str, object] | None = None
+    publication_staging: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
     _digest_shape_input: InitVar[str] = "current"
@@ -1102,6 +1104,38 @@ class SessionRecord:
                 raise ReviewInputError(
                     "assessment queue does not match session identity/generation"
                 )
+        from .quarantine_lineage import normalize_lineage
+
+        normalized_lineage = normalize_lineage(self.quarantine_lineage)
+        object.__setattr__(self, "quarantine_lineage", normalized_lineage)
+        if normalized_lineage is not None:
+            origin = normalized_lineage["origin_manifest"]["binding"]
+            if (
+                self.api_run_accounting is None
+                or origin["repository"] != self.repository
+                or origin["repository_id"] != self.repository_id
+                or origin["pull_request"] != self.pull_request
+                or origin["generation"] > self.generation
+            ):
+                raise ReviewInputError("quarantine lineage does not match its session")
+        from .publication_staging import normalize_staging
+
+        staging = normalize_staging(self.publication_staging)
+        object.__setattr__(self, "publication_staging", staging)
+        if staging is not None:
+            from .publication_staging import PublicationStaging
+
+            frontier = PublicationStaging.from_document(staging)
+            if not frontier.complete and (
+                self.transaction is None
+                or self.transaction.transaction_id != frontier.transaction_id
+                or self.transaction.result_sha256 != frontier.result_sha256
+                or self.transaction.phase
+                not in {"publication_pending", "publication_failed"}
+            ):
+                raise ReviewInputError(
+                    "unconfirmed publication staging must retain its exact transaction"
+                )
         from .historical_assessments import normalize_hold
 
         normalized_hold = normalize_hold(self.historical_assessments)
@@ -1162,6 +1196,14 @@ class SessionRecord:
             payload["api_run_accounting"] = dict(self.api_run_accounting)
         if self.historical_assessments is not None:
             payload["historical_assessments"] = dict(self.historical_assessments)
+        if self.quarantine_lineage is not None:
+            payload["quarantine_lineage"] = json.loads(
+                canonical_bytes(self.quarantine_lineage)
+            )
+        if self.publication_staging is not None:
+            payload["publication_staging"] = json.loads(
+                canonical_bytes(self.publication_staging)
+            )
         return payload
 
     def _payload_without_dispositions(self) -> dict[str, object]:
@@ -1218,6 +1260,8 @@ class SessionRecord:
         disposition_snapshot: Mapping[str, object] | None = None,
         api_run_accounting: Mapping[str, object] | None = None,
         historical_assessments: Mapping[str, object] | None = None,
+        quarantine_lineage: Mapping[str, object] | None = None,
+        publication_staging: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
         normalized_grants = _stored_continuation_grants(continuation_grants)
@@ -1265,6 +1309,16 @@ class SessionRecord:
         normalized_hold = normalize_hold(historical_assessments)
         if normalized_hold is not None:
             payload["historical_assessments"] = normalized_hold
+        from .quarantine_lineage import normalize_lineage
+
+        normalized_lineage = normalize_lineage(quarantine_lineage)
+        from .publication_staging import normalize_staging
+
+        normalized_staging = normalize_staging(publication_staging)
+        if normalized_staging is not None:
+            payload["publication_staging"] = normalized_staging
+        if normalized_lineage is not None:
+            payload["quarantine_lineage"] = normalized_lineage
         if normalized_api is not None:
             payload["api_run_accounting"] = normalized_api
         if normalized_snapshot is not None:
@@ -1305,6 +1359,8 @@ class SessionRecord:
             disposition_snapshot=normalized_snapshot,
             api_run_accounting=normalized_api,
             historical_assessments=normalized_hold,
+            quarantine_lineage=normalized_lineage,
+            publication_staging=normalized_staging,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -1386,6 +1442,12 @@ class SessionRecord:
             raise ReviewInputError(
                 "historical assessments cannot be a null absence marker"
             )
+        if "publication_staging" in value and value["publication_staging"] is None:
+            raise ReviewInputError(
+                "publication staging cannot be a null absence marker"
+            )
+        if "quarantine_lineage" in value and value["quarantine_lineage"] is None:
+            raise ReviewInputError("quarantine lineage cannot be a null absence marker")
         if has_api_accounting and value["api_run_accounting"] is None:
             raise ReviewInputError("API accounting cannot be a null absence marker")
         if has_snapshot and value["disposition_snapshot"] is None:
@@ -1410,10 +1472,10 @@ class SessionRecord:
             or has_queue
             or has_snapshot
             or has_api_accounting
+            or "historical_assessments" in value
             or "quarantine_lineage" in value
             or "publication_staging" in value
             or "rescan_state" in value
-            or "historical_assessments" in value
             else "operator-paused"
             if has_operator_paused
             else "legacy"
@@ -1499,6 +1561,12 @@ class SessionRecord:
             historical_assessments=cast(
                 Mapping[str, object] | None, value.get("historical_assessments")
             ),
+            quarantine_lineage=cast(
+                Mapping[str, object] | None, value.get("quarantine_lineage")
+            ),
+            publication_staging=cast(
+                Mapping[str, object] | None, value.get("publication_staging")
+            ),
             _digest_shape_input=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
@@ -1529,6 +1597,7 @@ class SessionRecord:
         assessment_queue: Mapping[str, object] | None = None,
         disposition_snapshot: Mapping[str, object] | None = None,
         api_run_accounting: Mapping[str, object] | None = None,
+        historical_assessments: Mapping[str, object] | None = None,
         quarantine_lineage: Mapping[str, object] | None = None,
         publication_staging: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
@@ -1571,6 +1640,7 @@ class SessionRecord:
             assessment_queue=assessment_queue,
             disposition_snapshot=disposition_snapshot,
             api_run_accounting=api_run_accounting,
+            historical_assessments=historical_assessments,
             quarantine_lineage=quarantine_lineage,
             publication_staging=publication_staging,
         )
@@ -1775,6 +1845,8 @@ class SessionRecord:
         disposition_snapshot: Mapping[str, object] | None | object = ...,
         api_run_accounting: Mapping[str, object] | None | object = ...,
         historical_assessments: Mapping[str, object] | None | object = ...,
+        quarantine_lineage: Mapping[str, object] | None | object = ...,
+        publication_staging: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
         from .quarantine_lineage import require_lineage_successor
 
@@ -1884,15 +1956,15 @@ class SessionRecord:
                 if disposition_snapshot is ...
                 else cast(Mapping[str, object] | None, disposition_snapshot)
             ),
-            historical_assessments=(
-                self.historical_assessments
-                if historical_assessments is ...
-                else cast(Mapping[str, object] | None, historical_assessments)
-            ),
             api_run_accounting=(
                 self.api_run_accounting
                 if api_run_accounting is ...
                 else cast(Mapping[str, object] | None, api_run_accounting)
+            ),
+            historical_assessments=(
+                self.historical_assessments
+                if historical_assessments is ...
+                else cast(Mapping[str, object] | None, historical_assessments)
             ),
             quarantine_lineage=cast(Mapping[str, object] | None, next_lineage),
             publication_staging=cast(Mapping[str, object] | None, next_staging),
@@ -4308,6 +4380,12 @@ def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> No
     from .historical_assessments import require_hold_successor
 
     require_hold_successor(before.historical_assessments, after.historical_assessments)
+    from .quarantine_lineage import require_lineage_successor
+
+    require_lineage_successor(before.quarantine_lineage, after.quarantine_lineage)
+    from .publication_staging import require_staging_successor
+
+    require_staging_successor(before.publication_staging, after.publication_staging)
     if before.api_run_accounting is not None:
         if after.api_run_accounting is None:
             raise ReviewInputError("API accounting cannot be silently discarded")

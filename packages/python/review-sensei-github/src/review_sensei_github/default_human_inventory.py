@@ -107,10 +107,28 @@ class HumanInventoryContext:
     retained_source: RetainedPublishedInventorySource | None = field(
         default=None, repr=False
     )
+    selected_transaction: ReviewTransaction | None = field(default=None, repr=False)
     historical_source: Any | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         SessionIdentity(self.repository, self.pull_request, self.repository_id)
+        if self.selected_transaction is not None and (
+            not isinstance(self.selected_transaction, ReviewTransaction)
+            or self.selected_transaction.transaction_id != self.transaction_id
+            or self.selected_transaction.result_sha256 != self.original_content_digest
+            or not self.selected_transaction.identity_matches(
+                repository=self.repository,
+                pull_request=self.pull_request,
+                base_sha=self.base_sha,
+                head_sha=self.head_sha,
+                policy_digest=self.policy_digest,
+                configuration_digest=self.configuration_digest,
+                evidence_digest=self.evidence_digest,
+            )
+        ):
+            raise ReviewInputError(
+                "default human inventory selected transaction conflicts"
+            )
         if self.historical_source is not None:
             from .historical_completion import HistoricalReadSelection
 
@@ -349,22 +367,32 @@ def build_human_inventory_context(
     ):
         raise ReviewInputError("default human inventory Bot identity unavailable")
     context = HumanInventoryContext(
-        identity.repository,
-        identity.repository_id,
-        identity.pull_request,
-        base_sha,
-        head_sha,
-        app_slug,
-        user["id"],
-        transaction.transaction_id,
-        transaction.result_sha256,
-        publication_digest,
-        policy_digest,
-        configuration_digest,
-        evidence_digest,
-        budget,
-        _retained_source,
-        _historical_source,
+        repository=identity.repository,
+        repository_id=identity.repository_id,
+        pull_request=identity.pull_request,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        app_slug=app_slug,
+        producer_id=user["id"],
+        transaction_id=transaction.transaction_id,
+        original_content_digest=transaction.result_sha256,
+        publication_digest=publication_digest,
+        policy_digest=policy_digest,
+        configuration_digest=configuration_digest,
+        evidence_digest=evidence_digest,
+        budget=budget,
+        retained_source=_retained_source,
+        selected_transaction=transaction,
+        historical_source=_historical_source,
+    )
+    from .api_run_requests import ApiRunSessionLedger
+
+    _transaction(
+        ledger,
+        context,
+        loaded=loaded
+        if isinstance(ledger, ApiRunSessionLedger) and ledger._quarantine_required
+        else _loaded,
     )
     _live_pr(transport, token, context)
     return context

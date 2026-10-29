@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.8.16 - 2026-10-29
+
+Changes since [v0.8.15](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.15), from [e006596160be74a9a72b9428c5675224afa347c6](https://github.com/malsabbagh/review-sensei/commit/e006596160be74a9a72b9428c5675224afa347c6) through [3c3b2093b24dff99f22b7d964e302e7fc5d0d6be](https://github.com/malsabbagh/review-sensei/commit/3c3b2093b24dff99f22b7d964e302e7fc5d0d6be).
+
+Previous annotated tag object: `8e824a0c705e025f5fb1a1b60b389684a53f8527`.
+
+- docs: record released v0.8.15 ([28ac723b84e810fce0b1987e4743133a0e7867a8](https://github.com/malsabbagh/review-sensei/commit/28ac723b84e810fce0b1987e4743133a0e7867a8)).
+- chore\(deps-dev\): bump undici and wrangler in deploy/cloudflare \(\#389\) ([00925c639e9d64d02c7b7731ed9d4c3d4fcdd3c8](https://github.com/malsabbagh/review-sensei/commit/00925c639e9d64d02c7b7731ed9d4c3d4fcdd3c8)).
+- Isolate unresolved review predecessors in authenticated quarantine ledgers \(\#390\) ([67ae175b021ad14404329c2315a8cd0b2e418bd1](https://github.com/malsabbagh/review-sensei/commit/67ae175b021ad14404329c2315a8cd0b2e418bd1)).
+- Fix complete native root views for recovery consumers \(\#391\) ([3c3b2093b24dff99f22b7d964e302e7fc5d0d6be](https://github.com/malsabbagh/review-sensei/commit/3c3b2093b24dff99f22b7d964e302e7fc5d0d6be)).
+
+## review-sensei-github 0.3.22 - 2026-10-29
+
+- Pin `review-sensei==0.8.16`.
+
 ## 0.8.15 - 2026-10-27
 
 Changes since [v0.8.14](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.14), from [52b5ca47ba3508a526312ce8424ff0c7fa1bb347](https://github.com/malsabbagh/review-sensei/commit/52b5ca47ba3508a526312ce8424ff0c7fa1bb347) through [8ab72ca718dd84822cfb3fc9c2d79a38aff1f463](https://github.com/malsabbagh/review-sensei/commit/8ab72ca718dd84822cfb3fc9c2d79a38aff1f463).

@@ -37,9 +37,16 @@ def parse_historical_command(body):
     from review_sensei.disposition import parse_maintainer_command
 
     parsed = parse_maintainer_command(body, actor="untrusted")
+    if parsed is None:
+        if isinstance(body, str) and re.search(
+            r"--reason[ \t]+[\"']?historical[:/@_-]", body, re.IGNORECASE | re.ASCII
+        ):
+            raise ReviewInputError(
+                "historical command must use the complete supported finding syntax"
+            )
+        return None
     if (
-        parsed is None
-        or re.match(r"historical[:/@_-]", parsed.reason or "", re.IGNORECASE | re.ASCII)
+        re.match(r"historical[:/@_-]", parsed.reason or "", re.IGNORECASE | re.ASCII)
         is None
     ):
         return None
@@ -134,16 +141,18 @@ def prepare_historical_target(run, authority, command, app, permission):
     selected = max(candidates, key=lambda r: r["id"])
     # The source is the current review's explicit hold marker, never fallback
     # selection of an older review when the current index lacks an ID.
+    human_reader = app._human_inventory_reader(
+        token=run.ledger.token,
+        repository=run.identity.repository,
+        pull_request=run.identity.pull_request,
+        head_sha=run.head_sha,
+        app_slug="reviewsensei[bot]",
+        budget=run.caller.budget_view,
+    )
     eligibility = approval_eligibility_from_body(
         selected["body"],
-        human_inventory_reader=app._human_inventory_reader(
-            token=run.ledger.token,
-            repository=run.identity.repository,
-            pull_request=run.identity.pull_request,
-            head_sha=run.head_sha,
-            app_slug="reviewsensei[bot]",
-            budget=run.caller.budget_view,
-        ),
+        human_inventory_reader=human_reader,
+        native_union_reader=human_reader.native_union_reader(selected),
     )
     if (
         not isinstance(eligibility, ReviewApprovalEligibility)

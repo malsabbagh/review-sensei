@@ -129,6 +129,16 @@ the authenticated durable hold. Missing/unsupported evidence, altered state or
 unconfirmed marker updates withhold approval, including empty complete results,
 rescan, later runs and `verify`.
 
+When quarantine lineage and grouped native publication are also present, the
+canonical envelope order is native union v8, quarantine v7, historical v6, then
+the current eligibility. Each carried view records the same fresh-human flag;
+the effective human gate is that flag or any pending assessment in either view.
+Readers authenticate each source independently. Re-evaluation refreshes both
+views and replaces both visible notices; settling one domain cannot clear the
+other. Session construction, round trips and successors retain historical
+assessments, quarantine lineage and publication staging together.
+
+
 The supported explicit decision retains the existing Worker/Python spelling:
 
 ```

@@ -682,6 +682,7 @@ class _CompletionFixture(_CleanupTailFixture):
         self.completion_fault = None
         self.completion_thread_reads = 0
         self.run_results = {}
+        self.qualified_old_soft_cleanup_successes = set()
         self.run_heads = {}
         self.terminal_write_fault = False
 
@@ -844,6 +845,10 @@ class _CompletionFixture(_CleanupTailFixture):
                 else self.attempt
             )
             result = self.run_results.get((run_id, attempt), 0)
+            if (run_id, attempt) in self.qualified_old_soft_cleanup_successes:
+                # Synthetic Actions metadata for the separately qualified
+                # v0.8.14 executor, not the current CLI's recorded exit status.
+                result = 0
             conclusion = "success" if result == 0 else "failure"
             current = run_id == self.run_id and attempt == self.attempt
             if not current and self.completion_fault in {
@@ -1627,6 +1632,11 @@ os._exit(92)
     def historical_case(
         directory, fixture_type=_CompletionFixture, *, partial_predecessor=False
     ):
+        import json
+
+        from review_sensei_github.publication import approval_eligibility_from_body
+        from review_sensei_github.session_ledger import parse_session_comment
+
         f = fixture_type(directory, mode="refused")
         patch = f.root / "review.patch"
         original = patch.read_text()
@@ -1641,11 +1651,35 @@ os._exit(92)
         if not partial_predecessor:
             patch.write_text(original, encoding="utf-8", newline="\n")
         f.next_run()
-        if f.invoke(human=True) != 0:
+        if f.invoke(human=True) != 1:
             raise AssertionError("original soft cleanup refusal was not exercised")
+        outcome = json.loads((f.root / "publication.json").read_text())
+        if (
+            outcome["status"] != "published_terminal_pending"
+            or outcome["publication_status"] != "published"
+            or outcome["accounting_terminal"] is not False
+            or outcome["terminal_reason"] != "thread_cleanup_unconfirmed"
+        ):
+            raise AssertionError("current CLI did not retain unfinished cleanup")
         patch.write_text(original, encoding="utf-8", newline="\n")
         if f.threads[0]["isResolved"]:
             raise AssertionError("original cleanup refusal did not retain target")
+        predecessor = parse_session_comment(f.comment["body"], identity=IDENTITY)
+        eligibility = approval_eligibility_from_body(f.reviews[-1]["body"])
+        if (
+            predecessor.transaction.phase != "publication_succeeded"
+            or predecessor.api_run_accounting["terminal_transaction"] is not None
+            or eligibility is None
+            or eligibility.native_union is not None
+            or eligibility.quarantine_assessments is not None
+            or eligibility.historical_assessments is not None
+        ):
+            raise AssertionError("historical fixture exceeds the qualified old format")
+        # The historical protocol recognizes v0.8.14's successful soft-cleanup
+        # exit. Current code correctly reports terminal-pending above. Model
+        # the old executor only in external Actions metadata; preserve the
+        # actual current exit, accounting root and native publication bytes.
+        f.qualified_old_soft_cleanup_successes.add((f.run_id, f.attempt))
         # Synthetic external state after a separately authorized confirmation;
         # the historical verifier itself never performs this mutation.
         from review_sensei_github.publication import finding_publication_scope
@@ -2085,7 +2119,7 @@ os._exit(92)
                 self.assertIsNotNone(initial.api_run_accounting["terminal_transaction"])
                 f.next_run()
                 self.assertEqual(
-                    f.invoke(human=True), 1 if mode == "lost-ack" else 0, f.error
+                    f.invoke(human=True), 0 if mode == "confirmed" else 1, f.error
                 )
                 before = parse_session_comment(f.comment["body"], identity=IDENTITY)
                 self.assertEqual(before.transaction.phase, "publication_succeeded")
@@ -2388,7 +2422,12 @@ os._exit(92)
             self.assertIsNone(old.api_run_accounting["terminal_transaction"])
             f.next_run()
             self.assertEqual(f.invoke(human=True), 1)
-            self.assertIn("previous caller run is not terminal", f.error)
+            self.assertIn(
+                "historical executor did not prove successful review exit", f.error
+            )
+            self.assertEqual(
+                parse_session_comment(f.comment["body"], identity=IDENTITY), old
+            )
             self.assertEqual(f.provider_calls, 1)
 
     def test_close_refusal_reports_terminal_pending_for_published_and_skipped(self):

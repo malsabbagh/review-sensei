@@ -163,12 +163,8 @@ class PreparedHumanAssessment:
             )
         normalized = replace(
             self,
-            eligibility=replace(
-                self.eligibility,
-                human_review=replace(inventory, resolved=()),
-                facts=replace(
-                    self.eligibility.facts, has_human_adjudication_findings=True
-                ),
+            eligibility=self.eligibility.with_fresh_human_review(
+                replace(inventory, resolved=())
             ),
         )
         return evidence_digest(
@@ -334,11 +330,7 @@ class HumanAssessmentPublisher:
             inventory,
             resolved=tuple(sorted(item.fingerprint for item in inventory.findings)),
         )
-        maximum = replace(
-            eligibility,
-            human_review=maximum_inventory,
-            facts=replace(eligibility.facts, has_human_adjudication_findings=False),
-        )
+        maximum = eligibility.with_fresh_human_review(maximum_inventory)
         future_body = self._authority_body(
             prepared, maximum_inventory, maximum, evidence_sha256="0" * 64
         )
@@ -1024,14 +1016,7 @@ class HumanAssessmentPublisher:
             raise GitHubConversationError(
                 "human assessment review capability is missing"
             )
-        refreshed = replace(
-            original,
-            human_review=updated_inventory,
-            facts=replace(
-                original.facts,
-                has_human_adjudication_findings=bool(updated_inventory.pending),
-            ),
-        )
+        refreshed = original.with_fresh_human_review(updated_inventory)
         # Receipt scans and local report framing cannot activate decisions.
         # Acquire the complete fresh source/root/PR fence in the pending-page
         # callback immediately before each write or reconciled return instead

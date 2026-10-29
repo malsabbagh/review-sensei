@@ -953,17 +953,26 @@ def _disposition_frame_reserve(
             has_human_adjudication_findings=False,
         ),
     )
-    if eligibility.quarantine_assessments is not None:
-        # This sizing projection resolves fresh findings only. Independent
-        # historical obligations remain in the envelope and combined facts.
-        view = dict(eligibility.quarantine_assessments, fresh_human_pending=False)
-        future = replace(
-            future,
-            quarantine_assessments=view,
-            facts=replace(
-                future.facts, has_human_adjudication_findings=bool(view["pending"])
-            ),
-        )
+    future = replace(
+        future,
+        historical_assessments=(
+            dict(eligibility.historical_assessments, fresh_human_pending=False)
+            if eligibility.historical_assessments is not None
+            else None
+        ),
+        quarantine_assessments=(
+            dict(eligibility.quarantine_assessments, fresh_human_pending=False)
+            if eligibility.quarantine_assessments is not None
+            else None
+        ),
+    )
+    future = replace(
+        future,
+        facts=replace(
+            future.facts,
+            has_human_adjudication_findings=future.carried_assessment_pending,
+        ),
+    )
     identifiers = assign_finding_identifiers(entry.instance for entry in entries)
     # The command accepts at most ten IDs. Use the longest assigned IDs and
     # longest valid actor, without inventing a persisted provenance record.
@@ -1874,6 +1883,8 @@ class ReviewApprovalFinalizer:
         self.human_inventory_reader = human_inventory_reader
         self.human_inventory_reader_factory = human_inventory_reader_factory
         self.prior_publication_reader_factory: Callable[[object], Any] | None = None
+        self.native_union_reader_factory: Callable[[dict[str, Any]], Any] | None = None
+        self.quarantine_reader_factory: Callable[..., Any] | None = None
         self.historical_assessment_reader_factory: Callable[..., Any] | None = None
         # An explicitly supplied metadata credential is independent of the
         # capability used for review/check mutations. Never persist this value.
@@ -1892,6 +1903,39 @@ class ReviewApprovalFinalizer:
         # Installed only on a single command finalization copy. Other
         # publication/conversation entry points acquire no new authority.
         self._thread_cleanup_token_provider: Callable[[], str] | None = None
+
+    def quarantine_reader(self, *, token, repository, pull_request, head_sha):
+        factory = self.quarantine_reader_factory
+        if factory is None:
+            return None
+        from .quarantine_holds import QuarantineHoldReader
+
+        reader = factory(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+        )
+        if type(reader) is not QuarantineHoldReader:
+            raise ReviewInputError("quarantine assessment reader is unsupported")
+        return reader
+
+    def attach_quarantine(
+        self, eligibility, *, token, repository, pull_request, head_sha
+    ):
+        reader = self.quarantine_reader(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+        )
+        if reader is None:
+            if eligibility.quarantine_assessments is not None:
+                raise ReviewInputError(
+                    "quarantine assessment source reader is unavailable"
+                )
+            return eligibility
+        return reader.attach(eligibility, head_sha=head_sha)
 
     def historical_reader(self, *, token, repository, pull_request, head_sha):
         factory = self.historical_assessment_reader_factory
@@ -1918,11 +1962,17 @@ class ReviewApprovalFinalizer:
             pull_request=pull_request,
             head_sha=head_sha,
         )
-        return (
-            eligibility
-            if reader is None
-            else reader.attach(eligibility, head_sha=head_sha)
-        )
+        if reader is None:
+            if eligibility.historical_assessments is not None:
+                raise ReviewInputError(
+                    "historical assessment source reader is unavailable"
+                )
+            return eligibility
+        return reader.attach(eligibility, head_sha=head_sha)
+
+    def attach_carried(self, eligibility, **context):
+        eligibility = self.attach_historical(eligibility, **context)
+        return self.attach_quarantine(eligibility, **context)
 
     @contextmanager
     def _read_operation(self) -> Iterator[None]:
@@ -2108,6 +2158,24 @@ class ReviewApprovalFinalizer:
                 )
             if historical_reader is not None:
                 eligibility = historical_reader.require(eligibility, head_sha=head_sha)
+            quarantine_reader = self.quarantine_reader(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )
+            if (
+                eligibility.quarantine_assessments is not None
+                and quarantine_reader is None
+            ):
+                return known(
+                    PublicationResult(
+                        status="approval_withheld",
+                        diagnostic="quarantine_assessment_unverified",
+                    )
+                )
+            if quarantine_reader is not None:
+                eligibility = quarantine_reader.require(eligibility, head_sha=head_sha)
             # Body-placed blockers stay in the persisted flag. Inline blockers are
             # not settled by that flag: a caller that just published them says they
             # are unresolved, and a later finalizer requires a resolved thread.
@@ -2694,7 +2762,7 @@ class ReviewApprovalFinalizer:
             human = replace(human, resolved=tuple(sorted(resolved)))
             has_human = bool(human.pending)
         else:
-            has_human = eligibility.facts.has_human_adjudication_findings
+            has_human = eligibility.fresh_human_pending
         from review_sensei.disposition import disposition_honors_coverage_uncertainty
 
         effective_incomplete_coverage = incomplete_coverage
@@ -2712,27 +2780,12 @@ class ReviewApprovalFinalizer:
             incomplete_coverage=effective_incomplete_coverage,
             policy_digest=policy_digest,
         )
+        adjusted = eligibility.with_fresh_human_review(human)
         adjusted = replace(
-            eligibility,
-            human_review=human,
-            facts=replace(
-                eligibility.facts,
-                has_blocking_findings=has_blocking,
-                has_human_adjudication_findings=has_human,
-            ),
+            adjusted,
+            facts=replace(adjusted.facts, has_blocking_findings=has_blocking),
         )
-        if adjusted.historical_assessments is not None:
-            fresh = (
-                bool(human.pending)
-                if human is not None
-                else adjusted.historical_assessments["fresh_human_pending"]
-            )
-            adjusted = replace(
-                adjusted,
-                historical_assessments=None,
-                facts=replace(adjusted.facts, has_human_adjudication_findings=fresh),
-            )
-        adjusted = self.attach_historical(
+        adjusted = self.attach_carried(
             adjusted,
             token=token,
             repository=repository,
@@ -2746,12 +2799,17 @@ class ReviewApprovalFinalizer:
                 status="gate_reevaluation_failed",
                 diagnostic="gate_reevaluation_failed",
             )
-        from .historical_assessments import remove_hold_notice
+        from .historical_assessments import (
+            remove_hold_notice as remove_historical_notice,
+        )
+        from .quarantine_holds import remove_hold_notice as remove_quarantine_notice
 
         new_body = (
             body[: marker_match.start()]
             + approval_eligibility_marker(adjusted)
-            + remove_hold_notice(body[marker_match.end() :])
+            + remove_quarantine_notice(
+                remove_historical_notice(body[marker_match.end() :])
+            )
         )
         if finding_ids:
             provenance = override_provenance_marker(
@@ -3771,7 +3829,7 @@ class ReviewApprovalFinalizer:
         with self._read_operation():
             from .checks import ReviewCheckPublisher, review_check_outcome
 
-            eligibility = self.attach_historical(
+            eligibility = self.attach_carried(
                 eligibility,
                 token=token,
                 repository=repository,
@@ -4795,13 +4853,13 @@ class ReviewPublisher:
             authorized_dispositions=authorized_dispositions,
         )
 
-    def _eligibility_with_history(self, result, **kwargs):
+    def _eligibility_with_carried(self, result, **kwargs):
         eligibility = approval_eligibility_from_result(result, **kwargs)
-        context = getattr(self, "_historical_context", None)
+        context = getattr(self, "_carried_context", None)
         return (
             eligibility
             if context is None
-            else self.finalizer.attach_historical(eligibility, **context)
+            else self.finalizer.attach_carried(eligibility, **context)
         )
 
     def _publish_check_state(
@@ -4819,22 +4877,29 @@ class ReviewPublisher:
         not change review publication or approval eligibility.
         """
 
-        context = getattr(self, "_historical_context", None)
+        context = getattr(self, "_carried_context", None)
         if (
             outcome is not None
             and outcome.conclusion == "success"
             and context is not None
         ):
-            reader = self.finalizer.historical_reader(**context)
-            if reader is not None:
-                from review_sensei.historical_assessments import pending_assessments
+            quarantine = self.finalizer.quarantine_reader(**context)
+            historical = self.finalizer.historical_reader(**context)
+            from review_sensei.historical_assessments import pending_assessments
 
-                if pending_assessments(reader.read(head_sha=head_sha)):
-                    outcome = CheckOutcome(
-                        conclusion="action_required",
-                        title="Historical assessment decision required",
-                        summary="An earlier assessment still needs an explicit current authorized decision; it is not a fresh model finding.",
-                    )
+            carried_pending = (
+                quarantine is not None
+                and bool(quarantine.read(head_sha=head_sha).pending)
+            ) or (
+                historical is not None
+                and bool(pending_assessments(historical.read(head_sha=head_sha)))
+            )
+            if carried_pending:
+                outcome = CheckOutcome(
+                    conclusion="action_required",
+                    title="Historical assessment decision required",
+                    summary="Carried historical assessments require exact authorized individual decisions before approval.",
+                )
         if check_token is None:
             return "check_capability_unavailable"
         if outcome is None:
@@ -4965,7 +5030,7 @@ class ReviewPublisher:
             return PublicationResult(
                 status="already_published", diagnostic="approval_withheld"
             )
-        replay_eligibility = persisted or self._eligibility_with_history(
+        replay_eligibility = persisted or self._eligibility_with_carried(
             result,
             head_sha=head_sha,
             base_sha=base_sha,
@@ -5074,7 +5139,7 @@ class ReviewPublisher:
         allow_human_inventory_start: bool = False,
         narrative_archive: Callable[[], ConfirmedNarrativeArchive] | None = None,
     ) -> PublicationResult:
-        self._historical_context = dict(
+        self._carried_context = dict(
             token=token,
             repository=repository,
             pull_request=pull_request,
@@ -5344,7 +5409,7 @@ class ReviewPublisher:
             qualification = "qualified"
         # Validate the complete inventory before checks or review mutations.
         # Failure must not publish an unreassessable human-review record.
-        prospective_eligibility = self._eligibility_with_history(
+        prospective_eligibility = self._eligibility_with_carried(
             result,
             head_sha=head_sha,
             base_sha=base_sha,
@@ -6031,7 +6096,7 @@ class ReviewPublisher:
             and check_capability_failure is not None
         ):
             check_diagnostic = check_capability_failure.code
-        eligibility = self._eligibility_with_history(
+        eligibility = self._eligibility_with_carried(
             result,
             head_sha=head_sha,
             base_sha=base_sha,

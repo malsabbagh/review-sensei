@@ -150,13 +150,19 @@ def execute_command(run: ReviewRun, args: Any) -> int:
     source = authority.document["source"]
     actor = authority.document["actor"]
     from .historical_assessment_action import parse_historical_command
+    from .quarantine_action import parse_quarantine_command
 
     historical = parse_historical_command(args.comment_body)
-    command = historical or parse_maintainer_command(
-        args.comment_body,
-        actor=actor["login"],
-        head_sha=run.head_sha,
-        command_id=str(source["id"]),
+    quarantine = parse_quarantine_command(args.comment_body)
+    command = (
+        historical
+        or quarantine
+        or parse_maintainer_command(
+            args.comment_body,
+            actor=actor["login"],
+            head_sha=run.head_sha,
+            command_id=str(source["id"]),
+        )
     )
     if command is None:
         raise ReviewInputError("authenticated source is not a supported command")
@@ -205,6 +211,21 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             repository=run.identity.repository,
             actor=actor["login"],
         )
+    quarantine_refusal = None
+    if quarantine is not None:
+        from .quarantine_action import (
+            QuarantineTargetRefusal,
+            decision_authority,
+            prepare_quarantine_target,
+        )
+
+        try:
+            quarantine_target = prepare_quarantine_target(
+                run, authority, quarantine, app, permission
+            )
+            run.ledger.business_guard = lambda: decision_authority(run, authority)
+        except QuarantineTargetRefusal as error:
+            quarantine_refusal = str(error)
     historical_refusal = None
     if historical is not None:
         from .historical_assessment_action import (
@@ -230,7 +251,22 @@ def execute_command(run: ReviewRun, args: Any) -> int:
         and run.plan.policy.reviews == "advisory"
     ):
         explicit_mode = "advisory"
-    if historical_refusal is not None:
+    if quarantine_refusal is not None:
+        from review_sensei.disposition import MaintainerCommandResult
+
+        result = MaintainerCommandResult(
+            action=command.action,
+            applied=False,
+            operator_paused=run.ledger.load(run.identity).record.operator_paused,
+            summary="Carried historical assessment refused: " + quarantine_refusal,
+        )
+    elif quarantine is not None:
+        from .quarantine_action import apply_quarantine_target
+
+        result = apply_quarantine_target(
+            run, authority, quarantine, quarantine_target, app
+        )
+    elif historical_refusal is not None:
         from review_sensei.disposition import MaintainerCommandResult
 
         result = MaintainerCommandResult(
@@ -328,8 +364,10 @@ def run_action(argv: Sequence[str], *, purpose: str) -> int:
         raise ReviewInputError("current Actions routes require their native run ledger")
     if purpose == "command":
         from .historical_assessment_action import parse_historical_command
+        from .quarantine_action import parse_quarantine_command
 
         parse_historical_command(args.comment_body)
+        parse_quarantine_command(args.comment_body)
     source = event_source(args, purpose=purpose)
     args.provider = getattr(args, "provider", None)
     args.model = getattr(args, "model", None)

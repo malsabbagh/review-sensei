@@ -361,7 +361,18 @@ class GitHubApplication:
         self.replier = replier
         self.session_ledger = session_ledger
         self.enable_disposition_snapshot_writes = enable_disposition_snapshot_writes
+        self._quarantine_hold_readers: dict[tuple[str, int], Any] = {}
+        self._human_inventory_readers: dict[tuple, Any] = {}
         self._historical_assessment_readers: dict[tuple[str, int], Any] = {}
+        if getattr(
+            getattr(session_ledger, "caller", None),
+            "_has_quarantine_assessments",
+            False,
+        ):
+            for publisher in (reviewer, replier):
+                publisher.finalizer.quarantine_reader_factory = (
+                    self._quarantine_hold_reader
+                )
         if getattr(
             getattr(session_ledger, "caller", None),
             "_has_historical_assessments",
@@ -378,6 +389,18 @@ class GitHubApplication:
                 publisher.finalizer.human_inventory_reader_factory = (
                     self._human_inventory_reader
                 )
+
+    def _quarantine_hold_reader(self, *, token, repository, pull_request, head_sha):
+        from .quarantine_holds import QuarantineHoldReader
+
+        key = repository, pull_request
+        if key not in self._quarantine_hold_readers:
+            self._quarantine_hold_readers[key] = QuarantineHoldReader(
+                ledger=self.session_ledger,
+                repository=repository,
+                pull_request=pull_request,
+            )
+        return self._quarantine_hold_readers[key]
 
     def _historical_assessment_reader(
         self, *, token, repository, pull_request, head_sha
@@ -3781,15 +3804,8 @@ class GitHubApplication:
                         updated_inventory = work_assessment.inventory.apply(
                             assessment.decisions
                         )
-                        retained = replace(
-                            human.eligibility,
-                            human_review=updated_inventory,
-                            facts=replace(
-                                human.eligibility.facts,
-                                has_human_adjudication_findings=bool(
-                                    updated_inventory.pending
-                                ),
-                            ),
+                        retained = human.eligibility.with_fresh_human_review(
+                            updated_inventory
                         )
 
                         def source_guard() -> bool:

@@ -573,6 +573,53 @@ class DefaultHumanInventoryStoreTests(unittest.TestCase):
             self.store.read(reference)
         self.assertEqual(len(self.http.requests), calls)
 
+    def test_selected_transaction_stays_bound_to_the_inventory_context(self):
+        self.assertEqual(
+            self.context.selected_transaction,
+            self.ledger.load(IDENTITY).record.transaction,
+        )
+        for changes in (
+            {"head_sha": "c" * 40},
+            {"policy_digest": "0" * 64},
+            {"original_content_digest": "0" * 64},
+            {"selected_transaction": object()},
+        ):
+            with (
+                self.subTest(changes=changes),
+                self.assertRaisesRegex(
+                    ReviewInputError, "selected transaction conflicts"
+                ),
+            ):
+                replace(self.context, **changes)
+
+    def test_context_construction_authenticates_durable_publication_phase(self):
+        self.ledger.replace(
+            IDENTITY,
+            lambda record: record.evolve(
+                transaction=replace(record.transaction, phase="publication_suppressed")
+            ),
+        )
+        self.http.requests.clear()
+        with self.assertRaisesRegex(ReviewInputError, "durable authority conflicts"):
+            build_human_inventory_context(
+                http=self.http,
+                token="synthetic",
+                ledger=self.ledger,
+                identity=IDENTITY,
+                base_sha=BASE,
+                head_sha=HEAD,
+                app_slug=APP,
+                publication_digest=PUBLICATION,
+                policy_digest=self.context.policy_digest,
+                configuration_digest=self.context.configuration_digest,
+                evidence_digest=self.context.evidence_digest,
+                budget=self.budget,
+            )
+        self.assertEqual(
+            [(method, path) for method, path, *_ in self.http.requests],
+            [("GET", "/users/sensei%5Bbot%5D")],
+        )
+
     def test_child_transport_errors_do_not_expose_credentials(self):
         with patch.object(
             self.http, "request", side_effect=RuntimeError("synthetic-secret")

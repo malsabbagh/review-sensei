@@ -145,6 +145,49 @@ class GitHubApplicationTests(unittest.TestCase):
             replier=self.replier,
         )
 
+    def test_both_carried_assessment_sources_are_wired_independently(self):
+        from review_sensei_github.conversation import ConversationPublisher
+        from review_sensei_github.historical_assessments import (
+            HistoricalAssessmentReader,
+        )
+        from review_sensei_github.http import GitHubHttp
+        from review_sensei_github.publication import ReviewPublisher
+        from review_sensei_github.quarantine_holds import QuarantineHoldReader
+
+        http = GitHubHttp()
+        ledger = SimpleNamespace(
+            caller=SimpleNamespace(
+                _has_quarantine_assessments=True,
+                _has_historical_assessments=True,
+            )
+        )
+        reviewer = ReviewPublisher(http=http)
+        replier = ConversationPublisher(http=http)
+        application = GitHubApplication(
+            broker=self.broker,
+            http=http,
+            reviewer=reviewer,
+            learner=self.learner,
+            replier=replier,
+            session_ledger=ledger,
+        )
+        scope = dict(
+            token="synthetic",
+            repository="owner/repo",
+            pull_request=7,
+            head_sha="a" * 40,
+        )
+        quarantine = reviewer.finalizer.quarantine_reader(**scope)
+        historical = reviewer.finalizer.historical_reader(**scope)
+        self.assertIsInstance(quarantine, QuarantineHoldReader)
+        self.assertIsInstance(historical, HistoricalAssessmentReader)
+        self.assertIsNot(quarantine, historical)
+        self.assertIs(quarantine.ledger, ledger)
+        self.assertIs(historical.ledger, ledger)
+        self.assertIs(replier.finalizer.quarantine_reader(**scope), quarantine)
+        self.assertIs(replier.finalizer.historical_reader(**scope), historical)
+        self.assertEqual(application._human_inventory_readers, {})
+
     def test_gate_reevaluation_failure_is_an_evaluation_failure(self):
         from review_sensei.disposition import MaintainerCommandResult
 
