@@ -133,10 +133,21 @@ def is_readonly_census(request, api_url):
         PART_MIDDLE_QUERY,
         PART_OLD_QUERY,
         PART_ROOTS_QUERY,
+        ROOT_ID_QUERIES,
+        ROOT_IDS_FORWARD_QUERY,
+        ROOT_IDS_QUERY,
         ROOT_OPEN_QUERY,
         source_query_variables,
     )
 
+    if value["query"] in {*ROOT_ID_QUERIES, ROOT_IDS_QUERY, ROOT_IDS_FORWARD_QUERY}:
+        operation = value["query"].partition("(")[0].removeprefix("query ").strip()
+        return (
+            set(value)
+            in ({"query", "variables"}, {"query", "variables", "operationName"})
+            and value.get("operationName", operation) == operation
+            and source_query_variables(value["query"], value.get("variables"))
+        )
     operation = {
         OPEN_QUERY: "NativePublicationOpening",
         OLD_QUERY: "NativeExistingRoots",

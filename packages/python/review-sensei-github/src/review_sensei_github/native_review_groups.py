@@ -361,6 +361,7 @@ class NativeGroupEvidence:
     content_sha256: str
     instances: tuple[str, ...]
     updated_at: tuple[str, ...]
+    root_rows: tuple[dict[str, Any], ...] = ()
 
     @property
     def receipt_digest(self) -> str:
@@ -515,6 +516,7 @@ def verify_complete_group_response(
         plan.part_digest(ordinal),
         tuple(instances),
         tuple(updated_at),
+        tuple(json.loads(canonical_bytes(node)) for node in nodes),
     )
 
 
@@ -580,7 +582,13 @@ def full_inline_envelope() -> dict[str, int]:
     # Sorted round-robin groups differ from the average by at most7/8 of the
     # largest item: the sum of every full block is paid exactly once in B.
     packet = (total + 7 * largest + 7) // 8 + PART_RESPONSE_FRAMING_BYTES
+    from .native_review_census import root_id_schedule_certificate
+
+    root_id_certificate = root_id_schedule_certificate(
+        total, largest, source_bytes=_MAX_RESULT_BYTES, findings=count
+    )
     return {
+        **root_id_certificate,
         "accepted_source_bytes": _MAX_RESULT_BYTES,
         "findings": count,
         "fixed_inline_bytes": fixed,

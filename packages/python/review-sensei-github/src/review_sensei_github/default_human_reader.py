@@ -165,6 +165,9 @@ class DefaultHumanInventoryReader:
         self.document: dict[str, object] | None = None
         self.reference: HumanInventoryReference | None = None
         self.inventory: PendingHumanReview | None = None
+        self._native_root_read: tuple[bytes, Any] | None = None
+        self._native_root_frontier: tuple[Any, ...] | None = None
+        self._native_root_read_budget: EvidenceReadBudget | None = None
 
     def attach_authenticated_store(self, store: HumanInventoryStore) -> bool:
         """Accept only the original same-operation store's complete admission."""
@@ -327,6 +330,12 @@ class DefaultHumanInventoryReader:
 
         def read(receipt):
             store = self.store or self._admitted_store or self._cold_store()
+            original_budget = self.budget
+            self._native_root_frontier = None
+            self._native_root_read = None
+            self._native_root_read_budget = None
+            if store.context.budget is not original_budget:
+                raise ReviewInputError("native root consumer original budget changed")
             from .publication_recovery import _publication_transport
 
             guard = getattr(
@@ -336,11 +345,51 @@ class DefaultHumanInventoryReader:
             evidence = NativePublicationReader.for_review(
                 store, review, old_root_nodes=targets
             )(receipt)
+            if (
+                self.budget is not original_budget
+                or store.context.budget is not original_budget
+            ):
+                raise ReviewInputError("native root consumer original budget changed")
             self.store = store
             self._native_root_read = (canonical_bytes(review), evidence)
+            self._native_root_read_budget = original_budget
+            from .caller_operation import caller_for_http
+
+            caller = caller_for_http(store.http)
+            self._native_root_frontier = (
+                caller,
+                None if caller is None else caller._block,
+                None if caller is None else caller._root,
+                None if caller is None else caller._active_operation,
+                None if caller is None else len(caller.observations),
+                evidence,
+            )
             return evidence
 
         return read
+
+    def native_thread_nodes(self):
+        from .native_review_census import refresh_native_thread_nodes
+
+        value = getattr(self, "_native_root_read", None)
+        if value is None:
+            return None
+        if (
+            self.store is None
+            or self._native_root_read_budget is not self.budget
+            or self.store.context.budget is not self._native_root_read_budget
+        ):
+            raise ReviewInputError("native root consumer original budget changed")
+        self.budget.check()
+        _, evidence = value
+        return refresh_native_thread_nodes(
+            self.store.http,
+            token=self.store.token,
+            repository=self.repository,
+            evidence=evidence,
+            app_slug=self.app_slug,
+            producer_id=self.store.context.producer_id,
+        )
 
     def confirmed_native_root(self, eligibility):
         """Expected main bytes from a complete proof, never a mutation grant."""
@@ -349,6 +398,12 @@ class DefaultHumanInventoryReader:
         value = getattr(self, "_native_root_read", None)
         if value is None or self.store is None or eligibility.native_union is None:
             return None
+        if (
+            self._native_root_read_budget is not self.budget
+            or self.store.context.budget is not self._native_root_read_budget
+        ):
+            raise ReviewInputError("native root consumer original budget changed")
+        self.budget.check()
         raw, evidence = value
         if (
             evidence.document_sha256
@@ -389,13 +444,53 @@ class DefaultHumanInventoryReader:
     def _original_review(
         self, review: object, reviews: list[Any]
     ) -> tuple[FindingIndex, dict[str, Any], Any]:
+        # Every validation attempt consumes this one-use handoff, including
+        # ownership, proof or root-fence failures and the ordinary fallback.
+        frontier = self._native_root_frontier
+        self._native_root_frontier = None
         if self.store is None or self.document is None or self.inventory is None:
             raise ReviewInputError("default human inventory was not authenticated")
-        self.store.revalidate_snapshot()
         if not isinstance(review, dict) or not self._owned_review(review):
             raise ReviewInputError("default human inventory root ownership conflicts")
         context = self.store.context
         inventory = self.inventory
+        native_reader = self.native_union_reader(review)
+        cached_native = getattr(self, "_native_root_read", None)
+        from .caller_operation import caller_for_http
+
+        caller = caller_for_http(self.store.http)
+        adjacent = (
+            caller is not None
+            and cached_native is not None
+            and cached_native[0] == canonical_bytes(review)
+            and self._native_root_read_budget is self.budget
+            and context.budget is self._native_root_read_budget
+            and frontier is not None
+            and len(frontier) == 6
+            and frontier[0] is caller
+            and frontier[1] == caller._block
+            and frontier[2] is caller._root
+            and frontier[3] is caller._active_operation
+            and frontier[4] == len(caller.observations)
+            and frontier[5] is cached_native[1]
+        )
+        if adjacent:
+            assert cached_native is not None
+            from .native_review_census import require_native_root_evidence
+
+            # The decoder just completed this exact source/admission/native
+            # proof and its owned root/head closing. No HTTP call, root change
+            # or operation switch intervened. Consume that positive frontier
+            # once for this local envelope check; never restart its ten reads.
+            require_native_root_evidence(
+                self.store.http, token=self.store.token, evidence=cached_native[1]
+            )
+            self.store.transaction_after_read()
+
+            def native_reader(_receipt):
+                return cached_native[1]
+        else:
+            self.store.revalidate_snapshot()
         # The selected root must name this authenticated publication, not merely
         # carry a valid reference to its parts. Decode locally against the
         # already authenticated inventory; never recurse through the reader or
@@ -403,7 +498,7 @@ class DefaultHumanInventoryReader:
         eligibility = approval_eligibility_from_body(
             review["body"],
             human_inventory_reader=lambda _reference: inventory,
-            native_union_reader=self.native_union_reader(review),
+            native_union_reader=native_reader,
         )
         if (
             eligibility is None
