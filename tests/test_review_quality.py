@@ -75,7 +75,9 @@ class ReviewQualityConfigurationTests(unittest.TestCase):
                 "schema: 1\nreview:\n  quality: high-signal\n"
             )
             (root / "diff.patch").write_text(
-                "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1,2 @@\n keep\n+change\n"
+                "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1,2 @@\n keep\n+change\n",
+                encoding="utf-8",
+                newline="\n",
             )
             (root / "response.json").write_text(
                 json.dumps({"summary": "ok", "comments": []})
