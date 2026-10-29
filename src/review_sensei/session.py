@@ -4894,6 +4894,7 @@ class LocalSessionLedger:
             cached is not None
             # Windows Python 3.11 exposes creation time as st_ctime. It cannot
             # authenticate a cache hit after a same-size edit restoring mtime.
+            and os.name != "nt"
             and sys.platform != "win32"
             and self._activation_ticket is None
             and not self._tail_preparing
@@ -4919,7 +4920,21 @@ class LocalSessionLedger:
             # authenticate the current inode through the ordinary cold path.
             del self._part_documents[key]
         self._dispatch_evidence(f"part:{storage_id}:resolve")
-        path = self._part_directory(identity, storage_id=storage_id) / storage_id
+        # The opt-in snapshot batch combines resolution and containment in
+        # _part_directory's one bounded filesystem inspection. Ordinary reads
+        # and sealed tails retain their existing three dispatches and liability.
+        path = (
+            self._part_directory(
+                identity,
+                storage_id=storage_id,
+                inspection_charged=(
+                    self.enable_disposition_snapshot_writes
+                    and self._activation_ticket is None
+                    and not self._tail_preparing
+                ),
+            )
+            / storage_id
+        )
         self._dispatch_evidence(f"part:{storage_id}:read")
         if path.is_symlink():
             raise ReviewInputError("local partition must not be a symlink")
@@ -4937,7 +4952,7 @@ class LocalSessionLedger:
             # on Windows: every read still authenticates the complete bytes.
             same_file = (
                 after[:-1] == current[:-1]
-                if sys.platform == "win32"
+                if os.name == "nt" or sys.platform == "win32"
                 else after == current
             )
             if (
@@ -5154,9 +5169,11 @@ class LocalSessionLedger:
         # Local replace independently revalidates the graph before activation.
         # Include that traversal plus its root control work, with cold Windows
         # reads; the existing minimum also reserves other bounded root work.
+        cold_read_calls = 3 if self._tail_preparing else 2
         activation_reads = sum(
-            3
-            if sys.platform == "win32"
+            cold_read_calls
+            if os.name == "nt"
+            or sys.platform == "win32"
             or self._tail_preparing
             or (
                 (identity, part_id) not in self._part_documents
@@ -5166,7 +5183,9 @@ class LocalSessionLedger:
             for part_id in activation_ids
         )
         tail_calls = max(16, activation_reads + 6)
-        self.evidence_budget.preflight(len(missing) + 3 * read_parts + tail_calls)
+        self.evidence_budget.preflight(
+            len(missing) + cold_read_calls * read_parts + tail_calls
+        )
         for part in prepared.parts.values():
             self._write_evidence_part(directory, sizes, part)
         document = self.read_evidence(
