@@ -32,19 +32,29 @@ def validate_provenance(value, contract):
     """Review authenticates installed readbacks; hashes only bind their identity."""
     from .quarantine_published_tail import execution_manifest_digest
 
+    fields = {
+        "schema_version",
+        "contract",
+        "executor_sha",
+        "execution_manifest_sha256",
+        "broker",
+        "exposure",
+        "prewrite_refusals",
+    }
+    projected = (
+        isinstance(value, dict)
+        and value.get("schema_version") == "quarantine-published-tail-provenance-v2"
+    )
+    if projected:
+        fields.add("reader_projection")
     if (
         not isinstance(value, dict)
-        or set(value)
-        != {
-            "schema_version",
-            "contract",
-            "executor_sha",
-            "execution_manifest_sha256",
-            "broker",
-            "exposure",
-            "prewrite_refusals",
+        or set(value) != fields
+        or value["schema_version"]
+        not in {
+            "quarantine-published-tail-provenance-v1",
+            "quarantine-published-tail-provenance-v2",
         }
-        or value["schema_version"] != "quarantine-published-tail-provenance-v1"
         or value["contract"] != contract["schema_version"]
         or value["executor_sha"] != contract["executor_sha"]
         or value["execution_manifest_sha256"] != execution_manifest_digest(contract)
@@ -145,6 +155,15 @@ def validate_provenance(value, contract):
             )
         ):
             raise ReviewInputError("published-tail surface exposure bound is invalid")
+    if projected:
+        from .native_reader_projection import validate_reader_projection
+
+        validate_reader_projection(
+            value["reader_projection"],
+            contract,
+            source_contract_sha256=exposure["source_contract_sha256"],
+            surface_exposure=exposure["surfaces"],
+        )
     refusals = value["prewrite_refusals"]
     if not isinstance(refusals, list) or len(refusals) > 8:
         raise ReviewInputError("published-tail pre-write refusal census is unsupported")

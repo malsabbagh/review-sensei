@@ -89,6 +89,45 @@ def is_readonly_census(request, api_url):
         return False
     if value["query"] == QUERY:
         return set(value) == {"query", "variables"} and _variables(value["variables"])
+    from .native_review_groups import PART_QUERY
+
+    if value["query"] == PART_QUERY:
+        variables = value.get("variables")
+        return (
+            set(value)
+            in ({"query", "variables"}, {"query", "variables", "operationName"})
+            and value.get("operationName", "NativeReviewPart") == "NativeReviewPart"
+            and isinstance(variables, dict)
+            and set(variables) == {"id"}
+            and _cursor(variables["id"])
+        )
+    from .native_review_census import (
+        CLOSE_MIDDLE_QUERY,
+        CLOSE_QUERY,
+        MIDDLE_QUERY,
+        OPEN_QUERY,
+        PART_MIDDLE_QUERY,
+        PART_ROOTS_QUERY,
+        ROOT_OPEN_QUERY,
+        source_query_variables,
+    )
+
+    operation = {
+        OPEN_QUERY: "NativePublicationOpening",
+        ROOT_OPEN_QUERY: "NativeRootOpening",
+        PART_ROOTS_QUERY: "NativeReviewPartWithOpening",
+        MIDDLE_QUERY: "NativePublicationMiddle",
+        PART_MIDDLE_QUERY: "NativeReviewPartWithMiddle",
+        CLOSE_QUERY: "NativePublicationClosing",
+        CLOSE_MIDDLE_QUERY: "NativePublicationClosingWithMiddle",
+    }.get(value["query"])
+    if operation is not None:
+        return (
+            set(value)
+            in ({"query", "variables"}, {"query", "variables", "operationName"})
+            and value.get("operationName", operation) == operation
+            and source_query_variables(value["query"], value.get("variables"))
+        )
     # Existing authority/suppression/cleanup readers use these exact immutable
     # query texts. POST is their transport, not a native mutation. The same
     # closed variables and endpoint/byte checks still apply; mutations and

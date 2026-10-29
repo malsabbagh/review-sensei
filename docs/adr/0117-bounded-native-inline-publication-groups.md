@@ -23,7 +23,7 @@ staging protocol. It does not enable the separate body-prose partition writer.
 
 Prepare an immutable source/result/transaction-bound deterministic plan retaining
 every full inline explanation, location, original instance and command guidance.
-Select at most 8 groups with at most 100 roots per group, using sorted round-robin
+Select at most 8 groups with at most 32 roots per group, using sorted round-robin
 encoded cost. Each group is a COMMENT review with a bounded versioned part frame
 and complete maintainer guidance. Part frames contain no eligibility marker.
 
@@ -41,6 +41,13 @@ head/base/ownership/root-membership fence. Existing single-review formats keep
 their original replay readers. An older or unaware reader must withhold approval
 instead of interpreting an optional manifest as complete publication.
 
+Keep numeric review IDs and receipt hashes in the 4-KiB session frontier.
+Resolve opaque part node IDs freshly in the opening review metadata census,
+separately from root metadata. Reserve their full encoded width in that census;
+do not derive opaque IDs from an undocumented global-ID encoding. Root opening
+and middle metadata share the two smallest complete body packets. Closing uses
+complete numeric review membership and the fresh root/main-body projections.
+
 Use purpose-specific native projections. Complete group reads select full body,
 path, original/current line and commit, numeric comment/parent-review identity,
 numeric Bot identity, reply parent and update metadata. Omit unbounded diff hunks
@@ -49,6 +56,12 @@ certify old fixed review heads, root/thread/review associations, exact execution
 union and mutation targets; fresh native association and ceased-census checks
 remain mandatory. Head mismatch alone cannot authorize narrowing. Conversation
 and legacy report-conflict readers retain full old reply liability and bodies.
+
+Distinguish explicit review/check heads from API-selected reply-associated review
+heads. The complete review allocation reserve must include possible implicit
+review objects from native replies. An observed human reply is not qualification
+of the historical hosted REST endpoint; its count, encoded bytes and server-side
+head selection require independent source/API evidence before registration.
 
 One shared native walk counter includes opening metadata, complete body packets,
 middle occupancy metadata when needed and fresh closing metadata. The original
