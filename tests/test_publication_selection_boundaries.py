@@ -267,3 +267,39 @@ class InactivePublicationBoundaryTests(unittest.TestCase):
         for invalid in (False, 1, {}, object()):
             with self.subTest(verdict=invalid), self.assertRaises(ReviewInputError):
                 replace(result, review_verdict=invalid)
+
+    def test_malformed_results_reject_before_publication_effects(self):
+        from review_sensei_github.errors import GitHubPublicationError
+
+        for invalid in (None, {}, object()):
+            http, host = Mock(), Mock()
+            publisher = ReviewPublisher(http=http)
+            with (
+                self.subTest(result=invalid),
+                self.assertRaises(GitHubPublicationError),
+            ):
+                publisher.publish(
+                    token="synthetic",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha="a" * 40,
+                    base_branch="main",
+                    base_sha="b" * 40,
+                    result=invalid,
+                    diff="",
+                    app_slug="app[bot]",
+                )
+            with self.assertRaises(ReviewInputError):
+                publish_partitioned(
+                    publisher,
+                    token="synthetic",
+                    host=host,
+                    result=invalid,
+                    diff="",
+                    configuration_context={},
+                    convergence_policy=self.fixture.policy,
+                    app_slug="app[bot]",
+                )
+            self.assertEqual(http.mock_calls, [])
+            self.assertEqual(host.mock_calls, [])

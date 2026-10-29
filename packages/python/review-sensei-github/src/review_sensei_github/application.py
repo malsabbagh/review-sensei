@@ -529,6 +529,8 @@ class GitHubApplication:
         broker = self.broker
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
+        if not isinstance(result, ReviewResult):
+            raise ReviewInputError("review publication requires a validated result")
         if result.publication_selection is not None:
             raise ReviewInputError(
                 "publication selection is inactive; native revision protocol required"
