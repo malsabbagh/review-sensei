@@ -134,9 +134,15 @@ jobs:
       - name: Validate versioned public schemas
         run: python scripts/validate_public_schemas.py
       - name: Fetch immutable legacy reader source
-        run: git fetch --no-tags --depth=1 origin 5a121dfe39fb978c7d71def0d08dc570aad83f1d
+        run: |
+          for commit in 5a121dfe39fb978c7d71def0d08dc570aad83f1d 70305207647c22595660e5ebb9e4a33991489ffe 647a2db3a17e0e01e7c3017e5cecde9cc7a1ec10 39764935c7e1a66012833b51bc152d67700b1b8c ba89418d21898d14e6d1e535a5409c47c7cff3b2; do
+            git fetch --no-tags --depth=1 origin "$commit"
+          done
       - name: Verify legacy and current reader compatibility
-        run: python scripts/check_review_reader_compatibility.py
+        run: |
+          python -B scripts/check_review_reader_compatibility.py
+          python -B scripts/check_partition_reader_compatibility.py
+          python -B scripts/check_eligibility_v4_reader_compatibility.py
       - name: Validate evaluation corpus
         run: python scripts/validate_evaluation_corpus.py
       - name: Validate site manifest

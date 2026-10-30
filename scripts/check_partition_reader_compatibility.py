@@ -4,28 +4,86 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
 import tempfile
 from pathlib import Path
+from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[1]
+QUEUE_READER = "ba89418d21898d14e6d1e535a5409c47c7cff3b2"
 READERS = (
     "5a121dfe39fb978c7d71def0d08dc570aad83f1d",  # published v0.6.16
     "70305207647c22595660e5ebb9e4a33991489ffe",  # pre-partition main
 )
 
 
+def assert_archived_origins(source: Path, *modules: ModuleType) -> None:
+    """Refuse current or installed implementation leakage before assertions."""
+    source = source.resolve()
+    for module in modules:
+        origin = module.__file__
+        if origin is None or not Path(origin).resolve().is_relative_to(source):
+            raise RuntimeError(
+                "historical reader implementation is outside archived source"
+            )
+
+
+def pinned_sources_available() -> bool:
+    for commit in (*READERS, QUEUE_READER):
+        try:
+            result = subprocess.run(
+                ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+                cwd=ROOT,
+                env=dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_NO_REPLACE_OBJECTS="1"),
+                capture_output=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is None or result.returncode != 0:
+            print(
+                f"historical reader check: pinned source {commit} is unavailable locally; fetch the exact object first",
+                file=sys.stderr,
+            )
+            return False
+    return True
+
+
+def archive_source(commit: str) -> bytes | None:
+    try:
+        return subprocess.run(
+            ["git", "archive", "--format=tar", commit, "src"],
+            cwd=ROOT,
+            env=dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_NO_REPLACE_OBJECTS="1"),
+            check=True,
+            capture_output=True,
+            timeout=30,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        print(
+            f"historical reader check: pinned source {commit} is unavailable locally; fetch the exact object first",
+            file=sys.stderr,
+        )
+        return None
+
+
 def worker(source: Path, fixture_path: Path) -> None:
     sys.path.insert(0, str(source))
-    from review_sensei_github import GitHubHttp
-    from review_sensei_github.session_ledger import (
+    import review_sensei.hosting.github.http as http_module
+    import review_sensei.hosting.github.session_ledger as hosted_module
+    from review_sensei.hosting.github.http import GitHubHttp
+    from review_sensei.hosting.github.session_ledger import (
         GitHubIssueCommentSessionLedger,
     )
 
+    import review_sensei.session as core_module
     from review_sensei.errors import ReviewInputError
     from review_sensei.session import LocalSessionLedger, SessionIdentity
+
+    assert_archived_origins(source, core_module, http_module, hosted_module)
 
     payload = json.loads(fixture_path.read_text())
     identity = SessionIdentity(**payload["identity"])
@@ -74,7 +132,7 @@ def worker(source: Path, fixture_path: Path) -> None:
                 "historical local reader initialized over unreadable authority"
             )
     print(
-        f"PASS immutable reader {source.parent.name}: partition latest authority withholds"
+        f"PASS verified archived source {source.resolve()}: immutable reader {source.parent.name}: partition latest authority withholds"
     )
 
 
@@ -82,13 +140,26 @@ def main() -> int:
     if len(sys.argv) == 4 and sys.argv[1] == "--worker":
         worker(Path(sys.argv[2]), Path(sys.argv[3]))
         return 0
-    sys.path[:0] = [str(ROOT / "src"), str(ROOT)]
+    if not pinned_sources_available():
+        return 1
+    sys.path[:0] = [
+        str(ROOT / "src"),
+        str(ROOT / "packages/python/review-sensei-github/src"),
+        str(ROOT),
+    ]
+    import review_sensei_github.publication as current_hosted
     from review_sensei_github.session_ledger import render_session_comment
 
+    import review_sensei.models as current_core
     from review_sensei.session import LocalSessionLedger, SessionRecord
     from tests import test_review_transaction as fixture
     from tests.test_assessment_queue_storage import activate
     from tests.test_authenticated_partitions import checkpoint
+
+    assert_archived_origins(ROOT / "src", current_core)
+    assert_archived_origins(
+        ROOT / "packages/python/review-sensei-github/src", current_hosted
+    )
 
     with tempfile.TemporaryDirectory(prefix="lane-a-readers-") as temporary:
         directory = Path(temporary)
@@ -145,13 +216,10 @@ def main() -> int:
         )
         queue_path = directory / "queue-fixture.json"
         queue_path.write_text(json.dumps(queue_fixture))
-        for commit in (*READERS, "ba89418d21898d14e6d1e535a5409c47c7cff3b2"):
-            archive = subprocess.run(
-                ["git", "archive", "--format=tar", commit, "src"],
-                cwd=ROOT,
-                check=True,
-                capture_output=True,
-            ).stdout
+        for commit in (*READERS, QUEUE_READER):
+            archive = archive_source(commit)
+            if archive is None:
+                return 1
             target = directory / commit
             with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
                 for member in tree.getmembers():
@@ -179,6 +247,7 @@ def main() -> int:
                     [
                         sys.executable,
                         "-I",
+                        "-B",
                         str(Path(__file__).resolve()),
                         "--worker",
                         str(target / "src"),

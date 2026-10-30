@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
 import tempfile
 from pathlib import Path
+from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[1]
 READERS = (
@@ -19,11 +21,67 @@ READERS = (
 )
 
 
+def assert_archived_origins(source: Path, *modules: ModuleType) -> None:
+    """Refuse current or installed implementation leakage before assertions."""
+    source = source.resolve()
+    for module in modules:
+        origin = module.__file__
+        if origin is None or not Path(origin).resolve().is_relative_to(source):
+            raise RuntimeError(
+                "historical reader implementation is outside archived source"
+            )
+
+
+def pinned_sources_available() -> bool:
+    for commit in READERS:
+        try:
+            result = subprocess.run(
+                ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+                cwd=ROOT,
+                env=dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_NO_REPLACE_OBJECTS="1"),
+                capture_output=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is None or result.returncode != 0:
+            print(
+                f"historical reader check: pinned source {commit} is unavailable locally; fetch the exact object first",
+                file=sys.stderr,
+            )
+            return False
+    return True
+
+
+def archive_source(commit: str) -> bytes | None:
+    try:
+        return subprocess.run(
+            ["git", "archive", "--format=tar", commit, "src"],
+            cwd=ROOT,
+            env=dict(os.environ, GIT_NO_LAZY_FETCH="1", GIT_NO_REPLACE_OBJECTS="1"),
+            check=True,
+            capture_output=True,
+            timeout=30,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        print(
+            f"historical reader check: pinned source {commit} is unavailable locally; fetch the exact object first",
+            file=sys.stderr,
+        )
+        return None
+
+
 def worker(source: Path, fixture: Path) -> None:
     sys.path.insert(0, str(source))
-    from review_sensei_github.errors import GitHubPublicationError
-    from review_sensei_github.http import GitHubHttp
-    from review_sensei_github.publication import ReviewApprovalFinalizer
+    import review_sensei.hosting.github.http as http_module
+    import review_sensei.hosting.github.publication as hosted_module
+    from review_sensei.hosting.github.errors import GitHubPublicationError
+    from review_sensei.hosting.github.http import GitHubHttp
+    from review_sensei.hosting.github.publication import ReviewApprovalFinalizer
+
+    import review_sensei.models as core_module
+
+    assert_archived_origins(source, core_module, http_module, hosted_module)
 
     class Response:
         status = 200
@@ -57,7 +115,7 @@ def worker(source: Path, fixture: Path) -> None:
     else:
         raise AssertionError("immutable reader accepted unsupported latest authority")
     print(
-        f"PASS immutable {source.parent.name}: latest v4 withholds, no older clean fallback"
+        f"PASS verified archived source {source.resolve()}: immutable {source.parent.name}: latest v4 withholds, no older clean fallback"
     )
 
 
@@ -65,12 +123,25 @@ def main() -> int:
     if len(sys.argv) == 4 and sys.argv[1] == "--worker":
         worker(Path(sys.argv[2]), Path(sys.argv[3]))
         return 0
-    sys.path[:0] = [str(ROOT / "src"), str(ROOT)]
+    if not pinned_sources_available():
+        return 1
+    sys.path[:0] = [
+        str(ROOT / "src"),
+        str(ROOT / "packages/python/review-sensei-github/src"),
+        str(ROOT),
+    ]
+    import review_sensei_github.publication as current_hosted
     from review_sensei_github.approval import approval_eligibility_from_result
     from review_sensei_github.publication import approval_eligibility_marker
 
+    import review_sensei.models as current_core
     from review_sensei.models import ReviewResult
     from tests.test_partitioned_eligibility_reader import Bundle
+
+    assert_archived_origins(ROOT / "src", current_core)
+    assert_archived_origins(
+        ROOT / "packages/python/review-sensei-github/src", current_hosted
+    )
 
     clean = approval_eligibility_from_result(
         ReviewResult(
@@ -104,18 +175,16 @@ def main() -> int:
         for commit in READERS:
             target = folder / commit
             target.mkdir()
-            archive = subprocess.run(
-                ["git", "archive", commit, "src"],
-                cwd=ROOT,
-                check=True,
-                capture_output=True,
-            ).stdout
+            archive = archive_source(commit)
+            if archive is None:
+                return 1
             with tarfile.open(fileobj=io.BytesIO(archive)) as stream:
                 stream.extractall(target, filter="data")
             subprocess.run(
                 [
                     sys.executable,
                     "-I",
+                    "-B",
                     str(Path(__file__).resolve()),
                     "--worker",
                     str(target / "src"),
