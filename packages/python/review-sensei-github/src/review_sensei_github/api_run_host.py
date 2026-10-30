@@ -8,15 +8,18 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Unpack
 
 from review_sensei.api_work import LEGACY_ACCOUNTING_VERSION, StartupPlan, StartupSlot
 from review_sensei.configuration import MAX_CONFIG_BYTES
 from review_sensei.errors import ReviewInputError
+from review_sensei.models import ReviewRequest
 from review_sensei.rescan import AuthorizedRescan
+from review_sensei.service import ReviewService
 from review_sensei.session import SessionIdentity
 
 from .api_run_requests import ApiRunSessionLedger
+from .command_bodies import _HostedProviderOptions
 from .http import MAX_PAGINATION_PAGES
 from .review_hooks import GitHubReviewHooks
 
@@ -199,7 +202,10 @@ class ApiRunReviewHooks:
         return self.ledger
 
     def run_provider(
-        self, service: object, request: object, **kwargs: object
+        self,
+        service: ReviewService,
+        request: ReviewRequest,
+        **kwargs: Unpack[_HostedProviderOptions],
     ) -> object:
         from review_sensei.errors import ProviderError
 
