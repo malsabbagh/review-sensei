@@ -595,7 +595,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         ):
             local_explicit_mode = "advisory"
         local_convergence_policy = resolve_review_convergence_policy(
-            mode=local_explicit_mode
+            mode=local_explicit_mode, quality=local_configuration.review.quality
         )
         from review_sensei.disposition import incomplete_coverage_from_result
 
@@ -797,6 +797,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             print(outcome.status)
             return run_outcome_exit_code(outcome.status)
         publication_configuration = load_configuration(args.config)
+        convergence_policy = resolve_review_convergence_policy(
+            mode=explicit_mode, quality=publication_configuration.review.quality
+        )
         publication_inventory = (
             args.publication_inventory
             or publication_configuration.github.publication_inventory
@@ -967,6 +970,10 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 json.loads(
                     read_bounded_utf8(args.result, maximum=2_097_152, label="result")
                 )
+            )
+        if result.publication_selection is not None:
+            raise ReviewInputError(
+                "publication selection is inactive; native revision protocol required"
             )
         if args.admission_context is not None:
             if configuration_context is None:

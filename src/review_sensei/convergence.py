@@ -280,8 +280,14 @@ class ReviewConvergencePolicy:
     mode: str = DEFAULT_REVIEW_MODE
     enforcement: str = "display-only"
     max_failed_attempts: int = DEFAULT_MAX_FAILED_ATTEMPTS
+    quality: str = "current"
 
     def __post_init__(self) -> None:
+        from .configuration import REVIEW_QUALITIES
+
+        _token(
+            self.quality, allowed=frozenset(REVIEW_QUALITIES), label="review quality"
+        )
         object.__setattr__(self, "mode", normalize_review_mode(self.mode))
         _token(self.enforcement, allowed=ENFORCEMENT_MODES, label="enforcement")
         if self.mode in OPERATOR_REVIEW_MODES and self.enforcement != "publication":
@@ -321,7 +327,7 @@ class ReviewConvergencePolicy:
         return "explicit-opt-in"
 
     def identity_fields(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "schema_version": PUBLIC_SCHEMA_VERSION,
             "mode": self.mode,
             "enforcement": self.enforcement,
@@ -329,6 +335,10 @@ class ReviewConvergencePolicy:
             "automatic_github_review_events": self.automatic_github_review_events,
             "inline_advisory_threads": self.inline_advisory_threads,
         }
+        # Preserve historical identity bytes when quality is omitted/current.
+        if self.quality != "current":
+            value["quality"] = self.quality
+        return value
 
     def digest(self) -> str:
         payload = json.dumps(
@@ -360,6 +370,7 @@ def resolve_review_convergence_policy(
     *,
     mode: str | None = None,
     enforcement: str | None = None,
+    quality: str = "current",
 ) -> ReviewConvergencePolicy:
     """Resolve the trusted review-convergence policy for doctor, plan, and publication."""
 
@@ -369,6 +380,7 @@ def resolve_review_convergence_policy(
     return ReviewConvergencePolicy(
         mode=resolved_mode,
         enforcement=enforcement,
+        quality=quality,
     )
 
 
@@ -912,6 +924,12 @@ def admit_review_result(
         raise ReviewInputError("review result is invalid")
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
+    if result.review_verdict is not None:
+        # Accepted selection already carries content-bound host admission.
+        # Replaying it must not reclassify selected obligations from model fields.
+        # Verified fixes and explicit overrides settle the separate inventory.
+        result.review_verdict.require_policy(policy)
+        return result
     if policy.enforcement != "publication":
         return result
     if not isinstance(authorized_dispositions, Sequence):
@@ -1013,6 +1031,7 @@ def admit_review_result(
                 on_changed_path=on_changed_path,
                 is_preference_or_optional=(comment.category or "").strip().casefold()
                 in PREFERENCE_CATEGORIES,
+                high_signal=policy.quality == "high-signal",
             )
             candidate = candidate_from_later_finding(
                 comment,
@@ -1304,6 +1323,7 @@ def policy_from_mapping(value: Mapping[str, object]) -> ReviewConvergencePolicy:
         "automatic_github_review_events",
         "inline_advisory_threads",
         "policy_digest",
+        "quality",
     }
     if unknown:
         raise ReviewInputError("review convergence policy contains unknown fields")
@@ -1312,8 +1332,15 @@ def policy_from_mapping(value: Mapping[str, object]) -> ReviewConvergencePolicy:
         raise ReviewInputError(
             "review convergence policy schema_version is unsupported"
         )
+    from .configuration import REVIEW_QUALITIES
+
     policy = ReviewConvergencePolicy(
         mode=normalize_review_mode(value.get("mode")),
+        quality=_token(
+            value.get("quality", "current"),
+            allowed=frozenset(REVIEW_QUALITIES),
+            label="review quality",
+        ),
         enforcement=_token(
             value.get("enforcement", "display-only"),
             allowed=ENFORCEMENT_MODES,

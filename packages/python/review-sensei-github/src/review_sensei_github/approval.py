@@ -13,6 +13,7 @@ from review_sensei.coverage import coverage_approval_state
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import HumanInventoryResolution, PendingHumanReview
 from review_sensei.models import ReviewResult
+from review_sensei.review_verdict import ReviewVerdict
 from review_sensei.schemas import validate_public_document
 
 if TYPE_CHECKING:
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
 
 APPROVAL_ELIGIBILITY_SCHEMA_VERSION = "1"
 APPROVAL_FACTS_SCHEMA_VERSION = "2"
+APPROVAL_VERDICT_FACTS_SCHEMA_VERSION = "3"
 APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION = "2.0"
 DEFAULT_HUMAN_ELIGIBILITY_VERSION = "5"
 MAX_REFERENCED_ELIGIBILITY_BYTES = 32 * 1024
@@ -81,6 +83,10 @@ class ApprovalFacts:
     ``check_published`` is retained as a diagnostic fact; inability to publish a
     merge-gate check does not make an otherwise eligible review ineligible for
     approval.
+
+    Provider identity is bound by the enclosing result/configuration identity.
+    A verdict's policy digest identifies convergence policy, not a provider;
+    parsing these facts validates shape and does not authenticate their source.
     """
 
     enabled: bool
@@ -96,10 +102,15 @@ class ApprovalFacts:
     persistence_status: str | None = None
     provider: str | None = None
     qualification_binding: str | None = None
+    review_verdict: ReviewVerdict | None = None
 
     def __post_init__(self) -> None:
         import re
 
+        if self.review_verdict is not None and (
+            type(self.review_verdict) is not ReviewVerdict or self.provider is None
+        ):
+            raise ReviewInputError("approval review verdict is invalid")
         if self.provider is not None and (
             not isinstance(self.provider, str)
             or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.provider) is None
@@ -119,7 +130,9 @@ class ApprovalFacts:
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
-            "schema_version": APPROVAL_FACTS_SCHEMA_VERSION
+            "schema_version": APPROVAL_VERDICT_FACTS_SCHEMA_VERSION
+            if self.review_verdict is not None
+            else APPROVAL_FACTS_SCHEMA_VERSION
             if self.provider is not None
             else APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
             "enabled": self.enabled,
@@ -132,6 +145,8 @@ class ApprovalFacts:
             "qualification": self.qualification,
             "check_published": self.check_published,
         }
+        if self.review_verdict is not None:
+            value["review_verdict"] = self.review_verdict.to_dict()
         if self.persistence_status is not None:
             value["persistence_status"] = self.persistence_status
         if self.provider is not None:
@@ -162,16 +177,27 @@ class ApprovalFacts:
             "persistence_status",
             "provider",
             "qualification_binding",
+            "review_verdict",
         }:
             raise ReviewInputError("approval facts must contain the documented fields")
         version = value.get("schema_version")
         if version not in {
             APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
             APPROVAL_FACTS_SCHEMA_VERSION,
+            APPROVAL_VERDICT_FACTS_SCHEMA_VERSION,
         }:
             raise ReviewInputError("approval facts schema_version is invalid")
+        if (version == APPROVAL_VERDICT_FACTS_SCHEMA_VERSION) != (
+            "review_verdict" in value
+        ):
+            raise ReviewInputError("approval review verdict version is invalid")
         if (
-            version == APPROVAL_FACTS_SCHEMA_VERSION and value.get("provider") is None
+            version
+            in {
+                APPROVAL_FACTS_SCHEMA_VERSION,
+                APPROVAL_VERDICT_FACTS_SCHEMA_VERSION,
+            }
+            and value.get("provider") is None
         ) or (
             version == APPROVAL_ELIGIBILITY_SCHEMA_VERSION
             and ("provider" in value or "qualification_binding" in value)
@@ -216,6 +242,9 @@ class ApprovalFacts:
             persistence_status=persistence_status,
             provider=value.get("provider"),
             qualification_binding=value.get("qualification_binding"),
+            review_verdict=ReviewVerdict.from_dict(value["review_verdict"])
+            if "review_verdict" in value
+            else None,
         )
 
 
@@ -603,6 +632,7 @@ def approval_facts_from_result(
         evidence_policy=result.evidence_policy,
         has_blocking_findings=has_blocking_findings(result),
         has_human_adjudication_findings=has_human_adjudication_findings(result),
+        review_verdict=result.review_verdict,
         coverage_blocker=coverage_state,
         qualification=qualification,
         provider=result.provider.strip().lower(),
@@ -667,11 +697,26 @@ def approval_eligibility_from_result(
         retained.human_review.resolved,
     )
     old, new = retained.facts, eligibility.facts
+    verdict = new.review_verdict
+    if old.review_verdict is not None:
+        if verdict is None:
+            verdict = old.review_verdict
+        else:
+            if verdict.policy_digest != old.review_verdict.policy_digest:
+                raise ReviewInputError("broader review verdict policy conflicts")
+            verdict = replace(
+                verdict,
+                unselected_blocking_defect=verdict.unselected_blocking_defect
+                or old.review_verdict.unselected_blocking_defect,
+                unselected_human_decision=verdict.unselected_human_decision
+                or old.review_verdict.unselected_human_decision,
+            )
     return replace(
         eligibility,
         human_review=inventory,
         facts=replace(
             new,
+            review_verdict=verdict,
             persistence_status=new.persistence_status or old.persistence_status,
             enabled=new.enabled and old.enabled,
             app_authored=new.app_authored or old.app_authored,
@@ -733,6 +778,11 @@ def evaluate_approval_facts(
         blockers.append("auto-approval-disabled")
     if facts.app_authored is True:
         blockers.append("app-authored-pull-request")
+    if facts.review_verdict is not None:
+        if facts.review_verdict.unselected_blocking_defect:
+            blockers.append("review-verdict-blocking")
+        if facts.review_verdict.unselected_human_decision:
+            blockers.append("review-verdict-human")
     if facts.has_blocking_findings is True:
         blockers.append("blocking-findings-open")
     if facts.has_human_adjudication_findings is True:
@@ -950,6 +1000,8 @@ _WITHHELD_DIAGNOSTICS = {
     "auto-approval-enabled-invalid": "approval_withheld",
     "app-authored-pull-request": "app_authored",
     "app-authored-flag-invalid": "approval_withheld",
+    "review-verdict-blocking": "required_fixes_open",
+    "review-verdict-human": "human_adjudication_open",
     "blocking-findings-open": "required_fixes_open",
     "human-adjudication-open": "human_adjudication_open",
     "review-threads-incomplete": "review_threads_incomplete",

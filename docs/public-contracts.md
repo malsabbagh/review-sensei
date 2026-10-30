@@ -57,6 +57,46 @@ authority from diagnostics. The bounded-evidence encoded byte allowance covers
 the complete canonical JSON envelope, including its base64 and metadata framing.
 The inner data-string check is an early rejection using the same ceiling.
 
+With trusted `review.quality: high-signal`, `ReviewResult.review_verdict` is
+an optional host-derived document. It binds the policy digest and the SHA-256
+of selected comment JSON and one classification byte per selected comment
+(`A` advisory, `B` blocking, `H` human decision; existing 250-comment ceiling),
+plus two booleans: `unselected_blocking_defect` and
+`unselected_human_decision`. It retains no unselected candidate identities,
+prose, counts, or publication queue. Omitted/current quality keeps the historical
+result bytes and digest projection. Verdict-bearing results use the explicit
+`reviewsensei:review-content:verdict:v1` digest domain. The result constructor
+checks selected-comment and admission binding and, when present, transaction
+policy binding; selected admission is restored on cold replay and is not
+reclassified from model fields;
+a sealed transaction also rejects removal or alteration of the verdict.
+
+Trusted admission runs before the accepted-operation encoder. Publication
+selection must call `project_review_comments` on that admitted result before
+retention; directly replacing its comment set fails the binding check. Projection
+retains positive verdict bits, rejects changes to admitted candidates, preserves
+prior lifecycle obligations, and removes only omitted new lifecycle records.
+Evidence verification may explicitly rebind selected bytes while preserving
+already-excluded requirements. Replay reads the frozen result without running
+selection or inference again. Same-review continuation and broader-review
+composition retain prior verdict bits.
+
+Approval facts version `3` carries this verdict independently from published
+blocking comments and `PendingHumanReview`. No synthetic human inventory item
+is created. A fix or explicit override can clear the corresponding selected
+finding through existing proof rules; it cannot clear an excluded requirement.
+The additional gate diagnostics expose neither candidate counts nor a deferred
+list. Execution failure continues to use review status and coverage. A new
+qualifying complete review may produce a fresh clean verdict; narrowed or
+no-provider reuse is not evidence that an excluded requirement has disappeared.
+Each new high-signal review runs one full discovery pass over the review input,
+retaining the authenticated baseline for reconciliation. This can cost more than
+incremental discovery, but uses the existing call, time, token, and work budgets;
+no retry or automatic review loop is added. Exact partial/remaining continuations
+reuse authenticated completed work and retain prior verdict bits. Public checks
+consume the same bits, including after selected findings resolve, without
+publishing unselected prose or counts.
+
 Published schemas live under `src/review_sensei/schemas/` and are included in the
 installed package. Each schema has a draft 2020-12 `$schema` and an `$id`
 containing `/v1/` for established documents. The opt-in authenticated work
@@ -70,6 +110,7 @@ requirement for a new major shape; the v2 discriminator is intentional.
 | Schema | Document |
 | --- | --- |
 | `review-result.schema.json` | Publisher-facing validated review output |
+| `review-verdict.schema.json` | Bounded current-review gates for required findings excluded by publication selection |
 | `review-comment.schema.json` | One inline review comment |
 | `learning-entry.schema.json` | Approved repository-local learning entry |
 | `learning-proposal.schema.json` | Unapproved provider-proposed learning entry |
@@ -1546,3 +1587,28 @@ The bare opt-in human-file-review adapter uses inline roots unless the trusted
 host supplies an eligibility reader. Hosted media composition supplies the
 existing independent schema 5 reader with current ledger, scope and root/prose
 proof. Partitioned schema 4 roots remain unsupported.
+
+
+## Inactive publication selection
+
+`publication-selection.schema.json` describes optional trusted
+`ReviewResult.publication_selection`. Its `inactive-publication-selection-v1`
+record binds the source result and original admission criteria, selected result
+projection, policy, exact occupancy, supplied finite N and ordered target actions.
+Only selected actions retain identities and comment hashes; no unselected queue
+or public deferred count is present. Source validation requires independent
+original candidates and occupancy. These hashes alone authenticate no census,
+disposition or native transition.
+
+Selected action records use `create`, `reuse` or `reopen`. Existing targets bind
+state and proof; uncertain targets must reconcile first. Reopening from released
+state consumes a slot. Contingent reopening is only inert intent backed by an
+existing reservation, and requires separate native transition proof before any
+future implementation can execute it. Every current publisher refuses all
+handoff-bearing results before effects, including create-only and empty plans.
+
+The explicit `reviewsensei:review-content:publication-selection:v1` digest domain
+includes the whole handoff and its selected result projection. Accepted-operation
+cold replay preserves bytes without reselection. Old bytes and digest domains
+remain unchanged when the field is absent. This is not an enabled strict cap or
+complete lifecycle qualification; see proposed ADR 0119.

@@ -6,6 +6,8 @@
   "additionalProperties": false,
   "required": ["summary", "comments", "provider"],
   "properties": {
+    "publication_selection": {"$ref": "https://reviewsensei.dev/schemas/v1/publication-selection.schema.json"},
+    "review_verdict": {"$ref": "https://reviewsensei.dev/schemas/v1/review-verdict.schema.json"},
     "summary": {"type": "string", "minLength": 1},
     "comments": {
       "type": "array",

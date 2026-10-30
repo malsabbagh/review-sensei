@@ -22,6 +22,7 @@
       "type": "string",
       "enum": ["display-only", "publication"]
     },
+    "quality": {"type": "string", "enum": ["current", "balanced", "high-signal"]},
     "max_failed_attempts": {
       "type": "integer",
       "minimum": 1,

@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/publication-selection.schema.json",
+  "title": "Inactive publication selection handoff v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_result_sha256",
+    "selected_result_sha256",
+    "policy_digest",
+    "criteria_sha256",
+    "occupancy_sha256",
+    "max_active_findings",
+    "actions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "inactive-publication-selection-v1"
+    },
+    "source_result_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "selected_result_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "policy_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "occupancy_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "max_active_findings": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "actions": {
+      "type": "array",
+      "maxItems": 250,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "instance",
+          "comment_sha256",
+          "action",
+          "consumes_slot",
+          "existing_target",
+          "target_state",
+          "target_proof_sha256"
+        ],
+        "properties": {
+          "instance": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "comment_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "action": {
+            "enum": [
+              "create",
+              "reuse",
+              "reopen"
+            ]
+          },
+          "consumes_slot": {
+            "type": "boolean"
+          },
+          "existing_target": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_state": {
+            "enum": [
+              "active",
+              "contingent",
+              "released",
+              null
+            ]
+          },
+          "target_proof_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "create"
+              },
+              "target_state": {
+                "const": null
+              },
+              "consumes_slot": {
+                "const": true
+              },
+              "existing_target": {
+                "type": "null"
+              },
+              "target_proof_sha256": {
+                "type": "null"
+              }
+            }
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "reuse"
+              },
+              "target_state": {
+                "const": "active"
+              },
+              "consumes_slot": {
+                "const": false
+              },
+              "existing_target": {
+                "type": "string"
+              },
+              "target_proof_sha256": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "reopen"
+              },
+              "target_state": {
+                "const": "contingent"
+              },
+              "consumes_slot": {
+                "const": false
+              },
+              "existing_target": {
+                "type": "string"
+              },
+              "target_proof_sha256": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "reopen"
+              },
+              "target_state": {
+                "const": "released"
+              },
+              "consumes_slot": {
+                "const": true
+              },
+              "existing_target": {
+                "type": "string"
+              },
+              "target_proof_sha256": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "criteria_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

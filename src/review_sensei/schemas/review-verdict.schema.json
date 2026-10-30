@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/review-verdict.schema.json",
+  "title": "ReviewSensei bounded current-review verdict v1",
+  "description": "Host-derived verdict included in the reviewsensei:review-content:verdict:v1 content identity. Runtime result validation binds ordered selected comments to the digest and one admission byte per selected comment; JSON Schema alone cannot express that hash/cardinality relation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_digest",
+    "unselected_blocking_defect",
+    "unselected_human_decision",
+    "selected_comments_sha256",
+    "selected_admission"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "policy_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "unselected_blocking_defect": {
+      "type": "boolean"
+    },
+    "unselected_human_decision": {
+      "type": "boolean"
+    },
+    "selected_comments_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "selected_admission": {
+      "description": "Ordered selected admission: A advisory, B blocking, H human decision. Runtime validation requires one byte per bound selected comment.",
+      "type": "string",
+      "maxLength": 250,
+      "pattern": "^[ABH]*$"
+    }
+  }
+}

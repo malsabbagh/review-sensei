@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0",
+  "policy_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "selected_comments_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "unselected_blocking_defect": true,
+  "unselected_human_decision": false,
+  "selected_admission": ""
+}
