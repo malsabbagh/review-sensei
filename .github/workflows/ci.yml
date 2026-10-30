@@ -401,7 +401,7 @@ jobs:
       matrix:
         include:
           - target: darwin-arm64
-            os: macos-14
+            os: macos-15
           - target: win32-x64
             os: windows-latest
     runs-on: ${{ matrix.os }}
@@ -484,7 +484,7 @@ jobs:
       matrix:
         include:
           - target: darwin-arm64
-            os: macos-14
+            os: macos-15
           - target: darwin-x64
             os: macos-15-intel
           - target: linux-arm64-gnu
