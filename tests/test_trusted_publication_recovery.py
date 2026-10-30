@@ -625,6 +625,50 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
                 any(review["state"] == "APPROVED" for review in state.reviews)
             )
 
+    def test_pre_v2_original_context_remains_publishable_and_is_not_reconstructed(self):
+        from review_sensei.context import (
+            _configuration_digest,
+            stage_configuration_digest,
+        )
+
+        original_key = ReviewService.context_cache_key
+
+        def legacy_key(service, request, **kwargs):
+            current = original_key(service, request, **kwargs)
+            if current is None:
+                return None
+            stage_digest = stage_configuration_digest(service.stages)
+            if request.work_policy_digest is not None:
+                stage_digest = _configuration_digest(
+                    {"stages": stage_digest, "work_policy": request.work_policy_digest}
+                )
+            return replace(
+                current, model=request.model or "default", stage_digest=stage_digest
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(ReviewService, "context_cache_key", new=legacy_key):
+                self.original_analysis(root)
+            original_admission = (root / "admission.json").read_bytes()
+            state = _FailedPublication()
+            code, _, error = self.invoke(root, state)
+            self.assertEqual(code, 1, error)
+            ledger = LocalSessionLedger(root / "ledger")
+            before = ledger.load(IDENTITY).record
+            code, _, error = self.invoke(
+                root, state, reconstruct=True, result_source=True
+            )
+            self.assertEqual(code, 1, error)
+            self.assertIn("original", error)
+            self.assertEqual(ledger.load(IDENTITY).record, before)
+            self.assertEqual((root / "admission.json").read_bytes(), original_admission)
+            state.fail_review = False
+            code, output, error = self.invoke(root, state)
+            self.assertEqual(code, 0, error)
+            self.assertIn("published", output)
+            self.assertEqual((root / "admission.json").read_bytes(), original_admission)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -373,6 +373,44 @@ class ReviewService:
     ) -> ReviewProvider:
         return self.stage_providers.get(stage.name, default or self.provider)
 
+    def context_cache_key(
+        self,
+        request: ReviewRequest,
+        *,
+        profile: str = "default",
+        provider_override: ReviewProvider | None = None,
+    ) -> ReviewContextCacheKey | None:
+        """Resolve the same provider/model selection used for actual execution."""
+        active = provider_override or self.provider
+
+        def selected_model(provider: ReviewProvider) -> str | None:
+            if getattr(provider, "allow_model_override", True):
+                return request.model or provider.model
+            return provider.model
+
+        model = selected_model(active)
+        if not isinstance(model, str) or not model.strip():
+            return None
+        bindings: dict[str, tuple[str, str]] = {}
+        for stage in self.stages:
+            selected = self._provider_for_stage(stage, default=active)
+            stage_model = selected_model(selected)
+            if not isinstance(stage_model, str) or not stage_model.strip():
+                return None
+            bindings[stage.name] = (selected.name, stage_model)
+        if self.work_budgets.mode == "unified":
+            if request.work_policy_digest not in {None, self.work_policy_digest}:
+                raise ReviewInputError("review request work policy identity is invalid")
+            request = replace(request, work_policy_digest=self.work_policy_digest)
+        return build_review_context_cache_key(
+            request,
+            provider_name=active.name,
+            stages=self.stages,
+            profile=profile,
+            effective_model=model,
+            stage_provider_bindings=bindings,
+        )
+
     def _continuation_scope_digest(
         self,
         request: ReviewRequest,
@@ -1037,11 +1075,8 @@ class ReviewService:
                 raise ReviewInputError(
                     "current_key does not match the trusted snapshot identity"
                 )
-        canonical_key = build_review_context_cache_key(
-            key_request,
-            provider_name=active_provider.name,
-            stages=self.stages,
-            profile=profile,
+        canonical_key = self.context_cache_key(
+            key_request, profile=profile, provider_override=active_provider
         )
         if current_key is not None and current_key != canonical_key:
             raise ReviewInputError(
@@ -1204,7 +1239,7 @@ class ReviewService:
                 "active review category ids must be declared by a configured stage"
             )
         coverage = self._coverage_decision(
-            request,
+            key_request,
             incremental=incremental,
             current_key=current_key,
             profile=profile,
@@ -1760,23 +1795,25 @@ class ReviewService:
     ) -> _CoverageDecision:
         """Resolve the coverage mode and the prior findings that stay in scope.
 
-        Prior findings are only reconciled when this run can verify that the
-        caller's prior cache key is compatible with the current snapshot and
-        configuration.  A ``fallback-full`` caused by incomplete related context
-        or a missing changed-path list keeps those verified priors, so a full
-        bounded re-review reports them as ``uncertain`` rather than dropping
-        them; omission still never counts as proof of a fix.  A ``fallback-full``
-        caused by an incompatible or unverifiable key discards them instead,
-        because their identities cannot be tied to this snapshot.
+        Coverage reuse requires a compatible current execution identity. A model
+        change, legacy key or unknown model cannot reuse analysis, but same-scope
+        findings remain obligations for a full bounded pass. Old coverage and
+        claimed resolutions never establish current evidence. Unverifiable
+        repository/PR/base identity and same-head replay remain ineligible.
         """
 
-        if current_key is None:
-            current_key = build_review_context_cache_key(
-                request,
-                provider_name=self.provider.name,
-                stages=self.stages,
-                profile=profile,
+        def same_prior_scope() -> bool:
+            if incremental is None:
+                return False
+            previous = incremental.previous_key
+            return (
+                request.repository == previous.repository
+                and request.pull_request_number == previous.pull_request
+                and request.base_sha == previous.base_sha
+                and request.head_sha is not None
+                and request.head_sha != previous.head_sha
             )
+
         mode = "full"
         skip_provider = False
         reviewed_paths: tuple[str, ...] | None = None
@@ -1797,7 +1834,10 @@ class ReviewService:
                 previous_findings = ()
             elif not cache_key_is_compatible(current_key, incremental.previous_key):
                 mode = "fallback-full"
-                previous_findings = ()
+                previous_findings = (
+                    incremental.previous_findings if same_prior_scope() else ()
+                )
+                evidence_confirmed = ()
             elif incremental.reviewed_paths is None:
                 # Incremental coverage is defined by the caller's changed-path
                 # list.  Without one there is no reviewed scope to reason about,
@@ -1811,11 +1851,14 @@ class ReviewService:
                 reviewed_paths = incremental.reviewed_paths
                 skip_provider = incremental.reviewed_paths == ()
         elif incremental is not None:
-            # Without repository/PR/base/head identity the prior key cannot be
-            # checked for compatibility, so prior findings are not trusted.
+            # Unknown execution identity withholds all reuse. Independently
+            # bound snapshot scope can still retain unresolved obligations.
             mode = "fallback-full"
             generation = incremental.generation
-            evidence_confirmed = incremental.evidence_confirmed_concerns
+            previous_findings = (
+                incremental.previous_findings if same_prior_scope() else ()
+            )
+            evidence_confirmed = ()
             related_paths = incremental.related_paths
         return _CoverageDecision(
             mode=mode,

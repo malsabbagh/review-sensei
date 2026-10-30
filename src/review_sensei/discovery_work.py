@@ -148,7 +148,10 @@ def discover(
         snapshot_request.head_sha,
     )
     coverage_decision = service._coverage_decision(
-        request, incremental=incremental, current_key=current_key, profile=profile
+        snapshot_request,
+        incremental=incremental,
+        current_key=current_key,
+        profile=profile,
     )
     prior_reviewed_files, prior_reviewed_hunks = extract_prior_reviewed_coverage(
         analysis, prior_partial, limits=request.limits

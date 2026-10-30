@@ -37,7 +37,6 @@ from .context import (
     ContextSnapshot,
     RepositoryContextStore,
     SymbolAwareContextPolicy,
-    build_review_context_cache_key,
     build_review_context_selection,
 )
 from .diff import analyze_diff
@@ -3334,12 +3333,10 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             work_budget=work_budget,
             work_policy_digest=service.work_policy_digest,
         )
-        current_key = build_review_context_cache_key(
+        current_key = service.context_cache_key(
             _checkpoint_cache_request(
                 request, base_sha=resolved_base_sha, head_sha=resolved_head_sha
             ),
-            provider_name=service.provider.name,
-            stages=service.stages,
             profile=effective_profile,
         )
         if (
@@ -3650,14 +3647,12 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 admission_baseline = None
             else:
                 admission_baseline = persisted_baseline
-            current_key = build_review_context_cache_key(
+            current_key = service.context_cache_key(
                 _checkpoint_cache_request(
                     request,
                     base_sha=resolved_base_sha,
                     head_sha=resolved_head_sha,
                 ),
-                provider_name=service.provider.name,
-                stages=service.stages,
                 profile=effective_profile,
             )
             if (
@@ -3956,14 +3951,12 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                     "identity-bound analysis currently supports only legacy evidence"
                 )
             else:
-                cache_key = build_review_context_cache_key(
+                cache_key = service.context_cache_key(
                     _checkpoint_cache_request(
                         request,
                         base_sha=resolved_base_sha,
                         head_sha=resolved_head_sha,
                     ),
-                    provider_name=service.provider.name,
-                    stages=service.stages,
                     profile=effective_profile,
                 )
                 if (

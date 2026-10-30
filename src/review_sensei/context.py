@@ -2515,9 +2515,14 @@ def build_review_context_cache_key(
     provider_name: str,
     stages: Sequence[Stage],
     profile: str = "default",
+    effective_model: str | None = None,
+    stage_provider_bindings: Mapping[str, tuple[str, str]] | None = None,
 ) -> ReviewContextCacheKey | None:
-    """Bind optional incremental cache state to snapshot and configuration identity."""
+    """Bind a known execution identity; runtime callers should use the service.
 
+    Explicit-model homogeneous callers remain supported. Routed stages require
+    complete bindings. Unknown models cannot authorize incremental reuse.
+    """
     if (
         not request.repository
         or request.pull_request_number is None
@@ -2525,7 +2530,36 @@ def build_review_context_cache_key(
         or request.head_sha is None
     ):
         return None
-    model = request.model or "default"
+    if stage_provider_bindings is not None and set(stage_provider_bindings) != {
+        stage.name for stage in stages
+    }:
+        raise ContextLoadError("stage provider bindings must match configured stages")
+    model = effective_model if effective_model is not None else request.model
+    if model is None:
+        return None
+    if stage_provider_bindings is None:
+        if any(stage.provider_profile is not None for stage in stages):
+            return None
+        stage_provider_bindings = {
+            stage.name: (provider_name, model) for stage in stages
+        }
+    if set(stage_provider_bindings) != {stage.name for stage in stages}:
+        raise ContextLoadError("stage provider bindings must match configured stages")
+    bindings: list[dict[str, str]] = []
+    for stage in stages:
+        binding = stage_provider_bindings[stage.name]
+        if not isinstance(binding, tuple) or len(binding) != 2:
+            raise ContextLoadError("stage provider binding is invalid")
+        for value in binding:
+            try:
+                validate_bounded_text(
+                    value, 256, label="stage execution identity", allow_empty=False
+                )
+            except ReviewInputError as exc:
+                raise ContextLoadError("stage provider binding is invalid") from exc
+        bindings.append(
+            {"stage": stage.name, "provider": binding[0], "model": binding[1]}
+        )
     return ReviewContextCacheKey(
         request.repository,
         request.pull_request_number,
@@ -2536,12 +2570,12 @@ def build_review_context_cache_key(
         profile,
         _configuration_digest(
             {
+                "domain": "reviewsensei:incremental-execution:v2",
                 "stages": stage_configuration_digest(stages),
                 "work_policy": request.work_policy_digest,
+                "bindings": bindings,
             }
-        )
-        if request.work_policy_digest is not None
-        else stage_configuration_digest(stages),
+        ),
         context_configuration_digest(request.lens_contexts),
         learning_configuration_digest(request.learnings),
     )

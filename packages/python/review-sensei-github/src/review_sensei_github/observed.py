@@ -20,7 +20,7 @@ from review_sensei.baseline import (
     baseline_from_review,
     evaluate_baseline_compatibility,
 )
-from review_sensei.context import ReviewContextCacheKey, build_review_context_cache_key
+from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy, derive_blocker_candidate
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import (
@@ -631,9 +631,7 @@ def run_observed_review_sequence(
                 base_sha="f" * 40,
                 head_sha=step.head_sha,
             )
-            current_key = build_review_context_cache_key(
-                request, provider_name=provider.name, stages=service.stages
-            )
+            current_key = service.context_cache_key(request)
             if current_key is None:
                 raise ReviewInputError("observed cache identity is unavailable")
             session_identity = SessionIdentity("owner/repo", 136, repository_id=136)
