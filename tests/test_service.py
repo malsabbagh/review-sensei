@@ -16,7 +16,6 @@ from review_sensei.context import (
 from review_sensei.errors import ProviderError, ReviewFormatError, ReviewInputError
 from review_sensei.models import (
     LearningEntry,
-    ProviderRequest,
     ProviderResponse,
     ReviewComment,
     ReviewRequest,
@@ -629,16 +628,11 @@ class ReviewServiceTests(unittest.TestCase):
         provider = FailProvider('{"summary":"ok"}')
         service = ReviewService(
             provider,
-            budget=ResourceBudget.create(max_provider_calls=1, max_retry_attempts=0),
+            budget=ResourceBudget.create(max_provider_calls=1, max_retry_attempts=1),
         )
-        request = ProviderRequest(prompt="review", limits=ReviewLimits())
-        with self.assertRaises(ProviderError) as raised:
-            service._complete(provider, request)
-        self.assertTrue(raised.exception.transient)
-        self.assertEqual(str(raised.exception), "transient provider failure")
-        self.assertEqual(len(provider.requests), 1)
-        with self.assertRaisesRegex(ProviderError, "resource budget exhausted"):
-            service._complete(provider, request)
+        run = service.run(ReviewRequest(diff=DIFF), sleeper=lambda _: None)
+        self.assertEqual(run.outcome.provider_calls, 1)
+        self.assertEqual(run.outcome.status, "budget_exhausted")
         self.assertEqual(len(provider.requests), 1)
 
     def test_structural_recovery_uses_retry_budget_not_provider_call_budget(self):

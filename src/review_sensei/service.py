@@ -37,7 +37,6 @@ from .models import (
     FindingLifecycleRecord,
     LearningProposal,
     ProviderRequest,
-    ProviderResponse,
     ReviewComment,
     ReviewLensContext,
     ReviewRequest,
@@ -484,32 +483,6 @@ class ReviewService:
         if isinstance(provider, _BudgetedProvider):
             return provider
         return _BudgetedProvider(provider, budget=budgeted._budget)
-
-    def _stage_attempt_limit(self) -> int:
-        return max(
-            1,
-            min(_MAX_PROVIDER_OUTPUT_ATTEMPTS, self.budget.max_retry_attempts + 1),
-        )
-
-    def _complete(
-        self, provider: ReviewProvider, provider_request: ProviderRequest
-    ) -> ProviderResponse:
-        """Call a provider and count every invocation toward the budget.
-
-        Each provider call consumes one ``max_provider_calls`` slot whether or
-        not the adapter returns a response, so transient transport failures
-        cannot bypass the deterministic call ceiling. Structural output retries
-        within a stage remain bounded separately by ``max_retry_attempts`` via
-        ``_stage_attempt_limit``.
-        """
-        if self._provider_calls >= self.budget.max_provider_calls:
-            raise ProviderError(
-                "resource budget exhausted "
-                f"({self._provider_calls}/{self.budget.max_provider_calls} "
-                "provider calls)"
-            )
-        self._provider_calls += 1
-        return provider.complete(provider_request)
 
     @staticmethod
     def _source_context_coverage(request: ReviewRequest) -> object | None:
