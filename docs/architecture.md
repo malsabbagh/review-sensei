@@ -1243,7 +1243,7 @@ larger or more verbose inventories can still exceed inline bounds. Full finding
 text is budgeted separately from the input overview, while the framed review
 body remains bounded to 65,536 bytes.
 
-Only confirmed archives enable narrative excerpts; retain finding prose and authority.
+Only confirmed archives enable narrative excerpts; all finding prose and authority stay intact.
 Complete-profile fitting can use a labelled UTF-8 provider-narrative excerpt
 with digest and links to the complete original transaction-bound result parts.
 The original result stays unchanged, and all confirmation reads share the

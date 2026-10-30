@@ -558,6 +558,6 @@ partial roots keep links/capacity/full-ID status. Local replay only; default rou
 approval unqualified (ADR 0089).
 Continuation must verify full input scope; absent/changed scope refuses reuse.
 Hosted-only reuse requires core-input proof and per-package signed provenance (ADR 0105).
-Only confirmed archives enable narrative excerpts; retain finding prose and authority.
+Only confirmed archives enable narrative excerpts; all finding prose and authority stay intact.
 
 Never execute inactive selection.
