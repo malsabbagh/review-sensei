@@ -1001,6 +1001,9 @@ def bootstrap(
                 or evidence.ceased_owner(identity, previous.owner) != stopped
             ):
                 raise ReviewInputError("review predecessor or checkpoint changed")
+            # Recover against the predecessor's frozen startup and codec.
+            # claim_startup preserves that plan; a newly derived caller plan
+            # must not change either owner's already frozen allocation basis.
             allocation = owner_allocations(
                 frozen.limit,
                 previous.startup.liability,

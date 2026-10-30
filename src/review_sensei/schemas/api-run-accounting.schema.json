@@ -557,6 +557,7 @@
       }
     },
     "request-pair": {
+      "description": "Completed request encoded as [request_id, deadline_unix_ms]; the decoder is selected by the accounting version.",
       "type": "array",
       "prefixItems": [
         {

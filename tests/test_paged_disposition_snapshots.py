@@ -25,6 +25,7 @@ from review_sensei.disposition_snapshot import (
     prepare_local_paged_snapshot,
     read_paged_snapshot,
     stage_paged_snapshot,
+    validate_page_index,
 )
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewTransaction
@@ -157,6 +158,107 @@ def append(store, prior, values, generation):
 
 
 class PagedDispositionSnapshotTests(unittest.TestCase):
+    def test_empty_partial_and_closed_page_boundaries_roundtrip(self):
+        for count in (0, 7, 8, 9, 16, 17, 23):
+            with (
+                self.subTest(count=count),
+                patch("review_sensei.disposition_snapshot.MAX_DISPOSITION_PAGES", 2),
+            ):
+                store = SnapshotStore()
+                values = tuple(decision(i) for i in range(count))
+                _, document, restored = append(store, None, values, 1)
+                self.assertEqual(restored, values)
+                self.assertEqual(len(document["pages"]), count // 8)
+                self.assertEqual(len(document["tail"]), count % 8)
+        store = SnapshotStore()
+        with (
+            patch("review_sensei.disposition_snapshot.MAX_DISPOSITION_PAGES", 2),
+            self.assertRaisesRegex(ReviewInputError, "finite bounds"),
+        ):
+            append(store, None, tuple(decision(i) for i in range(24)), 1)
+        self.assertEqual(store.parts, {})
+
+    def test_malformed_root_and_closed_tail_refuse_before_page_reads(self):
+        store = SnapshotStore()
+        root, document, _ = append(store, None, (decision(0),), 1)
+        malformed = [None, {}, {"state_manifest": {}}, []]
+        for count in (None, True, -1, 1.5, "1", 4097):
+            malformed.append(
+                {
+                    **root,
+                    "state_manifest": {**root["state_manifest"], "item_count": count},
+                }
+            )
+        for broken in malformed:
+            with self.subTest(root=broken), self.assertRaises(ReviewInputError):
+                validate_page_index(document, root=broken)
+        damaged = copy.deepcopy(document)
+        damaged["tail"][0]["unexpected"] = "unvalidated decision"
+        with self.assertRaises(ReviewInputError):
+            validate_page_index(damaged, root=root)
+
+    def test_preparation_rejects_stale_page_reference_before_returning_write_set(self):
+        store = SnapshotStore()
+        values = tuple(decision(i) for i in range(8))
+        root, document, _ = append(store, None, values, 1)
+        changed = (
+            {**values[0], "reason": "Changed independent rationale"},
+            *values[1:],
+        )
+        with self.assertRaisesRegex(ReviewInputError, "page reference.*inventory"):
+            prepare_local_paged_snapshot(
+                binding=root["state_manifest"]["binding"],
+                pages=document["pages"],
+                values=changed,
+                result_digest=root["result_digest"],
+                max_manifest_bytes=2048,
+            )
+
+    def test_inline_reused_page_and_partitioned_index_remain_valid_manifests(self):
+        from review_sensei.schemas import validate_public_document
+
+        store = SnapshotStore()
+        values = tuple(decision(i) for i in range(8))
+        context = snapshot()["state_manifest"]["binding"]
+        page = inline_manifest(
+            {
+                "schema_version": "disposition-page-v1",
+                "result_digest": RESULT,
+                "offset": 0,
+                "dispositions": list(values),
+            },
+            binding=context,
+            item_count=8,
+        )
+        self.assertIsNotNone(page)
+        prepared = prepare_local_paged_snapshot(
+            binding=context,
+            pages=[page],
+            values=values,
+            result_digest=RESULT,
+            max_manifest_bytes=1024,
+        )
+        for key, part in prepared.parts.items():
+            store.parts[key] = AuthenticatedPart(part, context["producer"])
+        root = {
+            "schema_version": "2.0",
+            "result_digest": RESULT,
+            "state_manifest": prepared.manifest,
+        }
+        self.assertEqual(prepared.manifest["encoding"], "partitioned-json-v1")
+        record = LocalDispositionBatchTests.record().evolve(disposition_snapshot=root)
+        validate_public_document(record.to_dict(), "session-record")
+        document = store.read_evidence(
+            None, prepared.manifest, expected_binding=context
+        )
+        self.assertEqual(document["pages"], [page])
+        self.assertEqual(
+            read_paged_snapshot(
+                document, root=root, reader=store.read_evidence, identity=None
+            ),
+            values,
+        )
+
     def test_250_distinct_maximum_reasons_roundtrip_and_preserve_all_prior_carriers(
         self,
     ):

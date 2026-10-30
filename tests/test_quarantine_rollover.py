@@ -87,6 +87,12 @@ class QuarantineRolloverTests(unittest.TestCase):
                     self.assertEqual(
                         read_startup_part(ledger, identity, identifier), expected
                     )
+                    for invalid in ("not-a-comment", None):
+                        with (
+                            self.subTest(identifier=invalid),
+                            self.assertRaises(ReviewInputError),
+                        ):
+                            read_startup_part(ledger, identity, invalid)
                     # Mutating the ordinary cache cannot substitute a body for
                     # the exact census row pinned by this issued operation.
                     cached = ledger._comments_by_id[item["id"]]

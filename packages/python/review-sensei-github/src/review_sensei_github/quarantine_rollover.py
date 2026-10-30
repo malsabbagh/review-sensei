@@ -100,6 +100,15 @@ class _StartupSnapshot:
         return self.validate(payload, record, body)
 
 
+def _comment_storage_id(storage_id):
+    try:
+        return int(storage_id)
+    except (TypeError, ValueError) as exc:
+        raise ReviewInputError(
+            "quarantine rollover decision carrier identity is invalid"
+        ) from exc
+
+
 def retention_preflight(ledger, previous):
     """Exact tail bound for this issued startup and its selected decision parts.
 
@@ -131,7 +140,7 @@ def retention_preflight(ledger, previous):
             # census. Read the pinned bodies through the ordinary owner/hash
             # validator; do not borrow a previous operation's verified cache.
             if any(
-                int(part["storage_id"]) not in snapshot.listed
+                _comment_storage_id(part["storage_id"]) not in snapshot.listed
                 for part in manifest["parts"]
             ):
                 raise ReviewInputError(
@@ -156,7 +165,7 @@ def read_startup_part(ledger, identity, storage_id):
     snapshot.require()
     if snapshot.ledger is not ledger or snapshot.identity != identity:
         raise ReviewInputError("quarantine rollover part scope changed")
-    item = snapshot.listed.get(int(storage_id))
+    item = snapshot.listed.get(_comment_storage_id(storage_id))
     return (
         None
         if item is None

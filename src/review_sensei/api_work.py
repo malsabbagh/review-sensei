@@ -648,7 +648,7 @@ class ApiRunAccounting:
             prior_nonstartup_liability=document["prior_nonstartup_liability"],
             blocks=tuple(block(b) for b in document["blocks"]),
             completed=tuple(
-                PendingApiRequest(*p)
+                PendingApiRequest(request_id=p[0], deadline_unix_ms=p[1])
                 if document["version"] == ACCOUNTING_VERSION
                 else PendingApiRequest(**p)
                 for p in document["completed"]

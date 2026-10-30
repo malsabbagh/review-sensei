@@ -36,6 +36,7 @@ from review_sensei.bounded_evidence import (
     MAX_PARTS,
     MAX_STORED_PART_BYTES,
     MAX_STORED_PARTS,
+    PACKED_CHUNK_BYTES,
     PART_ENCODING,
     PART_FRAMING_RESERVE,
     PARTITION_ENCODING,
@@ -327,12 +328,12 @@ def _disposition_index_bounds(
         if inline_size <= max_manifest_bytes:
             return _DispositionIndexBounds(True, decoded, (), (), (), inline_size)
     packed = decoded + (decoded + 7) // 8 + (decoded + 63) // 64 + 11
-    count = (packed + 23_499) // 23_500
+    count = (packed + PACKED_CHUNK_BYTES - 1) // PACKED_CHUNK_BYTES
     if count > MAX_PARTS:
         raise ReviewInputError("disposition index exceeds bounded part count")
     raw_sizes, bodies, wires = [], [], []
     for index in range(count):
-        chunk = min(23_500, packed - index * 23_500)
+        chunk = min(PACKED_CHUNK_BYTES, packed - index * PACKED_CHUNK_BYTES)
         # All non-data fields have fixed values/widths. Base64 adds no JSON
         # escaping. These skeletons measure size only and are never published.
         skeleton = {
@@ -772,6 +773,7 @@ class GitHubIssueCommentSessionLedger:
         """
         from review_sensei.disposition_snapshot import (
             DISPOSITION_PAGE_ITEMS,
+            _prepared_page_reference,
             read_paged_snapshot,
             validate_page_index,
         )
@@ -830,7 +832,15 @@ class GitHubIssueCommentSessionLedger:
         for index, supplied in enumerate(pages):
             page = json.loads(canonical_bytes(supplied))
             if page.get("schema_version") != "disposition-page-v1":
-                references.append(page)
+                references.append(
+                    _prepared_page_reference(
+                        page,
+                        binding=binding,
+                        values=values,
+                        result_digest=result_digest,
+                        offset=index * DISPOSITION_PAGE_ITEMS,
+                    )
+                )
                 page_specs.append(None)
                 continue
             offset = index * DISPOSITION_PAGE_ITEMS

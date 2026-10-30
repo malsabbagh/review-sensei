@@ -50,6 +50,7 @@ class CallerReceiptCodecTests(unittest.TestCase):
     def test_mixed_malformed_duplicate_and_unknown_versions_refuse(self):
         document = self.state().to_document()
         mutations = (
+            lambda d: d.pop("version"),
             lambda d: d.update(version="caller-requests-v3"),
             lambda d: d["completed"].append(d["completed"][0]),
             lambda d: d["completed"].append(["uncertain-post", 42]),
@@ -65,7 +66,7 @@ class CallerReceiptCodecTests(unittest.TestCase):
             broken = copy.deepcopy(document)
             mutate(broken)
             with (
-                self.subTest(broken=broken["version"]),
+                self.subTest(broken=broken.get("version")),
                 self.assertRaises(ReviewInputError),
             ):
                 ApiRunAccounting.from_document(broken)

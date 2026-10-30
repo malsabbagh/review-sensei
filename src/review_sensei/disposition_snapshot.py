@@ -16,6 +16,7 @@ from .bounded_evidence import (
     inline_manifest,
     partition_evidence,
     read_inline_evidence,
+    validate_binding,
     validate_manifest,
 )
 from .errors import ReviewInputError
@@ -101,7 +102,19 @@ def validate_page_index(
     value: object, *, root: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     """Validate a closed finite index; only the authenticated root selects pages."""
-    count = root["state_manifest"]["item_count"]
+    from .session import MAX_DURABLE_BLOCKER_COUNT, _stored_dispositions
+
+    manifest = root.get("state_manifest") if isinstance(root, Mapping) else None
+    if (
+        not isinstance(manifest, Mapping)
+        or type(manifest.get("item_count")) is not int
+        or not 0 <= manifest["item_count"] <= MAX_DURABLE_BLOCKER_COUNT
+        or not isinstance(root.get("result_digest"), str)
+        or re.fullmatch(r"[a-f0-9]{64}", root["result_digest"]) is None
+    ):
+        raise ReviewInputError("disposition page root is invalid")
+    count = manifest["item_count"]
+    expected = validate_binding(manifest.get("binding"))
     if (
         not isinstance(value, dict)
         or set(value) != {"schema_version", "result_digest", "pages", "tail"}
@@ -114,7 +127,7 @@ def validate_page_index(
         or len(value["tail"]) != count % DISPOSITION_PAGE_ITEMS
     ):
         raise ReviewInputError("disposition page index does not match root")
-    expected = root["state_manifest"]["binding"]
+    _stored_dispositions(value["tail"], snapshot=True)
     for index, page in enumerate(value["pages"]):
         if not isinstance(page, dict):
             raise ReviewInputError("disposition page reference is invalid")
@@ -133,6 +146,43 @@ def validate_page_index(
         ):
             raise ReviewInputError("disposition page scope/order/count conflicts")
     return value["pages"]
+
+
+def _prepared_page_reference(
+    page: Mapping[str, Any],
+    *,
+    binding: dict[str, object],
+    values: tuple[Mapping[str, object], ...],
+    result_digest: str,
+    offset: int,
+) -> dict[str, Any]:
+    """Bind a reused reference to the exact requested page before any writes.
+
+    The owning adapter still authenticates its physical bytes on readback.
+    A matching root/result alone does not prove the requested inventory matches.
+    """
+    reference = json.loads(canonical_bytes(page))
+    if reference.get("encoding") == INLINE_ENCODING:
+        read_inline_evidence(reference, expected_binding=reference.get("binding", {}))
+    else:
+        validate_manifest(reference)
+    expected = {
+        "schema_version": "disposition-page-v1",
+        "result_digest": result_digest,
+        "offset": offset,
+        "dispositions": list(values[offset : offset + DISPOSITION_PAGE_ITEMS]),
+    }
+    scope = reference["binding"]
+    if (
+        reference["item_count"] != DISPOSITION_PAGE_ITEMS
+        or reference["sha256"] != hashlib.sha256(canonical_bytes(expected)).hexdigest()
+        or any(scope[key] != binding[key] for key in binding if key != "generation")
+        or scope["generation"] > binding["generation"]
+    ):
+        raise ReviewInputError(
+            "prepared disposition page reference differs from inventory"
+        )
+    return reference
 
 
 def read_paged_snapshot(
@@ -313,7 +363,15 @@ def prepare_local_paged_snapshot(
                 )
             references.append(prepare(page, DISPOSITION_PAGE_ITEMS, 1024))
         else:
-            references.append(dict(page))
+            references.append(
+                _prepared_page_reference(
+                    page,
+                    binding=binding,
+                    values=values,
+                    result_digest=result_digest,
+                    offset=index * DISPOSITION_PAGE_ITEMS,
+                )
+            )
     document = {
         "schema_version": "disposition-pages-v1",
         "result_digest": result_digest,

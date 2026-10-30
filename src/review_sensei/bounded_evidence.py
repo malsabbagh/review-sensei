@@ -27,6 +27,7 @@ INLINE_ENCODING = "inline-json-v1"
 PART_ENCODING = "evidence-part-v1"
 MAX_PART_BYTES = 32_768
 PART_FRAMING_RESERVE = 512
+PACKED_CHUNK_BYTES = 23_500
 MAX_PARTS = 32
 MAX_PARTITION_BYTES = 1_048_576
 MAX_PARTITION_DECODED_BYTES = 2_097_152
@@ -516,7 +517,10 @@ def partition_evidence(
         raise ReviewInputError("partition capacity exceeded: decoded bytes")
     packed = zlib.compress(raw, level=9)
     # Fixed conservative payload allocation includes base64 and closed framing.
-    chunks = [packed[i : i + 23_500] for i in range(0, len(packed), 23_500)]
+    chunks = [
+        packed[i : i + PACKED_CHUNK_BYTES]
+        for i in range(0, len(packed), PACKED_CHUNK_BYTES)
+    ]
     if len(chunks) > MAX_PARTS:
         raise ReviewInputError("partition capacity exceeded: part count")
     inventory = hashlib.sha256(raw).hexdigest()

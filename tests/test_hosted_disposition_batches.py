@@ -204,6 +204,40 @@ class AssignedIdBoundTests(unittest.TestCase):
 
 
 class HostedBatchAdapterTests(unittest.TestCase):
+    def test_stale_reused_page_refuses_before_any_new_remote_carrier(self):
+        state, ledger, _ = seeded()
+        record, values = stage(ledger, 8)
+        ledger.evidence_budget = EvidenceReadBudget()
+        prior = record.disposition_snapshot["state_manifest"]
+        document = ledger.read_evidence(
+            fixture.IDENTITY, prior, expected_binding=prior["binding"]
+        )
+        changed = (
+            {**values[0], "reason": "Changed independent rationale"},
+            *values[1:],
+        )
+        before = copy.deepcopy(state.comments)
+
+        def mutation(current):
+            ledger._tail_preparing, ledger._tail_scan_pages = True, 1
+            try:
+                ledger.stage_disposition_snapshot_batch(
+                    fixture.IDENTITY,
+                    record=current,
+                    binding={**prior["binding"], "generation": current.generation + 1},
+                    pages=document["pages"],
+                    values=changed,
+                    result_digest=current.transaction.result_sha256,
+                    max_manifest_bytes=2048,
+                )
+            finally:
+                ledger._tail_preparing, ledger._tail_scan_pages = False, None
+            self.fail("stale reference reached activation")
+
+        with self.assertRaisesRegex(ReviewInputError, "page reference.*inventory"):
+            ledger.replace(fixture.IDENTITY, mutation, now=fixture.NOW)
+        self.assertEqual(state.comments, before)
+
     def test_real_adapter_33_and_64_assigned_ids_roundtrip_in_bounded_fixture(self):
         for count in (33, 64):
             with self.subTest(count=count):
