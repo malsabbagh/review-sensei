@@ -252,6 +252,7 @@ class ReviewRun:
     session_grant: str | None = field(default=None, repr=False)
     title: str = ""
     actions_token: str | None = field(default=None, repr=False)
+    restart_id: str | None = None
 
     def retained_analysis(self, argv: list[str]) -> CompletedAnalysis | None:
         """Recover a stopped same-run owner's exact checkpoint, without inference."""
@@ -455,7 +456,10 @@ class ReviewRun:
             options=GitHubWriteOptions(
                 github_writes=True,
                 auto_review=True,
-                auto_approve=self.plan.policy.reviews == "auto-approve",
+                auto_approve=(
+                    self.restart_id is None
+                    and self.plan.policy.reviews == "auto-approve"
+                ),
                 complete_inventory=True,
             ),
             oidc_token=self.oidc,
@@ -614,6 +618,7 @@ def bootstrap(
     purpose: str = "review",
     source: Mapping[str, object] | None = None,
     quarantine_predecessor_comment_id: int | None = None,
+    restart_id: str | None = None,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
     event = os.environ.get("GITHUB_EVENT_NAME", "")
@@ -663,6 +668,26 @@ def bootstrap(
     ):
         raise ReviewInputError(
             "review startup identity or read capability is unavailable"
+        )
+    from .controlled_restart import entry_registration
+
+    restart_registration = entry_registration(
+        repository=args.repository,
+        repository_id=args.repository_id,
+        pull_request=args.pull_request,
+        request_id=restart_id,
+        purpose=purpose,
+        policy_commit=policy_commit,
+        base_sha=args.base_sha,
+        head_sha=args.head_sha,
+    )
+    if restart_registration is not None and (
+        quarantine_predecessor_comment_id is not None
+        or args.rescan
+        or args.review_remaining
+    ):
+        raise ReviewInputError(
+            "controlled restart cannot continue or migrate an old session"
         )
     # The trusted checkout is infrastructure; authenticate its exact policy SHA.
     try:
@@ -718,6 +743,8 @@ def bootstrap(
             "trusted policy does not enable the current review route"
         )
     job = "command" if purpose == "command" else plan.runner_kind
+    if restart_registration is not None and job != restart_registration["job"]:
+        raise ReviewInputError("controlled restart runner differs from its designation")
     startup = review_startup_plan(job)
     # Source-controlled startup and both execution owners must fit even before
     # authentication requests. A malformed/undersized local config cannot start
@@ -924,6 +951,17 @@ def bootstrap(
             actor=os.environ.get("GITHUB_ACTOR"),
             triggering_actor=os.environ.get("GITHUB_TRIGGERING_ACTOR"),
         )
+    if restart_registration is not None:
+        from .controlled_restart import install_admission, prepare_admission
+
+        proof = prepare_admission(
+            ledger=native,
+            identity=identity,
+            registration=restart_registration,
+            actions_token=actions_token,
+            directory=run_directory,
+        )
+        install_admission(native, proof)
     loaded = native.load(identity)
     if int(attempt) == 1:
         try:
@@ -1103,6 +1141,8 @@ def bootstrap(
     ledger = (ReviewRunLedger if purpose == "review" else ActionRunLedger)(
         native, caller, identity
     )
+    if restart_registration is not None:
+        proof.bind_runtime(ledger)
     publication_broker = BrokerClient(
         opener=caller.open,
         control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
@@ -1125,6 +1165,7 @@ def bootstrap(
         session.grant,
         title,
         actions_token,
+        restart_id,
     )
 
 
@@ -1132,12 +1173,14 @@ def _has_option(argv: Sequence[str], name: str) -> bool:
     return any(arg == name or arg.startswith(name + "=") for arg in argv)
 
 
-def run_review(argv: Sequence[str]) -> int:
+def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
     parser = argparse.ArgumentParser(prog="review-sensei-github review-run")
     parser.add_argument("--policy-commit", required=True)
     parser.add_argument("--run-directory", type=Path, required=True)
     parser.add_argument("--publication-outcome", type=Path, required=True)
     parser.add_argument("--quarantine-predecessor-comment-id", type=int)
+    if controlled_restart:
+        parser.add_argument("--restart-id", required=True)
     parser.add_argument("engine_args", nargs=argparse.REMAINDER)
     options = parser.parse_args(list(argv))
     core = options.engine_args
@@ -1154,11 +1197,16 @@ def run_review(argv: Sequence[str]) -> int:
         for value in (args.base_sha, args.head_sha)
     ):
         raise ReviewInputError("review lifecycle requires exact base and head")
+    if controlled_restart and args.diff is not None:
+        raise ReviewInputError(
+            "controlled restart requires a freshly prepared current full diff"
+        )
     selected = bootstrap(
         args,
         run_directory=options.run_directory,
         policy_commit=options.policy_commit,
         quarantine_predecessor_comment_id=options.quarantine_predecessor_comment_id,
+        restart_id=getattr(options, "restart_id", None),
     )
     core = [*core]
     if not _has_option(core, "--base-sha"):

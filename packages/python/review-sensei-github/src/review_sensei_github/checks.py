@@ -351,6 +351,22 @@ class ReviewCheckPublisher:
 
         if outcome.conclusion not in COMPLETED_CONCLUSIONS:
             raise GitHubPublicationError("check conclusion is invalid")
+        from .controlled_restart import effect_guard
+
+        if effect_guard(self.http) is not None and outcome.conclusion in {
+            "success",
+            "neutral",
+        }:
+            # Fresh analysis cannot certify obligations in an opaque archive.
+            # Keep the independent completed result, but never let abandonment
+            # of historical execution turn into a passing required check.
+            outcome = CheckOutcome(
+                "action_required",
+                "Historical review remains unsettled",
+                "The fresh review completed, but historical findings, decisions "
+                "and delayed effects remain unsettled. Controlled restart does "
+                "not certify those obligations or authorize approval.",
+            )
         validate_bounded_text(
             outcome.title,
             MAX_CHECK_TITLE_CHARS,
@@ -506,7 +522,13 @@ class ReviewCheckPublisher:
                 continue
             check_run_id = run.get("id")
             if isinstance(check_run_id, int) and not isinstance(check_run_id, bool):
-                return check_run_id
+                from .controlled_restart import owns_target
+
+                if owns_target(
+                    self.http,
+                    self._repository_path(repository, f"/check-runs/{check_run_id}"),
+                ):
+                    return check_run_id
         return None
 
     def _create(

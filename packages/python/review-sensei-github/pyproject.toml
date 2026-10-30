@@ -33,4 +33,4 @@ review-sensei-github = "review_sensei_github.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-review_sensei_github = ["fixtures/*.yml", "quarantine_activations.json"]
+review_sensei_github = ["fixtures/*.yml", "quarantine_activations.json", "controlled_restarts.json"]

@@ -1,3 +1,4 @@
+import { authorizeControlledRestart } from "./controlled-restart";
 import type { BrokerObservation } from "./broker-observation";
 import { BrokerLifetime } from "./broker-lifetime";
 import { BrokerDispatchControl, type BrokerControlReceipt } from "./broker-dispatch-control";
@@ -339,6 +340,7 @@ export class TokenBroker {
     // Reject obsolete or wrong-purpose authority before requesting installation tokens.
     const requestedAuthority = bindRunAuthority(body.session_attestation, claims);
     authorizeRunCapability(requestedAuthority, requested);
+    authorizeControlledRestart(requestedAuthority, requested, claims.event_name);
     const configuredTag = validatePublicWorkflowTag(this.env.PUBLIC_WORKFLOW_TAG ?? "");
     const observedTag = authorizeObservedWorkflowTag(
       configuredTag,
@@ -441,6 +443,7 @@ export class TokenBroker {
       throw new Error("broker_session_grant_invalid");
     }
     const parsed = parseRunAuthority(attestation, true);
+    authorizeControlledRestart(parsed, "review_session");
     const github = this.github.withRequestLifetime(lifetime, control);
     const scope = sessionScope(parsed, parsed.repository_id);
     const configuredTag = validatePublicWorkflowTag(this.env.PUBLIC_WORKFLOW_TAG ?? "");

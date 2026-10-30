@@ -3395,9 +3395,22 @@ class ReviewApprovalFinalizer:
         pull_request: int,
     ) -> list[Any]:
         try:
-            return self._review_pages(
+            from .controlled_restart import owns_target
+
+            items = self._review_pages(
                 token=token, repository=repository, pull_request=pull_request
             )
+            return [
+                item
+                for item in items
+                if isinstance(item, dict)
+                and owns_target(
+                    self.http,
+                    self.http.repository_path(
+                        repository, f"/pulls/{pull_request}/reviews/{item.get('id')}"
+                    ),
+                )
+            ]
         except GitHubHTTPTransientError as exc:
             raise GitHubPublicationTransientError(
                 "review decision reconciliation failed temporarily"
@@ -6151,6 +6164,14 @@ class ReviewPublisher:
                 or check_diagnostic == "check_permission"
                 else ""
             )
+            from .controlled_restart import effect_guard
+
+            restart_guard = effect_guard(self.http)
+            restart_marker = (
+                "\n" + restart_guard.admission.marker
+                if restart_guard is not None
+                else ""
+            )
             summary, index_marker = fit_assembled_review(
                 assembled,
                 review_marker=marker,
@@ -6167,17 +6188,21 @@ class ReviewPublisher:
                     eligibility, assembled.index_entries
                 )
                 + (NATIVE_UNION_FRAME_RESERVE if grouped_publication else 0)
-                + (len(check_warning.encode("utf-8")) + 2 if check_warning else 0),
+                + (len(check_warning.encode("utf-8")) + 2 if check_warning else 0)
+                + len(restart_marker.encode("utf-8")),
                 preserve_explanations=human_inventory is not None,
             )
             prepared_comments = assembled.inline_comments
 
             def body_for_summary(review_summary: str) -> str:
-                return _framed_review_body(
-                    review_summary,
-                    review_marker=marker,
-                    index_marker=index_marker,
-                    eligibility_marker=eligibility_marker,
+                return (
+                    _framed_review_body(
+                        review_summary,
+                        review_marker=marker,
+                        index_marker=index_marker,
+                        eligibility_marker=eligibility_marker,
+                    )
+                    + restart_marker
                 )
 
             body = body_for_summary(summary)
@@ -7268,6 +7293,14 @@ class ReviewPublisher:
         result_states: set[str] = set()
         for review in payload:
             if not isinstance(review, dict):
+                continue
+            from .controlled_restart import owns_review
+
+            if not owns_review(
+                self.http,
+                self.http.repository_path(repository, f"/pulls/{pull_request}/reviews"),
+                review,
+            ):
                 continue
             body = review.get("body")
             commit_id = review.get("commit_id")

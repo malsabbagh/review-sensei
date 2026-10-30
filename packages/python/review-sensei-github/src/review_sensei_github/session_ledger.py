@@ -1185,6 +1185,9 @@ class GitHubIssueCommentSessionLedger:
             record=record,
             consumed_grants=tuple(sorted(digests)),
         )
+        restart = getattr(self, "_controlled_restart", None)
+        if restart is not None:
+            body = restart.render(self, record, body)
         # Validate the exact comment before any GitHub write. Writers used to
         # PATCH first and parse the response afterwards, so a candidate the
         # public schema rejects became the stored ledger and the next command
@@ -1242,6 +1245,9 @@ class GitHubIssueCommentSessionLedger:
             ) from exc
         except GitHubHTTPError as exc:
             raise GitHubPublicationError("session ledger discovery failed") from exc
+        restart = getattr(self, "_controlled_restart", None)
+        if restart is not None:
+            items = restart.select(self, identity, items)
         found: list[tuple[int, SessionRecord]] = []
         for item in items:
             if not isinstance(item, dict):

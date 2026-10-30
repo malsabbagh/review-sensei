@@ -72,6 +72,18 @@ def http_read_operation(
     )
 
 
+def prewrite_fence_requests(caller: Any) -> int:
+    """Price an issued restart guard within the original caller allowance."""
+    proof = getattr(caller, "_controlled_restart_admission", None)
+    if proof is None:
+        return 0
+    from .controlled_restart import RestartAdmission
+
+    if type(proof) is not RestartAdmission:
+        raise ReviewInputError("caller restart fence proof is invalid")
+    return proof.prewrite_fence_requests(caller)
+
+
 def http_write_operation(http: Any, key: str) -> Any:
     caller = caller_for_http(http)
     if caller is None or caller._state is None:

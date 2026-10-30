@@ -268,6 +268,7 @@ class ApiRunRequestTransport:
         *,
         write_tail: int = 0,
         retained: CallerOperation | None = None,
+        prewrite_reads: int = 0,
     ) -> Iterator[CallerOperation]:
         if self._active_operation is not None:
             raise ReviewInputError("caller mutation cannot nest another operation")
@@ -290,7 +291,7 @@ class ApiRunRequestTransport:
         )
         if retained is None:
             self._issued_operations.append((operation, self._block))
-        if operation.remaining < (write_tail or 1):
+        if operation.remaining < ((write_tail + prewrite_reads) or 1):
             raise EvidenceBudgetExhausted("caller operation allocation is unfunded")
         self._active_operation = operation
         try:
@@ -305,9 +306,14 @@ class ApiRunRequestTransport:
 
     def mutation_operation(self, key: str) -> Any:
         from .api_run_plan import WRITE_CONFIRMATION_TAIL
+        from .caller_operation import prewrite_fence_requests
 
+        fences = prewrite_fence_requests(self)
         return self._operation(
-            key, WRITE_CONFIRMATION_TAIL, write_tail=WRITE_CONFIRMATION_TAIL
+            key,
+            WRITE_CONFIRMATION_TAIL + fences,
+            write_tail=WRITE_CONFIRMATION_TAIL,
+            prewrite_reads=fences,
         )
 
     @contextmanager
@@ -319,7 +325,9 @@ class ApiRunRequestTransport:
         Unknown child effects stop the root mutation and cannot be replayed.
         """
         from .api_run_plan import WRITE_CONFIRMATION_TAIL
+        from .caller_operation import prewrite_fence_requests
 
+        fences = prewrite_fence_requests(self)
         parent = self._active_operation
         identity = (self._root, "part:" + key)
         if (
@@ -331,11 +339,11 @@ class ApiRunRequestTransport:
         ):
             raise ReviewInputError("immutable part operation is unavailable")
         if min(parent.remaining, self.usable) < (
-            parent.write_tail + WRITE_CONFIRMATION_TAIL
+            parent.write_tail + fences + WRITE_CONFIRMATION_TAIL + fences
         ):
             raise EvidenceBudgetExhausted("immutable part and root tails are unfunded")
         operation = CallerOperation(
-            WRITE_CONFIRMATION_TAIL, WRITE_CONFIRMATION_TAIL, identity[1]
+            WRITE_CONFIRMATION_TAIL + fences, WRITE_CONFIRMATION_TAIL, identity[1]
         )
         self._staged_part_operation = operation
         try:
@@ -1301,8 +1309,14 @@ class ApiRunRequestTransport:
         # this finite allocation. Complete enumeration remains mandatory; the
         # write and its confirmation remain protected before every read.
         key = "native:" + getattr(mutate, "__qualname__", "checkpoint")
+        from .caller_operation import prewrite_fence_requests
+
+        fences = prewrite_fence_requests(self)
         with self._operation(
-            key, NATIVE_OPERATION_REQUESTS, write_tail=WRITE_CONFIRMATION_TAIL
+            key,
+            NATIVE_OPERATION_REQUESTS + fences,
+            write_tail=WRITE_CONFIRMATION_TAIL,
+            prewrite_reads=fences,
         ) as operation:
             self._checkpoint_operation = operation
             try:
