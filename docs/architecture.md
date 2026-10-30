@@ -1260,8 +1260,8 @@ Engine/hosted dependency direction stays unchanged.
 No new public core helper API is created (ADR 0078).
 
 
-The native engine oracle installs the core distribution only. Intel bundle
-qualification inspects collected files and the embedded PyInstaller module inventory
-to reject hosted runtime and cryptography packages, while retaining ordinary TLS
-libraries, trigger-shim compatibility and native parity (ADR 0078). A missing or
-malformed inventory cannot establish the engine boundary.
+The native oracle uses the core distribution.
+Intel qualification inspects collected files and the embedded PyInstaller module
+inventory to reject hosted runtime and cryptography packages, while preserving
+ordinary TLS libraries, trigger-shim compatibility and native parity (ADR 0078).
+A missing or malformed inventory cannot establish the engine boundary.
