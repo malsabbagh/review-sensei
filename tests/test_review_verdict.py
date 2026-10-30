@@ -75,6 +75,10 @@ class ReviewVerdictTests(unittest.TestCase):
             },
         )
         restored = ReviewResult.from_dict(document)
+        self.assertEqual(
+            json.dumps(restored.to_dict(), sort_keys=True),
+            json.dumps(document, sort_keys=True),
+        )
         self.assertEqual(restored.content_digest(), selected.content_digest())
         eligibility = approval_eligibility_from_result(
             restored,
@@ -200,6 +204,15 @@ class ReviewVerdictTests(unittest.TestCase):
         malformed["review_verdict"]["unselected_human_decision"] = 1
         with self.assertRaises(ReviewInputError):
             ReviewResult.from_dict(malformed)
+
+    def test_preparation_rejects_verdict_from_a_different_policy(self):
+        held = project_review_comments(self.result, (), policy=self.policy)
+        for policy in (
+            ReviewConvergencePolicy(),
+            ReviewConvergencePolicy(quality="high-signal", mode="legacy"),
+        ):
+            with self.subTest(policy=policy), self.assertRaises(ReviewInputError):
+                prepare_publishable_review(held, convergence_policy=policy)
 
     def test_broader_review_cannot_clear_retained_unselected_requirement(self):
         previous = project_review_comments(
@@ -435,6 +448,68 @@ class ReviewVerdictTests(unittest.TestCase):
         self.assertEqual(reconciled.finding_lifecycles[0].state, "still-present")
         with self.assertRaisesRegex(ReviewInputError, "retained obligation"):
             project_review_comments(reconciled, (), policy=self.policy)
+
+    def test_full_baseline_reconciliation_preserves_default_quality_behavior(self):
+        from types import SimpleNamespace
+
+        from test_verification_baseline import _key
+
+        from review_sensei.baseline import baseline_from_review
+        from review_sensei.cli import _reconcile_hosted_result
+        from review_sensei.outcomes import RunOutcome
+        from review_sensei.service import ReviewRun, ReviewService
+
+        initial = replace(self.result, comments=(self.blocker,))
+        clean = replace(initial, comments=())
+        for quality in ("current", "balanced", "high-signal"):
+            policy = ReviewConvergencePolicy(quality=quality)
+            baseline = baseline_from_review(initial, cache_key=_key(), policy=policy)
+            run = ReviewRun(
+                result=clean, outcome=RunOutcome("reviewed", provider_calls=1)
+            )
+            with self.subTest(quality=quality):
+                reconciled = _reconcile_hosted_result(
+                    ReviewService,
+                    admission_baseline=baseline,
+                    verification_scope=SimpleNamespace(coverage_mode="full"),
+                    convergence_policy=policy,
+                    current_key=_key(head_sha="c" * 40),
+                )(run).result
+                if quality == "high-signal":
+                    self.assertEqual(reconciled.review_status, "partial")
+                    self.assertEqual(
+                        reconciled.finding_lifecycles[0].state, "uncertain"
+                    )
+                else:
+                    self.assertEqual(reconciled.to_dict(), clean.to_dict())
+
+    def test_reverification_preserves_new_and_previous_lifecycle_obligations(self):
+        from review_sensei.context import finding_lifecycle_for_comment
+        from review_sensei.models import FindingLifecycleRecord
+        from review_sensei.review_verdict import preserve_verified_verdict
+
+        old_record = FindingLifecycleRecord(
+            finding_lifecycle_for_comment(self.note).fingerprint, "still-present"
+        )
+        new_record = FindingLifecycleRecord(
+            finding_lifecycle_for_comment(self.blocker).fingerprint, "uncertain"
+        )
+        previous = bind_review_verdict(
+            replace(
+                self.result, comments=(self.note,), finding_lifecycles=(old_record,)
+            ),
+            policy=self.policy,
+        )
+        verified = bind_review_verdict(
+            replace(
+                self.result,
+                comments=(self.note, self.blocker),
+                finding_lifecycles=(replace(old_record, state="new"), new_record),
+            ),
+            policy=self.policy,
+        )
+        preserved = preserve_verified_verdict(previous, verified, policy=self.policy)
+        self.assertEqual(preserved.finding_lifecycles, (old_record, new_record))
 
     def test_schema5_carries_versioned_verdict_and_rejects_stripping(self):
         from pathlib import Path

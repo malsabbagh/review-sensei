@@ -116,6 +116,8 @@ def comment_selection_digest(comments: tuple[ReviewComment, ...]) -> str:
         not isinstance(comment, ReviewComment) for comment in comments
     ):
         raise ReviewInputError("review verdict comments are invalid")
+    # Match the existing selected-comment JSON digest, including ASCII escaping.
+    # ReviewComment validates its serialized fields before trusted admission.
     payload = json.dumps(
         [comment.to_dict() for comment in comments],
         sort_keys=True,
@@ -235,7 +237,7 @@ def project_review_comments(
         unselected_blocking_defect=prior.unselected_blocking_defect
         or any(comment.effective_blocking is True for comment in omitted),
         unselected_human_decision=prior.unselected_human_decision
-        or any(comment.needs_human for comment in omitted),
+        or any(comment.needs_human is True for comment in omitted),
     )
     return replace(
         result, comments=selected, finding_lifecycles=lifecycles, review_verdict=verdict
@@ -296,9 +298,17 @@ def preserve_verified_verdict(
         for record in previous.finding_lifecycles
         if record.fingerprint not in optional_removed
     )
+    previous_fingerprints = {
+        record.fingerprint for record in previous.finding_lifecycles
+    }
+    added_lifecycles = tuple(
+        record
+        for record in verified.finding_lifecycles
+        if record.fingerprint not in previous_fingerprints
+    )
     return replace(
         verified,
         comments=comments,
         review_verdict=prior.with_verified_comments(comments),
-        finding_lifecycles=prior_lifecycles,
+        finding_lifecycles=prior_lifecycles + added_lifecycles,
     )

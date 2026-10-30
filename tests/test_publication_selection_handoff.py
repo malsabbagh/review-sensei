@@ -204,6 +204,10 @@ class PublicationSelectionHandoffTests(unittest.TestCase):
         selected = self.freeze()
         with self.assertRaises(ReviewInputError):
             replace(selected, summary="Different accepted result")
+        changed = selected.to_dict()
+        changed["summary"] = "Different accepted result"
+        with self.assertRaises(ReviewInputError):
+            ReviewResult.from_dict(changed)
         with self.assertRaises(ReviewInputError):
             self.freeze(source=selected)
         fingerprint = finding_lifecycle_for_comment(self.rows[2].comment).fingerprint
@@ -239,6 +243,8 @@ class PublicationSelectionHandoffTests(unittest.TestCase):
             if field == "remove":
                 document.pop("publication_selection")
             else:
+                self.assertIn(field, selected.publication_selection.to_document())
+                self.assertNotEqual(document["publication_selection"][field], "f" * 64)
                 document["publication_selection"][field] = "f" * 64
             with self.subTest(field=field), self.assertRaises(ReviewInputError):
                 ReviewResult.from_dict(document)

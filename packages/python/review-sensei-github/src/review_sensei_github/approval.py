@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 APPROVAL_ELIGIBILITY_SCHEMA_VERSION = "1"
 APPROVAL_FACTS_SCHEMA_VERSION = "2"
+APPROVAL_VERDICT_FACTS_SCHEMA_VERSION = "3"
 APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION = "2.0"
 DEFAULT_HUMAN_ELIGIBILITY_VERSION = "5"
 MAX_REFERENCED_ELIGIBILITY_BYTES = 32 * 1024
@@ -125,7 +126,7 @@ class ApprovalFacts:
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
-            "schema_version": "3"
+            "schema_version": APPROVAL_VERDICT_FACTS_SCHEMA_VERSION
             if self.review_verdict is not None
             else APPROVAL_FACTS_SCHEMA_VERSION
             if self.provider is not None
@@ -179,13 +180,19 @@ class ApprovalFacts:
         if version not in {
             APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
             APPROVAL_FACTS_SCHEMA_VERSION,
-            "3",
+            APPROVAL_VERDICT_FACTS_SCHEMA_VERSION,
         }:
             raise ReviewInputError("approval facts schema_version is invalid")
-        if (version == "3") != ("review_verdict" in value):
+        if (version == APPROVAL_VERDICT_FACTS_SCHEMA_VERSION) != (
+            "review_verdict" in value
+        ):
             raise ReviewInputError("approval review verdict version is invalid")
         if (
-            version in {APPROVAL_FACTS_SCHEMA_VERSION, "3"}
+            version
+            in {
+                APPROVAL_FACTS_SCHEMA_VERSION,
+                APPROVAL_VERDICT_FACTS_SCHEMA_VERSION,
+            }
             and value.get("provider") is None
         ) or (
             version == APPROVAL_ELIGIBILITY_SCHEMA_VERSION

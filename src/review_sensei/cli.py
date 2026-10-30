@@ -2508,11 +2508,12 @@ def _reconcile_hosted_result(
             and baseline is not None
         ):
             coverage = "full" if coverage in {None, "incremental"} else coverage
-        if baseline is not None and coverage in {
-            "incremental",
-            "fallback-full",
-            "full",
-        }:
+        if baseline is not None and (
+            coverage in {"incremental", "fallback-full"}
+            or coverage == "full"
+            and isinstance(convergence_policy, ReviewConvergencePolicy)
+            and convergence_policy.quality == "high-signal"
+        ):
             reconciled = reconcile_overflow_review(
                 result,
                 baseline,

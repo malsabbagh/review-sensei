@@ -34,7 +34,8 @@
       "src/review_sensei/schemas/quarantine-lineage.schema.json",
       "src/review_sensei/schemas/eligibility-v7.schema.json",
       "src/review_sensei/schemas/eligibility-v8.schema.json",
-      "src/review_sensei/schemas/publication-selection.schema.json"
+      "src/review_sensei/schemas/publication-selection.schema.json",
+      "src/review_sensei/schemas/review-verdict.schema.json"
     ],
     "description": "Required entries are these paths plus lanes.dist_safe.helpers and every module under lanes.dist_safe.discover. Forbidden entries are lanes.checkout_only.modules. The verifier reads this contract so MANIFEST.in and this file are the only places a lane asset is declared."
   },

@@ -78,6 +78,8 @@ class PublicationCandidate:
     Impact/evidence come from the completed verifier/admission contract. The
     model's severity label is deliberately not used for priority. Matching an
     existing target requires independently authenticated same-concern facts.
+    Required means exactly blocking or human-decision admission; a mismatch is
+    rejected before selection rather than reinterpreted as a new requirement.
     """
 
     comment: ReviewComment
@@ -129,7 +131,8 @@ class PublicationSelection:
     max_active_findings: int
     occupancy_sha256: str
     selected: tuple[SelectedFinding, ...]
-    # A bounded current-review verdict, not a queue of unselected findings.
+    # Any required candidate gates the review even when it is not selected.
+    # This is deliberately independent of the selected comment inventory.
     required_verdict: bool
 
     def to_document(self) -> dict[str, object]:
