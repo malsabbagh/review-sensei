@@ -17,10 +17,10 @@ from review_sensei.providers.openrouter import (
     OpenRouterProvider,
     OpenRouterRoutingPolicy,
     _NoRedirect,
-    _VerifiedHTTPSHandler,
     is_allowlisted_openrouter_endpoint,
 )
 from review_sensei.providers.registry import ProviderSettings, default_registry
+from review_sensei.providers.transport import DestinationBoundHTTPSHandler
 
 
 class _Response:
@@ -323,21 +323,15 @@ class OpenRouterProviderTests(unittest.TestCase):
 
     def test_verified_https_handler_rejects_host_mismatch(self):
         context = ssl.create_default_context()
-        handler = _VerifiedHTTPSHandler(context, expected_hostname="openrouter.ai")
-        captured: dict[str, object] = {}
-
-        def fake_do_open(factory, req):
-            captured["factory"] = factory
-            raise ProviderError("stop")
-
-        handler.do_open = fake_do_open
-        request = Request("https://openrouter.ai/api/v1/chat/completions")
-        with self.assertRaises(ProviderError):
-            handler.https_open(request)
-        factory = captured["factory"]
-        assert callable(factory)
+        handler = DestinationBoundHTTPSHandler(
+            context,
+            expected_hostname="openrouter.ai",
+            expected_port=443,
+            label="OpenRouter",
+        )
+        request = Request("https://evil.example/api/v1/chat/completions")
         with self.assertRaisesRegex(ProviderError, "TLS host mismatch"):
-            factory("evil.example", 443)
+            handler.https_open(request)
 
     def test_safe_opener_rejects_redirect_end_to_end(self):
         class _RedirectingOpener:
@@ -392,7 +386,7 @@ class OpenRouterProviderTests(unittest.TestCase):
         build.assert_called_once()
         handlers = build.call_args.args
         self.assertIsInstance(handlers[0], _NoRedirect)
-        self.assertIsInstance(handlers[1], _VerifiedHTTPSHandler)
+        self.assertIsInstance(handlers[1], DestinationBoundHTTPSHandler)
 
     def test_ssl_context_uses_certifi_when_ssl_cert_file_is_unset(self):
         dummy = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)

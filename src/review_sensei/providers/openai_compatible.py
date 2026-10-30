@@ -8,7 +8,6 @@ only to the configured HTTPS endpoint.
 from __future__ import annotations
 
 import errno
-import http.client
 import json
 import math
 import os
@@ -22,7 +21,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
-    HTTPSHandler,
     Request,
     build_opener,
     urlopen,
@@ -35,6 +33,7 @@ from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
 from .transport import (
     MAX_TRANSPORT_TIMEOUT_SECONDS,
+    DestinationBoundHTTPSHandler,
     bounded_transport_timeout,
     parse_retry_after_seconds,
     read_bounded_body,
@@ -125,35 +124,6 @@ class _NoRedirect(HTTPRedirectHandler):
         raise ProviderError("OpenAI-compatible endpoint redirected")
 
 
-class _VerifiedHTTPSHandler(HTTPSHandler):
-    """Verify TLS against the configured hostname, not only the resolved peer."""
-
-    def __init__(self, context: ssl.SSLContext, *, expected_hostname: str) -> None:
-        super().__init__(context=context)
-        self._expected_hostname = expected_hostname
-        self._verified_context = context
-
-    def https_open(self, req: Request) -> http.client.HTTPResponse:
-        verified_context = self._verified_context
-        expected_hostname = self._expected_hostname
-
-        def connection_factory(
-            host: str,
-            port: int | None = 443,
-            timeout: float | object = object(),
-            **kwargs: object,
-        ) -> http.client.HTTPSConnection:
-            return http.client.HTTPSConnection(
-                host,
-                port=port or 443,
-                timeout=timeout,
-                context=verified_context,
-                server_hostname=expected_hostname,  # type: ignore[call-overload]
-            )
-
-        return self.do_open(connection_factory, req)
-
-
 class OpenAICompatibleProvider:
     """Bounded adapter for ``/v1/chat/completions`` compatible APIs."""
 
@@ -235,10 +205,14 @@ class OpenAICompatibleProvider:
         self._expected_hostname = hostname
         self._opener = opener
         self._ssl_context = self._build_ssl_context()
+        endpoint_port = urlsplit(self.base_url).port
         self._safe_opener = build_opener(
             _NoRedirect(),
-            _VerifiedHTTPSHandler(
-                self._ssl_context, expected_hostname=self._expected_hostname
+            DestinationBoundHTTPSHandler(
+                self._ssl_context,
+                expected_hostname=self._expected_hostname,
+                expected_port=443 if endpoint_port is None else endpoint_port,
+                label="OpenAI-compatible",
             ),
         )
 

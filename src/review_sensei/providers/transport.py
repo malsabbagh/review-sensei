@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import errno
+import http.client
 import math
 import re
 import socket
+import ssl
 from threading import TIMEOUT_MAX
 from typing import Any
 from urllib.error import URLError
+from urllib.parse import urlsplit
+from urllib.request import HTTPSHandler, Request
 
 from ..errors import ProviderError
 
@@ -108,3 +112,53 @@ def read_bounded_body(response: Any, maximum: int, *, label: str) -> bytearray:
             raise ProviderError(f"{label} exceeded the configured size limit")
         body.extend(chunk)
     return body
+
+
+class DestinationBoundHTTPSHandler(HTTPSHandler):
+    """Keep direct and proxied HTTPS requests bound to an admitted destination.
+
+    urllib owns proxy discovery and CONNECT. Its standard HTTPSConnection parses
+    the authority and selects SNI from the origin, including through a tunnel.
+    """
+
+    def __init__(
+        self,
+        context: ssl.SSLContext,
+        *,
+        expected_hostname: str,
+        expected_port: int,
+        label: str,
+    ) -> None:
+        super().__init__(context=context)
+        self._destination = (expected_hostname, expected_port)
+        self._label = label
+
+    def _authority(self, url: str) -> tuple[str, int]:
+        try:
+            parsed = urlsplit(url)
+            if (
+                parsed.scheme.casefold() != "https"
+                or parsed.hostname is None
+                or "@" in parsed.netloc
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("invalid destination")
+            return (
+                parsed.hostname.encode("idna").decode("ascii").casefold(),
+                443 if parsed.port is None else parsed.port,
+            )
+        except (UnicodeError, ValueError) as exc:
+            raise ProviderError(f"{self._label} TLS host mismatch") from exc
+
+    def https_open(self, req: Request) -> http.client.HTTPResponse:
+        tunnel_host = getattr(req, "_tunnel_host", None)
+        if tunnel_host is not None and not isinstance(tunnel_host, str):
+            raise ProviderError(f"{self._label} TLS host mismatch")
+        destination = tunnel_host or req.host
+        if (
+            self._authority(req.full_url) != self._destination
+            or self._authority(f"https://{destination}") != self._destination
+        ):
+            raise ProviderError(f"{self._label} TLS host mismatch")
+        return super().https_open(req)
