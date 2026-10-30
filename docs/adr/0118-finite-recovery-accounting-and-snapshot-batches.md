@@ -118,3 +118,38 @@ Enabling a producer requires complete supported-profile lifecycle proof and
 independent review of the exact artifact. Rollback keeps any v2 roots, original
 receipts, unknown charges and obligations readable and preserved. It cannot
 reinterpret an unknown POST as permission for another create.
+
+## First closed-page checkpoint correction
+
+An enabled paged qualification candidate now stages its first closed page at
+eight decisions, before waiting for the embedded byte ceiling. Subsequent
+single-decision commands reuse the closed pages and stage at most one newly
+closed page. This fixes the decision-20 migration that previously needed two
+new pages after only one evidence promise remained. It does not add promises,
+borrow the independent command receipt, change any enclosing allocation or
+rewrite an old v1 snapshot. Disabled writers and production v1 adapters retain
+their original thresholds. A large pre-existing or bulk migration still needs
+its complete batch admission and may refuse before any snapshot write.
+
+The bounded public-entry regression exercises the existing frozen 1152-request
+candidate profile with 28 current decisions, 14 independent historical decisions,
+all thirteen materialized old late allocations, terminal action receipts and
+idempotent verification. Original unsettled accounting and late-carrier bytes
+must remain unchanged. Commands require their independent persisted terminal
+action result; the review-only terminal transaction field is a different
+completion contract. Source and rebuilt-package receipts must qualify the final
+artifact; this description is not a production activation or numerical cap.
+
+A larger light 33-decision profile can complete, but the corresponding heavy
+profile fails during its historical tail: at 184 visible issue comments plus
+the predecessor root, the complete packed allocation must also retain thirteen
+old possible creations and three current promises. Its 201 slots exceed the
+unchanged 200-allocation bound. Materialized old carriers do not refund uncertain
+old allocations. The failure is retained, not reinterpreted as acceptance.
+
+An active finding count alone does not bound immutable command/archive history,
+body growth, reactions, unknown writes or later review rounds. Therefore neither
+the successful 28-profile nor isolated 33/64 snapshot tests certify a global N.
+Global publication occupancy, stable revisions, reopening and a complete selected
+policy lifecycle remain separate prerequisites. No larger census or equivalent
+capacity expansion is introduced by the first-page correction.

@@ -158,6 +158,58 @@ def append(store, prior, values, generation):
 
 
 class PagedDispositionSnapshotTests(unittest.TestCase):
+    def test_candidate_starts_at_first_closed_page_before_a_multi_page_migration(self):
+        from review_sensei.disposition import FindingDisposition, _evolve_dispositions
+
+        transaction = ReviewTransaction.create(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha=BASE,
+            head_sha=HEAD,
+            policy_digest=POLICY,
+            configuration_digest="e" * 64,
+            evidence_digest="a" * 64,
+            reservation_id="f" * 64,
+            generation=1,
+        ).with_result(RESULT)
+        for paged, enabled in ((False, True), (True, True), (True, False)):
+            with (
+                self.subTest(paged=paged, enabled=enabled),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                ledger = LocalSessionLedger(
+                    Path(directory),
+                    evidence_budget=EvidenceReadBudget(),
+                    enable_disposition_snapshot_writes=enabled,
+                )
+                record = SessionRecord.create(
+                    IDENTITY,
+                    generation=1,
+                    transaction=transaction,
+                    last_committed_reservation_id=transaction.reservation_id,
+                    dispositions=tuple(decision(i) for i in range(7)),
+                )
+                new = FindingDisposition(**decision(7))
+                with patch.object(
+                    LocalSessionLedger,
+                    "supports_paged_disposition_snapshot_writes",
+                    new=property(lambda self: paged),
+                ):
+                    updated = _evolve_dispositions(
+                        record, (new,), head_sha=HEAD, now=None, ledger=ledger
+                    )
+                self.assertEqual(
+                    read_session_dispositions(ledger, updated),
+                    (*record.dispositions, new.to_dict()),
+                )
+                self.assertEqual(
+                    updated.disposition_snapshot is not None, paged and enabled
+                )
+                if paged and enabled:
+                    self.assertEqual(
+                        updated.disposition_snapshot["schema_version"], "2.0"
+                    )
+
     def test_empty_partial_and_closed_page_boundaries_roundtrip(self):
         for count in (0, 7, 8, 9, 16, 17, 23):
             with (
