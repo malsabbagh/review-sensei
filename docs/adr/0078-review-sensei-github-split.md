@@ -178,7 +178,12 @@ it requires the actual bundle/executable, scans collected files, and inspects th
 embedded CArchive/PYZ module inventory using pinned PyInstaller tooling. Hosted
 `review_sensei_github` and `cryptography` packages fail qualification; Python's
 ordinary TLS libraries and the trigger compatibility shim remain allowed. Missing
-or malformed inventory fails closed.
+or malformed inventory fails closed. Inventory item kinds distinguish Python
+modules/scripts from data assets; loose files are checked at the bundle import
+root and `_internal` import root. Data names such as `cryptography.txt` and
+`docs/cryptography/README.txt` do not establish a forbidden package. Unknown
+inventory kinds or a PyInstaller version different from the build pin fail
+qualification.
 
 Intel retains Python 3.11.9, actual native build/parity, candidate archiving and
 installed npm consumer checks. All five native targets remain required. Synthetic
