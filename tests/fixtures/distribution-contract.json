@@ -45,7 +45,15 @@
     "install_wheel": "python -m pip install dist/*.whl",
     "extract_sdist_tests": "tar -xzf dist/*.tar.gz",
     "run_dist_safe": "python -I -m unittest discover -s tests/dist_safe -v",
-    "run_downstream": "python -I -m unittest discover -s tests/downstream -v"
+    "run_downstream": "python -I -m unittest discover -s tests/downstream -v",
+    "install_editable_hosted": "python -m pip install -e packages/python/review-sensei-github --no-deps",
+    "lint": "python -m ruff check setup.py src tests scripts packages/python/review-sensei-github",
+    "typecheck": "python -m mypy src packages/python/review-sensei-github/src",
+    "checkout_coverage": "python scripts/run_checkout_tests.py --workers 4 --coverage --costs tests/fixtures/checkout-class-seconds.json --report /tmp/review-sensei-checkout-timings.json",
+    "coverage_floor": "python -m coverage report --precision=2 --show-missing --fail-under=80",
+    "build_hosted": "python -m build --outdir dist/github packages/python/review-sensei-github",
+    "install_hosted_wheel": "python -m pip install dist/github/*.whl",
+    "core_only_smoke": "python -I -m review_sensei --help"
   },
   "lanes": {
     "dist_safe": {

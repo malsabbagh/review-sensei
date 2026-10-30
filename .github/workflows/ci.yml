@@ -345,6 +345,7 @@ jobs:
           retention-days: 7
 
   intel-standalone:
+    # Preserve the required-check name consumed by release qualification.
     name: Intel macOS standalone ABI and parity
     runs-on: macos-15-intel
     timeout-minutes: 30
@@ -354,16 +355,16 @@ jobs:
           fetch-depth: 2
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          # Keep the actual failing framework/OpenSSL combination as a regression.
+          # Keep the existing Intel interpreter qualification unchanged.
           python-version: '3.11.9'
-      - name: Install statically linked native oracle
+      - name: Install core native oracle
         run: python scripts/install_standalone_oracle.py --target darwin-x64
       - name: Install pinned PyInstaller
         run: python -m pip install --disable-pip-version-check -r packaging/standalone/requirements.txt
       - name: Build Intel standalone
         run: python scripts/build_standalone.py --target darwin-x64 --output dist/standalone/darwin-x64
-      - name: Verify frozen crypto linkage and RSA signing
-        run: python scripts/check_standalone_crypto.py --bundle dist/standalone/darwin-x64/review-sensei --report "$RUNNER_TEMP/frozen-crypto.json"
+      - name: Verify frozen engine package boundary
+        run: python scripts/check_standalone_crypto.py --bundle dist/standalone/darwin-x64/review-sensei --report "$RUNNER_TEMP/engine-boundary.json"
       - name: Retain strict native CLI parity
         env:
           PYTHONPATH: src
@@ -375,12 +376,12 @@ jobs:
             --fixture-response evaluation/v1/responses/off-by-one.json \
             --base-ref "$(git rev-parse HEAD^)" \
             --head-ref "$(git rev-parse HEAD)"
-      - name: Retain verified native ABI evidence
+      - name: Retain verified engine boundary evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: frozen-intel-crypto-check
-          path: ${{ runner.temp }}/frozen-crypto.json
+          name: frozen-intel-engine-boundary
+          path: ${{ runner.temp }}/engine-boundary.json
           if-no-files-found: warn
 
       - name: Archive exact Intel native candidate

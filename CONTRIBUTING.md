@@ -16,6 +16,7 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements/ci.txt
 python -m pip install -e .
+python -m pip install -e packages/python/review-sensei-github --no-deps
 ```
 
 On Windows, use the equivalent `.venv\Scripts\activate` command. Do not
@@ -30,19 +31,20 @@ provider or GitHub credentials:
 ```bash
 python scripts/check_action_pins.py
 python scripts/validate_json_contracts.py
-python -m ruff format --check setup.py src tests scripts
-python -m ruff check setup.py src tests scripts
-python -m mypy src
-python -m compileall -q src
-python -m coverage run --source=review_sensei --branch -m unittest discover -s tests -v
+python scripts/validate_public_schemas.py
+python -m ruff format --check setup.py src tests scripts packages/python/review-sensei-github
+python -m ruff check setup.py src tests scripts packages/python/review-sensei-github
+python -m mypy src packages/python/review-sensei-github/src
+python -m compileall -q src packages/python/review-sensei-github/src
+python scripts/run_checkout_tests.py --workers 4 --coverage --costs tests/fixtures/checkout-class-seconds.json --report /tmp/review-sensei-checkout-timings.json
 python -m coverage report --precision=2 --show-missing --fail-under=80
-python -m unittest discover -s tests -v
-python -m build
+python -m build --outdir dist
+python -m build --outdir dist/github packages/python/review-sensei-github
 git diff --check
 ```
 
 The source branch-coverage floor is 80%. Ruff formatting and linting must be
-clean, and mypy must pass for `src`. Keep provider-specific transport and
+clean, and mypy must pass for both source packages. Keep provider-specific transport and
 authentication under `src/review_sensei/providers/`; review business logic stays
 independent of GitHub and model-provider SDKs.
 
@@ -63,13 +65,15 @@ repository context, configuration, and model output as untrusted input.
 
 The clean-wheel check is also required for package changes. It must run outside
 the checkout so the smoke test cannot import `src/`. After building
-distributions, install **only** the wheel and run the packaged dist-safe suite
+distributions, first install only the core wheel to check the engine boundary,
+then install the matching hosted wheel before running the packaged dist-safe suite
 extracted from the sdist:
 
 ```bash
 repository_root="$PWD"
 python -m build --outdir dist
-sha256sum dist/*.tar.gz dist/*.whl
+python -m build --outdir dist/github packages/python/review-sensei-github
+sha256sum dist/*.tar.gz dist/*.whl dist/github/*.tar.gz dist/github/*.whl
 python -m venv /tmp/review-sensei-wheel-venv
 /tmp/review-sensei-wheel-venv/bin/python -m pip install dist/*.whl
 cd /tmp
@@ -81,6 +85,9 @@ suite="$(printf '%s\n' "$sdist_root"/review_sensei-*/tests | head -n 1)"
 export REVIEWSENSEI_CHECKOUT_ROOT="$repository_root"
 export REVIEWSENSEI_DIST_SAFE_LANE=1
 /tmp/review-sensei-wheel-venv/bin/python -I -m review_sensei --help
+/tmp/review-sensei-wheel-venv/bin/python -I -m review_sensei --version
+/tmp/review-sensei-wheel-venv/bin/python -I -c "import importlib.util; assert importlib.util.find_spec('review_sensei_github') is None"
+/tmp/review-sensei-wheel-venv/bin/python -m pip install "$repository_root"/dist/github/*.whl
 /tmp/review-sensei-wheel-venv/bin/python -I -m unittest discover -s "$suite/dist_safe" -v
 /tmp/review-sensei-wheel-venv/bin/python -I -m unittest discover -s "$suite/downstream" -v
 /tmp/review-sensei-wheel-venv/bin/python -m pip check
@@ -143,8 +150,10 @@ Linux CI and release smoke builds use Docker's official ECR Public mirror with
 the same immutable Python/Debian multi-platform digests. Both images are pulled
 before building, with at most three attempts and jittered backoff for registry
 failures, then used without implicit pulls; the clean consumer remains
-offline. No registry login is required. Intel's static-OpenSSL build deliberately
-bypasses the wheel cache to preserve its ABI regression check.
+offline. No registry login is required. Intel uses the same core-only oracle installation as other native targets.
+Its pinned PyInstaller inventory check verifies both collected files and embedded
+Python modules exclude the hosted package and cryptography; native CLI parity
+and all five installed candidate checks remain required.
 
 ## Deterministic evaluation changes
 

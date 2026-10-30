@@ -1,8 +1,12 @@
-"""Verify the actual frozen Intel cryptography binding and its private OpenSSL."""
+"""Verify the frozen engine bundle excludes hosted runtime and cryptography.
+
+The historical script entrypoint is retained for native qualification callers.
+"""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -12,36 +16,26 @@ from pathlib import Path
 from build_standalone import StandaloneBuildError, validate_host_target
 
 PROBE = r"""
-import importlib
 import json
 import sys
-from pathlib import Path
+import PyInstaller
+from PyInstaller.archive.readers import CArchiveReader
 
-import cryptography.hazmat.bindings
-
-binding = Path(sys.argv[1]).resolve()
-name = "cryptography.hazmat.bindings._rust"
-if name in sys.modules:
-    raise RuntimeError("oracle Rust binding was loaded before the frozen probe")
-cryptography.hazmat.bindings.__path__.insert(0, str(binding.parent))
-module = importlib.import_module(name)
-
-from cryptography.hazmat.backends.openssl.backend import backend
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
-
-assert Path(module.__file__).resolve() == binding
-key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-message = b"review-sensei frozen binding ABI regression"
-signature = key.sign(message, padding.PKCS1v15(), hashes.SHA256())
-key.public_key().verify(signature, message, padding.PKCS1v15(), hashes.SHA256())
-print(json.dumps({"binding": str(binding), "rsa_verified": True,
-                  "openssl": backend.openssl_version_text()}))
+archive = CArchiveReader(sys.argv[1])
+modules = []
+pyz_archives = 0
+for name, entry in archive.toc.items():
+    if entry[-1] == "z":
+        pyz_archives += 1
+        modules.extend(archive.open_embedded_archive(name).toc)
+print(json.dumps({"schema_version": 1, "pyinstaller": PyInstaller.__version__,
+                  "archive_entries": sorted(archive.toc),
+                  "python_modules": sorted(modules), "pyz_archives": pyz_archives}))
 """
 
 
 class StandaloneCryptoError(ValueError):
-    """Raised for a frozen binding that could recreate an OpenSSL collision."""
+    """Raised when the actual engine bundle boundary cannot be verified."""
 
 
 def safe_detail(text: str) -> str:
@@ -54,25 +48,9 @@ def safe_detail(text: str) -> str:
     return text[:4096]
 
 
-def find_binding(bundle: Path) -> Path | None:
-    directory = bundle.resolve() / "_internal/cryptography/hazmat/bindings"
-    if not directory.is_dir():
-        return None
-    bindings = [path for path in directory.glob("_rust*.so") if path.is_file()]
-    if not bindings:
-        return None
-    if len(bindings) != 1:
-        raise StandaloneCryptoError("bundle must contain one frozen Rust binding")
-    return bindings[0].resolve()
-
-
-def shared_openssl_dependencies(output: str) -> list[str]:
-    dependencies = []
-    for line in output.splitlines()[1:]:
-        library = line.strip().split(" (", 1)[0]
-        if Path(library).name.startswith(("libssl.", "libcrypto.")):
-            dependencies.append(library)
-    return dependencies
+def _forbidden_entry(name: str) -> bool:
+    parts = name.replace("\\", "/").replace(".", "/").split("/")
+    return any(part in {"cryptography", "review_sensei_github"} for part in parts)
 
 
 def check_bundle(
@@ -81,62 +59,92 @@ def check_bundle(
     python_executable: str = sys.executable,
     run=subprocess.run,
 ) -> dict:
-    binding = find_binding(bundle)
-    if binding is None:
-        # The engine executable no longer imports cryptography. Nothing frozen
-        # means there is no OpenSSL collision to check.
-        return {
-            "check": "passed",
-            "binding": None,
-            "cryptography": "not-frozen",
-            "shared_openssl_dependencies": [],
-        }
-    try:
-        linked = run(
-            ["otool", "-L", str(binding)],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=30,
+    bundle = bundle.resolve()
+    if not bundle.is_dir():
+        raise StandaloneCryptoError("engine bundle is missing")
+    executables = [
+        path
+        for name in ("review-sensei", "review-sensei.exe")
+        if (path := bundle / name).is_file()
+    ]
+    if len(executables) != 1 or not os.access(executables[0], os.X_OK):
+        raise StandaloneCryptoError("engine bundle executable is missing or ambiguous")
+    collected = [
+        path.relative_to(bundle).as_posix()
+        for path in bundle.rglob("*")
+        if path.is_file()
+    ]
+    if any(_forbidden_entry(name) for name in collected):
+        raise StandaloneCryptoError(
+            "engine bundle contains a forbidden hosted or cryptography package"
         )
-        if shared_openssl_dependencies(linked.stdout):
-            raise StandaloneCryptoError(
-                "frozen Intel cryptography must not depend on shared OpenSSL"
-            )
-        # Load the extension FROM THE FROZEN FOLDER, not the installed oracle's
-        # original extension. Its rewritten Mach-O dependencies are therefore
-        # the dependencies used by the standalone executable. The oracle's
-        # matching Python wrappers exercise real signing with a temporary key.
+    try:
         checked = run(
-            [python_executable, "-I", "-c", PROBE, str(binding)],
+            [python_executable, "-I", "-c", PROBE, str(executables[0])],
             capture_output=True,
             text=True,
             check=True,
             timeout=30,
         )
     except subprocess.CalledProcessError as exc:
-        detail = safe_detail(exc.stderr or "")
         raise StandaloneCryptoError(
-            f"frozen cryptography import/signing failed: {detail}"
+            f"engine bundle inventory failed: {safe_detail(exc.stderr or '')}"
         ) from exc
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise StandaloneCryptoError(
-            "frozen cryptography import/signing failed"
-        ) from exc
+        raise StandaloneCryptoError("engine bundle inventory failed") from exc
     try:
-        result = json.loads(checked.stdout)
+        inventory = json.loads(checked.stdout)
+        if not isinstance(inventory, dict) or set(inventory) != {
+            "schema_version",
+            "pyinstaller",
+            "archive_entries",
+            "python_modules",
+            "pyz_archives",
+        }:
+            raise ValueError("invalid inventory")
         if (
-            not isinstance(result, dict)
-            or result.get("binding") != str(binding)
-            or result.get("rsa_verified") is not True
-            or not isinstance(result.get("openssl"), str)
+            inventory["schema_version"] != 1
+            or not isinstance(inventory["pyinstaller"], str)
+            or not inventory["pyinstaller"]
+            or type(inventory["pyz_archives"]) is not int
+            or inventory["pyz_archives"] < 1
         ):
-            raise ValueError("invalid probe result")
+            raise ValueError("invalid inventory")
+        for field in ("archive_entries", "python_modules"):
+            entries = inventory[field]
+            if (
+                not isinstance(entries, list)
+                or not entries
+                or any(not isinstance(name, str) or not name for name in entries)
+            ):
+                raise ValueError("invalid inventory")
+        if not any(
+            name == "review_sensei" or name.startswith("review_sensei.")
+            for name in inventory["python_modules"]
+        ):
+            raise ValueError("missing engine modules")
     except (ValueError, TypeError) as exc:
+        raise StandaloneCryptoError("engine bundle inventory is invalid") from exc
+    if any(
+        _forbidden_entry(name)
+        for field in ("archive_entries", "python_modules")
+        for name in inventory[field]
+    ):
         raise StandaloneCryptoError(
-            "frozen cryptography probe result is invalid"
-        ) from exc
-    return {**result, "shared_openssl_dependencies": [], "check": "passed"}
+            "engine bundle contains a forbidden hosted or cryptography package"
+        )
+    return {
+        "check": "passed",
+        "boundary": "engine-only",
+        "executable": str(executables[0]),
+        "collected_files": len(collected),
+        "archive_entries": len(inventory["archive_entries"]),
+        "python_modules": len(inventory["python_modules"]),
+        "pyinstaller": inventory["pyinstaller"],
+        "inventory_sha256": hashlib.sha256(
+            json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
 
 
 def main() -> int:
@@ -163,7 +171,7 @@ def main() -> int:
                 )
             except OSError:
                 pass
-        print(f"standalone crypto check failed: {exc}", file=sys.stderr)
+        print(f"standalone engine boundary check failed: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(report, sort_keys=True))
     return 0

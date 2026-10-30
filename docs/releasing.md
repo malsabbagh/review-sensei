@@ -684,6 +684,22 @@ The current `v5` promotion remains at the published `0.6.14` commit until a
 separately authorized channel move. This repair changes no Worker runtime,
 capability, secret, or ledger contract and performs no Worker deployment.
 
+
+### Current engine-only Intel qualification
+
+The earlier 0.6.14/0.6.15 static-OpenSSL repair above is historical. After the
+engine/hosted split (ADR 0078), the core oracle no longer installs cryptography.
+Current Intel builds use ordinary core installation and require the actual bundle's
+collected-file and embedded CArchive/PYZ module inventory to exclude cryptography
+and `review_sensei_github`. The historical `check_standalone_crypto.py` entrypoint
+now emits an engine-boundary receipt (`engine-boundary.json`), using pinned
+PyInstaller tooling. Missing executable or malformed inventory fails qualification.
+Python's normal TLS libraries and the trigger compatibility shim remain allowed.
+The required check keeps its compatible name, `Intel macOS standalone ABI and parity`;
+actual Intel build/parity and all five native installed candidate checks remain
+required. No release, version or channel operation is part of this cleanup.
+
+
 ## 0.6.14 rollout verification
 
 This cutoff includes bounded stale-baseline recovery (#209), canonical backend
