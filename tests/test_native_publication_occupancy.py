@@ -161,3 +161,35 @@ class NativePublicationOccupancyTests(unittest.TestCase):
                 backend.http, token="synthetic", evidence=evidence, producer_id=999
             )
         self.assertEqual(len(backend.calls), before)
+
+    def test_projection_requires_immutable_targets_and_exact_encoded_scalar_types(self):
+        backend, evidence = fixture()
+        before = len(backend.calls)
+        original = native_publication_occupancy(
+            backend.http, token="synthetic", evidence=evidence, producer_id=999
+        )
+        # Python value equality aliases these values, while the accepted
+        # authority bytes and immutable target contract distinguish them.
+        changed_target = replace(
+            original.targets[0], resolved=int(original.targets[0].resolved)
+        )
+        for number, snapshot in enumerate(
+            (
+                replace(original, repository_id=True),
+                replace(original, pull_request=float(original.pull_request)),
+                replace(original, targets=list(original.targets)),
+                replace(original, targets=(changed_target, *original.targets[1:])),
+            )
+        ):
+            with (
+                self.subTest(case=number),
+                self.assertRaisesRegex(ReviewInputError, "occupancy source"),
+            ):
+                require_publication_occupancy(
+                    snapshot,
+                    backend.http,
+                    token="synthetic",
+                    evidence=evidence,
+                    producer_id=999,
+                )
+        self.assertEqual(len(backend.calls), before)

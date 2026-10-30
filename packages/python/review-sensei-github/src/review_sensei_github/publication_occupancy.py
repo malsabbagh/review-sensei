@@ -8,7 +8,7 @@ creation attempts require separate evidence before strict publication can run.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
@@ -156,6 +156,16 @@ def native_publication_occupancy(
     )
 
 
+def _same_field_types(
+    value: NativePublicationOccupancy | NativeFindingTarget,
+    expected: NativePublicationOccupancy | NativeFindingTarget,
+) -> bool:
+    return all(
+        type(getattr(value, field.name)) is type(getattr(expected, field.name))
+        for field in fields(expected)
+    )
+
+
 def require_publication_occupancy(
     occupancy: NativePublicationOccupancy,
     http: GitHubHttp,
@@ -168,5 +178,18 @@ def require_publication_occupancy(
     expected = native_publication_occupancy(
         http, token=token, evidence=evidence, producer_id=producer_id
     )
-    if type(occupancy) is not NativePublicationOccupancy or occupancy != expected:
+    # Value equality aliases bool/int/float and accepts mutable replacements
+    # for scalar fields. Preserve the original immutable typed projection, not
+    # merely values that compare equal under Python's coercion rules.
+    if (
+        type(occupancy) is not NativePublicationOccupancy
+        or not _same_field_types(occupancy, expected)
+        or len(occupancy.targets) != len(expected.targets)
+        or any(
+            type(target) is not NativeFindingTarget
+            or not _same_field_types(target, original)
+            for target, original in zip(occupancy.targets, expected.targets)
+        )
+        or occupancy != expected
+    ):
         raise ReviewInputError("publication occupancy source differs")
