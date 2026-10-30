@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.8.17 - 2026-10-30
+
+Changes since [v0.8.16](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.16), from [7f8e9a250e6ffaaa89ac2b3e2638027e3109b0d5](https://github.com/malsabbagh/review-sensei/commit/7f8e9a250e6ffaaa89ac2b3e2638027e3109b0d5) through [ccd183d210966baacbd4e071892efbecde2b375d](https://github.com/malsabbagh/review-sensei/commit/ccd183d210966baacbd4e071892efbecde2b375d).
+
+Previous annotated tag object: `1ae442137e8e5bfb6c5283e96940d1b5aa04e37c`.
+
+- docs: record released v0.8.16 ([8bd48ab6a5bf08bc3c274ccc4a540de19f4fdc73](https://github.com/malsabbagh/review-sensei/commit/8bd48ab6a5bf08bc3c274ccc4a540de19f4fdc73)).
+- Preserve finite recovery accounting and preflight snapshot batches \(\#393\) ([e89857aade345302b743174c4223a5dc912a2a30](https://github.com/malsabbagh/review-sensei/commit/e89857aade345302b743174c4223a5dc912a2a30)).
+- Clarify archive-backed narrative preservation guarantees \(\#380\) ([ab7ebb389e65353254d522e74862a457745abc8e](https://github.com/malsabbagh/review-sensei/commit/ab7ebb389e65353254d522e74862a457745abc8e)).
+- Prepare strict publication selection and durable review verdicts \(\#392\) ([57bffa8254a9f81e555831e6d519963be4339826](https://github.com/malsabbagh/review-sensei/commit/57bffa8254a9f81e555831e6d519963be4339826)).
+- Preserve historical review obligations during authenticated session transition \(\#387\) ([ccd183d210966baacbd4e071892efbecde2b375d](https://github.com/malsabbagh/review-sensei/commit/ccd183d210966baacbd4e071892efbecde2b375d)).
+
+## review-sensei-github 0.3.23 - 2026-10-30
+
+- Pin `review-sensei==0.8.17`.
+
 ## 0.8.16 - 2026-10-29
 
 Changes since [v0.8.15](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.15), from [e006596160be74a9a72b9428c5675224afa347c6](https://github.com/malsabbagh/review-sensei/commit/e006596160be74a9a72b9428c5675224afa347c6) through [3c3b2093b24dff99f22b7d964e302e7fc5d0d6be](https://github.com/malsabbagh/review-sensei/commit/3c3b2093b24dff99f22b7d964e302e7fc5d0d6be).
