@@ -14,6 +14,7 @@ from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[1]
 QUEUE_READER = "ba89418d21898d14e6d1e535a5409c47c7cff3b2"
+# Keep these pins and the schema lane historical-reader fetch list in ci.yml in sync.
 READERS = (
     "5a121dfe39fb978c7d71def0d08dc570aad83f1d",  # published v0.6.16
     "70305207647c22595660e5ebb9e4a33991489ffe",  # pre-partition main

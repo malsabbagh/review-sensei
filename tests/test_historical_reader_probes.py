@@ -58,6 +58,74 @@ class HistoricalReaderProbeTests(unittest.TestCase):
                 self.assertLess(len(result.stderr), 200)
                 self.assertNotIn("Traceback", result.stderr)
 
+    def test_partial_pin_set_reports_later_missing_pin_and_complete_set_passes(self):
+        for name in SCRIPTS:
+            probe = load_probe(name)
+            with self.subTest(script=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                subprocess.run(
+                    ["git", "init", "--quiet", str(root)],
+                    check=True,
+                    capture_output=True,
+                )
+                tree = (
+                    subprocess.run(
+                        ["git", "mktree"],
+                        cwd=root,
+                        input=b"",
+                        check=True,
+                        capture_output=True,
+                    )
+                    .stdout.decode()
+                    .strip()
+                )
+                pins = []
+                for index in range(2):
+                    document = (
+                        f"tree {tree}\nauthor Synthetic <synthetic@example.test> 0 +0000\n"
+                        f"committer Synthetic <synthetic@example.test> 0 +0000\n\npin {index}\n"
+                    ).encode()
+                    command = ["git", "hash-object", "-t", "commit", "--stdin"]
+                    digest = (
+                        subprocess.run(
+                            command,
+                            cwd=root,
+                            input=document,
+                            check=True,
+                            capture_output=True,
+                        )
+                        .stdout.decode()
+                        .strip()
+                    )
+                    pins.append((digest, document))
+                subprocess.run(
+                    ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+                    cwd=root,
+                    input=pins[0][1],
+                    check=True,
+                    capture_output=True,
+                )
+                overrides = {"ROOT": root, "READERS": tuple(p[0] for p in pins)}
+                if hasattr(probe, "QUEUE_READER"):
+                    overrides["QUEUE_READER"] = pins[0][0]
+                error = io.StringIO()
+                with patch.multiple(probe, **overrides), redirect_stderr(error):
+                    self.assertEqual(probe.main(), 1)
+                    self.assertIn("pinned source " + pins[1][0], error.getvalue())
+                    self.assertNotIn("pinned source " + pins[0][0], error.getvalue())
+                    self.assertLess(len(error.getvalue()), 200)
+                    subprocess.run(
+                        ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+                        cwd=root,
+                        input=pins[1][1],
+                        check=True,
+                        capture_output=True,
+                    )
+                    error.seek(0)
+                    error.truncate()
+                    self.assertTrue(probe.pinned_sources_available())
+                    self.assertEqual(error.getvalue(), "")
+
     def test_module_origin_assertion_rejects_current_or_unknown_implementation(self):
         for name in SCRIPTS:
             probe = load_probe(name)

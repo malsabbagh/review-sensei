@@ -13,6 +13,7 @@ from pathlib import Path
 from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[1]
+# Keep these pins and the schema lane historical-reader fetch list in ci.yml in sync.
 READERS = (
     "5a121dfe39fb978c7d71def0d08dc570aad83f1d",
     "70305207647c22595660e5ebb9e4a33991489ffe",
