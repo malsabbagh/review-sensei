@@ -145,4 +145,5 @@ include tests/test_controlled_restart.py
 include tests/test_controlled_restart_journeys.py
 include tests/test_publication_selection_handoff.py
 include tests/test_publication_selection_boundaries.py
+include tests/test_native_publication_occupancy.py
 global-exclude *.py[cod]

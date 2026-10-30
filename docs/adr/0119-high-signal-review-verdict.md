@@ -113,6 +113,31 @@ remain readable or be withheld by an older reader; rollback must not strip their
 facts or reinterpret them as clean. No release or production activation is part
 of this slice.
 
+## Original native occupancy projection
+
+The inactive host seam `native_publication_occupancy` projects an already-issued
+complete native publication read. It makes no additional HTTP request, does not
+retry or enlarge the ten-call walk, and cannot authenticate a reconstructed
+evidence document. Original transport, credential, caller, producer, final union
+frame and exact inline finding index remain required. The complete numeric
+root/body/opaque-thread association participates in each target proof; opaque
+thread IDs retain their full supported width instead of being truncated into a
+slot identifier. Revalidation compares the whole projection to the original
+independent read, including membership and target versions.
+
+This is one publication's native thread union, not global PR occupancy. It
+refuses legacy, missing and body-placed current inventories. Other historical
+publications, body findings and uncertain creation attempts still need their
+own independently authenticated coverage before production selection. An
+unresolved target reserves a slot. A resolved UI target is uncertain and also
+reserves a slot; it is not treated as a confirmed release or an authenticated
+automatic reopening liability. No caller-supplied release flag is introduced.
+
+The numerical cap, global occupancy composition, confirmed settlement/reopening
+protocol and in-place native revision/readback remain unfinished. Existing
+publication entry points still reject every handoff-bearing result before
+effects. This seam grants no mutation authority and enables no policy.
+
 ## Follow-up work
 
 Prove and choose the numerical strict active-comment cap from the complete
