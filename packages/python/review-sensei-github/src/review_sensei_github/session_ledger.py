@@ -21,15 +21,24 @@ import copy
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Mapping, cast
+from typing import Any, Callable, Mapping, Sequence, cast
 from urllib.parse import quote
 
 from review_sensei.bounded_evidence import (
     INLINE_ENCODING,
+    MAX_MANIFEST_BYTES,
     MAX_PART_BYTES,
+    MAX_PART_READS,
+    MAX_PARTITION_BYTES,
+    MAX_PARTITION_DECODED_BYTES,
+    MAX_PARTS,
     MAX_STORED_PART_BYTES,
     MAX_STORED_PARTS,
+    PACKED_CHUNK_BYTES,
+    PART_ENCODING,
+    PART_FRAMING_RESERVE,
     PARTITION_ENCODING,
     ActivationTailPlan,
     AuthenticatedPart,
@@ -39,6 +48,7 @@ from review_sensei.bounded_evidence import (
     TailDispatch,
     _operation_witness_matches,
     canonical_bytes,
+    evidence_manifest,
     inline_manifest,
     partition_evidence,
     read_inline_evidence,
@@ -60,9 +70,11 @@ from review_sensei.session import (
     SessionLoadReason,
     SessionLoadResult,
     SessionRecord,
+    _disposition_page_ids,
     _history_extra_ids,
     _history_legacy_write_guard,
     _history_preserve_sources,
+    _remember_disposition_pages,
     _seal_tail_accounting,
     _tail_attempt_scope,
     _tail_operation_binding,
@@ -70,6 +82,7 @@ from review_sensei.session import (
     _tail_plan_scope,
     _validate_queue_retention,
     _validate_tail_draft,
+    disposition_snapshot_capacity,
     load_session_status,
     mutate_abort,
     mutate_commit,
@@ -271,6 +284,102 @@ def parse_session_comment(
             "session comment repository does not match",
         )
     return record
+
+
+def _immutable_part_body(part: Mapping[str, object]) -> str:
+    return (
+        "ReviewSensei immutable evidence part v1\n```json\n"
+        + canonical_bytes(part).decode()
+        + "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
+    )
+
+
+@dataclass(frozen=True)
+class _DispositionIndexBounds:
+    inline: bool
+    decoded_bytes: int
+    part_bytes: tuple[int, ...]
+    body_bytes: tuple[int, ...]
+    wire_bytes: tuple[int, ...]
+    manifest_bytes: int
+
+
+def _disposition_index_bounds(
+    document: dict[str, Any],
+    *,
+    binding: dict[str, object],
+    item_count: int,
+    max_manifest_bytes: int,
+) -> _DispositionIndexBounds:
+    """Size only: input unknown IDs use their full nineteen-character width.
+
+    No prospective identity or compressed placeholder document becomes evidence.
+    zlib's general deflateBound covers non-default compiled memory settings:
+    https://github.com/madler/zlib/blob/v1.2.12/deflate.c#L627-L697
+    Its normal-wrapper bound is L + ceil(L/8) + ceil(L/64) + 11. The current
+    partition codec uses no dictionary and its fixed 23,500-byte packed chunks.
+    """
+    decoded = len(canonical_bytes(document))
+    if not 0 < decoded <= MAX_PARTITION_DECODED_BYTES:
+        raise ReviewInputError("disposition index exceeds decoded capacity")
+    inline = inline_manifest(document, binding=binding, item_count=item_count)
+    if inline is not None:
+        inline_size = len(canonical_bytes(inline))
+        if inline_size <= max_manifest_bytes:
+            return _DispositionIndexBounds(True, decoded, (), (), (), inline_size)
+    packed = decoded + (decoded + 7) // 8 + (decoded + 63) // 64 + 11
+    count = (packed + PACKED_CHUNK_BYTES - 1) // PACKED_CHUNK_BYTES
+    if count > MAX_PARTS:
+        raise ReviewInputError("disposition index exceeds bounded part count")
+    raw_sizes, bodies, wires = [], [], []
+    for index in range(count):
+        chunk = min(PACKED_CHUNK_BYTES, packed - index * PACKED_CHUNK_BYTES)
+        # All non-data fields have fixed values/widths. Base64 adds no JSON
+        # escaping. These skeletons measure size only and are never published.
+        skeleton = {
+            "encoding": PART_ENCODING,
+            "binding_sha256": "0" * 64,
+            "inventory_sha256": "0" * 64,
+            "index": index,
+            "count": count,
+            "data": "",
+        }
+        payload_size = 4 * ((chunk + 2) // 3)
+        raw_sizes.append(len(canonical_bytes(skeleton)) + payload_size)
+        bodies.append(len(_immutable_part_body(skeleton).encode()) + payload_size)
+        wires.append(
+            len(canonical_bytes({"body": _immutable_part_body(skeleton)}))
+            + payload_size
+        )
+    encoded = sum(raw_sizes) + count * PART_FRAMING_RESERVE
+    if (
+        any(size + PART_FRAMING_RESERVE > MAX_PART_BYTES for size in raw_sizes)
+        or any(size > MAX_PART_BYTES for size in bodies)
+        or encoded > MAX_PARTITION_BYTES
+    ):
+        raise ReviewInputError("disposition index exceeds framed capacity")
+    # Literal x IDs are sizing tokens, never allocated or stored identities.
+    manifest_size = len(
+        canonical_bytes(
+            {
+                "encoding": PARTITION_ENCODING,
+                "binding": binding,
+                "item_count": item_count,
+                "decoded_bytes": decoded,
+                "sha256": "0" * 64,
+                "encoded_bytes": encoded,
+                "parts": [
+                    {"storage_id": "x" * 19, "bytes": size, "sha256": "0" * 64}
+                    for size in raw_sizes
+                ],
+            }
+        )
+    )
+    if manifest_size > min(MAX_MANIFEST_BYTES, max_manifest_bytes):
+        raise ReviewInputError("disposition index exceeds actual root allocation")
+    return _DispositionIndexBounds(
+        False, decoded, tuple(raw_sizes), tuple(bodies), tuple(wires), manifest_size
+    )
 
 
 class GitHubIssueCommentSessionLedger:
@@ -560,6 +669,11 @@ class GitHubIssueCommentSessionLedger:
             raise ReviewInputError("activation part identity changed")
         if not re.fullmatch(r"[1-9][0-9]{0,18}", storage_id):
             raise ReviewInputError("GitHub partition identity is invalid")
+        from .quarantine_rollover import read_startup_part
+
+        startup_part = read_startup_part(self, identity, storage_id)
+        if startup_part is not None:
+            return startup_part
         snapshot = getattr(self, "_quarantine_checkpoint_snapshot", None)
         if snapshot is not None and snapshot.ledger is self:
             snapshot.require_part(storage_id)
@@ -611,6 +725,379 @@ class GitHubIssueCommentSessionLedger:
             expected_binding=expected_binding,
             budget=self.evidence_budget,
         )
+
+    @property
+    def supports_paged_disposition_snapshot_writes(self) -> bool:
+        # Reader-first: the candidate batch does not enable production v2 writes.
+        return False
+
+    def _preflight_disposition_snapshot_batch(
+        self, identity, record, *, missing_parts, read_parts, retained_parts
+    ) -> None:
+        # Plain adaptive replace has no sealed future scan-call allocation. Its
+        # existing v1 path remains available; a candidate batch requires the
+        # existing bounded tail or the run-owned exact-checkpoint override.
+        if not self._tail_preparing or self._tail_scan_pages is None:
+            raise ReviewInputError(
+                "hosted disposition batch requires bounded activation scope"
+            )
+        self._validate_tail_scan_pages(self._tail_scan_pages)
+        assert self.evidence_budget is not None
+        calls = (
+            2 * missing_parts
+            + read_parts
+            + 3 * retained_parts
+            + 2 * read_parts
+            + 2 * self._tail_scan_pages
+            + 3
+        )
+        self.evidence_budget.preflight(calls)
+
+    def stage_disposition_snapshot_batch(
+        self,
+        identity: SessionIdentity,
+        *,
+        record: SessionRecord,
+        binding: dict[str, object],
+        pages: Sequence[Mapping[str, Any]],
+        values: tuple[Mapping[str, object], ...],
+        result_digest: str,
+        max_manifest_bytes: int,
+    ) -> dict[str, object]:
+        """Prepare one assigned-ID batch under existing discovery/allocation.
+
+        Numeric IDs arrive after POST. Index compression is bounded from its
+        maximum raw size, not favorable placeholder compression. Every physical
+        old carrier and late-growth promise remains charged; uncertain effects
+        stop the batch and are rediscovered by the existing recovery protocol.
+        """
+        from review_sensei.disposition_snapshot import (
+            DISPOSITION_PAGE_ITEMS,
+            _prepared_page_reference,
+            read_paged_snapshot,
+            validate_page_index,
+        )
+        from review_sensei.session import _stored_dispositions
+
+        if (
+            not self.enable_disposition_snapshot_writes
+            or not self._mutation_active
+            or self.evidence_budget is None
+        ):
+            raise ReviewInputError(
+                "hosted disposition batch requires enabled conditional mutation"
+            )
+        if (
+            type(self).stage_evidence
+            is not GitHubIssueCommentSessionLedger.stage_evidence
+            and getattr(self, "_part_staging_identity", None) != identity
+        ):
+            raise ReviewInputError(
+                "derived disposition batch requires its owned staging scope"
+            )
+        if (
+            binding.get("repository") != identity.repository
+            or binding.get("pull_request") != identity.pull_request
+            or binding.get("repository_id") != identity.repository_id
+            or binding.get("producer") != self.evidence_producer()
+            or binding.get("purpose") != "dispositions"
+        ):
+            raise ReviewInputError("hosted disposition batch binding does not match")
+        values = _stored_dispositions(list(values), snapshot=True)
+        root_shell = {
+            "schema_version": "2.0",
+            "result_digest": result_digest,
+            "state_manifest": {},
+        }
+        max_manifest_bytes = min(
+            max_manifest_bytes,
+            disposition_snapshot_capacity(record)
+            - len(canonical_bytes(root_shell))
+            + 2,
+        )
+        items = self._bounded_comments(identity)
+        if not self._inventory_complete:
+            raise ReviewInputError(
+                "hosted disposition batch needs complete retained census"
+            )
+        existing: dict[str, str] = {}
+        stored_count = stored_bytes = 0
+        for item in self._owned_carrier_items(items, identity):
+            stored_count += 1
+            stored_bytes += len(item["body"].encode())
+            existing[item["body"]] = str(item["id"])
+        references: list[dict[str, Any]] = []
+        page_specs: list[tuple[object, tuple[dict[str, object], ...]] | None] = []
+        missing: dict[str, dict[str, object]] = {}
+        for index, supplied in enumerate(pages):
+            page = json.loads(canonical_bytes(supplied))
+            if page.get("schema_version") != "disposition-page-v1":
+                references.append(
+                    _prepared_page_reference(
+                        page,
+                        binding=binding,
+                        values=values,
+                        result_digest=result_digest,
+                        offset=index * DISPOSITION_PAGE_ITEMS,
+                    )
+                )
+                page_specs.append(None)
+                continue
+            offset = index * DISPOSITION_PAGE_ITEMS
+            if (
+                set(page)
+                != {"schema_version", "result_digest", "offset", "dispositions"}
+                or type(page["offset"]) is not int
+                or page["offset"] != offset
+                or page["result_digest"] != result_digest
+                or page["dispositions"]
+                != list(values[offset : offset + DISPOSITION_PAGE_ITEMS])
+            ):
+                raise ReviewInputError("prepared hosted disposition page differs")
+            inline = inline_manifest(
+                page, binding=binding, item_count=DISPOSITION_PAGE_ITEMS
+            )
+            if inline is not None and len(canonical_bytes(inline)) <= 1024:
+                references.append(inline)
+                page_specs.append(None)
+                continue
+            parts = partition_evidence(
+                page, binding=binding, item_count=DISPOSITION_PAGE_ITEMS
+            )
+            ids = []
+            for number, part in enumerate(parts):
+                body = _immutable_part_body(part)
+                if len(body.encode()) > MAX_PART_BYTES:
+                    raise ReviewInputError(
+                        "hosted disposition page body exceeds capacity"
+                    )
+                if body not in existing:
+                    missing[body] = part
+                ids.append(existing.get(body, "x" + str(number).zfill(18)))
+            prospective = evidence_manifest(
+                page,
+                binding=binding,
+                item_count=DISPOSITION_PAGE_ITEMS,
+                parts=parts,
+                storage_ids=tuple(ids),
+            )
+            if len(canonical_bytes(prospective)) > 1024:
+                raise ReviewInputError(
+                    "hosted disposition page manifest exceeds allocation"
+                )
+            references.append(prospective)
+            page_specs.append((page, parts))
+        index_document = {
+            "schema_version": "disposition-pages-v1",
+            "result_digest": result_digest,
+            "pages": references,
+            "tail": list(values[len(pages) * DISPOSITION_PAGE_ITEMS :]),
+        }
+        # Validate the closed page structure/count/scope before any POST. The
+        # private nineteen-character sizing IDs never leave this preparation.
+        validate_page_index(
+            index_document,
+            root={
+                "schema_version": "2.0",
+                "result_digest": result_digest,
+                "state_manifest": {"binding": binding, "item_count": len(values)},
+            },
+        )
+        bounds = _disposition_index_bounds(
+            index_document,
+            binding=binding,
+            item_count=len(values),
+            max_manifest_bytes=max_manifest_bytes,
+        )
+        from .quarantine_published_tail import retained_storage_reserve
+
+        reserve_parts, reserve_bytes = retained_storage_reserve(self)
+        future_parts = len(missing) + len(bounds.part_bytes)
+        future_bytes = sum(len(body.encode()) for body in missing) + sum(
+            bounds.body_bytes
+        )
+        if (
+            stored_count + future_parts + reserve_parts > MAX_STORED_PARTS
+            or stored_bytes + future_bytes + reserve_bytes > MAX_STORED_PART_BYTES
+        ):
+            raise ReviewInputError(
+                "hosted disposition whole retention capacity exceeded before staging"
+            )
+        from .publication_recovery import _publication_transport
+
+        guard = getattr(
+            _publication_transport(self.http), "_quarantine_capacity_guard", None
+        )
+        if guard is not None and future_parts:
+            available = getattr(guard, "comment_bounds", None)
+            if not isinstance(available, list):
+                raise ReviewInputError(
+                    "hosted disposition batch has no exact comment promises"
+                )
+            available = list(available)
+            # The command receipt is a distinct mandatory effect, not spare
+            # evidence capacity. A previously selected receipt-update target
+            # already has its own update-byte reserve and no creation promise.
+            if self._quarantine_command_receipt_marker is None:
+                raise ReviewInputError(
+                    "hosted disposition batch needs distinct evidence promises"
+                )
+            if getattr(guard, "command_receipt_update_id", None) is None:
+                receipt_choices = [
+                    bound
+                    for bound in available
+                    if type(bound) is int and bound >= 65_536
+                ]
+                if not receipt_choices:
+                    raise ReviewInputError(
+                        "hosted disposition batch must retain its command receipt"
+                    )
+                available.remove(min(receipt_choices))
+            wire_bounds = [
+                len(canonical_bytes({"body": body})) for body in missing
+            ] + list(bounds.wire_bytes)
+            for size in sorted(wire_bounds, reverse=True):
+                choices = [
+                    bound for bound in available if type(bound) is int and bound >= size
+                ]
+                if not choices:
+                    raise ReviewInputError(
+                        "hosted disposition batch exceeds existing comment promises"
+                    )
+                available.remove(min(choices))
+        old_pages = _disposition_page_ids(self, record)
+        old_manifest = (
+            record.disposition_snapshot["state_manifest"]
+            if record.disposition_snapshot
+            else None
+        )
+        old_snapshot_parts = len(old_pages) + (
+            len(old_manifest["parts"])
+            if isinstance(old_manifest, dict)
+            and old_manifest["encoding"] == PARTITION_ENCODING
+            else 0
+        )
+        retained_parts = (
+            len(
+                _tail_part_ids(
+                    record,
+                    history_ids=_history_extra_ids(self, record),
+                    disposition_page_ids=old_pages,
+                )
+            )
+            - old_snapshot_parts
+        )
+        read_parts = sum(
+            len(ref["parts"])
+            for ref in references
+            if ref["encoding"] == PARTITION_ENCODING
+        ) + len(bounds.part_bytes)
+        self._preflight_disposition_snapshot_batch(
+            identity,
+            record,
+            missing_parts=future_parts,
+            read_parts=read_parts,
+            retained_parts=retained_parts,
+        )
+        cache = getattr(self, "_disposition_page_cache", {})
+        if not isinstance(cache, dict) or len(cache) >= MAX_PART_READS:
+            raise ReviewInputError("disposition page proof cache exceeds finite bound")
+
+        def write(part: dict[str, object]) -> str:
+            body = _immutable_part_body(part)
+            if body in existing:
+                return existing[body]
+            self._verify_live_head(identity)
+            status, payload = self._request(
+                "POST", self._comments_path(identity), body={"body": body}
+            )
+            if (
+                status != 201
+                or not isinstance(payload, dict)
+                or type(payload.get("id")) is not int
+                or not 1 <= payload["id"] < 10**19
+                or payload.get("body") != body
+            ):
+                raise GitHubPublicationTransientError(
+                    "hosted disposition create unconfirmed; rediscovery required"
+                )
+            self._part_owner(payload, identity)
+            storage_id = str(payload["id"])
+            if storage_id in existing.values():
+                raise ReviewInputError("hosted disposition assigned identity conflicts")
+            existing[body] = storage_id
+            return storage_id
+
+        actual_references = []
+        for reference, spec in zip(references, page_specs):
+            if spec is None:
+                actual_references.append(reference)
+                continue
+            page, parts = spec
+            manifest = evidence_manifest(
+                page,
+                binding=binding,
+                item_count=DISPOSITION_PAGE_ITEMS,
+                parts=parts,
+                storage_ids=tuple(write(part) for part in parts),
+            )
+            if len(canonical_bytes(manifest)) > len(canonical_bytes(reference)):
+                raise ReviewInputError(
+                    "hosted disposition page exceeded prepared bound"
+                )
+            actual_references.append(manifest)
+        actual_document = {**index_document, "pages": actual_references}
+        if len(canonical_bytes(actual_document)) > bounds.decoded_bytes:
+            raise ReviewInputError(
+                "hosted disposition index exceeded prepared raw bound"
+            )
+        if bounds.inline:
+            inlined_index = inline_manifest(
+                actual_document, binding=binding, item_count=len(values)
+            )
+            if (
+                inlined_index is None
+                or len(canonical_bytes(inlined_index)) > bounds.manifest_bytes
+            ):
+                raise ReviewInputError(
+                    "hosted disposition inline index exceeded prepared bound"
+                )
+            manifest = inlined_index
+        else:
+            parts = partition_evidence(
+                actual_document, binding=binding, item_count=len(values)
+            )
+            if len(parts) > len(bounds.part_bytes) or any(
+                len(canonical_bytes(part)) > bound
+                for part, bound in zip(parts, bounds.part_bytes)
+            ):
+                raise ReviewInputError(
+                    "hosted disposition compressed index exceeded prepared bound"
+                )
+            manifest = evidence_manifest(
+                actual_document,
+                binding=binding,
+                item_count=len(values),
+                parts=parts,
+                storage_ids=tuple(write(part) for part in parts),
+            )
+            if len(canonical_bytes(manifest)) > bounds.manifest_bytes:
+                raise ReviewInputError(
+                    "hosted disposition index manifest exceeded prepared bound"
+                )
+        document = self.read_evidence(identity, manifest, expected_binding=binding)
+        root = {
+            "schema_version": "2.0",
+            "result_digest": result_digest,
+            "state_manifest": manifest,
+        }
+        restored = read_paged_snapshot(
+            document, root=root, reader=self.read_evidence, identity=identity
+        )
+        if restored != values:
+            raise ReviewInputError("hosted disposition batch readback differs")
+        _remember_disposition_pages(self, root, document)
+        return manifest
 
     def stage_evidence(
         self,
@@ -1950,6 +2437,8 @@ class GitHubIssueCommentSessionLedger:
                 _history_preserve_sources(self, before, draft)
             old_ids = _history_extra_ids(self, before)
             new_ids = _history_extra_ids(self, draft)
+            old_disposition_ids = _disposition_page_ids(self, before)
+            new_disposition_ids = _disposition_page_ids(self, draft)
             if self._session_grant is None:
                 raise ReviewInputError("activation grant is unavailable")
             grant_digest = hashlib.sha256(self._session_grant.encode()).hexdigest()
@@ -1975,6 +2464,8 @@ class GitHubIssueCommentSessionLedger:
                     grant_sha256=grant_digest,
                     old_history_ids=old_ids,
                     new_history_ids=new_ids,
+                    old_disposition_page_ids=old_disposition_ids,
+                    new_disposition_page_ids=new_disposition_ids,
                 )
 
             def part_steps(record: SessionRecord) -> tuple[TailDispatch, ...]:
@@ -1991,6 +2482,10 @@ class GitHubIssueCommentSessionLedger:
                         if record is draft
                         or record.record_sha256 != before.record_sha256
                         else old_ids,
+                        disposition_page_ids=new_disposition_ids
+                        if record is draft
+                        or record.record_sha256 != before.record_sha256
+                        else old_disposition_ids,
                     )
                     if part_id not in self._verified_parts
                     and not self._part_is_listed(part_id)

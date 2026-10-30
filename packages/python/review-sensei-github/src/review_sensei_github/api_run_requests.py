@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from review_sensei.api_work import (
+    LEGACY_ACCOUNTING_VERSION,
     ApiExecutionOwner,
     ApiRunAccounting,
     ApiRunIdentity,
@@ -213,7 +214,7 @@ class ApiRunRequestTransport:
         self.label_phase("terminal")
 
     def bind_terminal_reservation(self, block_id: str) -> None:
-        from .api_run_plan import TERMINAL_REQUESTS
+        from .api_run_plan import terminal_requests
 
         block = next(
             (b for b in self.accounting.blocks if b.block_id == block_id), None
@@ -222,7 +223,13 @@ class ApiRunRequestTransport:
             self._terminal_block is not None
             or block is None
             or block.issued_by != self.accounting.owner
-            or block.undispatched != TERMINAL_REQUESTS
+            or block.undispatched
+            != terminal_requests(
+                self.accounting.configuration.limit,
+                startup=self.accounting.startup.liability,
+                successor=self.accounting.owner.run_attempt > 1,
+                legacy=self.accounting.version == LEGACY_ACCOUNTING_VERSION,
+            )
         ):
             raise ReviewInputError("caller terminal reservation conflicts")
         self._terminal_block = block_id
@@ -1153,7 +1160,12 @@ class ApiRunRequestTransport:
         if self._checkpoint is not None:
             raise ReviewInputError("caller checkpoint has unresolved publication")
         self.accounting
-        from .api_run_plan import NATIVE_OPERATION_REQUESTS, WRITE_CONFIRMATION_TAIL
+        from .api_run_plan import (
+            NATIVE_OPERATION_REQUESTS,
+            QUARANTINE_CHECKPOINT_REQUESTS,
+            QUARANTINE_STAGING_REQUESTS,
+            WRITE_CONFIRMATION_TAIL,
+        )
 
         self._checkpoint_readback_attempted = False
 
@@ -1192,14 +1204,22 @@ class ApiRunRequestTransport:
         # this finite allocation. Complete enumeration remains mandatory; the
         # write and its confirmation remain protected before every read.
         key = "native:" + getattr(mutate, "__qualname__", "checkpoint")
+        quarantine = isinstance(ledger, ApiRunSessionLedger) and getattr(
+            ledger, "_quarantine_required", False
+        )
+        capacity = NATIVE_OPERATION_REQUESTS
+        if quarantine:
+            capacity = (
+                QUARANTINE_STAGING_REQUESTS
+                if self._terminal_reason is None
+                else QUARANTINE_CHECKPOINT_REQUESTS
+            )
         with self._operation(
-            key, NATIVE_OPERATION_REQUESTS, write_tail=WRITE_CONFIRMATION_TAIL
+            key, capacity, write_tail=WRITE_CONFIRMATION_TAIL
         ) as operation:
             self._checkpoint_operation = operation
             try:
-                if isinstance(ledger, ApiRunSessionLedger) and getattr(
-                    ledger, "_quarantine_required", False
-                ):
+                if quarantine:
                     from .quarantine_checkpoint import replace_quarantine_checkpoint
 
                     confirmed = replace_quarantine_checkpoint(
@@ -1306,6 +1326,40 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         self.evidence_budget = caller.budget_view
         self._terminal_claimed = False
         self._part_staging_identity: SessionIdentity | None = None
+
+    def stage_disposition_snapshot_batch(self, identity, **kwargs):
+        if self._part_staging_identity is not None:
+            raise ReviewInputError("immutable part staging cannot nest")
+        self._part_staging_identity = identity
+        try:
+            return super().stage_disposition_snapshot_batch(identity, **kwargs)
+        finally:
+            self._part_staging_identity = None
+
+    def _preflight_disposition_snapshot_batch(
+        self, identity, record, *, missing_parts, read_parts, retained_parts
+    ):
+        snapshot = getattr(self, "_quarantine_checkpoint_snapshot", None)
+        if snapshot is None or self._part_staging_identity != identity:
+            raise ReviewInputError(
+                "run-owned disposition batch requires exact checkpoint scope"
+            )
+        snapshot.require()
+        if (
+            snapshot.identity != identity
+            or snapshot.record.record_sha256 != record.record_sha256
+        ):
+            raise ReviewInputError("run-owned disposition batch root changed")
+        # The issued census and exact owned creation echoes provide every part
+        # read. Each new part retains its live-head GET/POST allowance; five
+        # existing requests remain for root fences/head/write/confirmation.
+        required = 2 * missing_parts + 5
+        if snapshot.operation.remaining < required:
+            raise EvidenceBudgetExhausted(
+                "complete disposition batch exceeds existing checkpoint allocation"
+            )
+        assert self.evidence_budget is not None
+        self.evidence_budget.preflight(required)
 
     def stage_evidence(
         self,

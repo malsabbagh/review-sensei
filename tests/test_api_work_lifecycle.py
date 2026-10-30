@@ -268,15 +268,15 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
                 or evidence.ceased_owner(IDENTITY, previous.owner) != stopped
             ):
                 raise ReviewInputError("recovery ownership changed")
+            allocation = owner_allocations(
+                configuration.limit,
+                previous.startup.liability,
+                legacy=previous.version == "caller-requests-v1",
+            )
             state = (
                 previous.claim_startup(owner)
-                .reserve(
-                    "successor-review",
-                    owner_allocations(
-                        configuration.limit, HOSTED_API_STARTUP_PLAN.liability
-                    ).successor_work,
-                )
-                .reserve("successor-terminal", TERMINAL_REQUESTS)
+                .reserve("successor-review", allocation.successor_work)
+                .reserve("successor-terminal", allocation.successor_terminal)
             )
             return record.evolve(
                 generation=record.generation + 1, api_run_accounting=state.to_document()

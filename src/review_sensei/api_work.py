@@ -17,7 +17,8 @@ from .errors import ReviewInputError
 DEFAULT_API_REQUEST_LIMIT = 512
 # Closed JSON/JavaScript integer representation, not an operational workload cap.
 MAX_API_REQUEST_LIMIT = (1 << 53) - 1
-ACCOUNTING_VERSION = "caller-requests-v1"
+ACCOUNTING_VERSION = "caller-requests-v2"
+LEGACY_ACCOUNTING_VERSION = "caller-requests-v1"
 _HEX40 = re.compile(r"[a-f0-9]{40}")
 _HEX64 = re.compile(r"[a-f0-9]{64}")
 _NAME = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
@@ -207,7 +208,7 @@ class ApiRunAccounting:
 
     def __post_init__(self) -> None:
         if (
-            self.version != ACCOUNTING_VERSION
+            self.version not in {LEGACY_ACCOUNTING_VERSION, ACCOUNTING_VERSION}
             or not isinstance(self.identity, ApiRunIdentity)
             or not isinstance(self.configuration, FrozenApiConfiguration)
             or not isinstance(self.owner, ApiExecutionOwner)
@@ -526,8 +527,19 @@ class ApiRunAccounting:
             )
 
     def to_document(self) -> dict[str, object]:
-        """Closed value serialization; this does not authenticate a checkpoint."""
-        return cast(dict[str, object], json.loads(json.dumps(asdict(self))))
+        """Closed, lossless wire encoding; never authentication or compaction.
+
+        V2 omits repeated completed-receipt field names, preserving every
+        ordered identity and deadline. Existing V1 runs keep their exact
+        representation, including when a successor finishes their work.
+        """
+        document = cast(dict[str, object], json.loads(json.dumps(asdict(self))))
+        if self.version == ACCOUNTING_VERSION:
+            document["completed"] = [
+                [request.request_id, request.deadline_unix_ms]
+                for request in self.completed
+            ]
+        return document
 
     def require_successor(self, candidate: ApiRunAccounting) -> None:
         """Value retention at a checked root; no replacement owner authority.
@@ -537,6 +549,8 @@ class ApiRunAccounting:
         resetting counters or moving a crashed owner's remainder into new work.
         """
         self.require_binding(candidate.identity, candidate.configuration)
+        if self.version != candidate.version:
+            raise ReviewInputError("caller receipt encoding cannot change within a run")
         if (
             self.terminal_transaction is not None
             and self.terminal_transaction != candidate.terminal_transaction
@@ -633,7 +647,12 @@ class ApiRunAccounting:
             startup_used=tuple((s[0], s[1]) for s in document["startup_used"]),
             prior_nonstartup_liability=document["prior_nonstartup_liability"],
             blocks=tuple(block(b) for b in document["blocks"]),
-            completed=tuple(PendingApiRequest(**p) for p in document["completed"]),
+            completed=tuple(
+                PendingApiRequest(request_id=p[0], deadline_unix_ms=p[1])
+                if document["version"] == ACCOUNTING_VERSION
+                else PendingApiRequest(**p)
+                for p in document["completed"]
+            ),
             version=document["version"],
             previous_record=document.get("previous_record"),
             terminal_transaction=document.get("terminal_transaction"),
