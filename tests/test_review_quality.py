@@ -56,6 +56,11 @@ class ReviewQualityConfigurationTests(unittest.TestCase):
                 policy = resolve_review_convergence_policy(quality=quality)
                 self.assertEqual(policy.quality, quality)
                 self.assertEqual(policy_from_mapping(policy.to_dict()), policy)
+                if quality != "current":
+                    stripped = policy.to_dict()
+                    stripped.pop("quality")
+                    with self.assertRaises(ReviewInputError):
+                        policy_from_mapping(stripped)
                 self.assertEqual(
                     ReviewTransaction.compute_policy_digest(policy.identity_fields()),
                     policy.digest(),
@@ -301,6 +306,42 @@ class HighSignalVerificationTests(unittest.TestCase):
                 convergence_policy=self.policy,
             )
 
+    def test_nonactionable_fields_are_invalid_candidates_not_completed_disproof(self):
+        valid = verifier_fixtures.candidate(snapshot_sha=self.digest)
+        for field in ("claim", "triggering_conditions", "impacted_path"):
+            with self.subTest(field=field), self.assertRaises(ReviewInputError):
+                replace(valid, **{field: " "})
+
+    def test_fresh_high_signal_preparation_binds_a_verdict_without_prior_verdict(self):
+        from review_sensei.review_verdict import comment_selection_digest
+
+        self.assertIsNone(self.result.review_verdict)
+        for evidence in ("legacy", "confirmed"):
+            prepared = prepare_publishable_review(
+                self.result,
+                evidence_policy=evidence,
+                convergence_policy=self.policy,
+                **(
+                    {
+                        "snapshot": self.snapshot,
+                        "snapshot_sha256": self.digest,
+                        "candidates": (
+                            verifier_fixtures.candidate(snapshot_sha=self.digest),
+                        ),
+                    }
+                    if evidence == "confirmed"
+                    else {}
+                ),
+            ).result
+            with self.subTest(evidence=evidence):
+                self.assertEqual(
+                    prepared.review_verdict.policy_digest, self.policy.digest()
+                )
+                self.assertEqual(
+                    prepared.review_verdict.selected_comments_sha256,
+                    comment_selection_digest(prepared.comments),
+                )
+
 
 class HighSignalPublicationBindingTests(unittest.TestCase):
     def test_prepared_quality_cannot_be_rebound_to_another_policy(self):
@@ -409,6 +450,7 @@ class HighSignalFallbackTests(unittest.TestCase):
                     head_sha=baseline_fixtures.SHA_C, model="different-model"
                 ),
                 changed_paths=(concern.path,),
+                changed_lines={concern.path: frozenset({concern.line})},
             )
             self.assertEqual(admitted.comments[0].path, concern.path)
             self.assertEqual(admitted.comments[0].category, concern.category)

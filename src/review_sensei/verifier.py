@@ -1873,8 +1873,14 @@ def _verify_candidate_evidence(
             evaluation_complete=evaluation_complete,
         )
     if not actionable:
+        # CandidateFinding rejects empty causal fields at construction. This
+        # defensive malformed-input path is not completed source disproof.
         return VerificationResult(
-            "insufficient-evidence", tuple(dict.fromkeys(reasons)), True, False
+            "insufficient-evidence",
+            tuple(dict.fromkeys(reasons)),
+            True,
+            False,
+            evaluation_complete=False,
         )
     supported_premises, contrary_evidence = _assess_candidate_premises(
         candidate, snapshot

@@ -1,0 +1,29 @@
+{
+  "schema_version": "inactive-publication-selection-v1",
+  "source_result_sha256": "1e8cc24cf39aa5694ce7458f50e06b832110a66e44bb6887bc4ea5649052b63a",
+  "selected_result_sha256": "72e5932fb455272e5fd205440f99ccbbc5c66e225e4512dab3186b00af7865fa",
+  "policy_digest": "2020dafacc81c79e02f134fc66d5b0f2c64a5e9c53cff1e5e66d364d3d7b3e9f",
+  "criteria_sha256": "15c5147a4ebd1a28326f1a55a97d4959fdf630965240f577537e323afb9e197d",
+  "occupancy_sha256": "abb4850dda9e744669d2abeeaa795459580ba2fd5fccc24c084d69cb563a9299",
+  "max_active_findings": 2,
+  "actions": [
+    {
+      "instance": "d288c9cbe183d86a1f6f190a9e1c748ff924e90310a23d74223ff17038930032",
+      "comment_sha256": "0801b669386014b953efb1b847b5b70791e08b8d19f9f1873a11e1008d283078",
+      "action": "create",
+      "consumes_slot": false,
+      "existing_target": null,
+      "target_state": null,
+      "target_proof_sha256": null
+    },
+    {
+      "instance": "bb5985c8d0fb0ebd9e4cf10ac30b6f1bdcbbeb8e9d0935c1c4566ca6aa362c8a",
+      "comment_sha256": "fc11c5bcb68bcfb7c2bf96c27a64abbd8b2aff8d1cf7189c012656e327f99b18",
+      "action": "reuse",
+      "consumes_slot": false,
+      "existing_target": "comment:existing",
+      "target_state": "active",
+      "target_proof_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ]
+}

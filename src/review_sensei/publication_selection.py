@@ -136,6 +136,11 @@ class PublicationSelection:
     required_verdict: bool
 
     def to_document(self) -> dict[str, object]:
+        """Render the pure count plan; durable authority requires the frozen handoff.
+
+        This diagnostic document is not a PublicationSelectionHandoff and cannot
+        authorize native target actions or replace independent occupancy proof.
+        """
         return {
             "schema_version": "strict-publication-selection-v1",
             "max_active_findings": self.max_active_findings,
@@ -211,13 +216,9 @@ def select_publication(
             continue
         selected.append(SelectedFinding(candidate, consumes))
         reserved += int(consumes)
-    occupancy = [
-        {"target": slot.target, "state": slot.state, "proof_sha256": slot.proof_sha256}
-        for slot in sorted(slots, key=lambda item: item.target)
-    ]
     return PublicationSelection(
         max_active_findings=max_active_findings,
-        occupancy_sha256=hashlib.sha256(canonical_bytes(occupancy)).hexdigest(),
+        occupancy_sha256=_occupancy_digest(slots),
         selected=tuple(selected),
         required_verdict=any(candidate.required for candidate in unique.values()),
     )
@@ -466,8 +467,10 @@ def freeze_publication_selection(
         or not isinstance(policy, ReviewConvergencePolicy)
         or source.review_verdict is None
         or source.publication_selection is not None
-        or source.transaction is not None
-        and source.transaction.result_sha256 is not None
+        or (
+            source.transaction is not None
+            and source.transaction.result_sha256 is not None
+        )
     ):
         raise ReviewInputError(
             "publication selection requires an unsealed admitted source"

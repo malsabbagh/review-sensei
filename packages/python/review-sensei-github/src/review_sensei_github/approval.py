@@ -83,6 +83,10 @@ class ApprovalFacts:
     ``check_published`` is retained as a diagnostic fact; inability to publish a
     merge-gate check does not make an otherwise eligible review ineligible for
     approval.
+
+    Provider identity is bound by the enclosing result/configuration identity.
+    A verdict's policy digest identifies convergence policy, not a provider;
+    parsing these facts validates shape and does not authenticate their source.
     """
 
     enabled: bool

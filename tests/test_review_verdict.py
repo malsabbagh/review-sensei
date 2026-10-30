@@ -214,6 +214,102 @@ class ReviewVerdictTests(unittest.TestCase):
             with self.subTest(policy=policy), self.assertRaises(ReviewInputError):
                 prepare_publishable_review(held, convergence_policy=policy)
 
+    def test_unselected_human_check_explains_qualifying_review_without_listed_findings(
+        self,
+    ):
+        from review_sensei_github.checks import review_check_outcome
+
+        held = project_review_comments(
+            replace(self.result, comments=(self.human,)), (), policy=self.policy
+        )
+        outcome = review_check_outcome(
+            policy="auto-approve",
+            review_status="complete",
+            required_fixes=False,
+            required_decisions=False,
+            review_verdict=held.review_verdict,
+        )
+        self.assertEqual(outcome.conclusion, "action_required")
+        self.assertIn("qualifying review", outcome.summary.lower())
+        self.assertNotIn("listed", outcome.summary)
+        mixed = review_check_outcome(
+            policy="auto-approve",
+            review_status="complete",
+            required_fixes=True,
+            required_decisions=False,
+            review_verdict=held.review_verdict,
+        )
+        self.assertIn("review comments", mixed.summary)
+        self.assertIn("qualifying review", mixed.summary.lower())
+
+    def test_replay_cannot_change_enforcement_or_selected_admission_cardinality(self):
+        from review_sensei.convergence import admit_review_result
+
+        policy = ReviewConvergencePolicy(
+            mode="legacy", enforcement="publication", quality="high-signal"
+        )
+        bound = bind_review_verdict(self.result, policy=policy)
+        with self.assertRaises(ReviewInputError):
+            admit_review_result(bound, replace(policy, enforcement="display-only"))
+        document = bound.to_dict()
+        document["review_verdict"]["selected_admission"] = ""
+        with self.assertRaises(ReviewInputError):
+            ReviewResult.from_dict(document)
+
+    def test_provider_and_selected_comment_order_remain_in_result_identity(self):
+        import hashlib
+
+        from review_sensei.bounded_evidence import canonical_bytes
+        from review_sensei.review_verdict import comment_selection_digest
+
+        note = replace(self.note, body="ملاحظة λ", effective_blocking=False)
+        comments = (self.human, note)
+        self.assertEqual(
+            comment_selection_digest(comments),
+            hashlib.sha256(
+                canonical_bytes([c.to_dict() for c in comments])
+            ).hexdigest(),
+        )
+        bound = bind_review_verdict(
+            replace(self.result, comments=comments), policy=self.policy
+        )
+        self.assertNotEqual(
+            replace(bound, provider="other").content_digest(), bound.content_digest()
+        )
+        reordered = bound.to_dict()
+        reordered["comments"].reverse()
+        with self.assertRaises(ReviewInputError):
+            ReviewResult.from_dict(reordered)
+
+    def test_matched_downgrade_stays_uncertain_during_full_high_signal_reconciliation(
+        self,
+    ):
+        from test_verification_baseline import _key
+
+        from review_sensei.baseline import (
+            baseline_from_review,
+            reconcile_overflow_review,
+        )
+        from review_sensei.context import finding_lifecycle_for_comment
+        from review_sensei.models import FindingLifecycleRecord
+
+        initial = replace(self.result, comments=(self.blocker,))
+        baseline = baseline_from_review(initial, cache_key=_key(), policy=self.policy)
+        fingerprint = finding_lifecycle_for_comment(self.blocker).fingerprint
+        downgraded = replace(
+            initial,
+            comments=(replace(self.blocker, blocking=False, effective_blocking=False),),
+            finding_lifecycles=(FindingLifecycleRecord(fingerprint, "new"),),
+        )
+        reconciled = reconcile_overflow_review(
+            downgraded, baseline, coverage_mode="full", retain_matched_obligations=True
+        )
+        self.assertEqual(reconciled.review_status, "partial")
+        self.assertEqual(
+            reconciled.finding_lifecycles,
+            (FindingLifecycleRecord(fingerprint, "uncertain"),),
+        )
+
     def test_broader_review_cannot_clear_retained_unselected_requirement(self):
         previous = project_review_comments(
             self.result, (self.human,), policy=self.policy
@@ -329,6 +425,8 @@ class ReviewVerdictTests(unittest.TestCase):
                 )
 
     def test_no_provider_continuation_cannot_clear_unselected_requirements(self):
+        from types import SimpleNamespace
+
         from review_sensei.cli import _reconcile_hosted_result
         from review_sensei.outcomes import RunOutcome
         from review_sensei.service import ReviewRun, ReviewService
@@ -347,6 +445,14 @@ class ReviewVerdictTests(unittest.TestCase):
         )(run)
         self.assertTrue(resumed.result.review_verdict.unselected_blocking_defect)
         self.assertTrue(resumed.result.review_verdict.unselected_human_decision)
+        full = _reconcile_hosted_result(
+            ReviewService,
+            admission_baseline=None,
+            verification_scope=SimpleNamespace(coverage_mode="full"),
+            convergence_policy=self.policy,
+            prior_partial=prior,
+        )(replace(run, outcome=RunOutcome("reviewed", provider_calls=1)))
+        self.assertEqual(full.result.review_verdict, resumed.result.review_verdict)
         self.assertFalse(
             evaluate_auto_approval(
                 result=resumed.result,

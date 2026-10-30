@@ -102,7 +102,12 @@ def review_check_outcome(
     bounded_required = required_fixes is True or unselected_fixes
     bounded_decisions = required_decisions is True or unselected_decisions
     required_guidance = (
-        "A qualifying review must establish that these requirements are satisfied."
+        (
+            "Published findings are listed in the ReviewSensei review comments. "
+            if required_fixes is True or required_decisions is True
+            else ""
+        )
+        + "A qualifying review must establish that these requirements are satisfied."
         if unselected_fixes or unselected_decisions
         else "They are listed in the ReviewSensei review comments."
     )
@@ -165,6 +170,7 @@ def review_check_outcome(
             summary=(
                 "The completed review reported findings that require a human "
                 "decision before approval."
+                + (" " + required_guidance if unselected_decisions else "")
             ),
         )
     if review_status == "partial" and bounded_mixed:

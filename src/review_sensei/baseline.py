@@ -1345,6 +1345,9 @@ def reconcile_overflow_review(
     Missing priors remain uncertain and make the result partial. Existing
     partial checkpoint and approval gates preserve exact prior history and
     withhold approval. No prior finding is injected into provider discovery.
+    ``retain_matched_obligations`` preserves rediscovered high-signal history
+    during full discovery: a matched prior cannot become a removable new note.
+    A downgrade or ambiguous match still takes precedence and remains uncertain.
     """
 
     pairs = tuple(
