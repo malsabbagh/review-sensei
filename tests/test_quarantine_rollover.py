@@ -9,7 +9,10 @@ from urllib.parse import urlsplit
 from review_sensei_github.api_run_budget import CallerRunBudget
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
 from review_sensei_github.quarantine_published_tail import BROKER_QUALIFICATIONS
-from review_sensei_github.quarantine_rollover import retention_preflight
+from review_sensei_github.quarantine_rollover import (
+    read_startup_part,
+    retention_preflight,
+)
 from test_quarantine_activation import registered_resource
 from test_quarantine_published_tail_journey import PublishedTailJourneyFixture
 
@@ -39,6 +42,91 @@ class ArchiveFaultFixture(PublishedTailJourneyFixture):
 
 
 class QuarantineRolloverTests(unittest.TestCase):
+    def test_census_part_reuse_is_pinned_scoped_and_expires_with_rollover(self):
+        from dataclasses import replace
+
+        from review_sensei_github import api_run_history
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
+        ):
+            f = PublishedTailJourneyFixture(directory)
+            _old, registration = f.original_origins()
+            with registered_resource([registration]):
+                self.assertEqual(f.invoke(), 0, f.error)
+                inventories = f.selected.ledger._quarantine_authenticated.inventories
+                origin = next(iter(inventories))
+                instance = inventories[origin]["assessments"][0]["instance"]
+                f.quarantine_predecessor_comment_id = None
+                f.select_command(
+                    "@reviewsensei dismiss "
+                    + instance
+                    + ' --reason "quarantine:'
+                    + origin
+                    + ' Exact source disproves this historical concern."',
+                    new_run=True,
+                )
+                captured = []
+                original = api_run_history.retain_previous_run
+
+                def retain(ledger, identity, previous, *args, **kwargs):
+                    snapshot = ledger._quarantine_rollover_snapshot
+                    item = next(
+                        iter(
+                            ledger._owned_carrier_items(
+                                list(snapshot.listed.values()), identity
+                            )
+                        )
+                    )
+                    identifier = str(item["id"])
+                    expected = ledger._part_from_item(
+                        copy.deepcopy(item), identity, identifier
+                    )
+                    start = len(f.trace)
+                    self.assertEqual(
+                        read_startup_part(ledger, identity, identifier), expected
+                    )
+                    for invalid in ("not-a-comment", None):
+                        with (
+                            self.subTest(identifier=invalid),
+                            self.assertRaises(ReviewInputError),
+                        ):
+                            read_startup_part(ledger, identity, invalid)
+                    # Mutating the ordinary cache cannot substitute a body for
+                    # the exact census row pinned by this issued operation.
+                    cached = ledger._comments_by_id[item["id"]]
+                    old_body = cached["body"]
+                    cached["body"] = "foreign cache body"
+                    try:
+                        self.assertEqual(
+                            read_startup_part(ledger, identity, identifier), expected
+                        )
+                    finally:
+                        cached["body"] = old_body
+                    with self.assertRaises(ReviewInputError):
+                        read_startup_part(
+                            ledger, replace(identity, pull_request=8), identifier
+                        )
+                    # A newly created archive has no original census row. It
+                    # must fall through to its separate physical readback.
+                    self.assertIsNone(read_startup_part(ledger, identity, "999999999"))
+                    self.assertEqual(len(f.trace), start)
+                    captured.append((ledger, identity, identifier, snapshot))
+                    return original(ledger, identity, previous, *args, **kwargs)
+
+                with patch.object(api_run_history, "retain_previous_run", retain):
+                    self.assertEqual(f.invoke_command(), 0, f.error)
+                self.assertEqual(len(captured), 1)
+                ledger, identity, identifier, snapshot = captured[0]
+                self.assertIsNone(read_startup_part(ledger, identity, identifier))
+                ledger._quarantine_rollover_snapshot = snapshot
+                try:
+                    with self.assertRaises(ReviewInputError):
+                        read_startup_part(ledger, identity, identifier)
+                finally:
+                    ledger._quarantine_rollover_snapshot = None
+
     def test_stored_and_absent_archive_effects_keep_the_exact_tail_and_never_repost(
         self,
     ):
@@ -137,3 +225,5 @@ class QuarantineRolloverTests(unittest.TestCase):
         ledger = SimpleNamespace(_quarantine_rollover_snapshot={"calls": 1})
         with self.assertRaises(ReviewInputError):
             retention_preflight(ledger, None)
+        with self.assertRaises(ReviewInputError):
+            read_startup_part(ledger, None, "1")
