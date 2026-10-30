@@ -126,6 +126,20 @@ class EffectiveModelContractTests(unittest.TestCase):
         self.assertGreater(provider.calls, 0)
         self.assertEqual(len(cache._keys), 0)
 
+    def test_unknown_routed_model_disables_key_with_known_default(self):
+        from review_sensei import Stage
+
+        stages = (Stage("first", "{diff}", ("summary", "comments")),)
+        default, routed = _Provider("known-default"), _Provider(None)
+        routed.allow_model_override = False
+        service = ReviewService(
+            default, stages=stages, stage_providers={"first": routed}
+        )
+        self.assertIsNone(service.context_cache_key(self.request()))
+        self.assertIsNone(
+            service.context_cache_key(replace(self.request(), model="ignored"))
+        )
+
     def test_override_and_budget_wrapper_resolve_same_identity(self):
         from review_sensei.service import _BudgetedProvider, _CallBudget
 

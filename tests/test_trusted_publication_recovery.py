@@ -625,6 +625,37 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
                 any(review["state"] == "APPROVED" for review in state.reviews)
             )
 
+    def test_routed_original_identity_requires_original_context_documents(self):
+        from review_sensei.service import DEFAULT_STAGES
+
+        routed = _AnalysisProvider()
+        routed.model = "different-routed-model"
+        routed.allow_model_override = False
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(
+                engine_cli,
+                "bind_stage_providers",
+                return_value=(_AnalysisProvider(), {DEFAULT_STAGES[0].name: routed}),
+            ):
+                self.original_analysis(root)
+            original_admission = (root / "admission.json").read_bytes()
+            state = _FailedPublication()
+            self.assertEqual(self.invoke(root, state)[0], 1)
+            ledger = LocalSessionLedger(root / "ledger")
+            before = ledger.load(IDENTITY).record
+            code, _, error = self.invoke(root, state, reconstruct=True)
+            self.assertEqual(code, 1, error)
+            self.assertIn("original committed transaction", error)
+            self.assertEqual(ledger.load(IDENTITY).record, before)
+            self.assertEqual((root / "admission.json").read_bytes(), original_admission)
+            self.assertFalse(state.reviews)
+            state.fail_review = False
+            code, output, error = self.invoke(root, state)
+            self.assertEqual(code, 0, error)
+            self.assertIn("published", output)
+            self.assertEqual((root / "admission.json").read_bytes(), original_admission)
+
     def test_pre_v2_original_context_remains_publishable_and_is_not_reconstructed(self):
         from review_sensei.context import (
             _configuration_digest,
