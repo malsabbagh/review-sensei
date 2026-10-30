@@ -1255,5 +1255,6 @@ Never execute inactive selection.
 Hosted commands use ordinary module imports with explicit compatibility re-exports.
 Their finite existing engine CLI helper dependency is qualified at invocation time,
 so late patches and local GitHub constructor lookup remain effective. Both command
-modules receive normal Ruff/mypy checks; the engine still never imports the hosted
-runtime and no new public core helper API is created (ADR 0078).
+modules receive normal Ruff/mypy checks.
+Engine/hosted dependency direction stays unchanged.
+No new public core helper API is created (ADR 0078).
