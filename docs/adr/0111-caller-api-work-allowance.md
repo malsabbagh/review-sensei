@@ -88,6 +88,18 @@ Provider failure, timeout, interruption after entry, unknown reservation and
 uncertain cleanup remain conservative blockers. Post-dispatch provider settlement
 is future work, outside this change.
 
+A stopped-owner successor cannot infer completion from `publication_succeeded`.
+Without the terminal accounting binding, the historical record does not retain
+an authenticated original cleanup-target manifest. The successor refuses before
+the `already_published` shortcut rather than manufacturing a completion witness.
+This guard prevents unsafe closure; it does not recover such historical sessions.
+Ordinary new-run follow-up still requires its predecessor's terminal archive.
+ADR 0114 defines a distinct versioned historical-publication transition using
+complete read-only effect authentication and fresh current authority. It archives
+the predecessor without synthesizing its terminal flag. Existing pending/failed
+publication recovery remains unchanged. Serialized completion evidence grants no
+new live authority.
+
 Commands and replies admit a durable intent before effects. It binds purpose,
 source ID/version/body digest, run, owner, head, configuration, operation key and
 antecedent root. Execution entry is durable. Terminal closure requires a typed

@@ -866,6 +866,7 @@ class SessionRecord:
     assessment_queue: Mapping[str, object] | None = None
     disposition_snapshot: Mapping[str, object] | None = None
     api_run_accounting: Mapping[str, object] | None = None
+    historical_assessments: Mapping[str, object] | None = None
     quarantine_lineage: Mapping[str, object] | None = None
     publication_staging: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
@@ -1135,6 +1136,20 @@ class SessionRecord:
                 raise ReviewInputError(
                     "unconfirmed publication staging must retain its exact transaction"
                 )
+        from .historical_assessments import normalize_hold
+
+        normalized_hold = normalize_hold(self.historical_assessments)
+        object.__setattr__(self, "historical_assessments", normalized_hold)
+        if normalized_hold is not None:
+            receipt = normalized_hold["source"]["completion"]
+            if self._digest_shape != "current" or (
+                receipt["repository"],
+                receipt["repository_id"],
+                receipt["pull_request"],
+            ) != (self.repository, self.repository_id, self.pull_request):
+                raise ReviewInputError(
+                    "historical assessment session identity conflicts"
+                )
         expected_payload = {
             "current": self._payload,
             "operator-paused": self._payload_without_dispositions,
@@ -1179,6 +1194,8 @@ class SessionRecord:
             payload["disposition_snapshot"] = dict(self.disposition_snapshot)
         if self.api_run_accounting is not None:
             payload["api_run_accounting"] = dict(self.api_run_accounting)
+        if self.historical_assessments is not None:
+            payload["historical_assessments"] = dict(self.historical_assessments)
         if self.quarantine_lineage is not None:
             payload["quarantine_lineage"] = json.loads(
                 canonical_bytes(self.quarantine_lineage)
@@ -1242,6 +1259,7 @@ class SessionRecord:
         assessment_queue: Mapping[str, object] | None = None,
         disposition_snapshot: Mapping[str, object] | None = None,
         api_run_accounting: Mapping[str, object] | None = None,
+        historical_assessments: Mapping[str, object] | None = None,
         quarantine_lineage: Mapping[str, object] | None = None,
         publication_staging: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
@@ -1286,6 +1304,11 @@ class SessionRecord:
 
         normalized_snapshot = normalize_snapshot(disposition_snapshot)
         normalized_api = _stored_api_accounting(api_run_accounting)
+        from .historical_assessments import normalize_hold
+
+        normalized_hold = normalize_hold(historical_assessments)
+        if normalized_hold is not None:
+            payload["historical_assessments"] = normalized_hold
         from .quarantine_lineage import normalize_lineage
 
         normalized_lineage = normalize_lineage(quarantine_lineage)
@@ -1335,6 +1358,7 @@ class SessionRecord:
             assessment_queue=normalized_queue,
             disposition_snapshot=normalized_snapshot,
             api_run_accounting=normalized_api,
+            historical_assessments=normalized_hold,
             quarantine_lineage=normalized_lineage,
             publication_staging=normalized_staging,
         )
@@ -1411,6 +1435,13 @@ class SessionRecord:
         has_queue = "assessment_queue" in value
         has_snapshot = "disposition_snapshot" in value
         has_api_accounting = "api_run_accounting" in value
+        if (
+            "historical_assessments" in value
+            and value["historical_assessments"] is None
+        ):
+            raise ReviewInputError(
+                "historical assessments cannot be a null absence marker"
+            )
         if "publication_staging" in value and value["publication_staging"] is None:
             raise ReviewInputError(
                 "publication staging cannot be a null absence marker"
@@ -1441,6 +1472,7 @@ class SessionRecord:
             or has_queue
             or has_snapshot
             or has_api_accounting
+            or "historical_assessments" in value
             or "quarantine_lineage" in value
             or "publication_staging" in value
             or "rescan_state" in value
@@ -1526,6 +1558,9 @@ class SessionRecord:
                 Mapping[str, object] | None, value.get("disposition_snapshot")
             ),
             api_run_accounting=_stored_api_accounting(value.get("api_run_accounting")),
+            historical_assessments=cast(
+                Mapping[str, object] | None, value.get("historical_assessments")
+            ),
             quarantine_lineage=cast(
                 Mapping[str, object] | None, value.get("quarantine_lineage")
             ),
@@ -1562,6 +1597,7 @@ class SessionRecord:
         assessment_queue: Mapping[str, object] | None = None,
         disposition_snapshot: Mapping[str, object] | None = None,
         api_run_accounting: Mapping[str, object] | None = None,
+        historical_assessments: Mapping[str, object] | None = None,
         quarantine_lineage: Mapping[str, object] | None = None,
         publication_staging: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
@@ -1604,6 +1640,7 @@ class SessionRecord:
             assessment_queue=assessment_queue,
             disposition_snapshot=disposition_snapshot,
             api_run_accounting=api_run_accounting,
+            historical_assessments=historical_assessments,
             quarantine_lineage=quarantine_lineage,
             publication_staging=publication_staging,
         )
@@ -1617,11 +1654,39 @@ class SessionRecord:
         adapter must confirm the retained carrier and stopped predecessor first.
         Ordinary evolve() never allows an accounting identity replacement.
         """
+        return self._rollover_api_accounting(accounting, historical=False)
+
+    def rollover_historical_api_accounting(
+        self, accounting: Mapping[str, object], *, assessments=()
+    ) -> "SessionRecord":
+        """Value constraints only; source adapter authenticates the transition."""
+        return self._rollover_api_accounting(
+            accounting, historical=True, assessments=assessments
+        )
+
+    def _rollover_api_accounting(
+        self, accounting: Mapping[str, object], *, historical: bool, assessments=()
+    ) -> "SessionRecord":
         from .api_work import ApiRunAccounting
 
         previous = ApiRunAccounting.from_document(self.api_run_accounting)
         candidate = ApiRunAccounting.from_document(accounting)
         ref = candidate.previous_record
+        if historical:
+            from .historical_completion import (
+                REFERENCE_VERSION,
+                require_receipt_matches,
+            )
+
+            if ref is None or ref.get("schema_version") != REFERENCE_VERSION:
+                raise ReviewInputError(
+                    "historical rollover requires a versioned receipt"
+                )
+            require_receipt_matches(self, candidate, ref["completion"])
+        elif ref is not None and "completion" in ref:
+            raise ReviewInputError(
+                "ordinary rollover cannot consume historical completion"
+            )
         if (
             previous.identity.repository_id != candidate.identity.repository_id
             or previous.identity.run_id == candidate.identity.run_id
@@ -1644,7 +1709,11 @@ class SessionRecord:
                     self.transaction is None
                     or self.transaction.phase
                     not in {"publication_succeeded", "publication_suppressed"}
-                    or previous.terminal_transaction != self.transaction.transaction_id
+                    or (
+                        not historical
+                        and previous.terminal_transaction
+                        != self.transaction.transaction_id
+                    )
                 )
             )
             or (previous.analysis_abort is not None and self.transaction is not None)
@@ -1665,6 +1734,16 @@ class SessionRecord:
         payload["generation"] = self.generation + 1
         payload["api_run_accounting"] = candidate.to_document()
         payload["transaction"] = self.transaction
+        if historical:
+            from .historical_assessments import initial_hold
+
+            if self.historical_assessments is not None:
+                raise ReviewInputError(
+                    "historical transition cannot replace an existing assessment source"
+                )
+            hold = initial_hold(ref, list(assessments))
+            if hold is not None:
+                payload["historical_assessments"] = hold
         return type(self)._construct(**cast(dict[str, Any], payload))
 
     def quarantine_api_accounting(
@@ -1765,6 +1844,7 @@ class SessionRecord:
         assessment_queue: Mapping[str, object] | None | object = ...,
         disposition_snapshot: Mapping[str, object] | None | object = ...,
         api_run_accounting: Mapping[str, object] | None | object = ...,
+        historical_assessments: Mapping[str, object] | None | object = ...,
         quarantine_lineage: Mapping[str, object] | None | object = ...,
         publication_staging: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
@@ -1783,6 +1863,14 @@ class SessionRecord:
         )
         require_staging_successor(self.publication_staging, next_staging)
         updated = _format_datetime(_aware_now(now))
+        from .historical_assessments import require_hold_successor
+
+        require_hold_successor(
+            self.historical_assessments,
+            self.historical_assessments
+            if historical_assessments is ...
+            else historical_assessments,
+        )
         if self.api_run_accounting is not None and api_run_accounting is not ...:
             if api_run_accounting is None:
                 raise ReviewInputError("API accounting cannot be removed")
@@ -1872,6 +1960,11 @@ class SessionRecord:
                 self.api_run_accounting
                 if api_run_accounting is ...
                 else cast(Mapping[str, object] | None, api_run_accounting)
+            ),
+            historical_assessments=(
+                self.historical_assessments
+                if historical_assessments is ...
+                else cast(Mapping[str, object] | None, historical_assessments)
             ),
             quarantine_lineage=cast(Mapping[str, object] | None, next_lineage),
             publication_staging=cast(Mapping[str, object] | None, next_staging),
@@ -4371,6 +4464,9 @@ def _history_preserve_sources(
 
 
 def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> None:
+    from .historical_assessments import require_hold_successor
+
+    require_hold_successor(before.historical_assessments, after.historical_assessments)
     from .quarantine_lineage import require_lineage_successor
 
     require_lineage_successor(before.quarantine_lineage, after.quarantine_lineage)
@@ -4385,7 +4481,18 @@ def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> No
         previous = ApiRunAccounting.from_document(before.api_run_accounting)
         current = ApiRunAccounting.from_document(after.api_run_accounting)
         if previous.identity != current.identity:
-            expected = before.rollover_api_accounting(after.api_run_accounting)
+            reference = current.previous_record
+            expected = (
+                before.rollover_historical_api_accounting(
+                    after.api_run_accounting,
+                    assessments=(after.historical_assessments or {}).get(
+                        "assessments", ()
+                    ),
+                )
+                if reference is not None
+                and reference.get("schema_version") == "caller-run-reference-v2"
+                else before.rollover_api_accounting(after.api_run_accounting)
+            )
             if expected.record_sha256 != after.record_sha256:
                 raise ReviewInputError("caller run rollover discarded session state")
         else:

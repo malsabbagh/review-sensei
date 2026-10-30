@@ -149,14 +149,20 @@ def execute_command(run: ReviewRun, args: Any) -> int:
     run.ledger.business_guard = authority.fence
     source = authority.document["source"]
     actor = authority.document["actor"]
+    from .historical_assessment_action import parse_historical_command
     from .quarantine_action import parse_quarantine_command
 
+    historical = parse_historical_command(args.comment_body)
     quarantine = parse_quarantine_command(args.comment_body)
-    command = quarantine or parse_maintainer_command(
-        args.comment_body,
-        actor=actor["login"],
-        head_sha=run.head_sha,
-        command_id=str(source["id"]),
+    command = (
+        historical
+        or quarantine
+        or parse_maintainer_command(
+            args.comment_body,
+            actor=actor["login"],
+            head_sha=run.head_sha,
+            command_id=str(source["id"]),
+        )
     )
     if command is None:
         raise ReviewInputError("authenticated source is not a supported command")
@@ -220,6 +226,22 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             run.ledger.business_guard = lambda: decision_authority(run, authority)
         except QuarantineTargetRefusal as error:
             quarantine_refusal = str(error)
+    historical_refusal = None
+    if historical is not None:
+        from .historical_assessment_action import (
+            HistoricalTargetRefusal,
+            prepare_historical_target,
+        )
+
+        try:
+            historical_target = prepare_historical_target(
+                run, authority, historical, app, permission
+            )
+        except HistoricalTargetRefusal as error:
+            # This process has not entered a decision mutation. A definite
+            # selector/role refusal can finish as a charged explicit no-op;
+            # transport/budget uncertainty and stale authority still escape.
+            historical_refusal = str(error)
     authority.fence()
     boundary = caller.begin_action_effect(run.ledger, run.identity, intent)
     explicit_mode = getattr(args, "review_mode", None)
@@ -243,6 +265,21 @@ def execute_command(run: ReviewRun, args: Any) -> int:
 
         result = apply_quarantine_target(
             run, authority, quarantine, quarantine_target, app
+        )
+    elif historical_refusal is not None:
+        from review_sensei.disposition import MaintainerCommandResult
+
+        result = MaintainerCommandResult(
+            action=command.action,
+            applied=False,
+            operator_paused=run.ledger.load(run.identity).record.operator_paused,
+            summary="Historical assessment refused: " + historical_refusal,
+        )
+    elif historical is not None:
+        from .historical_assessment_action import apply_historical_target
+
+        result = apply_historical_target(
+            run, authority, historical, historical_target, app
         )
     else:
         result = app.apply_maintainer_command(
@@ -328,8 +365,10 @@ def run_action(argv: Sequence[str], *, purpose: str) -> int:
     if getattr(args, "session_ledger", None) is not None:
         raise ReviewInputError("current Actions routes require their native run ledger")
     if purpose == "command":
+        from .historical_assessment_action import parse_historical_command
         from .quarantine_action import parse_quarantine_command
 
+        parse_historical_command(args.comment_body)
         parse_quarantine_command(args.comment_body)
     source = event_source(args, purpose=purpose)
     args.provider = getattr(args, "provider", None)

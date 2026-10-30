@@ -14,8 +14,10 @@ import json
 import os
 import re
 import subprocess
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Mapping, Sequence
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -252,6 +254,7 @@ class ReviewRun:
     session_grant: str | None = field(default=None, repr=False)
     title: str = ""
     actions_token: str | None = field(default=None, repr=False)
+    restart_id: str | None = None
 
     def retained_analysis(self, argv: list[str]) -> CompletedAnalysis | None:
         """Recover a stopped same-run owner's exact checkpoint, without inference."""
@@ -260,7 +263,27 @@ class ReviewRun:
         loaded = self.ledger.load(self.identity)
         if loaded.status != "ok" or loaded.record is None:
             raise ReviewInputError("successor checkpoint is unavailable")
+        self.caller._require_ledger(self.ledger, self.identity)
+        if loaded.record.record_sha256 != self.caller._root:
+            raise ReviewInputError("successor checkpoint changed")
         transaction = loaded.record.transaction
+        from .api_run_history import inherited_preprovider_reference
+
+        inherited = inherited_preprovider_reference(
+            loaded.record, self.caller.accounting
+        )
+        if inherited is not None:
+            raise ReviewInputError(
+                "inherited enrollment has no proven provider non-entry or root-write settlement"
+            )
+        if (
+            transaction is not None
+            and transaction.phase == "publication_succeeded"
+            and self.caller.accounting.terminal_transaction is None
+        ):
+            raise ReviewInputError(
+                "successor publication tail is unverified; authenticated predecessor completion is required"
+            )
         if transaction is None or transaction.phase not in {
             "publication_pending",
             "publication_failed",
@@ -437,7 +460,10 @@ class ReviewRun:
             options=GitHubWriteOptions(
                 github_writes=True,
                 auto_review=True,
-                auto_approve=self.plan.policy.reviews == "auto-approve",
+                auto_approve=(
+                    self.restart_id is None
+                    and self.plan.policy.reviews == "auto-approve"
+                ),
                 complete_inventory=True,
             ),
             oidc_token=self.oidc,
@@ -596,6 +622,7 @@ def bootstrap(
     purpose: str = "review",
     source: Mapping[str, object] | None = None,
     quarantine_predecessor_comment_id: int | None = None,
+    restart_id: str | None = None,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
     event = os.environ.get("GITHUB_EVENT_NAME", "")
@@ -645,6 +672,26 @@ def bootstrap(
     ):
         raise ReviewInputError(
             "review startup identity or read capability is unavailable"
+        )
+    from .controlled_restart import entry_registration
+
+    restart_registration = entry_registration(
+        repository=args.repository,
+        repository_id=args.repository_id,
+        pull_request=args.pull_request,
+        request_id=restart_id,
+        purpose=purpose,
+        policy_commit=policy_commit,
+        base_sha=args.base_sha,
+        head_sha=args.head_sha,
+    )
+    if restart_registration is not None and (
+        quarantine_predecessor_comment_id is not None
+        or args.rescan
+        or args.review_remaining
+    ):
+        raise ReviewInputError(
+            "controlled restart cannot continue or migrate an old session"
         )
     # The trusted checkout is infrastructure; authenticate its exact policy SHA.
     try:
@@ -700,6 +747,8 @@ def bootstrap(
             "trusted policy does not enable the current review route"
         )
     job = "command" if purpose == "command" else plan.runner_kind
+    if restart_registration is not None and job != restart_registration["job"]:
+        raise ReviewInputError("controlled restart runner differs from its designation")
     startup = review_startup_plan(job)
     # Source-controlled startup and both execution owners must fit even before
     # authentication requests. A malformed/undersized local config cannot start
@@ -906,6 +955,17 @@ def bootstrap(
             actor=os.environ.get("GITHUB_ACTOR"),
             triggering_actor=os.environ.get("GITHUB_TRIGGERING_ACTOR"),
         )
+    if restart_registration is not None:
+        from .controlled_restart import install_admission, prepare_admission
+
+        proof = prepare_admission(
+            ledger=native,
+            identity=identity,
+            registration=restart_registration,
+            actions_token=actions_token,
+            directory=run_directory,
+        )
+        install_admission(native, proof)
     loaded = native.load(identity)
     if int(attempt) == 1:
         try:
@@ -936,8 +996,20 @@ def bootstrap(
                 )
                 if previous.identity == caller.run:
                     raise ReviewInputError("caller run already started")
-                stopped = evidence.ceased_run_owner(
-                    identity, previous.identity.run_id, previous.owner
+                historical_candidate = (
+                    purpose == "review"
+                    and previous.terminal_transaction is None
+                    and previous.action is None
+                    and previous.analysis_abort is None
+                    and previous_root.transaction is not None
+                    and previous_root.transaction.phase == "publication_succeeded"
+                )
+                stopped = (
+                    None
+                    if historical_candidate
+                    else evidence.ceased_run_owner(
+                        identity, previous.identity.run_id, previous.owner
+                    )
                 )
 
                 def require_cessation():
@@ -949,9 +1021,38 @@ def bootstrap(
                     ):
                         raise ReviewInputError("previous caller cessation changed")
 
-                caller.rollover_and_activate(
-                    native, identity, frozen, owner, previous_root, require_cessation
-                )
+                if historical_candidate:
+                    from .historical_completion import (
+                        authenticate_historical_publication,
+                    )
+
+                    def authenticate(record):
+                        return authenticate_historical_publication(
+                            caller=caller,
+                            ledger=native,
+                            identity=identity,
+                            configuration=frozen,
+                            owner=owner,
+                            previous=record,
+                            actions=evidence,
+                            current_base=args.base_sha,
+                            current_head=args.head_sha,
+                            pull=pull,
+                            authority=session.attestation,
+                        )
+
+                    caller.rollover_historical_and_activate(
+                        native, identity, frozen, owner, previous_root, authenticate
+                    )
+                else:
+                    caller.rollover_and_activate(
+                        native,
+                        identity,
+                        frozen,
+                        owner,
+                        previous_root,
+                        require_cessation,
+                    )
             else:
                 raise ReviewInputError("previous caller root cannot be authenticated")
         except GitHubPublicationTransientError:
@@ -980,8 +1081,32 @@ def bootstrap(
         ):
             raise ReviewInputError("caller run is already terminal")
         prior = loaded.record
+        from .api_run_history import inherited_preprovider_reference
+
+        inherited = (
+            inherited_preprovider_reference(prior, previous)
+            if purpose == "review"
+            else None
+        )
+        if inherited is not None:
+            # Remote absence of a reservation is indistinguishable from a
+            # dispatched, unstored root PATCH. Never claim successor ownership
+            # or provider permission from this inherited snapshot alone.
+            raise ReviewInputError(
+                "inherited enrollment has no proven provider non-entry or root-write settlement"
+            )
+        elif (
+            purpose == "review"
+            and previous.previous_record is not None
+            and previous.previous_record.get("schema_version")
+            == "caller-run-reference-v2"
+            and prior.transaction is not None
+            and prior.transaction.phase == "analysis"
+        ):
+            raise ReviewInputError("new transaction has no proven provider non-entry")
         if (
             purpose == "review"
+            and inherited is None
             and prior.transaction is not None
             and (
                 prior.transaction.base_sha != args.base_sha
@@ -1027,6 +1152,8 @@ def bootstrap(
     ledger = (ReviewRunLedger if purpose == "review" else ActionRunLedger)(
         native, caller, identity
     )
+    if restart_registration is not None:
+        proof.bind_runtime(ledger)
     publication_broker = BrokerClient(
         opener=caller.open,
         control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
@@ -1049,6 +1176,7 @@ def bootstrap(
         session.grant,
         title,
         actions_token,
+        restart_id,
     )
 
 
@@ -1056,12 +1184,14 @@ def _has_option(argv: Sequence[str], name: str) -> bool:
     return any(arg == name or arg.startswith(name + "=") for arg in argv)
 
 
-def run_review(argv: Sequence[str]) -> int:
+def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
     parser = argparse.ArgumentParser(prog="review-sensei-github review-run")
     parser.add_argument("--policy-commit", required=True)
     parser.add_argument("--run-directory", type=Path, required=True)
     parser.add_argument("--publication-outcome", type=Path, required=True)
     parser.add_argument("--quarantine-predecessor-comment-id", type=int)
+    if controlled_restart:
+        parser.add_argument("--restart-id", required=True)
     parser.add_argument("engine_args", nargs=argparse.REMAINDER)
     options = parser.parse_args(list(argv))
     core = options.engine_args
@@ -1078,11 +1208,16 @@ def run_review(argv: Sequence[str]) -> int:
         for value in (args.base_sha, args.head_sha)
     ):
         raise ReviewInputError("review lifecycle requires exact base and head")
+    if controlled_restart and args.diff is not None:
+        raise ReviewInputError(
+            "controlled restart requires a freshly prepared current full diff"
+        )
     selected = bootstrap(
         args,
         run_directory=options.run_directory,
         policy_commit=options.policy_commit,
         quarantine_predecessor_comment_id=options.quarantine_predecessor_comment_id,
+        restart_id=getattr(options, "restart_id", None),
     )
     core = [*core]
     if not _has_option(core, "--base-sha"):
@@ -1093,26 +1228,43 @@ def run_review(argv: Sequence[str]) -> int:
         core.append("--title=" + selected.title)
     if args.config is None and selected.configuration_path is not None:
         core.extend(["--config", str(selected.configuration_path)])
-    if args.diff is None:
-        diff = options.run_directory / "review.patch"
-        prepare_diff(
-            repository=Path.cwd(),
-            base_ref=selected.base_sha,
-            head_ref=selected.head_sha,
-            head_repository=selected.head_repository
-            if selected.head_repository != selected.identity.repository
-            else None,
-            output=diff,
+    # The durable directory owns only the restart archive/claim. Fresh source
+    # bytes stay in a private temporary directory, including on failed or
+    # cancelled execution. Abrupt process death leaves only ephemeral storage.
+    workspace = (
+        TemporaryDirectory(
+            prefix="review-sensei-restart-", dir=os.environ.get("RUNNER_TEMP") or None
         )
-        core.extend(["--diff", str(diff)])
-    if not args.transaction:
-        core.append("--transaction")
-    if not args.github_session_ledger:
-        core.append("--github-session-ledger")
-    if args.output is None:
-        core.extend(["--output", str(options.run_directory / "review.json")])
-    if not _has_option(core, "--format"):
-        core.extend(["--format", "json"])
-    if not _has_option(core, "--exit-semantics"):
-        core.extend(["--exit-semantics", "operational"])
-    return selected.execute(core, publication_output=options.publication_outcome)
+        if controlled_restart
+        else nullcontext(str(options.run_directory))
+    )
+    with workspace as working_directory:
+        if controlled_restart and Path(working_directory).resolve().is_relative_to(
+            options.run_directory.resolve()
+        ):
+            raise ReviewInputError(
+                "controlled restart diff cannot use retained history storage"
+            )
+        if args.diff is None:
+            diff = Path(working_directory) / "review.patch"
+            prepare_diff(
+                repository=Path.cwd(),
+                base_ref=selected.base_sha,
+                head_ref=selected.head_sha,
+                head_repository=selected.head_repository
+                if selected.head_repository != selected.identity.repository
+                else None,
+                output=diff,
+            )
+            core.extend(["--diff", str(diff)])
+        if not args.transaction:
+            core.append("--transaction")
+        if not args.github_session_ledger:
+            core.append("--github-session-ledger")
+        if args.output is None:
+            core.extend(["--output", str(options.run_directory / "review.json")])
+        if not _has_option(core, "--format"):
+            core.extend(["--format", "json"])
+        if not _has_option(core, "--exit-semantics"):
+            core.extend(["--exit-semantics", "operational"])
+        return selected.execute(core, publication_output=options.publication_outcome)

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/eligibility-v6.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "current",
+    "historical_assessments"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "6"
+    },
+    "current": {
+      "type": "object",
+      "required": [
+        "schema_version"
+      ],
+      "properties": {
+        "schema_version": {
+          "enum": [
+            "1",
+            "2.0",
+            "3",
+            "4",
+            "5"
+          ]
+        }
+      }
+    },
+    "historical_assessments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope_sha256",
+        "state_sha256",
+        "pending",
+        "fresh_human_pending",
+        "review_id",
+        "historical_head_sha"
+      ],
+      "properties": {
+        "scope_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "state_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "pending": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "fresh_human_pending": {
+          "type": "boolean"
+        },
+        "review_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "historical_head_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        }
+      }
+    }
+  }
+}

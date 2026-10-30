@@ -33,6 +33,7 @@ from review_sensei_github.openrouter_workflow import emit_hosted_openrouter_reso
 _PUBLIC = (
     "review",
     "review-run",
+    "restart-run",
     "command-run",
     "reply-run",
     "publish",
@@ -48,6 +49,7 @@ _PUBLIC = (
 _HELP = {
     "review": "engine review plus hosted hooks",
     "review-run": "one metered review lifecycle",
+    "restart-run": "one registered serialized fresh review",
     "command-run": "one metered maintainer command lifecycle",
     "reply-run": "one metered mention reply lifecycle",
     "publish": "publish a prepared review",
@@ -283,11 +285,11 @@ def _main(argv: list[str] | None = None) -> int:
             return 1
     if command.startswith("-") or command in {"publish", "reply", "command"}:
         return _publication(args)
-    if command == "review-run":
+    if command in {"review-run", "restart-run"}:
         from .review_run import run_review
 
         try:
-            return run_review(rest)
+            return run_review(rest, controlled_restart=command == "restart-run")
         except (OSError, ValueError, ReviewSenseiError) as error:
             print(f"review-sensei: {error}", file=sys.stderr)
             return 1

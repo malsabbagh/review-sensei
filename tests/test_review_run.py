@@ -568,6 +568,403 @@ class EntryFixture(LifecycleFixture):
             os.chdir(old)
 
 
+class _CleanupTailFixture(EntryFixture):
+    def __init__(self, directory, mode, **kwargs):
+        super().__init__(directory, **kwargs)
+        self.mode = mode
+        self.threads = []
+        self.mutations = []
+        self.graphql_operations = []
+
+    def external(self, request, timeout):
+        import copy
+        import json
+        from urllib.parse import urlsplit
+
+        from fake_github_http import json_response
+
+        path = urlsplit(request.full_url).path
+        payload = json.loads(request.data) if request.data else None
+        if path == "/graphql":
+            self.trace.append((self.attempt, request.method, path))
+            operation = payload.get("operationName")
+            self.graphql_operations.append(operation)
+            if operation == "ResolveReviewThread":
+                identifier = payload["variables"]["input"]["threadId"]
+                self.mutations.append(identifier)
+                node = next(n for n in self.threads if n["id"] == identifier)
+                if self.mode not in {"refused", "lost-unstored"}:
+                    node["isResolved"] = True
+                if self.mode in {"lost-ack", "lost-unstored"}:
+                    raise TimeoutError("synthetic lost cleanup acknowledgement")
+                if self.mode != "confirmed":
+                    return json_response({}, 500)
+                return json_response(
+                    {
+                        "data": {
+                            "resolveReviewThread": {
+                                "thread": {"id": identifier, "isResolved": True}
+                            }
+                        }
+                    }
+                )
+            if operation == "ResolutionReadback":
+                identifier = payload["variables"]["id"]
+                node = next(n for n in self.threads if n["id"] == identifier)
+                return json_response(
+                    {
+                        "data": {
+                            "node": {"id": identifier, "isResolved": node["isResolved"]}
+                        }
+                    }
+                )
+            return json_response(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": copy.deepcopy(self.threads),
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+        if "/pulls/comments/" in path:
+            self.trace.append((self.attempt, request.method, path))
+            identifier = int(path.rsplit("/", 1)[1])
+            item = next(x for x in self.inline if x["id"] == identifier)
+            if request.method == "PATCH":
+                item["body"] = payload["body"]
+            return json_response(copy.deepcopy(item))
+        response = super().external(request, timeout)
+        if path.endswith("/jobs") and self.overlap:
+            value = json.loads(response.read(524288))
+            value["total_count"] = len(value["jobs"])
+            return json_response(value)
+        if path.endswith("/pulls/7/reviews") and request.method == "POST":
+            # The reusable fixture hardcodes its initial head for inline rows;
+            # return the submitted head on this evolving synthetic server.
+            for item in self.inline:
+                if item["pull_request_review_id"] == self.reviews[-1]["id"]:
+                    item["commit_id"] = payload["commit_id"]
+                    self.threads.append(
+                        {
+                            "id": "LIVE_" + str(item["id"]),
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "databaseId": item["id"],
+                                        "body": item["body"],
+                                        "author": {
+                                            "login": "reviewsensei",
+                                            "__typename": "Bot",
+                                        },
+                                    }
+                                ]
+                            },
+                        }
+                    )
+        return response
+
+
+class _CompletionFixture(_CleanupTailFixture):
+    """Native metadata from external HTTP, with the real completion path intact."""
+
+    def __init__(self, directory, mode="lost-ack", **kwargs):
+        super().__init__(directory, mode, **kwargs)
+        self.completion_fault = None
+        self.completion_thread_reads = 0
+        self.run_results = {}
+        self.qualified_old_soft_cleanup_successes = set()
+        self.run_heads = {}
+        self.terminal_write_fault = False
+
+    def invoke(self, *, human=False):
+        result = super().invoke(human=human)
+        self.run_results[self.run_id, self.attempt] = result
+        self.run_heads[self.run_id, self.attempt] = self.requested_head
+        return result
+
+    def external(self, request, timeout):
+        import copy
+        import json
+        from urllib.parse import urlsplit
+
+        from fake_github_http import json_response
+
+        path = urlsplit(request.full_url).path
+        payload = json.loads(request.data) if request.data else {}
+        if (
+            self.terminal_write_fault
+            and request.method == "PATCH"
+            and "/issues/comments/" in path
+        ):
+            from review_sensei_github.session_ledger import parse_session_comment
+
+            record = parse_session_comment(payload["body"], identity=IDENTITY)
+            if (
+                record is not None
+                and record.api_run_accounting["terminal_transaction"] is not None
+            ):
+                self.trace.append((self.attempt, request.method, path))
+                raise TimeoutError("synthetic uncertain terminal-marker write")
+        operation = payload.get("operationName")
+        if path.endswith("/rules/branches/main"):
+            self.trace.append((self.attempt, request.method, path))
+            return json_response([])
+        if path.endswith("/branches/main/protection"):
+            self.trace.append((self.attempt, request.method, path))
+            return json_response({}, 404)
+        if path == "/graphql" and operation in {
+            "ReviewCompletionThreads",
+            "ReviewCompletionReviewDates",
+        }:
+            self.trace.append((self.attempt, request.method, path))
+            self.graphql_operations.append(operation)
+            if operation == "ReviewCompletionReviewDates":
+                rows = []
+                for identifier in payload["variables"]["ids"]:
+                    review = next(r for r in self.reviews if r["node_id"] == identifier)
+                    rows.append(
+                        {
+                            "databaseId": review["id"],
+                            "createdAt": review["submitted_at"],
+                            "updatedAt": review["submitted_at"],
+                            "lastEditedAt": "2026-10-26T23:59:00Z"
+                            if self.completion_fault == "edited"
+                            and review is self.reviews[0]
+                            else None,
+                            "commit": {"oid": review["commit_id"]},
+                        }
+                    )
+                return json_response({"data": {"nodes": rows}})
+            nodes = copy.deepcopy(self.threads)
+            self.completion_thread_reads += 1
+            if self.completion_fault == "missing-root":
+                nodes = nodes[1:]
+            if (
+                self.completion_fault == "closing-change"
+                and self.completion_thread_reads > 1
+            ):
+                nodes[0]["isResolved"] = False
+            return json_response(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "headRefOid": self.live_head,
+                                "baseRefOid": getattr(self, "live_base", BASE),
+                                "reviewThreads": {
+                                    "nodes": nodes,
+                                    "pageInfo": {
+                                        "hasNextPage": self.completion_fault
+                                        == "pagination",
+                                        "endCursor": None,
+                                    },
+                                },
+                            }
+                        }
+                    }
+                }
+            )
+        if request.method == "GET" and "/check-runs" in path:
+            self.trace.append((self.attempt, request.method, path))
+            rows = copy.deepcopy([c for c in self.check_runs if c["head_sha"] in path])
+            if self.completion_fault == "check":
+                rows[0]["conclusion"] = "success"
+            if self.completion_fault == "check-producer":
+                rows[0]["app"]["slug"] = "another-app"
+            return json_response(
+                {
+                    "check_runs": rows,
+                    "total_count": len(rows)
+                    + (self.completion_fault == "check-incomplete"),
+                }
+            )
+        if (
+            request.method == "GET"
+            and path.endswith("/pulls/7/reviews")
+            and self.completion_fault == "budget"
+        ):
+            from urllib.parse import parse_qs
+
+            query = parse_qs(urlsplit(request.full_url).query)
+            page, size = int(query["page"][0]), int(query["per_page"][0])
+            self.trace.append((self.attempt, request.method, path))
+            return json_response(
+                [
+                    {
+                        "id": page * 1000 + i,
+                        "user": {"id": 888, "type": "User", "login": "alice"},
+                    }
+                    for i in range(size)
+                ]
+            )
+        if (
+            request.method == "GET"
+            and "/reviews/" in path
+            and not path.endswith("/comments")
+        ):
+            self.trace.append((self.attempt, request.method, path))
+            identifier = int(path.rsplit("/", 1)[1])
+            return json_response(
+                copy.deepcopy(next(r for r in self.reviews if r["id"] == identifier))
+            )
+        if (
+            request.method == "GET"
+            and "/reviews/" in path
+            and path.endswith("/comments")
+        ):
+            self.trace.append((self.attempt, request.method, path))
+            identifier = int(path.split("/reviews/")[1].split("/")[0])
+            return json_response(
+                copy.deepcopy(
+                    [
+                        c
+                        for c in self.inline
+                        if c["pull_request_review_id"] == identifier
+                    ]
+                )
+            )
+        response = super().external(request, timeout)
+        if "/actions/runs/" in path:
+            from review_sensei.historical_completion import QUALIFIED_EXECUTORS
+
+            value = json.loads(response.read(524288))
+            run_id = int(path.split("/actions/runs/")[1].split("/")[0])
+            attempt = (
+                int(path.split("/attempts/")[1].split("/")[0])
+                if "/attempts/" in path
+                else self.attempt
+            )
+            result = self.run_results.get((run_id, attempt), 0)
+            if (run_id, attempt) in self.qualified_old_soft_cleanup_successes:
+                # Synthetic Actions metadata for the separately qualified
+                # v0.8.14 executor, not the current CLI's recorded exit status.
+                result = 0
+            conclusion = "success" if result == 0 else "failure"
+            current = run_id == self.run_id and attempt == self.attempt
+            if not current and self.completion_fault in {
+                "failed-owner",
+                "cancelled-owner",
+            }:
+                conclusion = (
+                    "failure"
+                    if self.completion_fault == "failed-owner"
+                    else "cancelled"
+                )
+            job_kind = getattr(self, "past_jobs", {}).get(run_id, self.owner_job)
+            if path.endswith("/jobs"):
+                value["jobs"][0]["name"] = "ReviewSensei / " + job_kind
+                for job in value["jobs"]:
+                    if job["name"].endswith(" / " + job_kind):
+                        if not current:
+                            job["conclusion"] = conclusion
+                        job["steps"] = [
+                            {
+                                "number": 1,
+                                "name": f"Run {job_kind} review",
+                                "status": "in_progress" if current else "completed",
+                                "conclusion": None
+                                if current
+                                else (
+                                    "failure"
+                                    if self.completion_fault == "masked-step-failure"
+                                    else conclusion
+                                ),
+                                "completed_at": None
+                                if current
+                                else job["completed_at"],
+                            },
+                            {
+                                "number": 2,
+                                "name": f"Generate and publish {job_kind} mention reply",
+                                "status": "completed",
+                                "conclusion": "skipped",
+                                "completed_at": None,
+                            },
+                        ]
+                for kind in {"hosted", "local", "command"} - {job_kind}:
+                    if not any(
+                        job["name"].endswith(" / " + kind) for job in value["jobs"]
+                    ):
+                        value["jobs"].append(
+                            {
+                                "id": run_id * 10 + 100 + len(value["jobs"]),
+                                "run_id": run_id,
+                                "run_attempt": attempt,
+                                "name": "ReviewSensei / " + kind,
+                                "status": "completed",
+                                "conclusion": "skipped",
+                                "completed_at": None,
+                                "steps": [],
+                            }
+                        )
+                value["total_count"] = len(value["jobs"])
+            else:
+                key = next(iter(QUALIFIED_EXECUTORS))
+                contract = QUALIFIED_EXECUTORS[key]
+                value.update(
+                    run_attempt=attempt,
+                    conclusion=None if current else conclusion,
+                    status="in_progress"
+                    if current or self.previous_active
+                    else "completed",
+                    head_sha=self.run_heads.get((run_id, attempt), self.requested_head),
+                    referenced_workflows=[
+                        {
+                            "path": contract["workflow_path"],
+                            "ref": contract["workflow_ref"],
+                            "sha": "0" * 40
+                            if self.completion_fault == "unknown-source"
+                            else key,
+                        }
+                    ],
+                )
+            return json_response(value)
+        if path.endswith("/pulls/7") and hasattr(self, "live_base"):
+            value = json.loads(response.read(524288))
+            value["base"]["sha"] = self.live_base
+            return json_response(value)
+        if (
+            request.method == "POST"
+            and path.endswith("/issues/7/comments")
+            and payload.get("body", "").startswith(
+                "ReviewSensei immutable evidence part v1"
+            )
+        ):
+            if self.completion_fault == "base-after-archive":
+                self.live_base = "9" * 40
+            if self.completion_fault == "root-after-archive":
+                self.rewrite_record(generation_delta=1)
+        if request.method == "POST" and path.endswith("/pulls/7/reviews"):
+            review = self.reviews[-1]
+            review["node_id"] = "REVIEW_" + str(review["id"])
+            review["submitted_at"] = f"2026-10-25T22:00:{review['id'] - 100:02d}Z"
+            for comment in self.inline:
+                if comment["pull_request_review_id"] == review["id"]:
+                    comment["created_at"] = comment["updated_at"] = review[
+                        "submitted_at"
+                    ]
+            for thread in self.threads:
+                root = thread["comments"]["nodes"][0]
+                comment = next(c for c in self.inline if c["id"] == root["databaseId"])
+                root["createdAt"] = comment["created_at"]
+                root["updatedAt"] = comment["updated_at"]
+            return json_response(copy.deepcopy(review))
+        if request.method == "POST" and path.endswith("/check-runs"):
+            self.check_runs[-1]["app"]["id"] = 77
+            return json_response(copy.deepcopy(self.check_runs[-1]), 201)
+        return response
+
+
 class ReviewRunEntryTests(unittest.TestCase):
     def test_hard_killed_pending_result_has_one_proven_successor_and_no_reinference(
         self,
@@ -972,6 +1369,788 @@ os._exit(92)
 
 
 class ConsecutiveReviewRunTests(unittest.TestCase):
+    def test_historical_fixture_keeps_canonical_diff_bytes_with_crlf_defaults(self):
+        from unittest.mock import patch
+
+        write_text = Path.write_text
+
+        def platform_write(path, data, encoding=None, errors=None, newline=None):
+            if path.name == "review.patch" and newline is None:
+                newline = "\r\n"
+            return write_text(
+                path, data, encoding=encoding, errors=errors, newline=newline
+            )
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(Path, "write_text", platform_write),
+        ):
+            f = self.historical_case(directory)
+            self.assertNotIn(b"\r", (f.root / "review.patch").read_bytes())
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+
+    def test_historical_receipts_are_evidence_and_cannot_restore_enrollment_authority(
+        self,
+    ):
+        import copy
+        import sys
+
+        from review_sensei_github.action_completion import CompletionState
+        from review_sensei_github.api_run_history import read_previous_run
+        from review_sensei_github.historical_completion import (
+            HistoricalPublicationCompletion,
+        )
+
+        from review_sensei.errors import ReviewInputError
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self.historical_case(directory)
+            issued = []
+
+            def observe(frame, event, value):
+                if (
+                    event != "return"
+                    or frame.f_code.co_name != "authenticate_historical_publication"
+                ):
+                    return
+                self.assertIsInstance(value, HistoricalPublicationCompletion)
+                issued.append(value)
+                selection = value.selection
+                args = dict(
+                    caller=selection.caller,
+                    ledger=selection.ledger,
+                    identity=selection.identity,
+                    configuration=selection.configuration,
+                    owner=selection.owner,
+                    previous=selection.record,
+                )
+                value.require(**args)
+                for forged in (
+                    replace(value),
+                    HistoricalPublicationCompletion(
+                        selection, value.receipt_bytes, CompletionState.CONFIRMED
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "restored or foreign"
+                    ):
+                        forged.require(**args)
+                for change in (
+                    {"caller": object()},
+                    {
+                        "configuration": replace(
+                            selection.configuration, digest="0" * 64
+                        )
+                    },
+                    {
+                        "previous": selection.record.evolve(
+                            generation=selection.record.generation + 1
+                        )
+                    },
+                ):
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "stale, restored or foreign"
+                    ):
+                        value.require(**{**args, **change})
+
+            sys.setprofile(observe)
+            try:
+                self.assertEqual(f.invoke(human=True), 0, f.error)
+            finally:
+                sys.setprofile(None)
+            self.assertEqual(len(issued), 1)
+            proof = issued[0]
+            selection = proof.selection
+            with self.assertRaisesRegex(
+                ReviewInputError, "lacks current startup authority"
+            ):
+                proof.require(
+                    caller=f.accounted,
+                    ledger=selection.ledger,
+                    identity=IDENTITY,
+                    configuration=selection.configuration,
+                    owner=selection.owner,
+                    previous=selection.record,
+                )
+            for key, value in (
+                ("current_head_sha", "0" * 40),
+                ("historical_accounting_sha256", "0" * 64),
+                ("transaction_id", "0" * 64),
+            ):
+                reference = copy.deepcopy(f.accounted.accounting.previous_record)
+                reference["completion"][key] = value
+                with self.subTest(key=key), self.assertRaises(ReviewInputError):
+                    read_previous_run(f.selected.ledger, IDENTITY, reference)
+
+    def test_historical_transition_process_death_never_infers_nonentry_from_absence(
+        self,
+    ):
+        import json
+        import os
+        import subprocess
+        import sys
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.api_work import ApiRunAccounting
+
+        script = r"""
+import json, os, sys
+from pathlib import Path
+from test_review_run import ConsecutiveReviewRunTests
+f = ConsecutiveReviewRunTests.historical_case(sys.argv[1])
+stage, packet = sys.argv[2], Path(sys.argv[3])
+def killed():
+    packet.write_text(json.dumps({
+        "comment": f.comment, "extra": f.extra_comments, "reviews": f.reviews,
+        "inline": f.inline, "checks": f.check_runs, "threads": f.threads,
+        "policy": f.policy, "provider_calls": f.provider_calls, "run_id": f.run_id,
+        "accounting": f.accounted.accounting.to_document(),
+        "run_results": [[r, a, v] for (r, a), v in f.run_results.items()],
+        "run_heads": [[r, a, v] for (r, a), v in f.run_heads.items()],
+        "activation_body": getattr(f, "activation_body", None),
+        "delayed_body": getattr(f, "delayed_body", None),
+    }))
+    os._exit(91)
+def observed(frame, event, value):
+    if event != "return":
+        return
+    name, filename = frame.f_code.co_name, frame.f_code.co_filename
+    if name == "_accept_activation" and f.accounted._state is not None:
+        f.activation_body = f.comment["body"]
+        if stage == "enrolled":
+            killed()
+    if stage == "reservation" and name == "prepare_session_round" and value.reservation_id is not None:
+        killed()
+    if stage == "attached" and name == "prepare_review_transaction" and value.transaction is not None:
+        killed()
+    if stage == "provider-entry" and name == "begin_provider_phase" and filename.endswith("api_run_host.py"):
+        killed()
+    if stage == "provider-return" and name == "complete" and f.provider_calls == 3:
+        killed()
+original_external = f.external
+def external(request, timeout):
+    if stage == "reservation-request" and request.method == "PATCH":
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_review_run import IDENTITY
+        payload = json.loads(request.data)
+        pending = parse_session_comment(payload.get("body", ""), identity=IDENTITY)
+        if pending is not None and pending.reservation_id is not None:
+            f.delayed_body = payload["body"]
+            killed()
+    return original_external(request, timeout)
+f.external = external
+sys.setprofile(observed)
+f.invoke(human=True)
+os._exit(92)
+"""
+        for stage in (
+            "enrolled",
+            "reservation-request",
+            "reservation",
+            "attached",
+            "provider-entry",
+            "provider-return",
+        ):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                child = root / "child"
+                child.mkdir()
+                packet = root / "killed.json"
+                environment = fixture_process_environment()
+                environment["PYTHONPATH"] = os.pathsep.join(
+                    filter(
+                        None,
+                        (
+                            str(Path(__file__).resolve().parent),
+                            os.environ.get("PYTHONPATH"),
+                        ),
+                    )
+                )
+                process = subprocess.run(
+                    [sys.executable, "-c", script, str(child), stage, str(packet)],
+                    capture_output=True,
+                    timeout=30,
+                    env=environment,
+                )
+                self.assertEqual(process.returncode, 91, process.stderr.decode())
+                saved = json.loads(packet.read_text())
+                if stage == "reservation-request":
+                    self.assertEqual(saved["comment"]["body"], saved["activation_body"])
+                    self.assertIsNotNone(saved["delayed_body"])
+                (root / "parent").mkdir()
+                f = _CompletionFixture(str(root / "parent"))
+                f.root = child
+                f.policy = f.policy_ref = saved["policy"]
+                f.comment = saved["comment"]
+                f.extra_comments = {int(k): v for k, v in saved["extra"].items()}
+                f.reviews, f.inline, f.check_runs, f.threads = (
+                    saved[k] for k in ("reviews", "inline", "checks", "threads")
+                )
+                f.provider_calls, f.run_id = saved["provider_calls"], saved["run_id"]
+                f.run_results = {(r, a): v for r, a, v in saved["run_results"]}
+                f.run_heads = {(r, a): v for r, a, v in saved["run_heads"]}
+                f.run_results[f.run_id, 1] = 91
+                f.live_base = f.requested_base = "f" * 40
+                f.live_head = f.requested_head = "e" * 40
+                f.attempt, f.mode = 2, "confirmed"
+                before = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                prior = ApiRunAccounting.from_document(before.api_run_accounting)
+                calls = f.provider_calls
+                self.assertEqual(f.invoke(human=True), 1, f.error)
+                self.assertEqual(f.provider_calls, calls)
+                self.assertEqual(f.comment["body"], saved["comment"]["body"])
+                self.assertEqual(
+                    ApiRunAccounting.from_document(
+                        parse_session_comment(
+                            f.comment["body"], identity=IDENTITY
+                        ).api_run_accounting
+                    ),
+                    prior,
+                )
+                self.assertIn(
+                    "cannot be established"
+                    if stage == "reservation"
+                    else "no proven provider non-entry",
+                    f.error,
+                )
+                if stage == "reservation-request":
+                    # The external server may accept that old PATCH after the
+                    # refusal. No successor work or ownership has been issued.
+                    f.comment["body"] = saved["delayed_body"]
+                    late = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                    self.assertIsNotNone(late.reservation_id)
+                    self.assertEqual(
+                        ApiRunAccounting.from_document(
+                            late.api_run_accounting
+                        ).owner.run_attempt,
+                        1,
+                    )
+                    self.assertEqual(f.provider_calls, calls)
+
+    @staticmethod
+    def historical_case(
+        directory, fixture_type=_CompletionFixture, *, partial_predecessor=False
+    ):
+        import json
+
+        from review_sensei_github.publication import approval_eligibility_from_body
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        f = fixture_type(directory, mode="refused")
+        patch = f.root / "review.patch"
+        original = patch.read_text()
+        patch.write_text(
+            original
+            + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\nindex 0000000..1111111\nBinary files /dev/null and b/image.bin differ\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        if f.invoke(human=True) != 0:
+            raise AssertionError(f.error)
+        if not partial_predecessor:
+            patch.write_text(original, encoding="utf-8", newline="\n")
+        f.next_run()
+        if f.invoke(human=True) != 1:
+            raise AssertionError("original soft cleanup refusal was not exercised")
+        outcome = json.loads((f.root / "publication.json").read_text())
+        if (
+            outcome["status"] != "published_terminal_pending"
+            or outcome["publication_status"] != "published"
+            or outcome["accounting_terminal"] is not False
+            or outcome["terminal_reason"] != "thread_cleanup_unconfirmed"
+        ):
+            raise AssertionError("current CLI did not retain unfinished cleanup")
+        patch.write_text(original, encoding="utf-8", newline="\n")
+        if f.threads[0]["isResolved"]:
+            raise AssertionError("original cleanup refusal did not retain target")
+        predecessor = parse_session_comment(f.comment["body"], identity=IDENTITY)
+        eligibility = approval_eligibility_from_body(f.reviews[-1]["body"])
+        if (
+            predecessor.transaction.phase != "publication_succeeded"
+            or predecessor.api_run_accounting["terminal_transaction"] is not None
+            or eligibility is None
+            or eligibility.native_union is not None
+            or eligibility.quarantine_assessments is not None
+            or eligibility.historical_assessments is not None
+        ):
+            raise AssertionError("historical fixture exceeds the qualified old format")
+        # The historical protocol recognizes v0.8.14's successful soft-cleanup
+        # exit. Current code correctly reports terminal-pending above. Model
+        # the old executor only in external Actions metadata; preserve the
+        # actual current exit, accounting root and native publication bytes.
+        f.qualified_old_soft_cleanup_successes.add((f.run_id, f.attempt))
+        # Synthetic external state after a separately authorized confirmation;
+        # the historical verifier itself never performs this mutation.
+        from review_sensei_github.publication import finding_publication_scope
+
+        for thread in f.threads:
+            scope = finding_publication_scope(thread["comments"]["nodes"][0]["body"])
+            if scope is not None and scope[2] != f.requested_head:
+                thread["isResolved"] = True
+        f.next_run()
+        f.mode = "confirmed"
+        f.live_head = f.requested_head = "e" * 40
+        f.live_base = f.requested_base = "f" * 40
+        return f
+
+    def test_historical_completion_enrolls_fresh_base_and_preserves_exact_predecessor(
+        self,
+    ):
+        import copy
+        import os
+        import subprocess
+
+        from review_sensei_github.api_run_history import read_previous_run
+        from review_sensei_github.publication import parse_finding_index
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        for fault in (None, "archive-stored", "transition-stored", "new-policy-1024"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = self.historical_case(directory)
+                previous = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                old_document = copy.deepcopy(previous.to_dict())
+                old_provider = f.provider_calls
+                if fault == "new-policy-1024":
+                    f.config_bytes = f.config_bytes.replace(
+                        b"api_request_limit: 512", b"api_request_limit: 1024"
+                    )
+                    (f.root / ".reviewsensei.yml").write_bytes(f.config_bytes)
+                    subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(f.root),
+                            "-c",
+                            "user.name=Fixture",
+                            "-c",
+                            "user.email=fixture@example.invalid",
+                            "-c",
+                            "user.useConfigOnly=true",
+                            "commit",
+                            "-am",
+                            "new current policy",
+                        ],
+                        check=True,
+                        capture_output=True,
+                        env=dict(
+                            fixture_process_environment(),
+                            GIT_CONFIG_GLOBAL=os.devnull,
+                            GIT_CONFIG_NOSYSTEM="1",
+                        ),
+                    )
+                    f.policy_ref = f.policy = subprocess.check_output(
+                        ["git", "-C", str(f.root), "rev-parse", "HEAD"], text=True
+                    ).strip()
+                else:
+                    f.rollover_fault = fault
+                seen = []
+
+                def before_provider():
+                    self.assertEqual(f.provider_calls, old_provider)
+                    state = f.accounted.accounting
+                    self.assertEqual(state.identity.run_id, f.run_id)
+                    restored = read_previous_run(
+                        f.selected.ledger, IDENTITY, state.previous_record
+                    )
+                    self.assertEqual(restored.to_dict(), old_document)
+                    self.assertIsNone(
+                        restored.api_run_accounting["terminal_transaction"]
+                    )
+                    receipt = state.previous_record["completion"]
+                    self.assertEqual(
+                        receipt["historical_base_sha"], previous.transaction.base_sha
+                    )
+                    self.assertEqual(
+                        receipt["historical_head_sha"], previous.transaction.head_sha
+                    )
+                    self.assertEqual(receipt["current_base_sha"], f.requested_base)
+                    self.assertEqual(receipt["current_head_sha"], f.requested_head)
+                    seen.append(True)
+
+                f.before_entry = before_provider
+                self.assertEqual(f.invoke(human=True), 0, f.error)
+                self.assertEqual(seen, [True])
+                self.assertEqual(f.provider_calls, old_provider + 1)
+                self.assertLessEqual(f.accounted.startup_dispatches, 77)
+                self.assertEqual(
+                    f.accounted.accounting.configuration.limit,
+                    1024 if fault == "new-policy-1024" else 512,
+                )
+                current = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertEqual(
+                    (current.transaction.base_sha, current.transaction.head_sha),
+                    (f.requested_base, f.requested_head),
+                )
+                self.assertNotEqual(
+                    current.transaction.transaction_id,
+                    previous.transaction.transaction_id,
+                )
+                self.assertIsNotNone(current.api_run_accounting["terminal_transaction"])
+                self.assertEqual(f.check_runs[-1]["conclusion"], "action_required")
+                index = parse_finding_index(
+                    f.reviews[-1]["body"],
+                    repository_id=123,
+                    pull_request=7,
+                    head_sha=f.requested_head,
+                )
+                self.assertTrue(any(entry.needs_human for entry in index.entries))
+                self.assertEqual(previous.to_dict(), old_document)
+                self.assertEqual(
+                    sum(
+                        method == "POST"
+                        and path.endswith("/issues/7/comments")
+                        and observation["phase"] == "startup"
+                        for observation, (_, method, path) in zip(
+                            f.accounted.observations, f.trace
+                        )
+                    ),
+                    1,
+                )
+                if fault is None:
+                    # Ordinary following epochs keep the v2 evidence chain;
+                    # they do not reinterpret its receipt as new authority.
+                    f.before_entry = None
+                    f.next_run()
+                    f.live_head = f.requested_head = "1" * 40
+                    self.assertEqual(f.invoke(human=True), 0, f.error)
+                    archived_current = read_previous_run(
+                        f.selected.ledger,
+                        IDENTITY,
+                        f.accounted.accounting.previous_record,
+                    )
+                    older = read_previous_run(
+                        f.selected.ledger,
+                        IDENTITY,
+                        archived_current.api_run_accounting["previous_record"],
+                    )
+                    self.assertEqual(older.to_dict(), old_document)
+
+    def test_historical_transition_refuses_missing_effects_and_unfunded_tail_before_provider(
+        self,
+    ):
+        import copy
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        for fault, diagnostic in (
+            ("unresolved", "superseded cleanup target remains unresolved"),
+            ("unchanged-revision", "outside historical completion scope"),
+            ("base-only", "outside historical completion scope"),
+            ("missing-index", "historical finding inventory is unverifiable"),
+            ("edited", "edited after publication"),
+            ("missing-root", "original cleanup target is missing"),
+            ("check", "required check does not confirm"),
+            ("closing-change", "cleanup inventory changed"),
+            ("overlap", "overlapping"),
+            ("previous-active", "successful review exit"),
+            ("failed-owner", "successful review exit"),
+            ("cancelled-owner", "successful review exit"),
+            ("unknown-source", "source is unrecognized"),
+            ("masked-step-failure", "successful exit"),
+            ("capacity", "cannot fund the complete operation"),
+            ("archive-absent", "retained run create remains uncertain"),
+            ("transition-absent", "unconfirmed"),
+            ("foreign-archive", "owner"),
+            ("base-after-archive", "fresh current PR authority changed"),
+            ("root-after-archive", "generation conflict"),
+        ):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = self.historical_case(directory)
+                before = copy.deepcopy(f.comment)
+                provider = f.provider_calls
+                f.completion_fault = fault
+                if fault == "unresolved":
+                    f.threads[0]["isResolved"] = False
+                elif fault == "base-only":
+                    original = parse_session_comment(
+                        before["body"], identity=IDENTITY
+                    ).transaction
+                    f.live_head = f.requested_head = original.head_sha
+                elif fault == "unchanged-revision":
+                    original = parse_session_comment(
+                        before["body"], identity=IDENTITY
+                    ).transaction
+                    f.live_base = f.requested_base = original.base_sha
+                    f.live_head = f.requested_head = original.head_sha
+                elif fault == "missing-index":
+                    from review_sensei_github.publication import (
+                        FINDING_INDEX_MARKER_PREFIX,
+                    )
+
+                    body = f.reviews[0]["body"]
+                    start = body.index(FINDING_INDEX_MARKER_PREFIX)
+                    end = body.index("-->", start) + 3
+                    f.reviews[0]["body"] = body[:start] + body[end:]
+                elif fault == "overlap":
+                    f.overlap = True
+                elif fault == "previous-active":
+                    f.previous_active = True
+                elif fault == "capacity":
+                    for i in range(200):
+                        f.extra_comments[9_000_000 + i] = {
+                            "id": 9_000_000 + i,
+                            "body": "unrelated history",
+                            "user": {"id": 888, "login": "alice", "type": "User"},
+                            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+                        }
+                elif fault in {"archive-absent", "transition-absent"}:
+                    f.rollover_fault = fault
+                elif fault == "foreign-archive":
+                    f.archive_bad = "owner"
+                self.assertEqual(f.invoke(human=True), 1, f.error)
+                self.assertIn(diagnostic, f.error)
+                self.assertEqual(f.provider_calls, provider)
+                self.assertIsNone(f.accounted._state)
+                if fault != "root-after-archive":
+                    self.assertEqual(f.comment, before)
+                if fault not in {
+                    "archive-absent",
+                    "transition-absent",
+                    "foreign-archive",
+                    "base-after-archive",
+                    "root-after-archive",
+                }:
+                    self.assertFalse(
+                        any(
+                            method in {"POST", "PATCH"} and "/issues" in path
+                            for _, method, path in f.trace
+                        )
+                    )
+                root = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertIsNone(root.api_run_accounting["terminal_transaction"])
+
+    def test_historical_hold_root_capacity_refuses_before_any_archive_write(self):
+        import hashlib
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.errors import ReviewInputError
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self.historical_case(directory)
+            previous = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            largest = None
+            for count in range(1, 100):
+                rows = [
+                    {
+                        "fingerprint": hashlib.sha256(str(i).encode()).hexdigest(),
+                        "action": "defer",
+                        "reason": "x" * 480,
+                        "actor": "alice",
+                        "head_sha": "a" * 40,
+                    }
+                    for i in range(count)
+                ]
+                try:
+                    value = previous.evolve(
+                        generation=previous.generation + 1, dispositions=rows
+                    )
+                except ReviewInputError:
+                    break
+                largest = value
+            self.assertIsNotNone(largest)
+            import copy
+
+            history = copy.deepcopy(previous.convergence_history)
+            from dataclasses import replace
+
+            from review_sensei.baseline import (
+                baseline_from_history_document,
+                baseline_history_document,
+            )
+
+            baseline = baseline_from_history_document(history["baseline"])
+            for count in range(1, 256):
+                findings = tuple(
+                    replace(
+                        baseline.findings[0],
+                        fingerprint=hashlib.sha256(
+                            ("fp" + str(i)).encode()
+                        ).hexdigest(),
+                        resolution_criterion=hashlib.sha256(
+                            ("criterion" + str(i)).encode()
+                        ).hexdigest(),
+                        concern=hashlib.sha256(
+                            ("concern" + str(i)).encode()
+                        ).hexdigest(),
+                    )
+                    for i in range(count)
+                )
+                try:
+                    document = baseline_history_document(
+                        replace(baseline, findings=findings)
+                    )
+                except ReviewInputError:
+                    break
+                history["baseline"] = document
+            for count in range(1, 65):
+                history["progress"] = [
+                    {
+                        "event": "completed",
+                        "generation": 0,
+                        "blocker_set_sha256": hashlib.sha256(
+                            str(i).encode()
+                        ).hexdigest(),
+                        "blocker_count": 1,
+                        "transaction_id": hashlib.sha256(
+                            ("tx" + str(i)).encode()
+                        ).hexdigest(),
+                    }
+                    for i in range(count)
+                ]
+                try:
+                    value = largest.evolve(convergence_history=history)
+                except ReviewInputError:
+                    break
+                fullest = value
+            largest = fullest
+            # Obsolete grants are retained inert history, never authority.
+            grants = [
+                {
+                    "command_id": str(i) + "c" * 120,
+                    "actor": "a" * 256,
+                    "head_sha": "a" * 40,
+                    "policy_digest": "b" * 64,
+                    "issued_at": "2026-01-01T00:00:00Z",
+                    "expires_at": "2026-01-02T00:00:00Z",
+                    "consumed_reservation_id": None,
+                    "consumed_generation": None,
+                }
+                for i in range(4)
+            ]
+            try:
+                largest = largest.evolve(continuation_grants=grants)
+            except ReviewInputError:
+                pass
+            f.rewrite_record(mutate=lambda _record: largest)
+            before = f.comment["body"]
+            calls = f.provider_calls
+            self.assertEqual(f.invoke(human=True), 1, f.error)
+            self.assertIn("size limit", f.error)
+            self.assertEqual(f.comment["body"], before)
+            self.assertEqual(f.provider_calls, calls)
+            self.assertIsNone(f.accounted._state)
+            self.assertFalse(
+                any(
+                    method in {"POST", "PATCH"} and "/issues" in path
+                    for _, method, path in f.trace
+                )
+            )
+
+    def test_historical_transition_refuses_uncertain_original_terminal_write(self):
+        import copy
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = _CompletionFixture(directory, mode="confirmed")
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            f.next_run()
+            f.terminal_write_fault = True
+            self.assertEqual(f.invoke(human=True), 1, f.error)
+            before = copy.deepcopy(f.comment)
+            previous = parse_session_comment(before["body"], identity=IDENTITY)
+            self.assertEqual(previous.transaction.phase, "publication_succeeded")
+            self.assertIsNone(previous.api_run_accounting["terminal_transaction"])
+            provider = f.provider_calls
+            f.next_run()
+            f.terminal_write_fault = False
+            f.live_head = f.requested_head = "e" * 40
+            f.live_base = f.requested_base = "f" * 40
+            self.assertEqual(f.invoke(human=True), 1, f.error)
+            self.assertIn("successful review exit", f.error)
+            self.assertEqual(f.provider_calls, provider)
+            self.assertEqual(f.comment, before)
+            self.assertIsNone(f.accounted._state)
+
+    def test_completion_authentication_cannot_mutate_host_effects(self):
+        from review_sensei_github.http import GitHubHttp
+        from review_sensei_github.review_completion_recovery import _ReadOnlyHttp
+
+        from review_sensei.errors import ReviewInputError
+
+        def never_enter(request, timeout):
+            self.fail("a prohibited completion mutation reached external transport")
+
+        http = _ReadOnlyHttp(GitHubHttp(opener=never_enter))
+        for method, path, body in (
+            ("PATCH", "/repos/owner/repo/check-runs/1", {}),
+            ("POST", "/repos/owner/repo/pulls/7/reviews", {}),
+            (
+                "POST",
+                "/graphql",
+                {
+                    "operationName": "ReviewCompletionThreads",
+                    "query": "mutation { resolveReviewThread }",
+                },
+            ),
+            (
+                "POST",
+                "/graphql",
+                {"operationName": "ResolveReviewThread", "query": "query { node }"},
+            ),
+        ):
+            with (
+                self.subTest(method=method, path=path),
+                self.assertRaisesRegex(ReviewInputError, "read-only"),
+            ):
+                http.request(method, path, token="synthetic", body=body)
+
+    def test_successor_cannot_infer_tail_completion_from_published_transaction(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.api_work import ApiRunAccounting
+
+        for mode in ("confirmed", "refused", "lost-ack", "lost-unstored"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                f = _CleanupTailFixture(directory, mode)
+                patch = f.root / "review.patch"
+                patch.write_text(
+                    patch.read_text()
+                    + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\n"
+                    "index 0000000..1111111\n"
+                    "Binary files /dev/null and b/image.bin differ\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                self.assertEqual(f.invoke(human=True), 0, f.error)
+                initial = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertIsNotNone(initial.api_run_accounting["terminal_transaction"])
+                f.next_run()
+                self.assertEqual(
+                    f.invoke(human=True), 0 if mode == "confirmed" else 1, f.error
+                )
+                before = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertEqual(before.transaction.phase, "publication_succeeded")
+                if mode == "confirmed":
+                    self.assertIsNotNone(
+                        before.api_run_accounting["terminal_transaction"]
+                    )
+                    continue
+                self.assertIsNone(before.api_run_accounting["terminal_transaction"])
+                provider_calls, reviews = f.provider_calls, len(f.reviews)
+                mutations, queries = list(f.mutations), list(f.graphql_operations)
+                prior_accounting = ApiRunAccounting.from_document(
+                    before.api_run_accounting
+                )
+                f.mode = "confirmed"
+                f.attempt = 2
+                self.assertEqual(f.invoke(human=True), 1, f.error)
+                self.assertIn("successor publication tail is unverified", f.error)
+                after = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertIsNone(after.api_run_accounting["terminal_transaction"])
+                self.assertEqual(after.transaction, before.transaction)
+                self.assertEqual(after.dispositions, before.dispositions)
+                self.assertEqual(f.provider_calls, provider_calls)
+                self.assertEqual(len(f.reviews), reviews)
+                self.assertEqual(f.mutations, mutations)
+                self.assertEqual(f.graphql_operations, queries)
+                current = ApiRunAccounting.from_document(after.api_run_accounting)
+                self.assertEqual(current.identity, prior_accounting.identity)
+                for block in prior_accounting.blocks:
+                    self.assertIn(block, current.blocks)
+
     def test_second_ordinary_run_preserves_terminal_previous_root(self):
         import copy
 
@@ -1243,7 +2422,12 @@ os._exit(92)
             self.assertIsNone(old.api_run_accounting["terminal_transaction"])
             f.next_run()
             self.assertEqual(f.invoke(human=True), 1)
-            self.assertIn("previous caller run is not terminal", f.error)
+            self.assertIn(
+                "historical executor did not prove successful review exit", f.error
+            )
+            self.assertEqual(
+                parse_session_comment(f.comment["body"], identity=IDENTITY), old
+            )
             self.assertEqual(f.provider_calls, 1)
 
     def test_close_refusal_reports_terminal_pending_for_published_and_skipped(self):

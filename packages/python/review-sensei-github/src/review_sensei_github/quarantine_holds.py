@@ -62,14 +62,7 @@ class QuarantineHoldReader:
 
     def attach(self, eligibility, *, head_sha):
         authenticated = self.read(head_sha=head_sha)
-        old = eligibility.quarantine_assessments
-        fresh = (
-            bool(eligibility.human_review.pending)
-            if eligibility.human_review is not None
-            else old["fresh_human_pending"]
-            if old is not None
-            else eligibility.facts.has_human_adjudication_findings
-        )
+        fresh = eligibility.fresh_human_pending
         view = assessment_view(
             authenticated.archive["assessment_origins"],
             authenticated.inventories,
@@ -82,7 +75,11 @@ class QuarantineHoldReader:
             quarantine_assessments=view,
             facts=replace(
                 eligibility.facts,
-                has_human_adjudication_findings=(fresh or bool(view["pending"])),
+                has_human_adjudication_findings=(
+                    fresh
+                    or bool(view["pending"])
+                    or bool((eligibility.historical_assessments or {}).get("pending"))
+                ),
             ),
         )
 

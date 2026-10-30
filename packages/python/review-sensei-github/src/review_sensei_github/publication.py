@@ -953,17 +953,26 @@ def _disposition_frame_reserve(
             has_human_adjudication_findings=False,
         ),
     )
-    if eligibility.quarantine_assessments is not None:
-        # This sizing projection resolves fresh findings only. Independent
-        # historical obligations remain in the envelope and combined facts.
-        view = dict(eligibility.quarantine_assessments, fresh_human_pending=False)
-        future = replace(
-            future,
-            quarantine_assessments=view,
-            facts=replace(
-                future.facts, has_human_adjudication_findings=bool(view["pending"])
-            ),
-        )
+    future = replace(
+        future,
+        historical_assessments=(
+            dict(eligibility.historical_assessments, fresh_human_pending=False)
+            if eligibility.historical_assessments is not None
+            else None
+        ),
+        quarantine_assessments=(
+            dict(eligibility.quarantine_assessments, fresh_human_pending=False)
+            if eligibility.quarantine_assessments is not None
+            else None
+        ),
+    )
+    future = replace(
+        future,
+        facts=replace(
+            future.facts,
+            has_human_adjudication_findings=future.carried_assessment_pending,
+        ),
+    )
     identifiers = assign_finding_identifiers(entry.instance for entry in entries)
     # The command accepts at most ten IDs. Use the longest assigned IDs and
     # longest valid actor, without inventing a persisted provenance record.
@@ -1260,6 +1269,11 @@ def approval_eligibility_marker(eligibility: ReviewApprovalEligibility) -> str:
     )
     payload = base64.urlsafe_b64encode(canonical.encode("utf-8")).decode("ascii")
     marker = f"{APPROVAL_ELIGIBILITY_MARKER_PREFIX} {payload} -->"
+    from .historical_assessments import render_hold_notice
+
+    notice = render_hold_notice(eligibility)
+    if notice:
+        marker += "\n\n" + notice
     try:
         validate_bounded_text(
             marker,
@@ -1871,6 +1885,7 @@ class ReviewApprovalFinalizer:
         self.prior_publication_reader_factory: Callable[[object], Any] | None = None
         self.native_union_reader_factory: Callable[[dict[str, Any]], Any] | None = None
         self.quarantine_reader_factory: Callable[..., Any] | None = None
+        self.historical_assessment_reader_factory: Callable[..., Any] | None = None
         # An explicitly supplied metadata credential is independent of the
         # capability used for review/check mutations. Never persist this value.
         self.human_inventory_read_token = human_inventory_read_token
@@ -1921,6 +1936,43 @@ class ReviewApprovalFinalizer:
                 )
             return eligibility
         return reader.attach(eligibility, head_sha=head_sha)
+
+    def historical_reader(self, *, token, repository, pull_request, head_sha):
+        factory = self.historical_assessment_reader_factory
+        if factory is None:
+            return None
+        from .historical_assessments import HistoricalAssessmentReader
+
+        reader = factory(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+        )
+        if type(reader) is not HistoricalAssessmentReader:
+            raise ReviewInputError("historical assessment reader is unsupported")
+        return reader
+
+    def attach_historical(
+        self, eligibility, *, token, repository, pull_request, head_sha
+    ):
+        reader = self.historical_reader(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+        )
+        if reader is None:
+            if eligibility.historical_assessments is not None:
+                raise ReviewInputError(
+                    "historical assessment source reader is unavailable"
+                )
+            return eligibility
+        return reader.attach(eligibility, head_sha=head_sha)
+
+    def attach_carried(self, eligibility, **context):
+        eligibility = self.attach_historical(eligibility, **context)
+        return self.attach_quarantine(eligibility, **context)
 
     @contextmanager
     def _read_operation(self) -> Iterator[None]:
@@ -2088,6 +2140,24 @@ class ReviewApprovalFinalizer:
                 return PublicationResult(
                     status="approval_withheld", diagnostic="approval_withheld"
                 )
+            historical_reader = self.historical_reader(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )
+            if (
+                eligibility.historical_assessments is not None
+                and historical_reader is None
+            ):
+                return known(
+                    PublicationResult(
+                        status="approval_withheld",
+                        diagnostic="historical_assessment_unverified",
+                    )
+                )
+            if historical_reader is not None:
+                eligibility = historical_reader.require(eligibility, head_sha=head_sha)
             quarantine_reader = self.quarantine_reader(
                 token=token,
                 repository=repository,
@@ -2692,7 +2762,7 @@ class ReviewApprovalFinalizer:
             human = replace(human, resolved=tuple(sorted(resolved)))
             has_human = bool(human.pending)
         else:
-            has_human = eligibility.facts.has_human_adjudication_findings
+            has_human = eligibility.fresh_human_pending
         from review_sensei.disposition import disposition_honors_coverage_uncertainty
 
         effective_incomplete_coverage = incomplete_coverage
@@ -2710,27 +2780,12 @@ class ReviewApprovalFinalizer:
             incomplete_coverage=effective_incomplete_coverage,
             policy_digest=policy_digest,
         )
+        adjusted = eligibility.with_fresh_human_review(human)
         adjusted = replace(
-            eligibility,
-            human_review=human,
-            facts=replace(
-                eligibility.facts,
-                has_blocking_findings=has_blocking,
-                has_human_adjudication_findings=has_human,
-            ),
+            adjusted,
+            facts=replace(adjusted.facts, has_blocking_findings=has_blocking),
         )
-        if adjusted.quarantine_assessments is not None:
-            fresh = (
-                bool(human.pending)
-                if human is not None
-                else adjusted.quarantine_assessments["fresh_human_pending"]
-            )
-            adjusted = replace(
-                adjusted,
-                quarantine_assessments=None,
-                facts=replace(adjusted.facts, has_human_adjudication_findings=fresh),
-            )
-        adjusted = self.attach_quarantine(
+        adjusted = self.attach_carried(
             adjusted,
             token=token,
             repository=repository,
@@ -2744,12 +2799,17 @@ class ReviewApprovalFinalizer:
                 status="gate_reevaluation_failed",
                 diagnostic="gate_reevaluation_failed",
             )
-        from .quarantine_holds import remove_hold_notice
+        from .historical_assessments import (
+            remove_hold_notice as remove_historical_notice,
+        )
+        from .quarantine_holds import remove_hold_notice as remove_quarantine_notice
 
         new_body = (
             body[: marker_match.start()]
             + approval_eligibility_marker(adjusted)
-            + remove_hold_notice(body[marker_match.end() :])
+            + remove_quarantine_notice(
+                remove_historical_notice(body[marker_match.end() :])
+            )
         )
         if finding_ids:
             provenance = override_provenance_marker(
@@ -3343,9 +3403,22 @@ class ReviewApprovalFinalizer:
         pull_request: int,
     ) -> list[Any]:
         try:
-            return self._review_pages(
+            from .controlled_restart import owns_target
+
+            items = self._review_pages(
                 token=token, repository=repository, pull_request=pull_request
             )
+            return [
+                item
+                for item in items
+                if isinstance(item, dict)
+                and owns_target(
+                    self.http,
+                    self.http.repository_path(
+                        repository, f"/pulls/{pull_request}/reviews/{item.get('id')}"
+                    ),
+                )
+            ]
         except GitHubHTTPTransientError as exc:
             raise GitHubPublicationTransientError(
                 "review decision reconciliation failed temporarily"
@@ -3777,7 +3850,7 @@ class ReviewApprovalFinalizer:
         with self._read_operation():
             from .checks import ReviewCheckPublisher, review_check_outcome
 
-            eligibility = self.attach_quarantine(
+            eligibility = self.attach_carried(
                 eligibility,
                 token=token,
                 repository=repository,
@@ -4802,13 +4875,13 @@ class ReviewPublisher:
             authorized_dispositions=authorized_dispositions,
         )
 
-    def _eligibility_with_quarantine(self, result, **kwargs):
+    def _eligibility_with_carried(self, result, **kwargs):
         eligibility = approval_eligibility_from_result(result, **kwargs)
-        context = getattr(self, "_quarantine_context", None)
+        context = getattr(self, "_carried_context", None)
         return (
             eligibility
             if context is None
-            else self.finalizer.attach_quarantine(eligibility, **context)
+            else self.finalizer.attach_carried(eligibility, **context)
         )
 
     def _publish_check_state(
@@ -4826,14 +4899,24 @@ class ReviewPublisher:
         not change review publication or approval eligibility.
         """
 
-        context = getattr(self, "_quarantine_context", None)
+        context = getattr(self, "_carried_context", None)
         if (
             outcome is not None
             and outcome.conclusion == "success"
             and context is not None
         ):
-            reader = self.finalizer.quarantine_reader(**context)
-            if reader is not None and reader.read(head_sha=head_sha).pending:
+            quarantine = self.finalizer.quarantine_reader(**context)
+            historical = self.finalizer.historical_reader(**context)
+            from review_sensei.historical_assessments import pending_assessments
+
+            carried_pending = (
+                quarantine is not None
+                and bool(quarantine.read(head_sha=head_sha).pending)
+            ) or (
+                historical is not None
+                and bool(pending_assessments(historical.read(head_sha=head_sha)))
+            )
+            if carried_pending:
                 outcome = CheckOutcome(
                     conclusion="action_required",
                     title="Historical assessment decision required",
@@ -4969,7 +5052,7 @@ class ReviewPublisher:
             return PublicationResult(
                 status="already_published", diagnostic="approval_withheld"
             )
-        replay_eligibility = persisted or self._eligibility_with_quarantine(
+        replay_eligibility = persisted or self._eligibility_with_carried(
             result,
             head_sha=head_sha,
             base_sha=base_sha,
@@ -5086,7 +5169,7 @@ class ReviewPublisher:
             raise ReviewInputError(
                 "publication selection is inactive; native revision protocol required"
             )
-        self._quarantine_context = dict(
+        self._carried_context = dict(
             token=token,
             repository=repository,
             pull_request=pull_request,
@@ -5356,7 +5439,7 @@ class ReviewPublisher:
             qualification = "qualified"
         # Validate the complete inventory before checks or review mutations.
         # Failure must not publish an unreassessable human-review record.
-        prospective_eligibility = self._eligibility_with_quarantine(
+        prospective_eligibility = self._eligibility_with_carried(
             result,
             head_sha=head_sha,
             base_sha=base_sha,
@@ -6043,7 +6126,7 @@ class ReviewPublisher:
             and check_capability_failure is not None
         ):
             check_diagnostic = check_capability_failure.code
-        eligibility = self._eligibility_with_quarantine(
+        eligibility = self._eligibility_with_carried(
             result,
             head_sha=head_sha,
             base_sha=base_sha,
@@ -6098,6 +6181,14 @@ class ReviewPublisher:
                 or check_diagnostic == "check_permission"
                 else ""
             )
+            from .controlled_restart import effect_guard
+
+            restart_guard = effect_guard(self.http)
+            restart_marker = (
+                "\n" + restart_guard.admission.marker
+                if restart_guard is not None
+                else ""
+            )
             summary, index_marker = fit_assembled_review(
                 assembled,
                 review_marker=marker,
@@ -6114,17 +6205,21 @@ class ReviewPublisher:
                     eligibility, assembled.index_entries
                 )
                 + (NATIVE_UNION_FRAME_RESERVE if grouped_publication else 0)
-                + (len(check_warning.encode("utf-8")) + 2 if check_warning else 0),
+                + (len(check_warning.encode("utf-8")) + 2 if check_warning else 0)
+                + len(restart_marker.encode("utf-8")),
                 preserve_explanations=human_inventory is not None,
             )
             prepared_comments = assembled.inline_comments
 
             def body_for_summary(review_summary: str) -> str:
-                return _framed_review_body(
-                    review_summary,
-                    review_marker=marker,
-                    index_marker=index_marker,
-                    eligibility_marker=eligibility_marker,
+                return (
+                    _framed_review_body(
+                        review_summary,
+                        review_marker=marker,
+                        index_marker=index_marker,
+                        eligibility_marker=eligibility_marker,
+                    )
+                    + restart_marker
                 )
 
             body = body_for_summary(summary)
@@ -7215,6 +7310,14 @@ class ReviewPublisher:
         result_states: set[str] = set()
         for review in payload:
             if not isinstance(review, dict):
+                continue
+            from .controlled_restart import owns_review
+
+            if not owns_review(
+                self.http,
+                self.http.repository_path(repository, f"/pulls/{pull_request}/reviews"),
+                review,
+            ):
                 continue
             body = review.get("body")
             commit_id = review.get("commit_id")

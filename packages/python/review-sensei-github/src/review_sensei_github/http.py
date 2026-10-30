@@ -222,6 +222,7 @@ class GitHubHttp:
         self.timeout = timeout
         self.primed_issue_comments: dict[str, list[Any]] = {}
         self._quarantine_capacity_guard: Any = None
+        self._controlled_restart_guard: Any = None
 
     def repository_path(self, repository: str, suffix: str = "") -> str:
         owner, _, name = repository.partition("/")
@@ -248,6 +249,9 @@ class GitHubHttp:
         payload = None
         if body is not None:
             payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        restart_guard = self._controlled_restart_guard
+        if restart_guard is not None:
+            restart_guard.before_request(method, path, body)
         guard = self._quarantine_capacity_guard
         if guard is not None:
             guard.before_request(method, path, body)
@@ -288,6 +292,8 @@ class GitHubHttp:
                     )
                 status = int(getattr(response, "status", 200))
                 value = self._parse_body(bytes(raw))
+                if restart_guard is not None:
+                    restart_guard.after_response(method, path, status, value)
                 if guard is not None:
                     guard.after_response(method, value)
                 return status, value

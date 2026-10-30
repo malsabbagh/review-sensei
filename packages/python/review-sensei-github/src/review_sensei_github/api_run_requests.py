@@ -275,6 +275,7 @@ class ApiRunRequestTransport:
         *,
         write_tail: int = 0,
         retained: CallerOperation | None = None,
+        prewrite_reads: int = 0,
     ) -> Iterator[CallerOperation]:
         if self._active_operation is not None:
             raise ReviewInputError("caller mutation cannot nest another operation")
@@ -297,7 +298,7 @@ class ApiRunRequestTransport:
         )
         if retained is None:
             self._issued_operations.append((operation, self._block))
-        if operation.remaining < (write_tail or 1):
+        if operation.remaining < ((write_tail + prewrite_reads) or 1):
             raise EvidenceBudgetExhausted("caller operation allocation is unfunded")
         self._active_operation = operation
         try:
@@ -312,9 +313,14 @@ class ApiRunRequestTransport:
 
     def mutation_operation(self, key: str) -> Any:
         from .api_run_plan import WRITE_CONFIRMATION_TAIL
+        from .caller_operation import prewrite_fence_requests
 
+        fences = prewrite_fence_requests(self)
         return self._operation(
-            key, WRITE_CONFIRMATION_TAIL, write_tail=WRITE_CONFIRMATION_TAIL
+            key,
+            WRITE_CONFIRMATION_TAIL + fences,
+            write_tail=WRITE_CONFIRMATION_TAIL,
+            prewrite_reads=fences,
         )
 
     @contextmanager
@@ -326,7 +332,9 @@ class ApiRunRequestTransport:
         Unknown child effects stop the root mutation and cannot be replayed.
         """
         from .api_run_plan import WRITE_CONFIRMATION_TAIL
+        from .caller_operation import prewrite_fence_requests
 
+        fences = prewrite_fence_requests(self)
         parent = self._active_operation
         identity = (self._root, "part:" + key)
         if (
@@ -338,11 +346,11 @@ class ApiRunRequestTransport:
         ):
             raise ReviewInputError("immutable part operation is unavailable")
         if min(parent.remaining, self.usable) < (
-            parent.write_tail + WRITE_CONFIRMATION_TAIL
+            parent.write_tail + fences + WRITE_CONFIRMATION_TAIL + fences
         ):
             raise EvidenceBudgetExhausted("immutable part and root tails are unfunded")
         operation = CallerOperation(
-            WRITE_CONFIRMATION_TAIL, WRITE_CONFIRMATION_TAIL, identity[1]
+            WRITE_CONFIRMATION_TAIL + fences, WRITE_CONFIRMATION_TAIL, identity[1]
         )
         self._staged_part_operation = operation
         try:
@@ -532,6 +540,7 @@ class ApiRunRequestTransport:
             raise ReviewInputError("confirmed caller reservation owner conflicts")
         self._has_quarantine_assessments = record.quarantine_lineage is not None
         self._state, self._block, self._root = state, block_id, record.record_sha256
+        self._has_historical_assessments = record.historical_assessments is not None
         if self._activation_write_request_id is not None:
             self._reconciled_mutations.add(self._activation_write_request_id)
         return state
@@ -642,9 +651,38 @@ class ApiRunRequestTransport:
         self, ledger, identity, configuration, owner, previous, cessation
     ):
         """New run only: archive exact terminal root before replacing accounting."""
+        return self._rollover_and_activate(
+            ledger, identity, configuration, owner, previous, cessation
+        )
+
+    def rollover_historical_and_activate(
+        self, ledger, identity, configuration, owner, previous, authenticate
+    ):
+        """Distinct transition: authenticate within the serialized mutation."""
+        return self._rollover_and_activate(
+            ledger,
+            identity,
+            configuration,
+            owner,
+            previous,
+            None,
+            historical_authenticator=authenticate,
+        )
+
+    def _rollover_and_activate(
+        self,
+        ledger,
+        identity,
+        configuration,
+        owner,
+        previous,
+        cessation,
+        *,
+        historical_authenticator=None,
+    ):
         from dataclasses import replace
 
-        from .api_run_history import retain_previous_run
+        from .api_run_history import RETAINED_CONFIRMATION_TAIL, retain_previous_run
         from .api_run_plan import owner_allocations
 
         self._require_ledger(ledger, identity)
@@ -667,13 +705,39 @@ class ApiRunRequestTransport:
         self._reservation_started = True
         self._producer = ledger.evidence_producer()
         ledger.evidence_budget = self.budget_view
+        historical_prepared = False
 
         def prepare(record):
+            nonlocal historical_prepared
+            if historical_authenticator is not None:
+                if historical_prepared:
+                    raise ReviewInputError(
+                        "historical rollover callback is already consumed"
+                    )
+                historical_prepared = True
             if record.record_sha256 != previous.record_sha256:
                 raise ReviewInputError("previous caller root changed")
             if ledger.evidence_producer() != self._producer:
                 raise ReviewInputError("previous caller root producer changed")
-            cessation()
+            completion = None
+            if historical_authenticator is not None:
+                from .historical_completion import HistoricalPublicationCompletion
+
+                completion = historical_authenticator(record)
+                if type(completion) is not HistoricalPublicationCompletion:
+                    raise ReviewInputError(
+                        "historical enrollment lacks typed completion"
+                    )
+                completion.require(
+                    caller=self,
+                    ledger=ledger,
+                    identity=identity,
+                    configuration=configuration,
+                    owner=owner,
+                    previous=record,
+                )
+            else:
+                cessation()
             if (
                 record.reservation_id is not None
                 or record.reserved_slot is not None
@@ -685,7 +749,11 @@ class ApiRunRequestTransport:
                         record.transaction is None
                         or record.transaction.phase
                         not in {"publication_succeeded", "publication_suppressed"}
-                        or old.terminal_transaction != record.transaction.transaction_id
+                        or (
+                            completion is None
+                            and old.terminal_transaction
+                            != record.transaction.transaction_id
+                        )
                     )
                 )
                 or (old.analysis_abort is not None and record.transaction is not None)
@@ -707,8 +775,57 @@ class ApiRunRequestTransport:
                 from .api_run_history import read_action_result
 
                 read_action_result(ledger, identity, record)
+            allocation = owner_allocations(configuration.limit, self.plan.liability)
+
+            def candidate_state(reference):
+                return (
+                    replace(
+                        initial_accounting(
+                            self.run,
+                            configuration,
+                            owner,
+                            self.plan,
+                            prior_nonstartup_liability_upper_bound=0,
+                        ),
+                        previous_record=reference,
+                    )
+                    .reserve("hosted-review", allocation.first_work)
+                    .reserve("hosted-terminal", allocation.first_terminal)
+                )
+
+            if completion is not None:
+                from .api_run_history import preview_retained_reference
+
+                preview = preview_retained_reference(
+                    ledger, record, completion=completion
+                )
+                # Capacity only: this value is never assigned to activation,
+                # granted to a writer, persisted or treated as archive evidence.
+                record.rollover_historical_api_accounting(
+                    candidate_state(preview).to_document(),
+                    assessments=completion.assessments,
+                )
             before_archive = len(self.observations)
-            reference = retain_previous_run(ledger, identity, record)
+            if completion is not None:
+                # Existing complete archive/write/readback tail plus fresh old
+                # and current Actions inventories and current PR after archive.
+                self.budget_view.preflight(RETAINED_CONFIRMATION_TAIL + 5)
+            reference = retain_previous_run(
+                ledger, identity, record, completion=completion
+            )
+            if completion is not None:
+                from .review_completion_recovery import _get
+
+                completion.selection.require_current_owner()
+                completion.selection.require_current_pull(
+                    _get(
+                        ledger.http,
+                        ledger.http.repository_path(
+                            identity.repository, f"/pulls/{identity.pull_request}"
+                        ),
+                        ledger.token,
+                    )
+                )
             # The issuer authenticated the exact immutable part readback.
             # Charge the lost response permanently; only its effect is settled.
             self._reconciled_mutations.update(
@@ -717,21 +834,14 @@ class ApiRunRequestTransport:
                 if o.get("mutation")
                 and (o["outcome"] == "unknown" or o.get("uncertain_effect"))
             )
-            allocation = owner_allocations(configuration.limit, self.plan.liability)
-            state = replace(
-                initial_accounting(
-                    self.run,
-                    configuration,
-                    owner,
-                    self.plan,
-                    prior_nonstartup_liability_upper_bound=0,
-                ),
-                previous_record=reference,
+            state = candidate_state(reference)
+            updated = (
+                record.rollover_historical_api_accounting(
+                    state.to_document(), assessments=completion.assessments
+                )
+                if completion is not None
+                else record.rollover_api_accounting(state.to_document())
             )
-            state = state.reserve("hosted-review", allocation.first_work).reserve(
-                "hosted-terminal", allocation.first_terminal
-            )
-            updated = record.rollover_api_accounting(state.to_document())
             self._activation = updated, "hosted-review"
             return updated
 
@@ -1131,6 +1241,13 @@ class ApiRunRequestTransport:
             raise ReviewInputError("caller run has unresolved terminal work")
 
         def close(record):
+            if (
+                self._terminal_reason == "already-published"
+                and self.accounting.owner.run_attempt == 2
+            ):
+                raise ReviewInputError(
+                    "successor publication tail is unverified; authenticated predecessor completion is required"
+                )
             current = record.transaction
             if (
                 current is None
@@ -1204,6 +1321,9 @@ class ApiRunRequestTransport:
         # this finite allocation. Complete enumeration remains mandatory; the
         # write and its confirmation remain protected before every read.
         key = "native:" + getattr(mutate, "__qualname__", "checkpoint")
+        from .caller_operation import prewrite_fence_requests
+
+        fences = prewrite_fence_requests(self)
         quarantine = isinstance(ledger, ApiRunSessionLedger) and getattr(
             ledger, "_quarantine_required", False
         )
@@ -1215,7 +1335,10 @@ class ApiRunRequestTransport:
                 else QUARANTINE_CHECKPOINT_REQUESTS
             )
         with self._operation(
-            key, capacity, write_tail=WRITE_CONFIRMATION_TAIL
+            key,
+            capacity + fences,
+            write_tail=WRITE_CONFIRMATION_TAIL,
+            prewrite_reads=fences,
         ) as operation:
             self._checkpoint_operation = operation
             try:

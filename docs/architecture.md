@@ -47,13 +47,7 @@ Quarantine registry: append-only, empty; workflow disabled until reviewed exact 
 
 ## Repository caller accounting and current Actions authority
 
-One caller HTTP allowance: root `api_request_limit` (default 512).
-Only v3 purpose/source/repo/PR/head/run/attempt/job/workflow authority enables work.
-Successors must prove cessation; uncertainty/abandoned capacity stay charged.
-New runs must archive terminal predecessors.
-Only exact results/proven pre-entry aborts close actions; unknown work stays pending.
-Historical readers require exact review/archive evidence, fresh authority and no writes.
-Finite operation/page limits can refuse with caller capacity unused.
+One caller HTTP allowance: root `api_request_limit` (default 512). Only v3 purpose/source/repo/PR/head/run/attempt/job/workflow authority enables work. Successors prove cessation; uncertain/abandoned capacity stays charged. Archive predecessors unchanged: terminal or confirmed historical v2 receipt. Settle holds explicitly. Only exact results/proven pre-entry aborts close actions; unknown work stays pending. Historical readers require exact review/archive evidence, fresh authority and no writes. Finite operation/page limits can refuse with caller capacity unused.
 
 `review_run` and `action_run` own one lifecycle process across startup, review,
 command/reply, publication and cleanup. `api_run_requests` charges immediately
@@ -71,50 +65,26 @@ See [ADR 0111](adr/0111-caller-api-work-allowance.md).
 
 ## Default human inventory references
 
-Schema 5 owned purpose-bound parts retain all admitted human instances, metadata and
-original indexes beyond legacy capacity. References grant no authority: require independent
-transaction, live repo/PR/base/head and numeric Bot. Inference/decisions/approval require
-fresh complete original prose/index; receipt metadata never grants decisions. Retain all
-approval/provider/blocker facts through resolution. Preflight future receipts/prose/frames.
-Only original live admission starts writes; intent precedes data. Unknown/incomplete writes
-hold without recreation. One original finite budget covers publication/reply broker,
-storage/readers/fences. Missing/conflicting evidence withholds decisions. Require reader-first
-rollout and trusted complete emission (ADR 0094).
+Schema 5 owned purpose-bound parts retain all admitted human instances, metadata and original indexes beyond legacy capacity. References grant no authority: require independent transaction, live repo/PR/base/head and numeric Bot. Inference/decisions/approval require fresh complete original prose/index; receipt metadata never grants decisions. Retain all approval/provider/blocker facts through resolution. Preflight future receipts/prose/frames. Only original live admission starts writes; intent precedes data. Unknown/incomplete writes hold without recreation. One original finite budget covers publication/reply broker, storage/readers/fences. Missing/conflicting evidence withholds decisions. Require reader-first rollout and trusted complete emission (ADR 0094).
 
 Explicit rescan source admission is documented in ADR 0112 in the [ADR index](adr/README.md).
 
 ## Publication and recovery
 
-Writers default to at most 64 findings; readers accept 250. Only trusted
-`github.publication_inventory: complete` enables larger emission after reader-first
-rollout. Preserve every identity/explanation within body/item/path/future-assessment
-bounds; refuse overflow without truncation. Exact replay verifies prose.
-Retain bound result bytes in owned PR comments before GitHub-ledger
-`publication_pending`/review/check writes despite routing/diagnostics.
-Never retain diffs/prompts/credentials or write when writes-disabled.
-Recovery binds exact trusted transaction/admission/acceptance. One budget covers
-reads/writes; unconfirmed writes need complete owned readback. Missing/conflicting
-parts refuse. Unbound gains no checkpoint authority. See ADR 0093.
+Writers default to at most 64 findings; readers accept 250. Only trusted `github.publication_inventory: complete` enables larger emission after reader-first rollout. Preserve every identity/explanation within body/item/path/future-assessment bounds; refuse overflow without truncation. Exact replay verifies prose. Retain bound result bytes in owned PR comments before GitHub-ledger `publication_pending`/review/check writes despite routing/diagnostics. Never retain diffs/prompts/credentials or write when writes-disabled. Recovery binds exact trusted transaction/admission/acceptance. One budget covers reads/writes; unconfirmed writes need complete owned readback. Missing/conflicting parts refuse. Unbound gains no checkpoint authority. See ADR 0093.
 
 The packaged v5 schema validates structure; explicit rescan uses the trusted reader
 and one original command read allowance.
 
 ## Explicit human file review (local, opt-in)
 
-[Human file review](human-file-review.md) binds an owned exact result/root, complete inventory,
-regular base/head blobs and current authorized source. Hosted composition reads canonical retained
-state after broker authorization. V1 parts keep 32 files; groups keep 32 KiB and exact union coverage.
-Media keeps caller accounting and independent Worker check ceilings.
+[Human file review](human-file-review.md) binds an owned exact result/root, complete inventory, regular base/head blobs and current authorized source. Hosted composition reads canonical retained state after broker authorization. V1 parts keep 32 files; groups keep 32 KiB and exact union coverage. Media keeps caller accounting and independent Worker check ceilings.
 First-directory subtree proofs reduce shared-prefix reads; ADR 0103 describes capacity tradeoffs.
 Broker failures use the closed diagnostic catalog.
 Native media approval follows the review endpoint's HTTP 200 contract; audit
 comments use HTTP 201. Existing owned readback and current snapshot fences
 stay in place. Protocol failures expose fixed operation/status fields without raw bodies.
-Fresh source, permission, root, request, thread, qualification and full PR facts gate approval.
-Current finding facts require an exact-result index and positive resolution proof; never infer
-resolution from false flags. Never complete AI coverage/result/baseline/cache or carry across heads.
-Unknown writes need exact owned readback; unproven entered actions refuse replay.
-See [Proposed ADR 0103](adr/0103-bounded-hosted-media-confirmation.md) and [ADR 0077](adr/0077-explicit-human-file-review.md).
+Fresh source, permission, root, request, thread, qualification and full PR facts gate approval. Current finding facts require an exact-result index and positive resolution proof; never infer resolution from false flags. Never complete AI coverage/result/baseline/cache or carry across heads. Unknown writes need exact owned readback; unproven entered actions refuse replay. See [Proposed ADR 0103](adr/0103-bounded-hosted-media-confirmation.md) and [ADR 0077](adr/0077-explicit-human-file-review.md).
 
 For the operational flows and separate analysis, persistence, reassessment and
 approval bounds, see [Review pipelines and customization](review-pipelines.md).
@@ -125,11 +95,7 @@ architecture page. Refresh ownership and validation steps live in the guide itse
 
 Qualified library capabilities bind the exact credential-free endpoint, model,
 provider and `bounded-complete-text-v1` adapter contract. Shared discovery and
-reassessment check that identity before planning and dispatch. Ollama advertises
-the contract only with explicit fixed-model `require_completion_metadata=True`:
-it requires normal completion, exact model and bounded integer token usage before
-returning text. Present incomplete, length-terminated or over-cap metadata also
-refuses in legacy mode; absent legacy metadata retains its prior disposition.
+reassessment check that identity before planning and dispatch. Ollama advertises the contract only with explicit fixed-model `require_completion_metadata=True`: it requires normal completion, exact model and bounded integer token usage before returning text. Present incomplete, length-terminated or over-cap metadata also refuses in legacy mode; absent legacy metadata retains its prior disposition.
 This change activates no qualified profile or workflow. Remote tokenizer mapping,
 producer authority and full lifecycle qualification remain separate gates. See
 [ADR 0075](adr/0075-complete-provider-response-contract.md).
@@ -137,10 +103,7 @@ producer authority and full lifecycle qualification remain separate gates. See
 ## npm launcher and standalone boundary (issue #103)
 
 The npm surface is an adapter around the existing Python engine, not a second
-implementation. `packages/npm/cli/bin/review-sensei.js` is the only package
-that exposes the `review-sensei` command; it selects one exact platform package,
-validates its fixed in-package payload, and forwards argv/process behavior.
-`review_sensei.cli:main` remains the only review engine. Native one-folder
+implementation. `packages/npm/cli/bin/review-sensei.js` is the only package that exposes the `review-sensei` command; it selects one exact platform package, validates its fixed in-package payload, and forwards argv/process behavior. `review_sensei.cli:main` remains the only review engine. Native one-folder
 bundles are produced by the pinned PyInstaller spec in
 `packaging/standalone/`, with JSON defaults and `review-sensei` distribution
 metadata collected for `--version` outside a Python checkout.
@@ -150,9 +113,7 @@ Linux arm64/x64, and Windows x64. Package assembly and independent tarball
 validation are confined to ignored build/dist staging. Release publication is
 version-serialized and platform-first through npm Trusted Publishing, with
 launcher-last after exact registry version/integrity readback; PyPI remains an
-independent lane. A
-partial or compromised release is handled version-forward, never by moving a
-tag or replacing a tarball. See [ADR 0031](adr/0031-npm-launcher-and-standalone-platform-packages.md).
+independent lane. A partial or compromised release is handled version-forward, never by moving a tag or replacing a tarball. See [ADR 0031](adr/0031-npm-launcher-and-standalone-platform-packages.md).
 
 ## Boundary map
 
@@ -216,52 +177,29 @@ ReviewBaseline -------------> IncrementalReviewPlan + late classification
                                (C4 verification scope; C2 admits)
 ```
 
-`ReviewService.run` emits versioned `RunOutcome`. Hard budgets cap provider calls,
-transport retries, prompt/output bytes and elapsed time. One structural-correction
-retry differs from transport retry. Opt-in `RecoveryArtifact` republishes
-validated results without models or trusted learnings/configuration changes. See
-[ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
+`ReviewService.run` emits versioned `RunOutcome`. Hard budgets cap provider calls, transport retries, prompt/output bytes and elapsed time. One structural-correction retry differs from transport retry. Opt-in `RecoveryArtifact` republishes validated results without models or trusted learnings/configuration changes. See [ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
 
 An operator-ledger analysis checkpoint commits the logical review round before
 GitHub publication. An identical retry whose publication is pending or failed
 reports `publication_recovery_required` without another provider call or ledger
 charge. It requires the original validated result and trusted admission contexts;
-ledger baseline/digests cannot reconstruct them. Reusable runners publish
-new or independently validated retained results. Opt-in publication-failure
-diagnostics retain reviewed diff and trusted configuration/admission contexts up to seven
-days, disabled by `artifacts: none`. Local analysis-only duplicates remain unchanged.
-PR223 amendment to
+ledger baseline/digests cannot reconstruct them. Reusable runners publish new or independently validated retained results. Opt-in publication-failure diagnostics retain reviewed diff and trusted configuration/admission contexts up to seven days, disabled by `artifacts: none`. Local analysis-only duplicates remain unchanged. PR223 amendment to
 [ADR 0052](adr/0052-logical-review-transaction-across-analysis-and-publication.md).
 
-Opt-in recovery binds original trusted policy, exact base/head diff and authenticated
-prior baseline. Configuration/evidence/policy/reservation must match committed
-transaction. Missing admission/ordinary retries refuse. Both lanes skip provider
-credentials/inference; retain one read budget, broker/accepted-result/ledger/head
-guards and writer slot.
+Opt-in recovery binds original trusted policy, exact base/head diff and authenticated prior baseline. Configuration/evidence/policy/reservation must match committed transaction. Missing admission/ordinary retries refuse. Both lanes skip provider credentials/inference; retain one read budget, broker/accepted-result/ledger/head guards and writer slot.
 See [ADR 0097](adr/0097-explicit-trusted-publication-recovery.md).
 
 The review service owns the business invariants. Provider adapters own protocol,
 authentication, timeout, and response-envelope details. Publishers own GitHub
-API authentication and comment/review delivery. `prepare_publishable_review`
-sits between a validated `ReviewResult` and any publisher: `legacy` keeps
-single-pass comments and identifies them; `confirmed` publishes only candidates
-whose evidence exists in the exact reviewed snapshot. Unverified candidates
-never become findings, and incomplete verification cannot be treated as a
-clean review. Candidate text and snapshot contents remain untrusted data.
+API authentication and comment/review delivery. `prepare_publishable_review` sits between a validated `ReviewResult` and any publisher: `legacy` keeps single-pass comments and identifies them; `confirmed` publishes only candidates whose evidence exists in the exact reviewed snapshot. Unverified candidates never become findings, and incomplete verification cannot be treated as a clean review. Candidate text and snapshot contents remain untrusted data.
 
 The versioned synthetic corpus flows through a bounded, provider-neutral
-evaluation loader and `FixtureProvider` into the unchanged `ReviewService`.
-Reports retain only aggregate, non-monetary metrics. Live endpoints are
+evaluation loader and `FixtureProvider` into the unchanged `ReviewService`. Reports retain only aggregate, non-monetary metrics. Live endpoints are
 authority-gated by the CLI; CI uses fixture mode.
 
 ## Quality and supply-chain boundary
 
-Deterministic, provider-independent CI gates Ruff format/lint, mypy, compileall,
-branch coverage, three packaged Draft 2020-12 contracts and immutable Action pins.
-Build both distributions/SHA-256s; run unpacked-sdist dist-safe/downstream against
-installed wheels outside checkout. CodeQL Python/JS/TS findings use deterministic SARIF.
-Checkout-only scripts/.github/packages/deploy tests stay in compatibility/quality jobs.
-All workflow permissions default to
+Deterministic, provider-independent CI gates Ruff format/lint, mypy, compileall, branch coverage, three packaged Draft 2020-12 contracts and immutable Action pins. Build both distributions/SHA-256s; run unpacked-sdist dist-safe/downstream against installed wheels outside checkout. CodeQL Python/JS/TS findings use deterministic SARIF. Checkout-only scripts/.github/packages/deploy tests stay in compatibility/quality jobs. All workflow permissions default to
 `contents: read`, and the `required-checks` aggregate publishes the stable
 `Required checks` status used by branch protection. The optional downstream
 canary workflow is operator-gated and is excluded from that aggregate.
@@ -281,30 +219,16 @@ boundary. Its frozen `ReviewLimits` profile defaults to 1,048,576 bytes/50,000
 lines/500 files/5,000 hunks per diff, 4,194,304-byte prompts, 1,048,576-byte
 provider responses, and 2,097,152-byte publisher results, with independent
 metadata, learning, category, context, summary, comment, proposal, and line
-number ceilings documented in the README and ADR 0007. Profiles can only move
-downward. Canonical NFC UTF-8 repository paths and strict Git C-quoted paths are
+number ceilings documented in the README and ADR 0007. Profiles can only move downward. Canonical NFC UTF-8 repository paths and strict Git C-quoted paths are
 validated once and reused by models, stages, and diff analysis; no path is
 silently normalized. The CLI reads at most the diff ceiling plus one byte, and
 each provider adapter owns an equivalent bounded transport read.
 
 ## Portable workflow boundary
 
-`src/review_sensei/workflow.py` owns portable manual GitHub Actions. Before git it
-validates untrusted `base_ref`/`head_ref`/`head_repository`/`review_sensei_version`/
-diff limits. It fetches explicit refs with list argv, resolves verified base/head
-commit OIDs, checks merge base and writes bounded triple-dot diffs without head
-checkout/execution. Installed `review-sensei prepare-diff` exposes it without consumer
-Code Sensei source.
+`src/review_sensei/workflow.py` owns portable manual GitHub Actions. Before git it validates untrusted `base_ref`/`head_ref`/`head_repository`/`review_sensei_version`/ diff limits. It fetches explicit refs with list argv, resolves verified base/head commit OIDs, checks merge base and writes bounded triple-dot diffs without head checkout/execution. Installed `review-sensei prepare-diff` exposes it without consumer Code Sensei source.
 
-The generated caller is a read-only bootstrap, granting only `contents: read`,
-`pull-requests: read`, `issues: read` and `id-token: write`. It routes only on event
-shape and sends event context to the configured public reusable tag. Backend, model,
-endpoint, credential reference, runner and GitHub policy come only from its resolved
-trusted configuration commit, never caller inputs. The reusable workflow resolves one plan from the
-package, then runs the backend on the runner kind that plan requires: cloud
-backends on GitHub-hosted compute, local backends on the operator's
-self-hosted runner (labelled `ollama` in the example), which must have Ollama
-and the selected model provisioned before dispatch. Provider egress is explicit
+The generated caller is a read-only bootstrap, granting only `contents: read`, `pull-requests: read`, `issues: read` and `id-token: write`. It routes only on event shape and sends event context to the configured public reusable tag. Backend, model, endpoint, credential reference, runner and GitHub policy come only from its resolved trusted configuration commit, never caller inputs. The reusable workflow resolves one plan from the package, then runs the backend on the runner kind that plan requires: cloud backends on GitHub-hosted compute, local backends on the operator's self-hosted runner (labelled `ollama` in the example), which must have Ollama and the selected model provisioned before dispatch. Provider egress is explicit
 opt-in through the canonical `inference.backend` field (or the optional
 `REVIEWSENSEI_PROVIDER` Actions variable); the local backend uses
 `http://127.0.0.1:11434/api` with no API key, cloud backends use their fixed
@@ -321,19 +245,12 @@ install step verifies the package metadata and dependency set before review.
 
 The installation bootstrap is a narrow deployment adapter, not a repository
 configuration owner. Generated setup files carry a `ReviewSensei setup version`
-marker. Before creating a setup pull request, the Cloudflare Worker or Python
-adapter reads only the three known generated paths from the trusted default
-branch, with a 128 KiB per-file limit and strict UTF-8 decoding. Older
+marker. Before creating a setup pull request, the Cloudflare Worker or Python adapter reads only the three known generated paths from the trusted default branch, with a 128 KiB per-file limit and strict UTF-8 decoding. Older
 generated files, partial current setups, byte-exact managed v3 workflows, and
 managed v4 workflows following another valid public tag produce a reviewable
 migration PR; all current files are a no-op. A custom, malformed,
 or future-version file produces a no-write result so repository-owned workflow
-content is not overwritten. The migration branch is created once per base and
-tag (`review-sensei/setup-v5-<base12>-<tag>`), is reusable only when its parent
-is the named base SHA, its author is the ReviewSensei App, its content is
-exactly current, and its comparison changes generated paths only, and is never
-force-moved; it changes no path outside the generated set, preserving
-learnings, secrets, existing variables, and unrelated repository files. See ADR
+content is not overwritten. The migration branch is created once per base and tag (`review-sensei/setup-v5-<base12>-<tag>`), is reusable only when its parent is the named base SHA, its author is the ReviewSensei App, its content is exactly current, and its comparison changes generated paths only, and is never force-moved; it changes no path outside the generated set, preserving learnings, secrets, existing variables, and unrelated repository files. See ADR
 0021.
 
 Public JSON documents are versioned under `src/review_sensei/schemas/` with v1
@@ -366,23 +283,15 @@ same validated result.
 
 - `ReviewRequest` contains a unified diff and optional repository metadata.
 - `ReviewRequest.learnings` contains only approved `LearningEntry` values loaded
-  from the target branch or target commit. Optional lifecycle metadata does not
-  change that boundary; retired/superseded entries and finding feedback never
-  enter the prompt. `LearningStore.selection_digest` is the canonical SHA-256
-  of the review-time selection used by incremental cache keys;
-  `learning_digest` is the scope-agnostic primitive it is built from and
-  digests exactly the entries it is given.
+  from the target branch or target commit. Optional lifecycle metadata does not   change that boundary; retired/superseded entries and finding feedback never   enter the prompt. `LearningStore.selection_digest` is the canonical SHA-256   of the review-time selection used by incremental cache keys;   `learning_digest` is the scope-agnostic primitive it is built from and   digests exactly the entries it is given.
 - `review-sensei learnings diagnose` reports stale, conflicting, missing
-  superseder, and supersession-cycle signals for a human decision and never
-  mutates approved files.
+  superseder, and supersession-cycle signals for a human decision and never   mutates approved files.
 - `ReviewRequest.active_category_ids` records the configured lenses whose
-  `applies_to` patterns match the changed paths. The default pattern is `**`;
-  `*` matches within one segment and `**` spans zero or more segments.
+  `applies_to` patterns match the changed paths. The default pattern is `**`;   `*` matches within one segment and `**` spans zero or more segments.
 - `ReviewRequest.lens_contexts` contains the approved learnings and bounded
   `ReviewDocument` values selected for each active lens.
 - `RepositoryContextStore` resolves only explicitly configured sources inside a
-  trusted target/base checkout. It never defaults to scanning the process's
-  working directory.
+  trusted target/base checkout. It never defaults to scanning the process's   working directory.
 - `ProviderRequest` is the provider-facing prompt contract.
 - `ProviderResponse` normalizes provider text without retaining raw request
   context.
@@ -402,12 +311,9 @@ support. Composite controls reject missing live engine/prompt identity with boun
 Strict adapter OpenRouter endpoint-metadata allowlisting precedes live dispatch/report construction
 (proposed ADR 0082).
 - `Stage` declares one provider invocation, its expected output sections,
-  optional structured `ReviewCategory` values, and an optional canonical
-  `provider_profile`. Per-stage profiles cannot expand a local/private run onto
-  a remote endpoint.
+  optional structured `ReviewCategory` values, and an optional canonical   `provider_profile`. Per-stage profiles cannot expand a local/private run onto   a remote endpoint.
 - `ReviewCategory` gives a category a stable lowercase id, a human-readable
-  title, one or more concrete focus items, path applicability, and optional
-  learning/document selectors. Active categories are serialized into
+  title, one or more concrete focus items, path applicability, and optional   learning/document selectors. Active categories are serialized into
   `{review_categories}` without rescanning inserted diff or instruction text
   for template placeholders.
 - `ReviewCategoryCatalog` owns reusable category identity and resolves the
@@ -1280,9 +1186,7 @@ fix the selected fence size before activation. The retry rules and finite
 qualification matrix are in [ADR 0096](adr/0096-bounded-hosted-history-readers.md)
 and [hosted history acceptance](validation/hosted-history-readers.md).
 
-Same-operation inventory handoff must retain budget/transport/token/scope,
-fresh complete intent/parts reads and fresh ledger/Bot/PR/root/index/full-prose fences.
-Canonical admission is evidence only; see ADR 0098.
+Same-operation inventory handoff must retain budget/transport/token/scope, fresh complete intent/parts reads and fresh ledger/Bot/PR/root/index/full-prose fences. Canonical admission is evidence only; see ADR 0098.
 
 Restored handles bind operation/inventory/source, original clock/charges and time/generation/
 expiry/rollback limits. No replay reexecution, unknown-work publication, CLI/grant activation

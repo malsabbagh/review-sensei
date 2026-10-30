@@ -158,6 +158,164 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             )
         return run_id, *previous.ceased_owner(identity, predecessor)
 
+    def qualified_publication_cessation(
+        self,
+        identity: SessionIdentity,
+        run_id: int,
+        predecessor: ApiExecutionOwner,
+        *,
+        head_sha: str,
+    ) -> dict[str, Any]:
+        """Positive exit/source contract for historical root-write non-entry.
+
+        Completion of a job alone never settles an uncertain request. This
+        narrow source-qualified contract requires the actual review step to
+        succeed and excludes every other possible root writer in that run.
+        """
+        import hashlib
+
+        from review_sensei.bounded_evidence import canonical_bytes
+        from review_sensei.historical_completion import QUALIFIED_EXECUTORS
+
+        if (
+            type(run_id) is not int
+            or run_id < 1
+            or predecessor.run_attempt != 1
+            or predecessor.generation != 0
+            or predecessor.job not in {"hosted", "local"}
+        ):
+            raise ReviewInputError(
+                "historical owner has no qualified root-write contract"
+            )
+        previous = ApiRunActionsEvidence(
+            self.http, token=self.token, command_run_id=str(run_id), job=predecessor.job
+        )
+        # Read the latest run state, not merely a successful historical attempt:
+        # a later rerun could still own an unsettled write to this same root.
+        run = previous._get(identity, f"/actions/runs/{run_id}")
+        repository = run.get("repository")
+        if (
+            type(run.get("id")) is not int
+            or run.get("id") != run_id
+            or not isinstance(repository, dict)
+            or type(repository.get("id")) is not int
+            or repository.get("id") != identity.repository_id
+            or repository.get("full_name") != identity.repository
+            or type(run.get("run_attempt")) is not int
+            or run.get("run_attempt") != predecessor.run_attempt
+            or run.get("status") != "completed"
+            or run.get("conclusion") != "success"
+            or run.get("head_sha") != head_sha
+            or run.get("event") != "pull_request"
+        ):
+            raise ReviewInputError(
+                "historical executor did not prove successful review exit"
+            )
+        references = run.get("referenced_workflows")
+        if (
+            not isinstance(references, list)
+            or len(references) != 1
+            or not isinstance(references[0], dict)
+        ):
+            raise ReviewInputError("historical executor source is unrecognized")
+        source = references[0]
+        source_sha = source.get("sha")
+        contract = (
+            QUALIFIED_EXECUTORS.get(source_sha) if isinstance(source_sha, str) else None
+        )
+        if (
+            contract is None
+            or source.get("path") != contract["workflow_path"]
+            or source.get("ref") != contract["workflow_ref"]
+        ):
+            raise ReviewInputError("historical executor source is unrecognized")
+        jobs = previous._jobs(identity, predecessor.run_attempt)
+        selected = [j for j in jobs if _writer_name(j.get("name"), predecessor.job)]
+        if len(selected) != 1:
+            raise ReviewInputError("historical owning job is missing or ambiguous")
+        job = selected[0]
+        for kind in ("hosted", "local", "command"):
+            matching = [j for j in jobs if _writer_name(j.get("name"), kind)]
+            if (
+                len(matching) != 1
+                or matching[0].get("status") != "completed"
+                or matching[0].get("conclusion")
+                != ("success" if kind == predecessor.job else "skipped")
+            ):
+                raise ReviewInputError(
+                    "historical complete writer inventory is unconfirmed"
+                )
+        steps = job.get("steps")
+        if (
+            not isinstance(steps, list)
+            or not 1 <= len(steps) <= 64
+            or any(not isinstance(step, dict) for step in steps)
+        ):
+            raise ReviewInputError("historical review step inventory is unavailable")
+        review = [
+            step
+            for step in steps
+            if step.get("name") == f"Run {predecessor.job} review"
+        ]
+        reply = [
+            step
+            for step in steps
+            if step.get("name")
+            == f"Generate and publish {predecessor.job} mention reply"
+        ]
+        if (
+            len(review) != 1
+            or len(reply) != 1
+            or review[0].get("status") != "completed"
+            or review[0].get("conclusion") != "success"
+            or reply[0].get("status") != "completed"
+            or reply[0].get("conclusion") != "skipped"
+            or type(review[0].get("number")) is not int
+            or review[0]["number"] < 1
+        ):
+            raise ReviewInputError(
+                "historical review step did not prove successful exit"
+            )
+        completed = job.get("completed_at")
+        step_completed = review[0].get("completed_at")
+        if (
+            not isinstance(completed, str)
+            or not isinstance(step_completed, str)
+            or _stamp(step_completed) > _stamp(completed)
+        ):
+            raise ReviewInputError("historical review exit chronology conflicts")
+        projection = [
+            {
+                key: item.get(key)
+                for key in (
+                    "id",
+                    "run_id",
+                    "run_attempt",
+                    "name",
+                    "status",
+                    "conclusion",
+                    "completed_at",
+                    "steps",
+                )
+            }
+            for item in jobs
+        ]
+        return {
+            "run_id": run_id,
+            "attempt": predecessor.run_attempt,
+            "head_sha": head_sha,
+            "job_id": job["id"],
+            "step_number": review[0]["number"],
+            "completed_at": completed,
+            "executor_sha": source["sha"],
+            "executor_commit": contract["commit"],
+            "workflow_blob": contract["workflow_blob"],
+            "writer_inventory_sha256": hashlib.sha256(
+                canonical_bytes(projection)
+            ).hexdigest(),
+            "contract": contract["contract"],
+        }
+
     def ceased_owner(
         self, identity: SessionIdentity, predecessor: ApiExecutionOwner
     ) -> tuple[int, str, str]:

@@ -363,6 +363,7 @@ class GitHubApplication:
         self.enable_disposition_snapshot_writes = enable_disposition_snapshot_writes
         self._quarantine_hold_readers: dict[tuple[str, int], Any] = {}
         self._human_inventory_readers: dict[tuple, Any] = {}
+        self._historical_assessment_readers: dict[tuple[str, int], Any] = {}
         if getattr(
             getattr(session_ledger, "caller", None),
             "_has_quarantine_assessments",
@@ -371,6 +372,15 @@ class GitHubApplication:
             for publisher in (reviewer, replier):
                 publisher.finalizer.quarantine_reader_factory = (
                     self._quarantine_hold_reader
+                )
+        if getattr(
+            getattr(session_ledger, "caller", None),
+            "_has_historical_assessments",
+            False,
+        ):
+            for publisher in (reviewer, replier):
+                publisher.finalizer.historical_assessment_reader_factory = (
+                    self._historical_assessment_reader
                 )
         # Every ordinary fresh application can reconstruct supported default
         # inventories from its independently selected durable ledger.
@@ -391,6 +401,22 @@ class GitHubApplication:
                 pull_request=pull_request,
             )
         return self._quarantine_hold_readers[key]
+
+    def _historical_assessment_reader(
+        self, *, token, repository, pull_request, head_sha
+    ):
+        from .historical_assessments import HistoricalAssessmentReader
+
+        key = (repository, pull_request)
+        if key not in self._historical_assessment_readers:
+            self._historical_assessment_readers[key] = HistoricalAssessmentReader(
+                ledger=self.session_ledger,
+                http=self.http,
+                repository=repository,
+                pull_request=pull_request,
+                token=token,
+            )
+        return self._historical_assessment_readers[key]
 
     def _human_inventory_reader(
         self,
@@ -3784,15 +3810,8 @@ class GitHubApplication:
                         updated_inventory = work_assessment.inventory.apply(
                             assessment.decisions
                         )
-                        retained = replace(
-                            human.eligibility,
-                            human_review=updated_inventory,
-                            facts=replace(
-                                human.eligibility.facts,
-                                has_human_adjudication_findings=bool(
-                                    updated_inventory.pending
-                                ),
-                            ),
+                        retained = human.eligibility.with_fresh_human_review(
+                            updated_inventory
                         )
 
                         def source_guard() -> bool:

@@ -73,6 +73,8 @@ class TrustedRecoveryWorkflowTests(unittest.TestCase):
                 "recovery_policy_commit": "string",
                 "recovery_expected_head": "string",
                 "quarantine_predecessor_comment_id": "string",
+                "controlled_restart_id": "string",
+                "controlled_restart_directory": "string",
             },
         )
         for caller in (
