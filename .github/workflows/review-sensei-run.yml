@@ -42,6 +42,16 @@ on:
         required: false
         default: ''
         type: string
+      controlled_restart_id:
+        description: Exact installed one-shot designation; empty keeps ordinary entry
+        required: false
+        default: ''
+        type: string
+      controlled_restart_directory:
+        description: Pre-created private retained directory on an existing self-hosted runner
+        required: false
+        default: ''
+        type: string
       recover_publication:
         description: Retired; true is rejected before business HTTP
         required: false
@@ -200,6 +210,9 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           OPERATION: ${{ inputs.operation }}
+          CONTROLLED_RESTART_ID: ${{ inputs.controlled_restart_id }}
+          CONTROLLED_RESTART_DIRECTORY: ${{ inputs.controlled_restart_directory }}
+          QUARANTINE_PREDECESSOR_COMMENT_ID: ${{ inputs.quarantine_predecessor_comment_id }}
           RECOVER_PUBLICATION: ${{ inputs.recover_publication }}
           RECOVERY_POLICY_COMMIT: ${{ inputs.recovery_policy_commit }}
           RECOVERY_EXPECTED_HEAD: ${{ inputs.recovery_expected_head }}
@@ -230,6 +243,12 @@ jobs:
           if [[ "${RECOVER_PUBLICATION:-false}" != "false" || -n "${RECOVERY_POLICY_COMMIT:-}" || -n "${RECOVERY_EXPECTED_HEAD:-}" ]]; then
             echo '::error::new-run publication recovery is unsupported; rerun the original Actions run (one stopped-owner successor attempt)' >&2
             exit 1
+          fi
+          if [[ -n "${CONTROLLED_RESTART_ID:-}${CONTROLLED_RESTART_DIRECTORY:-}" ]]; then
+            if [[ ! "${CONTROLLED_RESTART_ID:-}" =~ ^[a-f0-9]{64}$ || -z "${CONTROLLED_RESTART_DIRECTORY:-}" || "$MODE" != "manual" || "$OPERATION" != "review" || "$GITHUB_EVENT_NAME" != "workflow_dispatch" || -n "${QUARANTINE_PREDECESSOR_COMMENT_ID:-}" ]]; then
+              echo '::error::controlled restart requires one manual designation, retained directory and no quarantine intent' >&2
+              exit 1
+            fi
           fi
           case "$MODE" in
             automatic|manual) ;;
@@ -933,6 +952,10 @@ jobs:
         if: inputs.operation == 'review'
         env:
           QUARANTINE_PREDECESSOR_COMMENT_ID: ${{ inputs.quarantine_predecessor_comment_id }}
+          CONTROLLED_RESTART_ID: ${{ inputs.controlled_restart_id }}
+          CONTROLLED_RESTART_DIRECTORY: ${{ inputs.controlled_restart_directory }}
+          MODE: ${{ inputs.mode }}
+          OPERATION: ${{ inputs.operation }}
           GITHUB_TOKEN: ${{ github.token }}
           POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
           REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
@@ -985,7 +1008,7 @@ jobs:
           # rounds and baselines.
           # The original authenticated event selects fresh rescan versus
           # cumulative remaining work. No caller boolean can authorize inference.
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
+          if [[ -z "${CONTROLLED_RESTART_ID:-}" && ( "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ) ]]; then
             review_intent=$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'from review_sensei_github.rescan import cli_event_review_intent; print(cli_event_review_intent())')
             case "$review_intent" in
               --rescan|--review-remaining) review_args+=("$review_intent") ;;
@@ -1021,13 +1044,25 @@ jobs:
           # Arm the forwarding trap before launching Python so a cancel
           # landing in the launch window still reaches the child.
           lifecycle_args=()
+          lifecycle_directory="$RUNNER_TEMP"
+          if [[ -n "${CONTROLLED_RESTART_ID:-}${CONTROLLED_RESTART_DIRECTORY:-}" ]]; then
+            # Path validation is not registration or proof of retention. The
+            # operator must have approved this existing runner/storage; the
+            # package independently checks the installed exact designation.
+            lifecycle_directory=$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'from review_sensei_github.controlled_restart_workflow import retained_directory; print(retained_directory())')
+            lifecycle_args+=(--restart-id "$CONTROLLED_RESTART_ID")
+          fi
           if [[ -n "$QUARANTINE_PREDECESSOR_COMMENT_ID" ]]; then
             lifecycle_args+=(--quarantine-predecessor-comment-id "$QUARANTINE_PREDECESSOR_COMMENT_ID")
           fi
           review_pid=""
           trap 'if [[ -n "$review_pid" ]]; then kill -TERM "$review_pid" 2>/dev/null || true; fi' TERM INT
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review-run \
-            --policy-commit "$POLICY_COMMIT" --run-directory "$RUNNER_TEMP" "${lifecycle_args[@]}" \
+          lifecycle_command=("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review-run \
+            --policy-commit "$POLICY_COMMIT" --run-directory "$lifecycle_directory" "${lifecycle_args[@]}")
+          if [[ -n "${CONTROLLED_RESTART_ID:-}" ]]; then
+            lifecycle_command[1]=restart-run
+          fi
+          "${lifecycle_command[@]}" \
             --publication-outcome publication-outcome.json -- "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --output review.json --outcome outcome.json &
@@ -1376,6 +1411,10 @@ jobs:
         if: inputs.operation == 'review'
         env:
           QUARANTINE_PREDECESSOR_COMMENT_ID: ${{ inputs.quarantine_predecessor_comment_id }}
+          CONTROLLED_RESTART_ID: ${{ inputs.controlled_restart_id }}
+          CONTROLLED_RESTART_DIRECTORY: ${{ inputs.controlled_restart_directory }}
+          MODE: ${{ inputs.mode }}
+          OPERATION: ${{ inputs.operation }}
           GITHUB_TOKEN: ${{ github.token }}
           POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
           REVIEW_SENSEI_WORKFLOW_REF: ${{ job.workflow_ref }}
@@ -1430,7 +1469,7 @@ jobs:
           # rounds and baselines.
           # The original authenticated event selects fresh rescan versus
           # cumulative remaining work. No caller boolean can authorize inference.
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
+          if [[ -z "${CONTROLLED_RESTART_ID:-}" && ( "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ) ]]; then
             review_intent=$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'from review_sensei_github.rescan import cli_event_review_intent; print(cli_event_review_intent())')
             case "$review_intent" in
               --rescan|--review-remaining) review_args+=("$review_intent") ;;
@@ -1460,13 +1499,25 @@ jobs:
           # Arm the forwarding trap before launching Python so a cancel
           # landing in the launch window still reaches the child.
           lifecycle_args=()
+          lifecycle_directory="$RUNNER_TEMP"
+          if [[ -n "${CONTROLLED_RESTART_ID:-}${CONTROLLED_RESTART_DIRECTORY:-}" ]]; then
+            # Path validation is not registration or proof of retention. The
+            # operator must have approved this existing runner/storage; the
+            # package independently checks the installed exact designation.
+            lifecycle_directory=$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'from review_sensei_github.controlled_restart_workflow import retained_directory; print(retained_directory())')
+            lifecycle_args+=(--restart-id "$CONTROLLED_RESTART_ID")
+          fi
           if [[ -n "$QUARANTINE_PREDECESSOR_COMMENT_ID" ]]; then
             lifecycle_args+=(--quarantine-predecessor-comment-id "$QUARANTINE_PREDECESSOR_COMMENT_ID")
           fi
           review_pid=""
           trap 'if [[ -n "$review_pid" ]]; then kill -TERM "$review_pid" 2>/dev/null || true; fi' TERM INT
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review-run \
-            --policy-commit "$POLICY_COMMIT" --run-directory "$RUNNER_TEMP" "${lifecycle_args[@]}" \
+          lifecycle_command=("$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review-run \
+            --policy-commit "$POLICY_COMMIT" --run-directory "$lifecycle_directory" "${lifecycle_args[@]}")
+          if [[ -n "${CONTROLLED_RESTART_ID:-}" ]]; then
+            lifecycle_command[1]=restart-run
+          fi
+          "${lifecycle_command[@]}" \
             --publication-outcome publication-outcome.json -- "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --output review.json --outcome outcome.json &

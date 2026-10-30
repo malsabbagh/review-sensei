@@ -81,11 +81,17 @@ and explicit compatibility review; this ADR does not silently authorize it.
   a passing approval gate can be justified. Restart authorization is not one.
 - The run directory must be retained storage under operator control. An
   ephemeral runner directory alone is not a durable archive/export strategy.
-- General workflow dispatch/retention integration is not activated by this
-  source change. An actual run ID must exist while its writer remains held;
-  installing its designation and preserving/exporting its archive require a
-  separately reviewed launch sequence. Do not predict an unknown run ID or
-  dispatch an enabled writer to discover one.
+- Inactive reusable-workflow inputs select the dedicated restart entry for an
+  explicit manual designation and omit the ordinary rescan intent. An existing
+  self-hosted runner must supply an empty private retained directory outside
+  its workspace/temp paths. Archive fsync and exact readback precede successor
+  admission there; path validation does not certify actual storage retention.
+  See [launch integration](../controlled-restart-launch.md).
+- Live dispatch and registration delivery remain unimplemented and inactive.
+  An actual run ID must exist while its writer remains held before capability
+  acquisition and before the registered package is required. Installing that
+  designation requires a separately reviewed launch sequence. Do not predict
+  an ID or dispatch an enabled writer to discover one.
 
 ## Alternatives considered
 
