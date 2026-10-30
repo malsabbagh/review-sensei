@@ -14,8 +14,10 @@ import json
 import os
 import re
 import subprocess
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Mapping, Sequence
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -1217,26 +1219,43 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
         core.append("--title=" + selected.title)
     if args.config is None and selected.configuration_path is not None:
         core.extend(["--config", str(selected.configuration_path)])
-    if args.diff is None:
-        diff = options.run_directory / "review.patch"
-        prepare_diff(
-            repository=Path.cwd(),
-            base_ref=selected.base_sha,
-            head_ref=selected.head_sha,
-            head_repository=selected.head_repository
-            if selected.head_repository != selected.identity.repository
-            else None,
-            output=diff,
+    # The durable directory owns only the restart archive/claim. Fresh source
+    # bytes stay in a private temporary directory, including on failed or
+    # cancelled execution. Abrupt process death leaves only ephemeral storage.
+    workspace = (
+        TemporaryDirectory(
+            prefix="review-sensei-restart-", dir=os.environ.get("RUNNER_TEMP") or None
         )
-        core.extend(["--diff", str(diff)])
-    if not args.transaction:
-        core.append("--transaction")
-    if not args.github_session_ledger:
-        core.append("--github-session-ledger")
-    if args.output is None:
-        core.extend(["--output", str(options.run_directory / "review.json")])
-    if not _has_option(core, "--format"):
-        core.extend(["--format", "json"])
-    if not _has_option(core, "--exit-semantics"):
-        core.extend(["--exit-semantics", "operational"])
-    return selected.execute(core, publication_output=options.publication_outcome)
+        if controlled_restart
+        else nullcontext(str(options.run_directory))
+    )
+    with workspace as working_directory:
+        if controlled_restart and Path(working_directory).resolve().is_relative_to(
+            options.run_directory.resolve()
+        ):
+            raise ReviewInputError(
+                "controlled restart diff cannot use retained history storage"
+            )
+        if args.diff is None:
+            diff = Path(working_directory) / "review.patch"
+            prepare_diff(
+                repository=Path.cwd(),
+                base_ref=selected.base_sha,
+                head_ref=selected.head_sha,
+                head_repository=selected.head_repository
+                if selected.head_repository != selected.identity.repository
+                else None,
+                output=diff,
+            )
+            core.extend(["--diff", str(diff)])
+        if not args.transaction:
+            core.append("--transaction")
+        if not args.github_session_ledger:
+            core.append("--github-session-ledger")
+        if args.output is None:
+            core.extend(["--output", str(options.run_directory / "review.json")])
+        if not _has_option(core, "--format"):
+            core.extend(["--format", "json"])
+        if not _has_option(core, "--exit-semantics"):
+            core.extend(["--exit-semantics", "operational"])
+        return selected.execute(core, publication_output=options.publication_outcome)

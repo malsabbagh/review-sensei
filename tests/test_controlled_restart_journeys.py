@@ -504,10 +504,31 @@ else:
             )
             self.assertEqual(archive["comments"][0]["body"], BODY)
 
+    def test_misplaced_temporary_root_refuses_without_reusing_retained_slot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journey = RestartJourney(directory)
+            # Remove only the fixture-owned supplied diff; restart prepares its own.
+            (journey.fixture.root / "review.patch").unlink()
+            original = review_run.TemporaryDirectory
+
+            def misplaced(**kwargs):
+                return original(prefix=kwargs["prefix"], dir=journey.fixture.root)
+
+            with patch.object(review_run, "TemporaryDirectory", side_effect=misplaced):
+                self.assertEqual(journey.invoke(), 1)
+            self.assertIn("diff cannot use retained history", journey.fixture.error)
+            self.assertEqual(journey.fixture.provider_calls, 0)
+            self.assertTrue((journey.fixture.root / "abandoned-history.json").exists())
+            self.assertEqual(len(list(journey.fixture.root.glob("*.claim"))), 1)
+            self.assertFalse((journey.fixture.root / "review.patch").exists())
+            self.assertFalse(list(journey.fixture.root.glob("review-sensei-restart-*")))
+
     def test_actual_git_diff_is_prepared_at_designated_base_and_head(self):
         with tempfile.TemporaryDirectory() as directory:
             journey = RestartJourney(directory)
             fixture = journey.fixture
+            # The fixture creates a supplied diff; this case exercises actual Git.
+            (fixture.root / "review.patch").unlink()
 
             def git(*args):
                 return subprocess.check_output(
@@ -545,9 +566,23 @@ else:
                 **{**changes, "base_sha": base, "head_sha": head}
             )
             journey.actual_diff = True
-            self.assertEqual(journey.invoke(), 0, fixture.error)
+            prepared = []
+            original_prepare = review_run.prepare_diff
+
+            def observe_diff(**kwargs):
+                original_prepare(**kwargs)
+                prepared.append((kwargs["output"], kwargs["output"].read_text()))
+
+            with patch.object(review_run, "prepare_diff", side_effect=observe_diff):
+                self.assertEqual(journey.invoke(), 0, fixture.error)
             self.assertEqual(fixture.provider_calls, 1)
-            self.assertIn("+change", (fixture.root / "review.patch").read_text())
+            self.assertEqual(len(prepared), 1)
+            path, diff = prepared[0]
+            self.assertIn("+change", diff)
+            self.assertFalse(path.is_relative_to(fixture.root.resolve()))
+            self.assertFalse(path.exists())
+            self.assertFalse(path.parent.exists())
+            self.assertFalse((fixture.root / "review.patch").exists())
             self.assertEqual(git("rev-parse", "HEAD"), fixture.policy)
             self.assert_accounting(journey)
 

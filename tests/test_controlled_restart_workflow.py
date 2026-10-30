@@ -196,15 +196,22 @@ class ControlledRestartWorkflowTests(unittest.TestCase):
         )
         return result, json.loads(capture.read_text()) if capture.exists() else None
 
-    def test_bash_selected_arguments_complete_real_public_restart_on_retained_storage(
+    def test_bash_public_restart_keeps_only_archive_and_claim_after_success_error_cancel(
         self,
     ):
         from review_sensei_github import cli, controlled_restart, review_run
         from test_controlled_restart_journeys import RestartJourney
         from test_review_transaction import HostedAnalysisCliTests
 
-        for lane in ("hosted", "local"):
-            with self.subTest(lane=lane), tempfile.TemporaryDirectory() as temporary:
+        for lane, outcome in (
+            (lane, outcome)
+            for lane in ("hosted", "local")
+            for outcome in ("success", "error", "cancel")
+        ):
+            with (
+                self.subTest(lane=lane, outcome=outcome),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 root = Path(temporary).resolve()
                 env = self.environment(root)
                 policy = root / "policy"
@@ -225,15 +232,37 @@ class ControlledRestartWorkflowTests(unittest.TestCase):
                 )
                 result, argv = self.route(lane, env)
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("--recovery-artifact", argv)
                 original = cli.main
+                prepared = []
+                evidence = {}
+                observed_live_diff = []
 
                 def diff(**kwargs):
-                    kwargs["output"].write_text(
+                    path = kwargs["output"]
+                    prepared.append(path)
+                    evidence.update(
+                        {
+                            p.name: p.read_bytes()
+                            for p in retained.iterdir()
+                            if p.name == "abandoned-history.json"
+                            or p.suffix == ".claim"
+                        }
+                    )
+                    path.write_text(
                         HostedAnalysisCliTests.ANALYSIS_DIFF,
                         encoding="utf-8",
                         newline="\n",
                     )
 
+                def publication_boundary():
+                    observed_live_diff.append(prepared[0].read_text())
+                    if outcome == "error":
+                        raise ReviewInputError("synthetic post-diff failure")
+                    if outcome == "cancel":
+                        raise KeyboardInterrupt()
+
+                fixture.before_publication = publication_boundary
                 with (
                     patch.object(
                         controlled_restart, "registrations", return_value=[journey.row]
@@ -241,19 +270,36 @@ class ControlledRestartWorkflowTests(unittest.TestCase):
                     patch.object(cli, "main", side_effect=lambda _: original(argv)),
                     patch.object(review_run, "prepare_diff", side_effect=diff),
                 ):
-                    self.assertEqual(fixture.invoke(), 0, fixture.error)
-                archived = json.loads(
-                    (retained / "abandoned-history.json").read_bytes()
+                    self.assertEqual(
+                        fixture.invoke(),
+                        {"success": 0, "error": 1, "cancel": 130}[outcome],
+                        fixture.error,
+                    )
+                self.assertEqual(
+                    observed_live_diff, [HostedAnalysisCliTests.ANALYSIS_DIFF]
                 )
+                self.assertEqual(len(prepared), 1)
+                self.assertFalse(prepared[0].is_relative_to(retained))
+                self.assertFalse(prepared[0].exists())
+                self.assertFalse(prepared[0].parent.exists())
+                self.assertEqual(len(evidence), 2)
+                self.assertEqual(
+                    {p.name: p.read_bytes() for p in retained.iterdir()},
+                    evidence,
+                )
+                archived = json.loads(evidence["abandoned-history.json"])
                 self.assertEqual(archived["historical_effects"], "unsettled")
                 self.assertEqual(fixture.provider_calls, 1)
                 self.assertEqual(fixture.accounted.accounting.configuration.limit, 512)
                 self.assertEqual(
                     len(fixture.accounted.observations), len(fixture.trace)
                 )
-                self.assertIsNotNone(
-                    fixture.selected.caller.accounting.terminal_transaction
-                )
+                if outcome == "success":
+                    self.assertIsNotNone(
+                        fixture.selected.caller.accounting.terminal_transaction
+                    )
+                else:
+                    self.assertFalse(fixture.reviews)
                 self.assertFalse((policy / "abandoned-history.json").exists())
 
     def test_actual_bash_selects_restart_without_rescan_and_preserves_ordinary_entry(

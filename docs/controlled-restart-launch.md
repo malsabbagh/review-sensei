@@ -28,6 +28,13 @@ directory before creating successor authority. A consumed/nonempty slot refuses.
 Keep this directory and any independent backup through failure and rollback;
 an optional seven-day diagnostics upload is not the retention contract.
 
+Freshly prepared source diffs use a separate private ephemeral working directory,
+removed on normal, error and cancellation exits. They are never placed in the
+retained history slot, including when diagnostic artifacts are disabled. Abrupt
+process termination may leave ephemeral working data for normal runner cleanup;
+it does not clear or renew the retained archive/claim. Explicit diagnostic
+artifacts retain their existing opt-in policy.
+
 ## Remaining launch and registration delivery gate
 
 Routing and a retained archive location do not supply an actual designated run ID
