@@ -89,6 +89,34 @@ class LocalPartitionReadCacheTests(unittest.TestCase):
             self.assertEqual(len(reads), 3 * part_count)
             self.assertLessEqual(ledger.evidence_budget.calls, 60)
 
+    def test_native_windows_cold_authentication_survives_platform_override(self):
+        # Platform simulation must not enable POSIX metadata proof on a real
+        # Windows filesystem, where the two stat APIs expose different ctimes.
+        original_fstat = os.fstat
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch("review_sensei.session.os.name", "nt"),
+                patch("review_sensei.session.sys.platform", "darwin"),
+                patch(
+                    "review_sensei.session.os.fstat",
+                    side_effect=lambda fd: descriptor_stat_shape(original_fstat(fd)),
+                ),
+            ):
+                ledger, document, manifest = self.stage_public_document(root)
+                for _ in range(2):
+                    before = ledger.evidence_budget.calls
+                    self.assertEqual(
+                        ledger.read_evidence(
+                            fixture.IDENTITY, manifest, expected_binding=binding()
+                        ),
+                        document,
+                    )
+                    self.assertEqual(
+                        ledger.evidence_budget.calls - before,
+                        3 * len(manifest["parts"]),
+                    )
+
     def test_windows_descriptor_change_during_public_staging_refuses(self):
         original_fstat = os.fstat
         calls = []

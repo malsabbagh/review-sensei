@@ -4066,7 +4066,11 @@ def read_session_dispositions(
     """Read exactly one authenticated decision authority; never fall back."""
     if record.disposition_snapshot is None:
         return record.dispositions
-    from .disposition_snapshot import normalize_snapshot, snapshot_document
+    from .disposition_snapshot import (
+        normalize_snapshot,
+        read_paged_snapshot,
+        snapshot_document,
+    )
 
     root = normalize_snapshot(record.disposition_snapshot)
     assert root is not None
@@ -4079,9 +4083,62 @@ def read_session_dispositions(
         record.repository, record.pull_request, record.repository_id
     )
     document = reader(identity, manifest, expected_binding=binding)
+    if root["schema_version"] == "2.0":
+        values = read_paged_snapshot(
+            document, root=root, reader=reader, identity=identity
+        )
+        _remember_disposition_pages(ledger, root, document)
+        return values
     return snapshot_document(
         document, result_digest=root["result_digest"], item_count=manifest["item_count"]
     )
+
+
+def _page_storage_ids(root: Mapping[str, Any], document: object) -> tuple[str, ...]:
+    from .disposition_snapshot import validate_page_index
+
+    return tuple(
+        reference["storage_id"]
+        for page in validate_page_index(document, root=root)
+        if page["encoding"] == PARTITION_ENCODING
+        for reference in page["parts"]
+    )
+
+
+def _remember_disposition_pages(
+    ledger: object, root: Mapping[str, Any], document: object
+) -> None:
+    """Remember only a fully authenticated root's finite physical read order.
+
+    This cache grants no mutation or content authority: final activation still
+    re-reads every required carrier. Its key binds the complete index manifest,
+    result and producer; another root, edited reference or generation cannot hit.
+    """
+    key = hashlib.sha256(canonical_bytes(root)).hexdigest()
+    ids = _page_storage_ids(root, document)
+    cache = getattr(ledger, "_disposition_page_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(ledger, "_disposition_page_cache", cache)
+    if not isinstance(cache, dict) or (
+        key not in cache and len(cache) >= MAX_PART_READS
+    ):
+        raise ReviewInputError("disposition page proof cache exceeds finite bound")
+    cache[key] = ids
+
+
+def _disposition_page_ids(ledger: object, record: SessionRecord) -> tuple[str, ...]:
+    root = record.disposition_snapshot
+    if root is None or root["schema_version"] != "2.0":
+        return ()
+    key = hashlib.sha256(canonical_bytes(root)).hexdigest()
+    cache = getattr(ledger, "_disposition_page_cache", {})
+    if key not in cache:
+        read_session_dispositions(ledger, record)
+        cache = getattr(ledger, "_disposition_page_cache", {})
+    if key not in cache:
+        raise ReviewInputError("complete disposition page inventory was not read")
+    return cast(tuple[str, ...], cache[key])
 
 
 def disposition_snapshot_capacity(record: SessionRecord) -> int:
@@ -4142,7 +4199,7 @@ def stage_session_dispositions(
     head_sha: str | None,
     now: datetime | None,
 ) -> SessionRecord:
-    """Stage one full snapshot inside the caller's serialized CAS mutation."""
+    """Stage one lossless snapshot inside the serialized CAS mutation."""
     if getattr(ledger, "enable_disposition_snapshot_writes", False) is not True:
         raise ReviewInputError(
             "disposition snapshot writer is disabled; decisions retained"
@@ -4161,12 +4218,7 @@ def stage_session_dispositions(
     stage = getattr(ledger, "stage_evidence", None)
     if not callable(stage):
         raise ReviewInputError("disposition snapshot staging is unavailable")
-    document = {
-        "schema_version": "1.0",
-        "result_digest": transaction.result_sha256,
-        "dispositions": list(values),
-    }
-    binding = {
+    binding: dict[str, object] = {
         "repository": record.repository,
         "repository_id": record.repository_id,
         "pull_request": record.pull_request,
@@ -4182,7 +4234,21 @@ def stage_session_dispositions(
     identity = SessionIdentity(
         record.repository, record.pull_request, record.repository_id
     )
-    root = {"schema_version": "1.0", "result_digest": transaction.result_sha256}
+    paged = callable(getattr(ledger, "stage_disposition_snapshot_batch", None)) and (
+        getattr(ledger, "supports_paged_disposition_snapshot_writes", True) is True
+    )
+    if (
+        not paged
+        and record.disposition_snapshot is not None
+        and record.disposition_snapshot["schema_version"] == "2.0"
+    ):
+        raise ReviewInputError(
+            "paged snapshot cannot downgrade without a qualified writer"
+        )
+    root = {
+        "schema_version": "2.0" if paged else "1.0",
+        "result_digest": transaction.result_sha256,
+    }
     capacity = (
         disposition_snapshot_capacity(record)
         - len(canonical_bytes({**root, "state_manifest": {}}))
@@ -4190,20 +4256,41 @@ def stage_session_dispositions(
     )
     if capacity <= 0:
         raise ReviewInputError("disposition snapshot has no future root capacity")
-    manifest = stage(
-        identity,
-        binding=binding,
-        document=document,
-        item_count=len(values),
-        max_manifest_bytes=capacity,
-    )
+    from .disposition_snapshot import stage_paged_snapshot
+
+    if paged:
+        manifest = stage_paged_snapshot(
+            ledger,
+            record,
+            values,
+            binding=binding,
+            identity=identity,
+            max_manifest_bytes=capacity,
+        )
+    else:
+        # Existing adapters retain the qualified single-document writer until
+        # they can preflight and authenticate an entire page/index/root batch.
+        manifest = stage(
+            identity,
+            binding=binding,
+            document={
+                "schema_version": "1.0",
+                "result_digest": transaction.result_sha256,
+                "dispositions": list(values),
+            },
+            item_count=len(values),
+            max_manifest_bytes=capacity,
+        )
     updated = record.evolve(
         now=now,
         generation=record.generation + 1,
         dispositions=(),
         disposition_snapshot={**root, "state_manifest": manifest},
     )
-    if read_session_dispositions(ledger, updated) != values:
+    # A batch authenticates the complete inventory once, after every write and
+    # before returning. Re-reading it here would require a second unplanned
+    # physical traversal, especially on Windows where inode caching is disabled.
+    if not paged and read_session_dispositions(ledger, updated) != values:
         raise ReviewInputError("disposition snapshot readback differs")
     return updated
 
@@ -4480,28 +4567,43 @@ def _tail_attempt_scope(
 
 
 def _tail_part_ids(
-    record: SessionRecord, *, history_ids: tuple[str, ...] = ()
+    record: SessionRecord,
+    *,
+    history_ids: tuple[str, ...] = (),
+    disposition_page_ids: tuple[str, ...] | None = None,
 ) -> tuple[str, ...]:
-    manifests = []
+    # This order must match baseline, dispositions, then assessment-queue reads.
+    ids: list[str] = []
+
+    def append_manifest(value: object) -> None:
+        if isinstance(value, dict) and value.get("encoding") == PARTITION_ENCODING:
+            manifest = validate_manifest(value)
+            ids.extend(
+                ref["storage_id"]
+                for ref in cast(list[dict[str, Any]], manifest["parts"])
+            )
+
     history = record.convergence_history
     baseline = history.get("baseline") if isinstance(history, Mapping) else None
-    if isinstance(baseline, dict) and baseline.get("encoding") == PARTITION_ENCODING:
-        manifests.append(validate_manifest(baseline))
+    append_manifest(baseline)
+    root = record.disposition_snapshot
+    if root is not None:
+        manifest = cast(dict[str, Any], root["state_manifest"])
+        append_manifest(manifest)
+        if root["schema_version"] == "2.0":
+            if disposition_page_ids is None:
+                if manifest["encoding"] != INLINE_ENCODING:
+                    raise ReviewInputError(
+                        "disposition page plan needs authenticated inventory"
+                    )
+                document = read_inline_evidence(
+                    manifest, expected_binding=manifest["binding"]
+                )
+                disposition_page_ids = _page_storage_ids(root, document)
+            ids.extend(disposition_page_ids)
     if record.assessment_queue is not None:
-        state_manifest = record.assessment_queue["state_manifest"]
-        if (
-            isinstance(state_manifest, dict)
-            and state_manifest.get("encoding") == PARTITION_ENCODING
-        ):
-            manifests.append(validate_manifest(state_manifest))
-    return (
-        tuple(
-            ref["storage_id"]
-            for manifest in manifests
-            for ref in cast(list[dict[str, Any]], manifest["parts"])
-        )
-        + history_ids
-    )
+        append_manifest(record.assessment_queue["state_manifest"])
+    return (*ids, *history_ids)
 
 
 def _tail_record_shape(record: SessionRecord) -> bytes:
@@ -4579,6 +4681,8 @@ def _tail_plan_scope(
     grant_sha256: str | None = None,
     old_history_ids: tuple[str, ...] = (),
     new_history_ids: tuple[str, ...] = (),
+    old_disposition_page_ids: tuple[str, ...] | None = None,
+    new_disposition_page_ids: tuple[str, ...] | None = None,
 ) -> str:
     return hashlib.sha256(
         canonical_bytes(
@@ -4586,8 +4690,16 @@ def _tail_plan_scope(
                 "adapter": adapter,
                 "current_root": before.record_sha256,
                 "draft_shape": hashlib.sha256(_tail_record_shape(draft)).hexdigest(),
-                "old_parts": _tail_part_ids(before, history_ids=old_history_ids),
-                "new_parts": _tail_part_ids(draft, history_ids=new_history_ids),
+                "old_parts": _tail_part_ids(
+                    before,
+                    history_ids=old_history_ids,
+                    disposition_page_ids=old_disposition_page_ids,
+                ),
+                "new_parts": _tail_part_ids(
+                    draft,
+                    history_ids=new_history_ids,
+                    disposition_page_ids=new_disposition_page_ids,
+                ),
                 "operation": dict(operation),
                 "original_deadline_ms": budget.wall_deadline_ms,
                 "scan_pages": scan_pages,
@@ -4889,6 +5001,7 @@ class LocalSessionLedger:
             cached is not None
             # Windows Python 3.11 exposes creation time as st_ctime. It cannot
             # authenticate a cache hit after a same-size edit restoring mtime.
+            and os.name != "nt"
             and sys.platform != "win32"
             and self._activation_ticket is None
             and not self._tail_preparing
@@ -4914,7 +5027,21 @@ class LocalSessionLedger:
             # authenticate the current inode through the ordinary cold path.
             del self._part_documents[key]
         self._dispatch_evidence(f"part:{storage_id}:resolve")
-        path = self._part_directory(identity, storage_id=storage_id) / storage_id
+        # The opt-in snapshot batch combines resolution and containment in
+        # _part_directory's one bounded filesystem inspection. Ordinary reads
+        # and sealed tails retain their existing three dispatches and liability.
+        path = (
+            self._part_directory(
+                identity,
+                storage_id=storage_id,
+                inspection_charged=(
+                    self.enable_disposition_snapshot_writes
+                    and self._activation_ticket is None
+                    and not self._tail_preparing
+                ),
+            )
+            / storage_id
+        )
         self._dispatch_evidence(f"part:{storage_id}:read")
         if path.is_symlink():
             raise ReviewInputError("local partition must not be a symlink")
@@ -4932,7 +5059,7 @@ class LocalSessionLedger:
             # on Windows: every read still authenticates the complete bytes.
             same_file = (
                 after[:-1] == current[:-1]
-                if sys.platform == "win32"
+                if os.name == "nt" or sys.platform == "win32"
                 else after == current
             )
             if (
@@ -4981,6 +5108,211 @@ class LocalSessionLedger:
             budget=self.evidence_budget,
         )
 
+    def _retained_evidence_parts(
+        self, identity: SessionIdentity
+    ) -> tuple[Path, dict[str, int]]:
+        directory = self._part_directory(identity)
+        self._reserve_local_io(2)  # directory creation and bounded enumeration
+        directory.mkdir(parents=True, exist_ok=True)
+        sizes: dict[str, int] = {}
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                self.evidence_budget.consume()  # metadata/stat per retained entry
+                if (
+                    len(sizes) >= MAX_STORED_PARTS
+                    or entry.is_symlink()
+                    or not entry.is_file()
+                    or not re.fullmatch(
+                        r"(?:[a-f0-9]{64}|\.staging-[A-Za-z0-9_-]{1,64})", entry.name
+                    )
+                ):
+                    raise ReviewInputError(
+                        "partition retention scan exceeded finite bounds"
+                    )
+                sizes[entry.name] = entry.stat().st_size
+        if sum(sizes.values()) > MAX_STORED_PART_BYTES:
+            raise ReviewInputError("partition retention byte capacity exceeded")
+        return directory, sizes
+
+    def _write_evidence_part(
+        self, directory: Path, sizes: dict[str, int], part: dict[str, object]
+    ) -> str:
+        raw = canonical_bytes(part)
+        storage_id = hashlib.sha256(raw).hexdigest()
+        if storage_id not in sizes:
+            if (
+                len(sizes) >= MAX_STORED_PARTS
+                or sum(sizes.values()) + len(raw) > MAX_STORED_PART_BYTES
+            ):
+                raise ReviewInputError("partition retention capacity exceeded")
+            # One durable immutable write includes temp write, mandatory
+            # sync and cleanup. Charge before any physical write.
+            self._reserve_local_io(1)
+            path = directory / storage_id
+            # Install a complete fsynced inode atomically without replacing
+            # an existing immutable object. A crash leaves only .staging
+            # debris charged to retention, never referenced as authority.
+            temporary = tempfile.NamedTemporaryFile(
+                dir=directory, prefix=".staging-", delete=False
+            )
+            try:
+                temporary.write(raw)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                temporary.close()
+                self.evidence_budget.check()
+                try:
+                    os.link(temporary.name, path)
+                except FileExistsError:
+                    pass
+                if os.name != "nt":
+                    fd = os.open(directory, os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+            finally:
+                temporary.close()
+                os.unlink(temporary.name)
+            sizes[storage_id] = len(raw)
+        return storage_id
+
+    @property
+    def supports_paged_disposition_snapshot_writes(self) -> bool:
+        # Reader-first rollout: the batch implementation is exercised explicitly
+        # in qualification, while existing callers retain their v1 writer until
+        # complete platform/lifecycle qualification authorizes paged activation.
+        return False
+
+    def stage_disposition_snapshot_batch(
+        self,
+        identity: SessionIdentity,
+        *,
+        record: SessionRecord,
+        binding: dict[str, object],
+        pages: Sequence[Mapping[str, Any]],
+        values: tuple[Mapping[str, object], ...],
+        result_digest: str,
+        max_manifest_bytes: int,
+    ) -> dict[str, object]:
+        """Stage one preflighted local batch, then authenticate its whole graph.
+
+        Content hashes fix every local reference before physical writes. One
+        retention census includes unknown/staging debris; one shared budget
+        covers all immutable writes, a cold full readback on every platform,
+        and the existing sixteen-call root/CAS tail. No receipt discounts old
+        charges and no earlier immutable evidence is removed.
+        """
+        from .disposition_snapshot import (
+            prepare_local_paged_snapshot,
+            read_paged_snapshot,
+        )
+
+        if not self.enable_disposition_snapshot_writes:
+            raise ReviewInputError("disposition snapshot writer is disabled")
+        if (
+            binding.get("repository") != identity.repository
+            or binding.get("pull_request") != identity.pull_request
+            or binding.get("repository_id") != identity.repository_id
+            or binding.get("producer") != self.evidence_producer()
+            or binding.get("purpose") != "dispositions"
+        ):
+            raise ReviewInputError("local disposition batch binding does not match")
+        prepared = prepare_local_paged_snapshot(
+            binding=binding,
+            pages=pages,
+            values=values,
+            result_digest=result_digest,
+            max_manifest_bytes=max_manifest_bytes,
+        )
+        root = {
+            "schema_version": "2.0",
+            "result_digest": result_digest,
+            "state_manifest": prepared.manifest,
+        }
+        cache = getattr(self, "_disposition_page_cache", {})
+        cache_key = hashlib.sha256(canonical_bytes(root)).hexdigest()
+        if not isinstance(cache, dict) or (
+            cache_key not in cache and len(cache) >= MAX_PART_READS
+        ):
+            raise ReviewInputError("disposition page proof cache exceeds finite bound")
+        future = record.evolve(
+            generation=cast(int, binding["generation"]),
+            dispositions=(),
+            disposition_snapshot=root,
+        )
+        if not self._tail_preparing:
+            _history_legacy_write_guard(self, record)
+        history_ids = _history_extra_ids(self, record)
+        page_ids = tuple(
+            ref["storage_id"]
+            for manifest in prepared.read_manifests[:-1]
+            if manifest["encoding"] == PARTITION_ENCODING
+            for ref in manifest["parts"]
+        )
+        activation_ids = _tail_part_ids(
+            future, history_ids=history_ids, disposition_page_ids=page_ids
+        )
+        # The complete index/root capacity is now fixed. Discovery cannot leave
+        # new immutable parts, even if a bounded census or funding check fails.
+        directory, sizes = self._retained_evidence_parts(identity)
+        missing = {
+            key: part for key, part in prepared.parts.items() if key not in sizes
+        }
+        if (
+            len(sizes) + len(missing) > MAX_STORED_PARTS
+            or sum(sizes.values())
+            + sum(len(canonical_bytes(part)) for part in missing.values())
+            > MAX_STORED_PART_BYTES
+        ):
+            raise ReviewInputError(
+                "partition whole retention capacity exceeded before staging"
+            )
+        read_parts = sum(
+            len(manifest["parts"])
+            for manifest in prepared.read_manifests
+            if manifest["encoding"] == PARTITION_ENCODING
+        )
+        # Local replace independently revalidates the graph before activation.
+        # Include that traversal plus its root control work, with cold Windows
+        # reads; the existing minimum also reserves other bounded root work.
+        cold_read_calls = 3 if self._tail_preparing else 2
+        activation_reads = sum(
+            cold_read_calls
+            if os.name == "nt"
+            or sys.platform == "win32"
+            or self._tail_preparing
+            or (
+                (identity, part_id) not in self._part_documents
+                and part_id not in prepared.parts
+            )
+            else 1
+            for part_id in activation_ids
+        )
+        tail_calls = max(16, activation_reads + 6)
+        self.evidence_budget.preflight(
+            len(missing) + cold_read_calls * read_parts + tail_calls
+        )
+        for part in prepared.parts.values():
+            self._write_evidence_part(directory, sizes, part)
+        document = self.read_evidence(
+            identity, prepared.manifest, expected_binding=binding
+        )
+        restored = read_paged_snapshot(
+            document,
+            root={
+                "schema_version": "2.0",
+                "result_digest": result_digest,
+                "state_manifest": prepared.manifest,
+            },
+            reader=self.read_evidence,
+            identity=identity,
+        )
+        if restored != values:
+            raise ReviewInputError("disposition snapshot readback differs")
+        _remember_disposition_pages(self, root, document)
+        return prepared.manifest
+
     def stage_evidence(
         self,
         identity: SessionIdentity,
@@ -5004,27 +5336,7 @@ class LocalSessionLedger:
             or binding.get("producer") != self.evidence_producer()
         ):
             raise ReviewInputError("local partition binding does not match")
-        directory = self._part_directory(identity)
-        self._reserve_local_io(2)  # directory creation and bounded enumeration
-        directory.mkdir(parents=True, exist_ok=True)
-        sizes: dict[str, int] = {}
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                self.evidence_budget.consume()  # metadata/stat per retained entry
-                if (
-                    len(sizes) >= MAX_STORED_PARTS
-                    or entry.is_symlink()
-                    or not entry.is_file()
-                    or not re.fullmatch(
-                        r"(?:[a-f0-9]{64}|\.staging-[A-Za-z0-9_-]{1,64})", entry.name
-                    )
-                ):
-                    raise ReviewInputError(
-                        "partition retention scan exceeded finite bounds"
-                    )
-                sizes[entry.name] = entry.stat().st_size
-        if sum(sizes.values()) > MAX_STORED_PART_BYTES:
-            raise ReviewInputError("partition retention byte capacity exceeded")
+        directory, sizes = self._retained_evidence_parts(identity)
         prospective_parts = partition_evidence(
             document, binding=binding, item_count=item_count
         )
@@ -5045,53 +5357,12 @@ class LocalSessionLedger:
                 "partition whole retention capacity exceeded before staging"
             )
 
-        def write(part: dict[str, object]) -> str:
-            raw = canonical_bytes(part)
-            storage_id = hashlib.sha256(raw).hexdigest()
-            if storage_id not in sizes:
-                if (
-                    len(sizes) >= MAX_STORED_PARTS
-                    or sum(sizes.values()) + len(raw) > MAX_STORED_PART_BYTES
-                ):
-                    raise ReviewInputError("partition retention capacity exceeded")
-                # One durable immutable write includes temp write, mandatory
-                # sync and cleanup. Charge before any physical write.
-                self._reserve_local_io(1)
-                path = directory / storage_id
-                # Install a complete fsynced inode atomically without replacing
-                # an existing immutable object. A crash leaves only .staging
-                # debris charged to retention, never referenced as authority.
-                temporary = tempfile.NamedTemporaryFile(
-                    dir=directory, prefix=".staging-", delete=False
-                )
-                try:
-                    temporary.write(raw)
-                    temporary.flush()
-                    os.fsync(temporary.fileno())
-                    temporary.close()
-                    self.evidence_budget.check()
-                    try:
-                        os.link(temporary.name, path)
-                    except FileExistsError:
-                        pass
-                    if os.name != "nt":
-                        fd = os.open(directory, os.O_RDONLY)
-                        try:
-                            os.fsync(fd)
-                        finally:
-                            os.close(fd)
-                finally:
-                    temporary.close()
-                    os.unlink(temporary.name)
-                sizes[storage_id] = len(raw)
-            return storage_id
-
         return stage_partitioned_evidence(
             document,
             binding=binding,
             item_count=item_count,
             max_manifest_bytes=max_manifest_bytes,
-            writer=write,
+            writer=lambda part: self._write_evidence_part(directory, sizes, part),
             reader=lambda storage_id: self._read_part(identity, storage_id),
             budget=self.evidence_budget,
             preflight_calls=(len(missing_sizes) + 3 * len(prospective_parts))
@@ -5851,6 +6122,8 @@ class LocalSessionLedger:
                 _history_preserve_sources(self, before, draft)
             old_ids = _history_extra_ids(self, before)
             new_ids = _history_extra_ids(self, draft)
+            old_disposition_ids = _disposition_page_ids(self, before)
+            new_disposition_ids = _disposition_page_ids(self, draft)
             plan_scope = _tail_plan_scope(
                 "local",
                 before,
@@ -5859,10 +6132,14 @@ class LocalSessionLedger:
                 budget=budget,
                 old_history_ids=old_ids,
                 new_history_ids=new_ids,
+                old_disposition_page_ids=old_disposition_ids,
+                new_disposition_page_ids=new_disposition_ids,
             )
             steps = tuple(
                 TailDispatch(f"part:{part_id}:{unit}")
-                for part_id in _tail_part_ids(draft, history_ids=new_ids)
+                for part_id in _tail_part_ids(
+                    draft, history_ids=new_ids, disposition_page_ids=new_disposition_ids
+                )
                 for unit in ("resolve", "directory", "read")
             ) + (
                 TailDispatch("root:reload", fence=True),
@@ -5890,6 +6167,8 @@ class LocalSessionLedger:
                     budget=budget,
                     old_history_ids=old_ids,
                     new_history_ids=new_ids,
+                    old_disposition_page_ids=old_disposition_ids,
+                    new_disposition_page_ids=new_disposition_ids,
                 ),
                 root_sha256=sealed.record_sha256,
             )

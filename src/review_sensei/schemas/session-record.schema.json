@@ -38,7 +38,7 @@
       ],
       "properties": {
         "schema_version": {
-          "const": "1.0"
+          "enum": ["1.0", "2.0"]
         },
         "result_digest": {
           "type": "string",

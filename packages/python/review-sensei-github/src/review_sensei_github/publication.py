@@ -3046,13 +3046,20 @@ class ReviewApprovalFinalizer:
                 status="gate_reevaluation_failed",
                 diagnostic="command_body_capacity_exceeded",
             )
-        from .api_run_plan import COMMAND_UPDATE_CONFIRMATION_REQUESTS
+        from .api_run_plan import (
+            COMMAND_UPDATE_CONFIRMATION_REQUESTS,
+            NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS,
+        )
         from .caller_operation import caller_for_http
 
         caller = caller_for_http(self.http)
         confirmation = nullcontext()
         if caller is not None and new_body != body:
-            capacity = 1 + COMMAND_UPDATE_CONFIRMATION_REQUESTS
+            capacity = 1 + (
+                NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS
+                if eligibility.native_union is not None
+                else COMMAND_UPDATE_CONFIRMATION_REQUESTS
+            )
             caller.budget_view.preflight(capacity)
             confirmation = caller._operation(
                 "command-review-update:"

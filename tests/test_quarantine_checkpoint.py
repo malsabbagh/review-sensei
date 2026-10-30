@@ -216,9 +216,20 @@ class QuarantineCheckpointTests(unittest.TestCase):
 
 class QuarantineCarrierPlanningTests(unittest.TestCase):
     def test_human_wrong_bot_and_foreign_copies_cannot_underfund_public_staging(self):
+        self._exercise_staging(funded=False)
+
+    def test_funded_staging_creates_owned_carriers_instead_of_reusing_copies(self):
+        self._exercise_staging(funded=True)
+
+    def _exercise_staging(self, *, funded):
         import random
         import string
+        from unittest.mock import patch
 
+        from review_sensei_github.api_run_plan import (
+            QUARANTINE_CHECKPOINT_REQUESTS,
+            QUARANTINE_STAGING_REQUESTS,
+        )
         from review_sensei_github.quarantine_creation import _body
 
         from review_sensei.bounded_evidence import partition_evidence
@@ -228,6 +239,7 @@ class QuarantineCarrierPlanningTests(unittest.TestCase):
                 fixture = JourneyFixture(directory)
                 old, registration = fixture.original_origins()
                 observed = []
+                required_bodies = []
 
                 def after_bootstrap(run):
                     ledger, identity = run.ledger, run.identity
@@ -248,6 +260,7 @@ class QuarantineCarrierPlanningTests(unittest.TestCase):
                     }
                     parts = partition_evidence(document, binding=binding, item_count=1)
                     self.assertGreaterEqual(len(parts), 3)
+                    required_bodies.extend(_body(part) for part in parts)
                     for number, part in enumerate(parts):
                         identifier = 9_000_000 + number
                         fixture.extra_comments[identifier] = {
@@ -267,6 +280,16 @@ class QuarantineCarrierPlanningTests(unittest.TestCase):
                     start = len(fixture.trace)
 
                     def mutate(current):
+                        remaining = (
+                            ledger._quarantine_checkpoint_snapshot.operation.remaining
+                        )
+                        # Exercise both finite windows. A constrained late
+                        # checkpoint cannot fund all parts; the current ordinary
+                        # window can fund newly owned carriers.
+                        if funded:
+                            self.assertGreaterEqual(remaining, 2 * len(parts) + 5)
+                        else:
+                            self.assertLess(remaining, 2 * len(parts) + 5)
                         ledger.stage_evidence(
                             identity,
                             binding=binding,
@@ -277,7 +300,13 @@ class QuarantineCarrierPlanningTests(unittest.TestCase):
                         return current.evolve(generation=current.generation + 1)
 
                     try:
-                        ledger.replace(identity, mutate)
+                        with patch(
+                            "review_sensei_github.api_run_plan.QUARANTINE_STAGING_REQUESTS",
+                            QUARANTINE_STAGING_REQUESTS
+                            if funded
+                            else QUARANTINE_CHECKPOINT_REQUESTS - 1,
+                        ):
+                            ledger.replace(identity, mutate)
                     finally:
                         observed.extend(fixture.trace[start:])
 
@@ -286,15 +315,35 @@ class QuarantineCarrierPlanningTests(unittest.TestCase):
                     fixture.after_action_bootstrap = after_bootstrap
                     fixture.quarantine_predecessor_comment_id = None
                     fixture.select_command("@reviewsensei verify", new_run=True)
-                    self.assertEqual(fixture.invoke_command(), 1)
-                self.assertTrue(observed)
-                self.assertFalse(
-                    any(
-                        method == "POST" and path.endswith("/issues/7/comments")
-                        for _, method, path in observed
+                    expected_success = funded and case != "association"
+                    self.assertEqual(
+                        fixture.invoke_command(),
+                        0 if expected_success else 1,
+                        fixture.error,
                     )
+                self.assertTrue(observed)
+                writes = sum(
+                    method == "POST" and path.endswith("/issues/7/comments")
+                    for _, method, path in observed
                 )
-                if case != "association":
+                self.assertEqual(
+                    writes, len(required_bodies) if expected_success else 0
+                )
+                if expected_success:
+                    created = [
+                        item
+                        for identifier, item in fixture.extra_comments.items()
+                        if identifier < 9_000_000
+                        and item.get("body") in required_bodies
+                    ]
+                    self.assertEqual(len(created), len(required_bodies))
+                    self.assertTrue(
+                        all(
+                            item["user"]["type"] == "Bot" and item["user"]["id"] == 999
+                            for item in created
+                        )
+                    )
+                if not funded and case != "association":
                     self.assertIn(
                         "staging and root confirmation are unfunded", fixture.error
                     )
