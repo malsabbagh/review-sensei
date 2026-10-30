@@ -53,7 +53,8 @@
     "coverage_floor": "python -m coverage report --precision=2 --show-missing --fail-under=80",
     "build_hosted": "python -m build --outdir dist/github packages/python/review-sensei-github",
     "install_hosted_wheel": "python -m pip install dist/github/*.whl",
-    "core_only_smoke": "python -I -m review_sensei --help"
+    "core_only_smoke": "python -I -m review_sensei --help",
+    "assert_no_hosted": "python -I -c \"import importlib.util; assert importlib.util.find_spec('review_sensei_github') is None\""
   },
   "lanes": {
     "dist_safe": {

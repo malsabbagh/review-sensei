@@ -247,6 +247,7 @@ jobs:
               assert importlib.resources.files("review_sensei").joinpath("schemas", name).is_file()
           PY
           "$wheel_venv/bin/python" -I -m review_sensei --help
+          "$wheel_venv/bin/python" -I -c "import importlib.util; assert importlib.util.find_spec('review_sensei_github') is None"
           "$wheel_venv/bin/python" - <<'PY'
           import subprocess
           import sys
