@@ -1250,3 +1250,10 @@ reopening proof, numeric capacity certification and activation remain unfinished
 See the proposed [ADR 0119](adr/0119-high-signal-review-verdict.md).
 
 Never execute inactive selection.
+
+
+Hosted commands use ordinary module imports with explicit compatibility re-exports.
+Their finite existing engine CLI helper dependency is qualified at invocation time,
+so late patches and local GitHub constructor lookup remain effective. Both command
+modules receive normal Ruff/mypy checks; the engine still never imports the hosted
+runtime and no new public core helper API is created (ADR 0078).

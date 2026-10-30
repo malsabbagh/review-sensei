@@ -70,12 +70,13 @@ engine, and the Worker keeps its existing schema path.
 `hosted.py` planning stays in the engine as library code. Only the
 `host-plan` command moves.
 
-The command implementations live in `command_bodies.py` and are executed by
-`commands.py`, with missing names read from `review_sensei.cli` at call time.
-That lets the hosted commands share engine helpers and see tests' patches
-without the engine importing the hosted package. The file is outside mypy and
-ruff's undefined-name check. Those private names are a maintainability
-boundary, not a second runtime.
+The command implementations live in the normally imported `command_bodies.py`;
+`commands.py` explicitly re-exports the existing command names. Finite engine CLI
+helpers and late-bound callables are qualified through `review_sensei.cli` at
+invocation time, preserving existing patches without an engine-to-hosted import.
+Both command modules participate in ordinary Ruff and mypy checking. The existing
+private helper dependency remains a maintainability boundary, not a new public
+core API or a second runtime.
 
 ### Review seam
 
@@ -138,3 +139,30 @@ schema import path, release metadata, and the import boundary test.
 Out of scope: changing the Worker protocol, renaming
 `review-sensei-run.yml`, moving `v5` in this change, and registering the PyPI
 project or Trusted Publisher. Those remain operator steps.
+
+
+## Amendment: ordinary typed command imports (2026-10-30, proposed)
+
+Remove command-source reading, `exec`/`compile`, the missing-global dictionary and
+unchecked callable casts. `command_bodies.py` imports standard/core types normally;
+`commands.py` re-exports the same ten entrypoints. Hosted package version resolution
+moves unchanged into the implementation module to avoid a circular import. Runtime
+GitHub constructors stay local imports so the established export-patching seam works.
+
+The finite CLI dependency is explicit: stage binding, provider registry, host outcome
+emission, configuration/inference resolution, bounded context loading and exit codes;
+plus the existing custom-endpoint/work-recovery parser helpers, configured budget,
+Ollama defaults, positive-number parser, offline errors and live-profile gates.
+`ReviewService` construction remains a late engine-CLI lookup. This creates no new
+public core helper API. Internal TypedDicts describe existing provider-run and
+checkpoint keywords; the two hook forwarding signatures propagate those annotations
+without changing execution, admission, recovery or accounting behavior.
+
+Only the loader-specific F821/F401 and mypy exclusions are removed. No blanket
+replacement ignores, Any/callable casts, service locator or helper registry is added.
+Validation retains CLI grammar/defaults/prog/version/exits, retirement refusals,
+late patches, broker diagnostics, lifecycle recovery and the engine-only package
+boundary. A self-contained installed-wheel contract proves normal imports,
+entrypoint identity, version behavior and invocation-time helper patches. Rollback
+would restore the loader and its old exclusions together; no persisted protocol or
+schema migration is involved.

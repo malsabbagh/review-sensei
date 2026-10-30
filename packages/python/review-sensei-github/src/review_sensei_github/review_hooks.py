@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from typing import Unpack
 
 from review_sensei.errors import ReviewInputError
+from review_sensei.models import ReviewRequest
+from review_sensei.service import ReviewService
 from review_sensei.session import SessionLedger
+from review_sensei_github.command_bodies import _HostedProviderOptions
 from review_sensei_github.commands import report_broker_failure, run_hosted_provider
 
 
@@ -25,7 +29,10 @@ class GitHubReviewHooks:
         )
 
     def run_provider(
-        self, service: object, request: object, **kwargs: object
+        self,
+        service: ReviewService,
+        request: ReviewRequest,
+        **kwargs: Unpack[_HostedProviderOptions],
     ) -> object:
         return run_hosted_provider(service, request, **kwargs)
 
