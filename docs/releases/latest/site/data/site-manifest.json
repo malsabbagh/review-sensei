@@ -1,9 +1,9 @@
 {
   "schema_version": "1.0",
-  "last_updated": "2026-10-29",
+  "last_updated": "2026-10-30",
   "release_facts": {
-    "version": "0.8.16",
-    "tag": "v0.8.16",
+    "version": "0.8.17",
+    "tag": "v0.8.17",
     "python_package": "review-sensei",
     "npm_launcher": "@reviewsensei/cli",
     "npm_platform_packages": [
