@@ -220,7 +220,13 @@ class CallerRunnerInputContractTests(unittest.TestCase):
         }
         self.assertEqual(
             runner_inputs,
-            invocation_inputs | {"hosted_runner", "quarantine_predecessor_comment_id"},
+            invocation_inputs
+            | {
+                "hosted_runner",
+                "quarantine_predecessor_comment_id",
+                "controlled_restart_id",
+                "controlled_restart_directory",
+            },
         )
         # The optional label changes hosted infrastructure only. Callers cannot
         # restate inference or policy, and generated callers retain the default.

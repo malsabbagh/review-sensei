@@ -70,6 +70,8 @@ class WorkflowValidationTests(unittest.TestCase):
                 "mode",
                 "operation",
                 "quarantine_predecessor_comment_id",
+                "controlled_restart_id",
+                "controlled_restart_directory",
                 "recover_publication",
                 "recovery_policy_commit",
                 "recovery_expected_head",
