@@ -34,6 +34,7 @@ SCHEMA_NAMES = (
     "eligibility-v5",
     "conversation-reply",
     "review-result",
+    "review-verdict",
     "human-file-review",
     "human-file-receipt",
     "human-file-review-group",

@@ -300,7 +300,9 @@ class ReviewRun:
         if args.diff is None:
             raise ReviewInputError("successor requires the exact original diff")
         diff = read_bounded_utf8(args.diff, maximum=1_048_576, label="original diff")
-        policy = resolve_review_convergence_policy(mode=args.review_mode)
+        policy = resolve_review_convergence_policy(
+            mode=args.review_mode, quality=self.plan.policy.review_quality
+        )
         contexts = reconstruct_publication_contexts(
             source_root=Path.cwd(),
             diff=diff,

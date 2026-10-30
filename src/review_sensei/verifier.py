@@ -296,8 +296,14 @@ class VerificationResult:
     actionable: bool
     supported_premises: tuple[str, ...] = field(default=(), compare=False)
     contrary_evidence: bool = field(default=False, compare=False)
+    # Host-derived execution fact, recomputed from the reviewed snapshot.
+    # Rejection of a disproved claim is distinct from unavailable evidence.
+    # This is not accepted from candidate/model output or serialized artifacts.
+    evaluation_complete: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.evaluation_complete) is not bool:
+            raise ReviewInputError("verification completion is invalid")
         if self.disposition not in DISPOSITIONS:
             raise ReviewInputError("verification disposition is unsupported")
 
@@ -1826,19 +1832,23 @@ def _verify_candidate_evidence(
 ) -> VerificationResult:
     reasons: list[str] = []
     evidence_valid = True
+    evaluation_complete = True
     for reference in candidate.evidence:
         if reference.snapshot_sha256 != reviewed_snapshot_sha256:
             evidence_valid = False
+            evaluation_complete = False
             reasons.append("evidence snapshot does not match reviewed snapshot")
             continue
         snapshot_content = snapshot.get(reference.path)
         if snapshot_content is None:
             evidence_valid = False
+            evaluation_complete = False
             reasons.append("evidence path is absent from reviewed snapshot")
             continue
         lines = _snapshot_lines(snapshot_content)
         if reference.line < 1 or reference.line > len(lines):
             evidence_valid = False
+            evaluation_complete = False
             reasons.append("evidence line is outside reviewed snapshot")
             continue
         if (
@@ -1856,11 +1866,21 @@ def _verify_candidate_evidence(
         reasons.append("candidate lacks actionable triggering conditions")
     if not evidence_valid:
         return VerificationResult(
-            "rejected", tuple(dict.fromkeys(reasons)), False, False
+            "rejected",
+            tuple(dict.fromkeys(reasons)),
+            False,
+            False,
+            evaluation_complete=evaluation_complete,
         )
     if not actionable:
+        # CandidateFinding rejects empty causal fields at construction. This
+        # defensive malformed-input path is not completed source disproof.
         return VerificationResult(
-            "insufficient-evidence", tuple(dict.fromkeys(reasons)), True, False
+            "insufficient-evidence",
+            tuple(dict.fromkeys(reasons)),
+            True,
+            False,
+            evaluation_complete=False,
         )
     supported_premises, contrary_evidence = _assess_candidate_premises(
         candidate, snapshot
@@ -1872,6 +1892,7 @@ def _verify_candidate_evidence(
         True,
         supported_premises=supported_premises,
         contrary_evidence=contrary_evidence,
+        evaluation_complete=True,
     )
 
 
@@ -1929,7 +1950,13 @@ def verify_candidates(
         key = _candidate_dedup_key(candidate)
         if key in seen:
             results.append(
-                VerificationResult("rejected", ("duplicate candidate",), False, False)
+                VerificationResult(
+                    "rejected",
+                    ("duplicate candidate",),
+                    False,
+                    False,
+                    evaluation_complete=True,
+                )
             )
             continue
         seen.add(key)
@@ -2236,8 +2263,10 @@ def _with_admission(
     authorized_dispositions: Sequence[object] = (),
     current_head_sha: str | None = None,
 ) -> ReviewResult:
+    from .review_verdict import bind_review_verdict
+
     policy = convergence_policy or ReviewConvergencePolicy()
-    return admit_review_result(
+    admitted = admit_review_result(
         result,
         policy,
         candidates=blocker_candidates if blocker_candidates is not None else derived,
@@ -2251,6 +2280,7 @@ def _with_admission(
         authorized_dispositions=authorized_dispositions,
         current_head_sha=current_head_sha,
     )
+    return bind_review_verdict(admitted, policy=policy)
 
 
 def prepare_publishable_review(
@@ -2287,8 +2317,10 @@ def prepare_publishable_review(
     runs; callers must supply candidates whenever legacy comments are present.
     Rejected, duplicate, malformed, insufficient-evidence, and out-of-diff
     candidates never become findings, and incomplete coverage cannot be a clean
-    review. A confirmed review with no legacy comments, no candidates, and no
-    rejections remains ``complete``. Operator review-convergence modes then
+    review. Under trusted high-signal quality, completed disproof, deduplication,
+    and location filtering do not mark execution incomplete or publish candidate
+    counts; missing or invalid source evidence still does. Other quality modes
+    retain the existing completion rules. Operator review-convergence modes then
     apply trusted blocker admission before a publisher emits events.
     ``blocker_candidates`` must match published comments;
     ``input_blocker_candidates`` must match input candidates.
@@ -2299,11 +2331,9 @@ def prepare_publishable_review(
     if evidence_policy not in EVIDENCE_POLICIES:
         raise ReviewInputError("evidence policy is unsupported")
     policy_for_binding = convergence_policy or ReviewConvergencePolicy()
-    convergence_policy_digest = (
-        policy_for_binding.digest()
-        if isinstance(policy_for_binding, ReviewConvergencePolicy)
-        else None
-    )
+    if not isinstance(policy_for_binding, ReviewConvergencePolicy):
+        raise ReviewInputError("review convergence policy is invalid")
+    convergence_policy_digest = policy_for_binding.digest()
     if evidence_policy == "legacy":
         if input_blocker_candidates is not None:
             raise ReviewInputError(
@@ -2393,6 +2423,7 @@ def prepare_publishable_review(
                     ("location outside reviewed diff",),
                     True,
                     True,
+                    evaluation_complete=True,
                 )
             )
             unpublished_candidates += 1
@@ -2411,14 +2442,25 @@ def prepare_publishable_review(
         final_verifications.append(verification)
     dropped_legacy = len(result.comments) if candidates else 0
     unpublished = unpublished_candidates + dropped_legacy
-    incomplete = unpublished_candidates > 0 or dropped_legacy > 0
+    high_signal = policy_for_binding.quality == "high-signal"
+    incomplete = (
+        any(
+            not verification.evaluation_complete for verification in final_verifications
+        )
+        if high_signal
+        else unpublished_candidates > 0 or dropped_legacy > 0
+    )
     summary = result.summary
     status = result.review_status
     if incomplete:
         status = _downgrade_incomplete_status(status)
-        coverage = _verification_coverage(
-            tuple(final_verifications),
-            dropped_legacy=dropped_legacy,
+        coverage = (
+            "Evidence verification could not complete against the reviewed source."
+            if high_signal
+            else _verification_coverage(
+                tuple(final_verifications),
+                dropped_legacy=dropped_legacy,
+            )
         )
         summary = f"{summary}\n\n{coverage}" if summary else coverage
     prepared = ReviewResult(
@@ -2452,6 +2494,12 @@ def prepare_publishable_review(
         authorized_dispositions=authorized_dispositions,
         current_head_sha=current_head_sha,
     )
+    if result.review_verdict is not None:
+        from .review_verdict import preserve_verified_verdict
+
+        prepared = preserve_verified_verdict(
+            result, prepared, policy=policy_for_binding
+        )
     return PublishableReview(
         prepared,
         tuple(final_verifications),

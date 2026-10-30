@@ -51,9 +51,10 @@ class HostedPolicy:
     artifacts: str
     operation_entry: str
     publication_inventory: str
+    review_quality: str = "current"
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "automatic_reviews": self.automatic_reviews,
             "writes": self.writes,
             "reviews": self.reviews,
@@ -63,6 +64,9 @@ class HostedPolicy:
             "operation_entry": self.operation_entry,
             "publication_inventory": self.publication_inventory,
         }
+        if self.review_quality != "current":
+            value["review_quality"] = self.review_quality
+        return value
 
 
 @dataclass(frozen=True)
@@ -156,6 +160,7 @@ def _hosted_policy(configuration: ProductConfiguration) -> HostedPolicy:
         artifacts=github.artifacts,
         operation_entry=github.operation_entry,
         publication_inventory=github.publication_inventory,
+        review_quality=configuration.review.quality,
     )
 
 

@@ -306,7 +306,9 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             run_id=str(caller.run.run_id),
             run_attempt=str(caller.attempt),
             reviews_policy=run.plan.policy.reviews,
-            convergence_policy=resolve_review_convergence_policy(mode=explicit_mode),
+            convergence_policy=resolve_review_convergence_policy(
+                mode=explicit_mode, quality=run.plan.policy.review_quality
+            ),
         )
     if result.evaluation_failed:
         raise ReviewInputError(

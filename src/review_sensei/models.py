@@ -5,11 +5,12 @@ import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 from urllib.parse import urlsplit
 
 from .coverage import CoverageManifest
 from .errors import ReviewInputError
+from .review_verdict import ReviewVerdict, comment_admission, comment_selection_digest
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
     DEFAULT_TOTAL_WORK_BUDGET,
@@ -19,6 +20,9 @@ from .validation import (
     validate_bounded_text,
     validate_repository_path,
 )
+
+if TYPE_CHECKING:
+    from .publication_selection import PublicationSelectionHandoff
 
 _LEARNING_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -345,10 +349,18 @@ def build_transaction_configuration_context(
 def _validate_policy_context(value: Mapping[str, object]) -> None:
     """Validate the closed convergence-policy identity used for a digest."""
 
-    if set(value) != _TRANSACTION_POLICY_KEYS:
+    if set(value) not in (
+        _TRANSACTION_POLICY_KEYS,
+        _TRANSACTION_POLICY_KEYS | {"quality"},
+    ):
         raise ReviewInputError(
             "review transaction policy must contain the documented identity fields"
         )
+    if "quality" in value:
+        from .configuration import REVIEW_QUALITIES
+
+        if value["quality"] not in REVIEW_QUALITIES:
+            raise ReviewInputError("review transaction policy quality is invalid")
     if value.get("schema_version") != "1.0":
         raise ReviewInputError("review transaction policy schema_version is invalid")
     if value.get("mode") not in _TRANSACTION_POLICY_MODES:
@@ -910,8 +922,9 @@ class ReviewComment:
     ``effective_blocking`` and ``needs_human`` are C2 runtime-only admission
     fields. They are omitted from ``to_dict`` / ``ReviewResult.from_dict`` and
     from the closed v1 ``review-comment`` / ``review-result`` schemas.
-    Reconstructing a result from JSON drops them; ``blocks_approval`` then
-    falls back to the model proposal or legacy severity rule.
+    Legacy JSON reconstruction drops them; ``blocks_approval`` then falls
+    back to the model proposal or legacy severity rule. An optional host-derived
+    review verdict separately binds and restores selected admission facts.
     """
 
     path: str
@@ -1427,8 +1440,35 @@ class ReviewResult:
     # Continuation provenance is separate from the frozen v1 content digest.
     # Its owning service compares the exact current request before reusing work.
     continuation_scope_digest: str | None = None
+    review_verdict: ReviewVerdict | None = None
+    publication_selection: PublicationSelectionHandoff | None = None
 
     def __post_init__(self) -> None:
+        if (
+            self.review_verdict is not None
+            and type(self.review_verdict) is not ReviewVerdict
+        ):
+            raise ReviewInputError("review result verdict is invalid")
+        if self.publication_selection is not None:
+            from .publication_selection import PublicationSelectionHandoff
+
+            if type(self.publication_selection) is not PublicationSelectionHandoff:
+                raise ReviewInputError("review result publication selection is invalid")
+            self.publication_selection.require_result(self)
+        if self.review_verdict is not None:
+            if self.review_verdict.selected_comments_sha256 != comment_selection_digest(
+                self.comments
+            ):
+                raise ReviewInputError("review verdict selected comments conflict")
+            if self.review_verdict.selected_admission != comment_admission(
+                self.comments
+            ):
+                raise ReviewInputError("review verdict selected admission conflicts")
+            if (
+                self.transaction is not None
+                and self.transaction.policy_digest != self.review_verdict.policy_digest
+            ):
+                raise ReviewInputError("review verdict transaction policy conflicts")
         if self.bounded_work_receipt is not None:
             from .remaining_progress import validate_execution_receipt
 
@@ -1615,6 +1655,18 @@ class ReviewResult:
         projection.
         """
 
+        projection_digest = self._content_digest_without_selection()
+        if self.publication_selection is None:
+            return projection_digest
+        value = {
+            "domain": "reviewsensei:review-content:publication-selection:v1",
+            "selected_result_sha256": projection_digest,
+            "publication_selection": self.publication_selection.to_document(),
+        }
+        return hashlib.sha256(_json_compact(value).encode("utf-8")).hexdigest()
+
+    def _content_digest_without_selection(self) -> str:
+        """Pure legacy/verdict projection; never remove a sealed envelope."""
         serialized = self.to_dict()
         missing = set(_CONTENT_DIGEST_REQUIRED_FIELDS) - set(serialized)
         if missing:
@@ -1640,6 +1692,12 @@ class ReviewResult:
                 **value,
                 "domain": "reviewsensei:review-content:bounded-work:v1",
                 "bounded_work_receipt": dict(sorted(self.bounded_work_receipt.items())),
+            }
+        if self.review_verdict is not None:
+            value = {
+                **value,
+                "domain": "reviewsensei:review-content:verdict:v1",
+                "review_verdict": self.review_verdict.to_dict(),
             }
         return hashlib.sha256(_json_compact(value).encode("utf-8")).hexdigest()
 
@@ -1698,6 +1756,10 @@ class ReviewResult:
             value["work_policy_digest"] = work_policy_digest
         if self.continuation_scope_digest is not None:
             value["continuation_scope_digest"] = self.continuation_scope_digest
+        if self.review_verdict is not None:
+            value["review_verdict"] = self.review_verdict.to_dict()
+        if self.publication_selection is not None:
+            value["publication_selection"] = self.publication_selection.to_document()
         if self.transaction is not None:
             value["transaction"] = self.transaction.to_dict()
         return value
@@ -1880,9 +1942,26 @@ class ReviewResult:
             raise ReviewInputError(
                 "review result work_policy_digest must be a SHA-256 digest"
             )
+        verdict = (
+            ReviewVerdict.from_dict(value["review_verdict"])
+            if "review_verdict" in value
+            else None
+        )
+        from .publication_selection import PublicationSelectionHandoff
+
+        selection = (
+            PublicationSelectionHandoff.from_document(value["publication_selection"])
+            if "publication_selection" in value
+            else None
+        )
+        restored_comments = (
+            verdict.restore_comments(tuple(comment_values))
+            if verdict is not None
+            else tuple(comment_values)
+        )
         return cls(
             summary=summary,
-            comments=tuple(comment_values),
+            comments=restored_comments,
             provider=provider,
             model=cast(str | None, model),
             learning_proposals=tuple(parsed_proposals),
@@ -1902,6 +1981,8 @@ class ReviewResult:
             continuation_scope_digest=cast(
                 str | None, value.get("continuation_scope_digest")
             ),
+            review_verdict=verdict,
+            publication_selection=selection,
         )
 
 

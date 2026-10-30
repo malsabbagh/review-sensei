@@ -47,7 +47,8 @@
         "schema_version": {
           "enum": [
             "1",
-            "2"
+            "2",
+            "3"
           ]
         },
         "enabled": {
@@ -69,6 +70,9 @@
             "legacy",
             "confirmed"
           ]
+        },
+        "review_verdict": {
+          "$ref": "https://reviewsensei.dev/schemas/v1/review-verdict.schema.json"
         },
         "has_blocking_findings": {
           "type": "boolean"
@@ -125,7 +129,10 @@
           "if": {
             "properties": {
               "schema_version": {
-                "const": "2"
+                "enum": [
+                  "2",
+                  "3"
+                ]
               }
             }
           },
@@ -162,6 +169,27 @@
               "provider": {
                 "const": "openrouter"
               }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "schema_version": {
+                "const": "3"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "review_verdict"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "review_verdict"
+              ]
             }
           }
         }

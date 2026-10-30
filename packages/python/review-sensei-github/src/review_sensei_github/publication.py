@@ -3216,6 +3216,7 @@ class ReviewApprovalFinalizer:
                 required_fixes=has_blocking,
                 required_decisions=has_human,
                 coverage_uncertainty_accepted=coverage_accepted,
+                review_verdict=adjusted.facts.review_verdict,
             )
             if check_token or check_token_provider is not None
             else None
@@ -4009,6 +4010,7 @@ class ReviewApprovalFinalizer:
                             review_status=eligibility.facts.review_status,
                             required_fixes=has_open_fixes,
                             required_decisions=has_open_decisions,
+                            review_verdict=eligibility.facts.review_verdict,
                         ),
                     )
                     check_confirmed = (
@@ -5159,6 +5161,14 @@ class ReviewPublisher:
         allow_human_inventory_start: bool = False,
         narrative_archive: Callable[[], ConfirmedNarrativeArchive] | None = None,
     ) -> PublicationResult:
+        if not isinstance(result, ReviewResult):
+            raise GitHubPublicationError(
+                "review publication requires a validated result"
+            )
+        if result.publication_selection is not None:
+            raise ReviewInputError(
+                "publication selection is inactive; native revision protocol required"
+            )
         self._carried_context = dict(
             token=token,
             repository=repository,
