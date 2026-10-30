@@ -48,6 +48,9 @@ REGISTRY_ONLY_WORKFLOWS = frozenset(
         # Explicit isolated quarantine intent; the four exact installation lanes
         # retain their registry-only core and source-owned adapter contracts.
         "9b1d9c66ece39c17fe393ec7b634ba5408ceafabc38f39451f3e8e5bacb867a9",
+        # Controlled restart invocation; all four core installers retain
+        # the independently reviewed registry-only installation contract.
+        "27c3041eda29f4ac49240f00de0049b17a94654a9aada7e00d2c0efe3e806ab4",
     }
 )
 
