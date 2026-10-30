@@ -141,4 +141,6 @@ include tests/test_quarantine_published_tail_isolation.py
 include tests/test_quarantine_published_tail_journey.py
 include tests/quarantine_published_tail_exposure.py
 include tests/quarantine_inline_exposure.py
+include tests/test_controlled_restart.py
+include tests/test_controlled_restart_journeys.py
 global-exclude *.py[cod]

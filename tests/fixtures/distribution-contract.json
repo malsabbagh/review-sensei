@@ -170,7 +170,9 @@
         "tests/test_quarantine_published_tail_journey.py",
         "tests/quarantine_published_tail_exposure.py",
         "tests/quarantine_inline_exposure.py",
-        "tests/test_quarantine_rollover.py"
+        "tests/test_quarantine_rollover.py",
+        "tests/test_controlled_restart.py",
+        "tests/test_controlled_restart_journeys.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },
