@@ -137,6 +137,26 @@ class DistributionLaneTests(unittest.TestCase):
                 ]
                 self.assertEqual(normalised, canonical)
 
+    def test_core_only_negative_boundary_precedes_hosted_installation(self):
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        canonical = shlex.split(CONTRACT["supported_command"]["assert_no_hosted"])
+        commands = [
+            shlex.split(line.strip())
+            for line in ci.replace("\\\n", " ").splitlines()
+            if line.strip().startswith('"$wheel_venv/bin/python"')
+        ]
+        negative = next(
+            index
+            for index, command in enumerate(commands)
+            if ["python", *command[1:]] == canonical
+        )
+        hosted_install = next(
+            index
+            for index, command in enumerate(commands)
+            if any("dist/github/" in argument for argument in command)
+        )
+        self.assertLess(negative, hosted_install)
+
     def test_installed_launcher_qualification_is_required_after_bare_wheel_checks(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         lane = CONTRACT["lanes"]["launcher_qualification"]

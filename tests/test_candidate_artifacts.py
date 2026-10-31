@@ -493,7 +493,7 @@ class CandidateWorkflowTests(unittest.TestCase):
             workflow.count("bash scripts/build_linux_standalone_in_container.sh"), 1
         )
         self.assertIn("python-version: '3.11.9'", workflow)
-        self.assertIn('--report "$RUNNER_TEMP/frozen-crypto.json"', workflow)
+        self.assertIn('--report "$RUNNER_TEMP/engine-boundary.json"', workflow)
         extra = workflow.split("  native-candidate:\n", 1)[1].split(
             "  candidate-npm:\n", 1
         )[0]

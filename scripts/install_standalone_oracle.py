@@ -1,4 +1,4 @@
-"""Install the native-build oracle, isolating Intel cryptography's OpenSSL."""
+"""Install the provider-neutral core used as the native-build oracle."""
 
 from __future__ import annotations
 
@@ -40,30 +40,6 @@ def install_oracle(
         "--disable-pip-version-check",
     ]
     try:
-        if target == "darwin-x64":
-            prefix = run(
-                ["brew", "--prefix", "openssl@3"],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=env,
-            ).stdout.strip()
-            openssl = Path(prefix)
-            if not openssl.is_absolute() or not all(
-                (openssl / "lib" / name).is_file()
-                for name in ("libssl.a", "libcrypto.a")
-            ):
-                raise OracleInstallError(
-                    "Intel OpenSSL static archives are unavailable"
-                )
-            # x86_64 macOS wheels stopped at cryptography 48. Building against
-            # Homebrew's shared OpenSSL lets PyInstaller's basename collection
-            # collide with Python's older libssl. Static linkage avoids that
-            # collision while preserving the declared dependency range.
-            env.update(OPENSSL_STATIC="1", OPENSSL_DIR=str(openssl))
-            command.extend(
-                ["--no-cache-dir", "--no-binary", "cryptography", "--force-reinstall"]
-            )
         command.append(".")
         run(command, cwd=root, env=env, check=True)
     except (OSError, subprocess.CalledProcessError) as exc:

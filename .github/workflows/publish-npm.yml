@@ -82,7 +82,7 @@ jobs:
       - name: Build one-folder standalone executable
         if: ${{ !startsWith(matrix.target, 'linux-') }}
         run: python scripts/build_standalone.py --target "${{ matrix.target }}" --output "dist/standalone/${{ matrix.target }}"
-      - name: Verify frozen Intel cryptography ABI
+      - name: Verify frozen Intel engine package boundary
         if: ${{ matrix.target == 'darwin-x64' }}
         run: python scripts/check_standalone_crypto.py --bundle dist/standalone/darwin-x64/review-sensei
 

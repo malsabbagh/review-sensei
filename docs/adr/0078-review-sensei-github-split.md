@@ -166,3 +166,27 @@ boundary. A self-contained installed-wheel contract proves normal imports,
 entrypoint identity, version behavior and invocation-time helper patches. Rollback
 would restore the loader and its old exclusions together; no persisted protocol or
 schema migration is involved.
+
+
+## Amendment: native core bundle qualification (2026-10-30, proposed)
+
+The standalone oracle installs only the core package on every platform. The old
+Intel Homebrew static-OpenSSL prerequisite and cryptography source-build flags
+belong to the pre-split dependency graph and are removed. The historical
+`check_standalone_crypto.py` command remains, with engine-boundary receipt semantics:
+it requires the actual bundle/executable, scans collected files, and inspects the
+embedded CArchive/PYZ module inventory using pinned PyInstaller tooling. Hosted
+`review_sensei_github` and `cryptography` packages fail qualification; Python's
+ordinary TLS libraries and the trigger compatibility shim remain allowed. Missing
+or malformed inventory fails closed. Inventory item kinds distinguish Python
+modules/scripts from data assets; loose files are checked at the bundle import
+root and `_internal` import root. Data names such as `cryptography.txt` and
+`docs/cryptography/README.txt` do not establish a forbidden package. Unknown
+inventory kinds or a PyInstaller version different from the build pin fail
+qualification.
+
+Intel retains Python 3.11.9, actual native build/parity, candidate archiving and
+installed npm consumer checks. All five native targets remain required. Synthetic
+offline tests prove installer and checker behavior; actual Intel and platform CI
+must qualify the resulting executable. Rollback restores the installer/checker
+and their native check wiring together; no public runtime or schema changes occur.
