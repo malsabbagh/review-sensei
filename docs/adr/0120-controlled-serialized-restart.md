@@ -170,3 +170,8 @@ procedure, and review exact release/launch/archive retention before activation.
 Keep strict publication selection in PR392 and finite capacity accounting in
 PR393 separate. The denied1024-part/1536-comment/64-call census proposal remains
 held. No old review or workflow is replayed as a smoke test.
+
+The inactive publication-source V3 candidate in ADR0115 uses quarantine lineage
+for eventual individual decisions and ordinary review completion. It does not
+activate this retained-run launcher, relax its exact source/base binding, or
+supply a completion path for the earlier deliberately held restart designation.

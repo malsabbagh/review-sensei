@@ -201,6 +201,11 @@ def prepare_quarantine_target(run, authority, command, app, permission):
         ),
         token=run.ledger.token,
     )
+    from .quarantine_native_scope import filter_reviews
+
+    rows = filter_reviews(
+        run.http, rows, repository=run.identity.repository, head_sha=run.head_sha
+    )
     candidates = [
         r
         for r in rows

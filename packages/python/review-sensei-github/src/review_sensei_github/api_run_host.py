@@ -39,8 +39,10 @@ _STARTUP_PREFIX = (
 )
 
 
-def review_startup_plan(job: str) -> StartupPlan:
-    if job not in {"hosted", "local", "command"}:
+def review_startup_plan(job: str, *, quarantine_v3: bool = False) -> StartupPlan:
+    from .quarantine_publication import STARTUP_READ_SLOTS
+
+    if job not in {"hosted", "local", "command"} or type(quarantine_v3) is not bool:
         raise ReviewInputError("review startup job is unsupported")
     return StartupPlan(
         (
@@ -48,6 +50,9 @@ def review_startup_plan(job: str) -> StartupPlan:
                 job,
                 1,
                 _STARTUP_PREFIX
+                # V3: one 14-read publication proof, bounded immutable-tag
+                # revalidation and archive growth; prepaid from the same 512.
+                + (("v3-publication",) * STARTUP_READ_SLOTS if quarantine_v3 else ())
                 + (("source",) if job == "command" else ())
                 # Different-run rollover is the largest supported startup:
                 # initial discovery; old run/jobs twice; native replacement's
@@ -64,6 +69,7 @@ def review_startup_plan(job: str) -> StartupPlan:
                 job,
                 2,
                 _STARTUP_PREFIX
+                + (("v3-publication",) * STARTUP_READ_SLOTS if quarantine_v3 else ())
                 + (("source",) if job == "command" else ())
                 + ("ceased-job",) * 2
                 + ("recovery-lists",) * (4 * MAX_PAGINATION_PAGES)
@@ -100,9 +106,10 @@ class ApiRunReviewHooks:
         oidc_token: str | None = None,
         actions_token: str | None = None,
     ):
-        if not isinstance(
-            ledger, ApiRunSessionLedger
-        ) or ledger.caller.plan != review_startup_plan(ledger.caller.job):
+        if not isinstance(ledger, ApiRunSessionLedger) or ledger.caller.plan not in (
+            review_startup_plan(ledger.caller.job),
+            review_startup_plan(ledger.caller.job, quarantine_v3=True),
+        ):
             raise ReviewInputError(
                 "caller hosted selection requires its native source policy"
             )

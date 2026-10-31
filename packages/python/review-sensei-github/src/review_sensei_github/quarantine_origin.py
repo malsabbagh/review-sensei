@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import weakref
 from dataclasses import dataclass
 
 from review_sensei.api_work import ApiRunAccounting
@@ -80,12 +81,17 @@ def read_predecessor(archive):
     return SessionRecord.from_dict(value)
 
 
-def origin_binding(identity, registration, previous, *, producer, configuration_digest):
+def origin_binding(
+    identity, registration, previous, *, producer, configuration_digest, base_sha=None
+):
+    base_sha = registration["base_sha"] if base_sha is None else base_sha
+    if not isinstance(base_sha, str) or re.fullmatch(r"[a-f0-9]{40}", base_sha) is None:
+        raise ReviewInputError("quarantine origin has no resolved base")
     return {
         "repository": identity.repository,
         "repository_id": identity.repository_id,
         "pull_request": identity.pull_request,
-        "base_sha": registration["base_sha"],
+        "base_sha": base_sha,
         "head_sha": registration["head_sha"],
         "policy_digest": hashlib.sha256(canonical_bytes(registration)).hexdigest(),
         "configuration_digest": configuration_digest,
@@ -116,13 +122,19 @@ def source_binding(record, producer):
     }
 
 
-@dataclass(frozen=True)
+_AUTHENTICATED: weakref.WeakSet[AuthenticatedQuarantine] = weakref.WeakSet()
+
+
+@dataclass(frozen=True, eq=False)
 class AuthenticatedQuarantine:
     record_sha256: str
     lineage_bytes: bytes
     archive_bytes: bytes
     inventories_bytes: bytes
     state_bytes: bytes
+    source_documents_bytes: bytes = b""
+    original_caller: object = None
+    original_identity: object = None
 
     @property
     def lineage(self):
@@ -151,9 +163,12 @@ class AuthenticatedQuarantine:
 
 
 class QuarantineOriginReader:
-    def __init__(self, *, metadata_token, actions_token, current_scope):
+    def __init__(
+        self, *, metadata_token, actions_token, current_scope, policy_commit=None
+    ):
         self.metadata_token, self.actions_token = metadata_token, actions_token
         self.current_scope = current_scope
+        self.policy_commit = policy_commit
         self._authenticated_sources: dict[tuple[str, str], bytes] = {}
 
     def prime_prepared(self, prepared, record, archive):
@@ -164,6 +179,12 @@ class QuarantineOriginReader:
         The ordinary read still verifies every carrier, origin binding and state.
         """
         from .quarantine_creation import require_prepared_sources
+
+        if (
+            prepared.slot.publication_scope is not None
+            and archive.get("publication_scope") != prepared.slot.publication_scope
+        ):
+            raise ReviewInputError("quarantine prepared publication scope changed")
 
         sources = require_prepared_sources(
             prepared, ledger=prepared.ledger, record=record
@@ -277,6 +298,25 @@ class QuarantineOriginReader:
             raise ReviewInputError(
                 "quarantine registered creation workflow source changed"
             )
+        if registration["schema_version"] == "quarantine-published-activation-v3":
+            from .quarantine_publication import authenticate_publication
+
+            proof = authenticate_publication(
+                http=ledger.http,
+                token=self.metadata_token,
+                intent=registration["publication"],
+                source=archive["creation_policy_commit"],
+            )
+            proof.require_before(run.get("created_at"))
+            if (
+                proof.receipt != archive.get("publication_scope")
+                or self.policy_commit != proof.receipt["source_commit"]
+                or self.current_scope.base_sha != proof.receipt["source_commit"]
+                or self.current_scope.head_sha != registration["head_sha"]
+            ):
+                raise ReviewInputError(
+                    "quarantine original publication/live scope conflicts"
+                )
 
     def read(self, ledger, identity, record):
         lineage = normalize_lineage(record.quarantine_lineage)
@@ -294,7 +334,14 @@ class QuarantineOriginReader:
         )
         if (
             not isinstance(archive, dict)
-            or set(archive) != _ARCHIVE_FIELDS
+            or set(archive)
+            != _ARCHIVE_FIELDS
+            | (
+                {"publication_scope"}
+                if registration["schema_version"]
+                == "quarantine-published-activation-v3"
+                else set()
+            )
             or archive["schema_version"]
             != (
                 "quarantine-published-origin-v1"
@@ -341,6 +388,10 @@ class QuarantineOriginReader:
                 previous,
                 producer=ledger.evidence_producer(),
                 configuration_digest=archive["creation_configuration_digest"],
+                base_sha=archive["creation_policy_commit"]
+                if registration["schema_version"]
+                == "quarantine-published-activation-v3"
+                else None,
             )
             or record.created_at != previous.created_at
             or record.expires_at != previous.expires_at
@@ -580,10 +631,20 @@ class QuarantineOriginReader:
                 "quarantine assessment complete state count conflicts"
             )
         pending_assessments(origins, inventories, state, scope=lineage["scope_sha256"])
-        return AuthenticatedQuarantine(
+        from .caller_operation import caller_for_http
+
+        authenticated = AuthenticatedQuarantine(
             record.record_sha256,
             canonical_bytes(lineage),
             canonical_bytes(archive),
             canonical_bytes(inventories),
             canonical_bytes(state),
+            canonical_bytes(sources),
+            caller_for_http(ledger.http),
+            identity,
         )
+        _AUTHENTICATED.add(authenticated)
+        from .quarantine_native_scope import bind_native_scope
+
+        bind_native_scope(ledger, identity, authenticated)
+        return authenticated

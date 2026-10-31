@@ -143,6 +143,9 @@ include tests/test_quarantine_decision_conflict.py
 include tests/test_quarantine_published_tail.py
 include tests/test_quarantine_published_tail_isolation.py
 include tests/test_quarantine_published_tail_journey.py
+include tests/test_quarantine_v3_journey.py
+include tests/test_quarantine_v3_publication.py
+include tests/test_quarantine_v3_check_capacity.py
 include tests/quarantine_published_tail_exposure.py
 include tests/quarantine_inline_exposure.py
 include tests/test_controlled_restart.py

@@ -3408,6 +3408,9 @@ class ReviewApprovalFinalizer:
             items = self._review_pages(
                 token=token, repository=repository, pull_request=pull_request
             )
+            from .quarantine_native_scope import filter_reviews
+
+            items = filter_reviews(self.http, items, repository=repository)
             return [
                 item
                 for item in items
@@ -7308,6 +7311,11 @@ class ReviewPublisher:
             payload = self.http.paginate(path=path, token=token)
         identity_states: set[str] = set()
         result_states: set[str] = set()
+        from .quarantine_native_scope import filter_reviews
+
+        payload = filter_reviews(
+            self.http, payload, repository=repository, head_sha=head_sha
+        )
         for review in payload:
             if not isinstance(review, dict):
                 continue

@@ -41,6 +41,7 @@ def require_registry_successor(before, after):
                     "quarantine-activation-v2",
                     "quarantine-published-activation-v1",
                     "quarantine-published-activation-v2",
+                    "quarantine-published-activation-v3",
                     "quarantine-body-limit-activation-v2",
                 }
                 or any(

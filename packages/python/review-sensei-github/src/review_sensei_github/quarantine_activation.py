@@ -53,9 +53,14 @@ def normalize_registration(value):
     published = isinstance(value, dict) and value.get("schema_version") in {
         "quarantine-published-activation-v1",
         "quarantine-published-activation-v2",
+        "quarantine-published-activation-v3",
     }
+    v3 = (
+        published
+        and value.get("schema_version") == "quarantine-published-activation-v3"
+    )
     if not isinstance(value, dict) or set(value) != (
-        _KEYS | {"published_tail"}
+        _KEYS | {"published_tail"} | ({"publication"} if v3 else set())
         if published
         else _KEYS | {"prepublication"}
         if body_limit
@@ -70,6 +75,7 @@ def normalize_registration(value):
             "quarantine-activation-v2",
             "quarantine-published-activation-v1",
             "quarantine-published-activation-v2",
+            "quarantine-published-activation-v3",
             "quarantine-body-limit-activation-v2",
         }
         or not isinstance(value["repository"], str)
@@ -90,7 +96,11 @@ def normalize_registration(value):
         or any(
             not isinstance(value[k], str)
             or re.fullmatch(r"[a-f0-9]{40}", value[k]) is None
-            for k in ("head_sha", "base_sha", "workflow_blob")
+            for k in (
+                ("head_sha", "workflow_blob")
+                if v3
+                else ("head_sha", "base_sha", "workflow_blob")
+            )
         )
         or any(
             not isinstance(value[k], str)
@@ -99,6 +109,20 @@ def normalize_registration(value):
         )
     ):
         raise ReviewInputError("quarantine activation registration is invalid")
+    if v3:
+        publication = value["publication"]
+        if (
+            value["base_sha"] != "publication-source-v1"
+            or not isinstance(publication, dict)
+            or set(publication) != {"hosted_version", "core_version"}
+            or any(
+                not isinstance(v, str)
+                or re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", v)
+                is None
+                for v in publication.values()
+            )
+        ):
+            raise ReviewInputError("quarantine publication scope intent is invalid")
     if published or body_limit:
         from .quarantine_published_tail import BODY_CONTRACT, normalize_tail_contract
 
@@ -196,15 +220,38 @@ def registered_activation(identity, predecessor_comment_id):
 class CreationSlot:
     """Process-issued, HTTP/identity/run-bound and consumable once before POST."""
 
-    def __init__(self, *, http, identity, run_id, registration, context=None):
+    def __init__(
+        self, *, http, identity, run_id, registration, context=None, publication=None
+    ):
         self._http, self._identity, self._run_id = http, identity, run_id
         self._registration = canonical_bytes(registration)
         self._consumed = False
         self._context = canonical_bytes(context) if context is not None else None
+        self._publication = publication
 
     @property
     def registration(self):
         return json.loads(self._registration)
+
+    @property
+    def publication_scope(self):
+        if self._publication is None:
+            return None
+        if self._context is None:
+            raise ReviewInputError("quarantine publication context is absent")
+        context = json.loads(self._context)
+        return self._publication.require(
+            self._http, self.registration["publication"], context["policy_commit"]
+        )
+
+    @property
+    def base_sha(self):
+        publication = self.publication_scope
+        return (
+            publication["source_commit"]
+            if publication is not None
+            else self.registration["base_sha"]
+        )
 
     def require_process(self, *, http, identity, run_id):
         if (
@@ -225,7 +272,7 @@ class CreationSlot:
         context = json.loads(self._context)
         if context["policy_commit"] != policy_commit:
             raise ReviewInputError("quarantine current policy changed")
-        scope = _authenticate_creation_scope(
+        scope, publication = _authenticate_creation_scope(
             http=http,
             token=token,
             metadata_token=metadata_token,
@@ -239,6 +286,10 @@ class CreationSlot:
         )
         if canonical_bytes(scope) != self._registration:
             raise ReviewInputError("quarantine activation registration changed")
+        if (
+            None if publication is None else publication.receipt
+        ) != self.publication_scope:
+            raise ReviewInputError("quarantine original publication scope changed")
 
     def consume_creation(self, *, http, identity, run_id):
         self.require_process(http=http, identity=identity, run_id=run_id)
@@ -267,6 +318,7 @@ def _authenticate_creation_scope(
     policy/revocation fences remain required by the lifecycle before each effect.
     """
     scope = registered_activation(identity, predecessor_comment_id)
+    v3 = scope["schema_version"] == "quarantine-published-activation-v3"
     sender = event.get("sender") if isinstance(event, dict) else None
     if (
         (scope["repository"], scope["repository_id"], scope["pull_request"])
@@ -290,7 +342,11 @@ def _authenticate_creation_scope(
         or sender.get("type") != "User"
         or type(sender.get("id")) is not int
         or sender["id"] < 1
-        or event.get("inputs") != {name: str(scope[name]) for name in _INPUTS}
+        or event.get("inputs")
+        != {
+            name: str(policy_commit if v3 and name == "base_sha" else scope[name])
+            for name in _INPUTS
+        }
     ):
         raise ReviewInputError(
             "quarantine intent scope or maintainer identity conflicts"
@@ -357,7 +413,18 @@ def _authenticate_creation_scope(
         raise ReviewInputError(
             "quarantine requires current numeric maintainer permission"
         )
-    return scope
+    publication = None
+    if v3:
+        from .quarantine_publication import authenticate_publication
+
+        publication = authenticate_publication(
+            http=http,
+            token=metadata_token,
+            intent=scope["publication"],
+            source=policy_commit,
+        )
+        publication.require_before(run.get("created_at"))
+    return scope, publication
 
 
 def authorize_creation_slot(
@@ -374,7 +441,7 @@ def authorize_creation_slot(
     triggering_actor,
 ):
     """Issue once after positive installed registration and live metadata checks."""
-    scope = _authenticate_creation_scope(
+    scope, publication = _authenticate_creation_scope(
         http=http,
         token=token,
         metadata_token=metadata_token,
@@ -401,6 +468,7 @@ def authorize_creation_slot(
             "actor": actor,
             "triggering_actor": triggering_actor,
         },
+        publication=publication,
     )
     _ISSUED.add(slot)
     return slot

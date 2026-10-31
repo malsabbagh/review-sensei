@@ -120,7 +120,23 @@ class NativeCapacityGuard:
         comment_plan=None,
         native_profile=None,
         receipt_update_bytes=0,
+        old_check_head=None,
+        current_check_head=None,
     ):
+        for head in (old_check_head, current_check_head):
+            if head is not None and (
+                not isinstance(head, str) or re.fullmatch(r"[a-f0-9]{40}", head) is None
+            ):
+                raise ReviewInputError("quarantine check target projection is invalid")
+        self.old_check_head, self.current_check_head = (
+            old_check_head,
+            current_check_head,
+        )
+        self.old_checks_outside_current_head = (
+            old_check_head is not None
+            and current_check_head is not None
+            and old_check_head != current_check_head
+        )
         self.identity, self.reserve = identity, deepcopy(reserve)
         self.native_profile = native_profile
         self.native_old_root_nodes = (
@@ -302,8 +318,9 @@ class NativeCapacityGuard:
         for surface, current in stats.items():
             old = self.reserve[surface]
             if surface == "checks":
-                # Old checks carry distinct old heads and never enter the
-                # current check-name reader. Its actual envelope is one page.
+                # The current check-name reader has exactly one page. Old
+                # allocations may share that head unless authenticated target
+                # projection independently proves they are elsewhere.
                 from .checks import MAX_CHECK_PAGE_SIZE
 
                 if (
@@ -424,17 +441,27 @@ class NativeCapacityGuard:
                     f"quarantine {surface} encoded-byte capacity exceeded"
                 )
             if surface == "checks":
-                if (
-                    current["count"] + len(tail) > 100
-                    or current["bytes"]
-                    + sum(tail)
-                    + len(tail) * _RESPONSE_METADATA_BYTES
-                    + 2 * self.closure_wire
-                    > _PAGE_BYTES
-                ):
+                reader_count = (
+                    current["count"] + len(tail)
+                    if self.old_checks_outside_current_head
+                    else count
+                )
+                reader_size = (
+                    current["bytes"] + sum(tail) + len(tail) * _RESPONSE_METADATA_BYTES
+                    if self.old_checks_outside_current_head
+                    else size
+                ) + 2 * self.closure_wire
+                if reader_count > MAX_CHECK_PAGE_SIZE or reader_size > _PAGE_BYTES:
                     raise ReviewInputError(
                         "quarantine current-check transaction capacity exceeded"
                     )
+                self.certificates[surface] = {
+                    "count_upper_bound": reader_count,
+                    "encoded_bytes_upper_bound": reader_size,
+                    "physical_reads_upper_bound": 1,
+                    "reader": "current-head-single-page",
+                    "old_check_head_excluded": self.old_checks_outside_current_head,
+                }
                 continue
             if surface == "issue_comments" and self.comment_plan is not None:
                 if count > len(self.comment_plan.known) + len(
@@ -916,9 +943,18 @@ def install_capacity(
     transport = _publication_transport(ledger.http)
     if type(transport) is not GitHubHttp:
         raise ReviewInputError("quarantine capacity transport is not audited")
+    current = getattr(ledger, "_quarantine_origin_reader", None)
+    current_check_head = None if current is None else current.current_scope.head_sha
+    isolation = receipt.get("execution_isolation", receipt)
+    old_check_head = isolation.get("old_head_sha")
     existing = transport._quarantine_capacity_guard
     if existing is not None:
-        if existing.identity != identity or existing.reserve != reserve:
+        if (
+            existing.identity != identity
+            or existing.reserve != reserve
+            or (existing.old_check_head, existing.current_check_head)
+            != (old_check_head, current_check_head)
+        ):
             raise ReviewInputError("quarantine native capacity scope changed")
         # Only a verified smaller remaining journey releases its own reserve.
         # A later consumer cannot replenish a consumed transaction promise.
@@ -1049,6 +1085,8 @@ def install_capacity(
         comment_plan=comment_plan,
         native_profile=native_profile,
         receipt_update_bytes=receipt_update_bytes,
+        old_check_head=old_check_head,
+        current_check_head=current_check_head,
     )
     guard.command_receipt_update_id = (
         None if receipt_update is None else receipt_update[0]
@@ -1090,12 +1128,12 @@ def install_capacity(
                 if native_profile is not None
                 else rows,
             )
-    # The check authority reads the current head. Fixed old-head checks never
-    # enter that reader; their late allocation reserve remains conservatively
-    # charged here nevertheless. The same holds for fixed old reaction IDs:
+    # The check authority reads the current head. Excluding old allocations
+    # requires the authenticated isolation receipt's distinct immutable head;
+    # same/unknown-head checks retain the complete old reserve in this reader.
+    # The same holds for fixed old reaction IDs:
     # none is enumerated by a successor authority reader.
     heads = set()
-    current = getattr(ledger, "_quarantine_origin_reader", None)
     if current is not None:
         heads.add(current.current_scope.head_sha)
     checks = {}
@@ -1107,12 +1145,20 @@ def install_capacity(
         check_token = provider()
     for head in sorted(heads):
         head_ids, expected = set(), None
+        from .api_run_host import review_startup_plan
+        from .caller_operation import caller_for_http
+
+        caller = caller_for_http(ledger.http)
+        all_checks = caller is not None and caller.plan == review_startup_plan(
+            caller.job, quarantine_v3=True
+        )
         for page in range(1, MAX_PAGINATION_PAGES + 1):
             status, value = ledger.http.request(
                 "GET",
                 ledger.http.repository_path(
                     identity.repository,
-                    f"/commits/{head}/check-runs?check_name=ReviewSensei&per_page=100&page={page}",
+                    f"/commits/{head}/check-runs?check_name=ReviewSensei&per_page=100&page={page}"
+                    + ("&filter=all" if all_checks else ""),
                 ),
                 token=check_token,
             )
