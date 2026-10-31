@@ -34,6 +34,29 @@ def restart_caller(tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
     if caller.count(anchor) != 1:
         raise GitHubSetupError("restart caller invocation seam is unavailable")
     caller = caller.replace(anchor, anchor + forwarded, 1)
+    # Explicit restart intent needs the authenticated read-only metadata path
+    # before the hold; ordinary manual review keeps its routing-only shortcut.
+    anchor = "          RECOVER_PUBLICATION: ${{ inputs.recover_publication }}\n"
+    intent = " || ".join(
+        f"inputs.controlled_restart_{name} != ''" for name, _ in fields
+    )
+    if caller.count(anchor) != 1:
+        raise GitHubSetupError("restart caller metadata intent seam is unavailable")
+    caller = caller.replace(
+        anchor,
+        anchor + "          CONTROLLED_RESTART_SCOPE: ${{ " + intent + " }}\n",
+        1,
+    )
+    anchor = 'if [[ "$EVENT_NAME" == "workflow_dispatch" && "${RECOVER_PUBLICATION:-false}" != "true" ]]; then'
+    if caller.count(anchor) != 1:
+        raise GitHubSetupError("restart caller metadata routing seam is unavailable")
+    caller = caller.replace(
+        anchor,
+        anchor.replace(
+            " ]]; then", ' && "${CONTROLLED_RESTART_SCOPE:-false}" != "true" ]]; then'
+        ),
+        1,
+    )
     # The existing trigger resolver already has its own explicit read-only
     # contents/pull-requests/issues permissions. Preserve that mapping exactly;
     # adding a second permissions key would produce an invalid workflow.
