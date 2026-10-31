@@ -19,7 +19,17 @@ if not is_disarmed() and not Path(
 
 
 def load_tests(loader, tests, pattern):
+    # Publication proofs require the optional pinned Sigstore/PyPI verifiers.
+    # CI runs these modules after installing those tools; keep this consumer
+    # lane limited to the core and hosted wheels' declared dependencies.
+    publication_proofs = {
+        "test_quarantine_v3_check_capacity",
+        "test_quarantine_v3_journey",
+        "test_quarantine_v3_publication",
+    }
     for path in sorted(_TESTS.glob("test_quarantine*.py")):
+        if path.stem in publication_proofs:
+            continue
         tests.addTests(loader.loadTestsFromModule(importlib.import_module(path.stem)))
     return tests
 

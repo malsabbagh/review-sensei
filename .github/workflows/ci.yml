@@ -283,6 +283,8 @@ jobs:
           # The separate installed launcher qualification needs the same pinned
           # YAML/signature tools as the frozen post-hold release verifier.
           "$wheel_venv/bin/python" -m pip install -r "$GITHUB_WORKSPACE/requirements/major-tag-validation.txt"
+          # Publication proof tests also require these optional verifiers.
+          "$wheel_venv/bin/python" -I -m unittest discover -s "$suite" -p 'test_quarantine_v3*.py' -v
           "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/launcher_qualification" -v
 
   npm:
@@ -406,7 +408,7 @@ jobs:
       matrix:
         include:
           - target: darwin-arm64
-            os: macos-14
+            os: macos-15
           - target: win32-x64
             os: windows-latest
     runs-on: ${{ matrix.os }}
@@ -489,7 +491,7 @@ jobs:
       matrix:
         include:
           - target: darwin-arm64
-            os: macos-14
+            os: macos-15
           - target: darwin-x64
             os: macos-15-intel
           - target: linux-arm64-gnu
