@@ -34,11 +34,7 @@ def restart_caller(tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
     if caller.count(anchor) != 1:
         raise GitHubSetupError("restart caller invocation seam is unavailable")
     caller = caller.replace(anchor, anchor + forwarded, 1)
-    # The trigger resolver reads PR metadata only. It must not acquire OIDC
-    # while the downstream reusable writer is still waiting for its hold.
-    caller = caller.replace(
-        "  resolve-trigger:\n",
-        "  resolve-trigger:\n    permissions:\n      contents: read\n      pull-requests: read\n",
-        1,
-    )
+    # The existing trigger resolver already has its own explicit read-only
+    # contents/pull-requests/issues permissions. Preserve that mapping exactly;
+    # adding a second permissions key would produce an invalid workflow.
     return caller

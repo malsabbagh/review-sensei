@@ -36,6 +36,7 @@ def load_tests(loader, tests, pattern):
         "test_controlled_restart_handoff",
         "test_controlled_restart_late_binding",
         "test_controlled_restart_installer",
+        "test_controlled_restart_caller_output",
     ):
         suite.addTests(loader.loadTestsFromModule(importlib.import_module(module)))
     return suite

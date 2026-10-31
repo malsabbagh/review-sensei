@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from review_sensei_github import controlled_restart_workflow as workflow
+from strict_workflow_yaml import load_workflow
 from test_controlled_restart import registration
 
 from review_sensei.errors import ReviewInputError
@@ -67,15 +68,23 @@ class LateBindingTests(unittest.TestCase):
             self.assertNotIn("old_comments", observed)
 
     def test_explicit_caller_forwards_late_intent_without_changing_normal_setup(self):
-        import yaml
         from review_sensei_github.controlled_restart_caller import restart_caller
         from review_sensei_github.setup import _tagged_workflow
 
         normal = _tagged_workflow()
         self.assertNotIn("controlled_restart_hosted_version", normal)
         prepared = restart_caller()
-        jobs = yaml.safe_load(prepared)["jobs"]
-        self.assertNotIn("id-token", jobs["resolve-trigger"]["permissions"])
+        jobs = load_workflow(prepared)["jobs"]
+        expected_permissions = {
+            "contents": "read",
+            "pull-requests": "read",
+            "issues": "read",
+        }
+        self.assertEqual(jobs["resolve-trigger"]["permissions"], expected_permissions)
+        self.assertEqual(
+            jobs["resolve-trigger"]["permissions"],
+            load_workflow(normal)["jobs"]["resolve-trigger"]["permissions"],
+        )
         forwarded = jobs["review-or-reply"]["with"]
         for name in ("hosted_version", "core_version", "parent_directory"):
             self.assertIn(
