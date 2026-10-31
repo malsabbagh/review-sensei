@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.8.18 - 2026-10-31
+
+Changes since [v0.8.17](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.17), from [15c08938bfbd2a2501ac418bdb3a4fed41406458](https://github.com/malsabbagh/review-sensei/commit/15c08938bfbd2a2501ac418bdb3a4fed41406458) through [59b30b0e2104f67be05d4009995fbaa2136ffa58](https://github.com/malsabbagh/review-sensei/commit/59b30b0e2104f67be05d4009995fbaa2136ffa58).
+
+Previous annotated tag object: `c7cf64e0e4a5d47822aeda1fd4585b4cd02039a1`.
+
+- docs: record released v0.8.17 ([74a5181d700408474e36e7a3206cc7581cc9b3b4](https://github.com/malsabbagh/review-sensei/commit/74a5181d700408474e36e7a3206cc7581cc9b3b4)).
+- Fix destination-bound default HTTPS transports \(\#394\) ([fd9ea77dfd459ec16aa67e5dc62a35326a6df079](https://github.com/malsabbagh/review-sensei/commit/fd9ea77dfd459ec16aa67e5dc62a35326a6df079)).
+- Replace dynamic hosted command loading with typed imports \(\#398\) ([6ca02e6f9cf913915217420bd3e0a7082f667d09](https://github.com/malsabbagh/review-sensei/commit/6ca02e6f9cf913915217420bd3e0a7082f667d09)).
+- Bind inactive native occupancy to original publication evidence \(\#399\) ([d9d26952de81682d9c362dcbe3b3048a5d169969](https://github.com/malsabbagh/review-sensei/commit/d9d26952de81682d9c362dcbe3b3048a5d169969)).
+- Stage candidate disposition pages before multi-page migration \(\#400\) ([8850fbdde34292b87a264ce2794739798da133ae](https://github.com/malsabbagh/review-sensei/commit/8850fbdde34292b87a264ce2794739798da133ae)).
+- Add a held launcher for controlled review restarts \(\#401\) ([46aa8da938ec63a435c93db15ff9aaadb0282f7b](https://github.com/malsabbagh/review-sensei/commit/46aa8da938ec63a435c93db15ff9aaadb0282f7b)).
+- Repair isolated pinned historical reader probes \(\#397\) ([08940dd4ec02edf7b594f50154ace8d6b025b74d](https://github.com/malsabbagh/review-sensei/commit/08940dd4ec02edf7b594f50154ace8d6b025b74d)).
+- Bind incremental reuse to effective provider and stage models \(\#395\) ([7fe72bb31e4fb41888cb85e161babfd35b7d650f](https://github.com/malsabbagh/review-sensei/commit/7fe72bb31e4fb41888cb85e161babfd35b7d650f)).
+- Remove obsolete Intel crypto prerequisites and verify engine bundles \(\#396\) ([59b30b0e2104f67be05d4009995fbaa2136ffa58](https://github.com/malsabbagh/review-sensei/commit/59b30b0e2104f67be05d4009995fbaa2136ffa58)).
+
+## review-sensei-github 0.3.24 - 2026-10-31
+
+- Pin `review-sensei==0.8.18`.
+
 ## 0.8.17 - 2026-10-30
 
 Changes since [v0.8.16](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.16), from [7f8e9a250e6ffaaa89ac2b3e2638027e3109b0d5](https://github.com/malsabbagh/review-sensei/commit/7f8e9a250e6ffaaa89ac2b3e2638027e3109b0d5) through [ccd183d210966baacbd4e071892efbecde2b375d](https://github.com/malsabbagh/review-sensei/commit/ccd183d210966baacbd4e071892efbecde2b375d).
