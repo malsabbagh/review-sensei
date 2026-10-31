@@ -356,6 +356,9 @@ Strict adapter OpenRouter endpoint-metadata allowlisting precedes live dispatch/
   re-reviews caller-supplied changed paths plus related dependency paths;
   incompatible base, learnings, model, or configuration, missing cache state,
   or incomplete related context falls back to a full bounded review.
+  `ReviewService.context_cache_key()` binds effective default and per-stage
+  provider/model selection in a domain-separated digest; unknown models disable
+  reuse, and legacy unbound keys require full bounded fallback (ADR 0042).
   Every admitted fallback preserves prior concern accounting: omitted,
   downgraded or ambiguously rediscovered concerns remain uncertain, make the
   review partial and retain the prior durable baseline until resolved.

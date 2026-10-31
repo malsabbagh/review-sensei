@@ -87,11 +87,44 @@ and explicit compatibility review; this ADR does not silently authorize it.
   its workspace/temp paths. Archive fsync and exact readback precede successor
   admission there; path validation does not certify actual storage retention.
   See [launch integration](../controlled-restart-launch.md).
-- Live dispatch and registration delivery remain unimplemented and inactive.
-  An actual run ID must exist while its writer remains held before capability
-  acquisition and before the registered package is required. Installing that
-  designation requires a separately reviewed launch sequence. Do not predict
-  an ID or dispatch an enabled writer to discover one.
+- The proposed source-only launcher uses a protected prerequisite with no
+  permissions, checkout, package installation, OIDC or provider credential of
+  its own. The existing read-only frozen-package planning and identity preflight
+  finish first and report the actual selected job, policy, base/head, run and
+  workflow. Neither acquires a provider capability or discovers the old ledger.
+  Every capability-bearing job then depends on the protected hold. This order
+  makes registration use observed frozen values, not a future policy guess.
+  Ordinary invocations proceed when the hold is skipped; cancellation or a
+  failed/partial restart intent cannot admit a provider job.
+- After the hold, a frozen-source installer verifies a later official hosted
+  publication using the existing signed immutable tags, publisher execution,
+  PyPI/Sigstore claims, exact wheel bytes and core pin. Ordinary installation
+  and its same-source rule are unchanged. The separate restart binding comes
+  only from the verified wheel's compiled row naming the actual first run/job,
+  frozen workflow, policy and base/head. No unsigned registry loader exists.
+- The exact row derives request_id and the retained child after the run exists.
+  Both parent and child must already exist privately outside workspace/temp;
+  the child is empty. The installer never creates or clears retained storage.
+  Runtime admission repeats its own installed-row, current-scope, stopped-owner,
+  expiry and one-shot checks. Installation does not issue a capability.
+- Release verification uses a bounded read-only official-release metadata
+  transport (48 requests, 512 KiB responses, 8 KiB paths, finite deadline).
+  It cannot query PRs, issue comments or historical execution censuses. It is
+  installation control-plane verification, not a replacement business transport:
+  the original 512 lifecycle allowance and protected tails remain unchanged.
+- `restart-caller` prints a manual caller for the existing workflow path without
+  installing it or changing normal setup. `restart-handoff` is an optional offline
+  worksheet from archive and publication bodies. It suggests same-instance or
+  same-concern matches, preserves prior decisions as evidence, and never creates
+  successor dispositions, clears obligations or grants approval. A missing
+  match means not observed, not fixed. It is not a hidden backlog or public
+  deferred-finding list. A qualified human must review the actual current head
+  and historical objections under ordinary branch protections.
+- Source implementation is not live activation. The protected environment,
+  retained host, frozen release, later registered publication, matching Worker
+  deployment, issuance cessation/expiry and actual canary still require exact
+  independent review and separate live authority. Keep v5 fixed while held;
+  publishing the later hosted package must not move it.
 
 ## Alternatives considered
 
@@ -137,3 +170,8 @@ procedure, and review exact release/launch/archive retention before activation.
 Keep strict publication selection in PR392 and finite capacity accounting in
 PR393 separate. The denied1024-part/1536-comment/64-call census proposal remains
 held. No old review or workflow is replayed as a smoke test.
+
+The inactive publication-source V3 candidate in ADR0115 uses quarantine lineage
+for eventual individual decisions and ordinary review completion. It does not
+activate this retained-run launcher, relax its exact source/base binding, or
+supply a completion path for the earlier deliberately held restart designation.

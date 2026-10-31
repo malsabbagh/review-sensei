@@ -124,9 +124,11 @@ def authenticate_isolated_predecessor(
             not in {
                 "quarantine-published-activation-v1",
                 "quarantine-published-activation-v2",
+                "quarantine-published-activation-v3",
             }
             or registration["predecessor_record_sha256"] != previous.record_sha256
             or previous.transaction.head_sha == current_head
+            and registration["schema_version"] != "quarantine-published-activation-v3"
             or previous.api_run_accounting is None
             or str(
                 ApiRunAccounting.from_document(

@@ -1,5 +1,16 @@
 # Public Contracts
 
+## Controlled restart source tools
+
+`review-sensei-github restart-caller` prints an explicit manual launcher caller;
+it does not install, dispatch, register or grant access. Normal setup output is
+unchanged. `restart-handoff` accepts bounded archive/publication body files and
+optional semantic notes, and prints a `controlled-restart-review-worksheet-v1`.
+Its matches are reviewer suggestions, never authenticated current inventory,
+successor dispositions or approval. Both tools are optional and perform no HTTP.
+The actual `restart-run` still requires its verified installed compiled row and
+all existing live admission checks. See [ADR0120](adr/0120-controlled-serialized-restart.md).
+
 ## npm launcher contract (issue #103)
 
 `@reviewsensei/cli` exposes exactly one `review-sensei` bin and five exact
@@ -545,6 +556,15 @@ round trip does not reset lifecycle state. `ReviewComment` may include
 reclassifying a finding does not open a second discussion; a comment without
 `defect_kind` buckets under the canonical `unknown` kind. Legacy documents
 without those keys remain valid.
+
+`ReviewService.context_cache_key(request, *, profile="default", provider_override=None)`
+resolves execution-aware incremental identity. It honors fixed-model adapter policy
+and per-stage selections. Unknown effective models return `None`; callers may run
+ordinary bounded analysis but cannot claim cache reuse. The pure
+`build_review_context_cache_key` accepts an explicit/effective model and optional
+exact stage bindings; routed stages require those bindings. The closed ten-field
+serialized key shape is unchanged. Legacy keys remain readable and require full
+bounded fallback rather than being assigned today's execution identity.
 
 An incremental pass whose reviewed set is empty returns without calling a
 provider. Its `summary` is engine-authored rather than provider output and

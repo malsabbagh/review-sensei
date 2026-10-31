@@ -7,7 +7,6 @@ from dataclasses import replace
 from review_sensei.context import (
     IncrementalReviewPlan,
     ReviewContextCache,
-    build_review_context_cache_key,
     finding_lifecycle_for_comment,
 )
 from review_sensei.dependencies import dependency_review_note
@@ -252,9 +251,8 @@ class DependencyReviewTests(unittest.TestCase):
             base_sha="a" * 40,
             head_sha="b" * 40,
         )
-        key = build_review_context_cache_key(
-            request, provider_name="fixture", stages=service.stages
-        )
+        key = service.context_cache_key(request)
+        self.assertIsNotNone(key)
         result = service.review(request)
         self.assertEqual(result.review_status, "partial")
         self.assertIsNone(cache.get(key))
@@ -269,11 +267,8 @@ class DependencyReviewTests(unittest.TestCase):
             base_sha="a" * 40,
             head_sha="c" * 40,
         )
-        prior_key = build_review_context_cache_key(
-            replace(request, head_sha="b" * 40),
-            provider_name="fixture",
-            stages=service.stages,
-        )
+        prior_key = service.context_cache_key(replace(request, head_sha="b" * 40))
+        self.assertIsNotNone(prior_key)
         cache.put_if_newer(prior_key, (1, "full", 1), generation=1)
         prior = finding_lifecycle_for_comment(
             ReviewComment(

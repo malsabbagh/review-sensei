@@ -21,6 +21,45 @@ def script():
 
 
 class QuarantineWorkflowTests(unittest.TestCase):
+    def test_inactive_v3_intent_passes_append_only_gate_without_reassignment(self):
+        from test_quarantine_activation import registration
+
+        gate = script()
+        original = registration()
+        v3 = {
+            **original,
+            "schema_version": "quarantine-published-activation-v3",
+            "run_number": 2,
+            "predecessor_comment_id": 42,
+            "base_sha": "publication-source-v1",
+            "publication": {"core_version": "0.8.17", "hosted_version": "0.3.24"},
+        }
+
+        def raw(rows):
+            return json.dumps(
+                {
+                    "schema_version": "quarantine-activation-registry-v1",
+                    "registrations": rows,
+                }
+            ).encode()
+
+        # The stdlib pre-install gate validates immutable slots, not runtime
+        # provenance/complete profile authority. Issuance remains separately closed.
+        self.assertEqual(
+            gate.require_registry_successor(raw([original]), raw([original, v3])),
+            [original, v3],
+        )
+        for candidate in (
+            [v3],
+            [original, {**v3, "run_number": 1}],
+            [original, {**v3, "run_number": 0}],
+        ):
+            with (
+                self.subTest(candidate=candidate),
+                self.assertRaises(gate.RegistryCheckError),
+            ):
+                gate.require_registry_successor(raw([original]), raw(candidate))
+
     def test_disabled_caller_retains_read_scopes_shared_lane_and_four_installer_contracts(
         self,
     ):

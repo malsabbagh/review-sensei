@@ -157,6 +157,27 @@ class DistributionLaneTests(unittest.TestCase):
         )
         self.assertLess(negative, hosted_install)
 
+    def test_installed_launcher_qualification_is_required_after_bare_wheel_checks(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        lane = CONTRACT["lanes"]["launcher_qualification"]
+        self.assertTrue(lane["packaged"])
+        self.assertEqual(lane["requirements"], "requirements/major-tag-validation.txt")
+        bare = ci.index('"$wheel_venv/bin/python" -m pip check')
+        tools = ci.index(
+            '"$wheel_venv/bin/python" -m pip install -r "$GITHUB_WORKSPACE/requirements/major-tag-validation.txt"'
+        )
+        qualification = ci.index(
+            '"$wheel_venv/bin/python" -I -m unittest discover -s "$suite/launcher_qualification" -v'
+        )
+        self.assertLess(bare, tools)
+        self.assertLess(tools, qualification)
+        for relative in lane["helpers"]:
+            self.assertTrue((ROOT / relative).is_file(), relative)
+            self.assertTrue(_manifest_covers(relative), relative)
+        for directory in lane["discover"]:
+            self.assertTrue(_manifest_covers(directory), directory)
+            self.assertTrue(list((ROOT / directory).glob("test_*.py")))
+
     def test_ci_verifies_the_sdist_through_the_contract_verifier(self):
         """CI must not repeat the packaged allowlist as inline tar assertions."""
 

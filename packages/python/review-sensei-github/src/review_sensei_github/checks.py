@@ -493,6 +493,16 @@ class ReviewCheckPublisher:
             return str(repo_path(repository, suffix))
         return f"/repos/{repository}{suffix}"
 
+    def _external_id(self, repository, head_sha):
+        from .quarantine_native_scope import native_scope
+
+        scope = native_scope(self.http, repository=repository, head_sha=head_sha)
+        return (
+            REVIEW_CHECK_EXTERNAL_ID
+            if scope is None
+            else REVIEW_CHECK_EXTERNAL_ID + ":quarantine:" + scope.scope
+        )
+
     def _find_own_run(
         self,
         *,
@@ -503,10 +513,15 @@ class ReviewCheckPublisher:
     ) -> int | None:
         """Return the App-owned check-run id for this head, if one exists."""
 
+        from .quarantine_native_scope import native_scope
+
+        scope = native_scope(self.http, repository=repository, head_sha=head_sha)
         path = (
             self._repository_path(repository, f"/commits/{head_sha}/check-runs")
             + f"?check_name={REVIEW_CHECK_NAME}&per_page={MAX_CHECK_PAGE_SIZE}"
         )
+        if scope is not None:
+            path += "&filter=all"
         try:
             status, payload = self.http.request("GET", path, token=token)
         except GitHubHTTPTransientError:
@@ -522,6 +537,12 @@ class ReviewCheckPublisher:
         runs = payload.get("check_runs")
         if not isinstance(runs, list):
             raise CheckOperationError(check_failure("lookup", status=status))
+        if scope is not None and (
+            type(payload.get("total_count")) is not int
+            or payload["total_count"] != len(runs)
+            or len(runs) > MAX_CHECK_PAGE_SIZE
+        ):
+            raise CheckOperationError(check_failure("lookup", status=status))
         expected = app_slug.casefold()
         # Review/comment users expose the App's REST Bot login, whereas a
         # native check's App object exposes its unsuffixed slug. Both identify
@@ -534,6 +555,12 @@ class ReviewCheckPublisher:
             if not isinstance(run, Mapping):
                 continue
             if run.get("name") != REVIEW_CHECK_NAME:
+                continue
+            if (
+                scope is not None
+                and run.get("external_id")
+                != REVIEW_CHECK_EXTERNAL_ID + ":quarantine:" + scope.scope
+            ):
                 continue
             if "head_sha" in run and run["head_sha"] != head_sha:
                 continue
@@ -567,7 +594,7 @@ class ReviewCheckPublisher:
             "name": REVIEW_CHECK_NAME,
             "head_sha": head_sha,
             "status": status,
-            "external_id": REVIEW_CHECK_EXTERNAL_ID,
+            "external_id": self._external_id(repository, head_sha),
             "output": {"title": title, "summary": summary},
         }
         if conclusion is not None:

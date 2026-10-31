@@ -33,6 +33,63 @@ WORKFLOW_PATH = "malsabbagh/review-sensei/.github/workflows/review-sensei-run.ym
 # and its proved finite growth contract. Empty means no live published-tail
 # activation is qualified. Registration alone cannot fill this catalog.
 BROKER_QUALIFICATIONS: dict[str, dict] = {}
+# No actual failed 899 execution is qualified by publishing this parser. Each
+# entry requires independent exact-package failure-union/target qualification.
+FAILED_PUBLISHED_EXECUTORS: dict[str, dict] = {}
+FAILED_CONTRACT = "failed-published-tail-isolation-v1"
+
+
+def failed_profile(contract):
+    if (
+        not isinstance(contract, dict)
+        or contract.get("schema_version") != FAILED_CONTRACT
+    ):
+        return None
+    digest = contract.get("profile_sha256")
+    profile = (
+        FAILED_PUBLISHED_EXECUTORS.get(digest) if isinstance(digest, str) else None
+    )
+    fields = {
+        "executor_sha",
+        "caller_blob",
+        "roles",
+        "same_head",
+        "failure_union_sha256",
+        "core_sha256",
+        "hosted_sha256",
+    }
+    if (
+        not isinstance(profile, dict)
+        or set(profile) != fields
+        or hashlib.sha256(canonical_bytes(profile)).hexdigest() != digest
+        or any(
+            not isinstance(profile[k], str)
+            or re.fullmatch(r"[a-f0-9]{40}", profile[k]) is None
+            for k in ("executor_sha", "caller_blob")
+        )
+        or any(
+            not isinstance(profile[k], str)
+            or re.fullmatch(r"[a-f0-9]{64}", profile[k]) is None
+            for k in ("failure_union_sha256", "core_sha256", "hosted_sha256")
+        )
+        or type(profile["same_head"]) is not bool
+        or not isinstance(profile["roles"], list)
+        or not 1 <= len(profile["roles"]) <= 8
+        or profile["roles"].count(["published-review", "failure"]) != 1
+        or any(
+            role
+            not in [
+                ["published-review", "failure"],
+                ["discussion", "failure"],
+                ["discussion", "cancelled"],
+            ]
+            for role in profile["roles"]
+        )
+    ):
+        raise ReviewInputError(
+            "failed published-tail source qualification is absent or invalid"
+        )
+    return profile
 
 
 def execution_manifest_digest(contract):
@@ -75,6 +132,7 @@ def retained_storage_reserve(ledger):
 
 
 def normalize_tail_contract(value):
+    profile = failed_profile(value)
     body_limit = (
         isinstance(value, dict) and value.get("schema_version") == BODY_CONTRACT
     )
@@ -87,18 +145,29 @@ def normalize_tail_contract(value):
         "executions",
         "broker_qualification_sha256",
     }
+    if profile is not None:
+        required.add("profile_sha256")
     if (
         not isinstance(value, dict)
         or set(value) != required
-        or value["schema_version"] not in {CONTRACT, BODY_CONTRACT}
-        or value["executor_sha"] != EXECUTOR
-        or value["caller_blob"] != (BODY_CALLER_BLOB if body_limit else CALLER_BLOB)
+        or value["schema_version"] not in {CONTRACT, BODY_CONTRACT, FAILED_CONTRACT}
+        or value["executor_sha"]
+        != (profile["executor_sha"] if profile is not None else EXECUTOR)
+        or value["caller_blob"]
+        != (
+            profile["caller_blob"]
+            if profile is not None
+            else BODY_CALLER_BLOB
+            if body_limit
+            else CALLER_BLOB
+        )
         or type(value["workflow_id"]) is not int
         or value["workflow_id"] < 1
         or not isinstance(value["broker_qualification_sha256"], str)
         or re.fullmatch(r"[a-f0-9]{64}", value["broker_qualification_sha256"]) is None
         or not isinstance(value["executions"], list)
-        or len(value["executions"]) != (1 if body_limit else 5)
+        or len(value["executions"])
+        != (len(profile["roles"]) if profile is not None else 1 if body_limit else 5)
     ):
         raise ReviewInputError("published-tail execution contract is unsupported")
     _stamp(value["census_started_at"])
@@ -136,7 +205,7 @@ def normalize_tail_contract(value):
         source = item["source"]
         if item["route"] in {"published-review", "failed-review"}:
             if source is not None or item["conclusion"] != (
-                "failure" if body_limit else "success"
+                "failure" if body_limit or profile is not None else "success"
             ):
                 raise ReviewInputError("published-tail original publication conflicts")
         else:
@@ -165,12 +234,16 @@ def normalize_tail_contract(value):
         ids.append(item["run_id"])
         roles.append((item["route"], item["conclusion"]))
     if ids != sorted(set(ids)) or (
-        roles != [("failed-review", "failure")]
-        if body_limit
+        roles != [tuple(role) for role in profile["roles"]]
+        if profile is not None
         else (
-            roles.count(("published-review", "success")) != 1
-            or roles.count(("discussion", "failure")) != 1
-            or roles.count(("discussion", "cancelled")) != 3
+            roles != [("failed-review", "failure")]
+            if body_limit
+            else (
+                roles.count(("published-review", "success")) != 1
+                or roles.count(("discussion", "failure")) != 1
+                or roles.count(("discussion", "cancelled")) != 3
+            )
         )
     ):
         raise ReviewInputError("published-tail execution union is incomplete")
@@ -187,6 +260,7 @@ def authenticate_tail_contract(
     contract = normalize_tail_contract(
         registration.get("prepublication" if body_limit else "published_tail")
     )
+    profile = failed_profile(contract)
     if (contract["schema_version"] == BODY_CONTRACT) != body_limit:
         raise ReviewInputError("quarantine execution class conflicts with registration")
     old = ApiRunAccounting.from_document(previous.api_run_accounting)
@@ -206,6 +280,7 @@ def authenticate_tail_contract(
         or previous.rescan_state is not None
         or previous.quarantine_lineage is not None
         or tx.head_sha == registration["head_sha"]
+        and not (profile is not None and profile["same_head"])
     ):
         raise ReviewInputError("published-tail predecessor is unsupported")
     full = next(
@@ -237,7 +312,7 @@ def authenticate_tail_contract(
     # The catalog is source-owned qualification, not an operator-supplied bound.
     if (
         qualification.get("contract") != contract["schema_version"]
-        or qualification.get("executor_sha") != EXECUTOR
+        or qualification.get("executor_sha") != contract["executor_sha"]
     ):
         raise ReviewInputError("published-tail broker source contract conflicts")
     creation_run_id = (
@@ -336,7 +411,13 @@ def authenticate_tail_contract(
                 else "pull_request_review_comment"
             )
             or run.get("referenced_workflows")
-            != [{"sha": EXECUTOR, "path": WORKFLOW_PATH, "ref": "refs/tags/v5"}]
+            != [
+                {
+                    "sha": contract["executor_sha"],
+                    "path": WORKFLOW_PATH,
+                    "ref": "refs/tags/v5",
+                }
+            ]
         ):
             raise ReviewInputError("published-tail execution has not ceased or changed")
         if _stamp(run.get("created_at")) < _stamp(contract["census_started_at"]):

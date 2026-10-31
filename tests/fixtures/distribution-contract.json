@@ -54,7 +54,8 @@
     "build_hosted": "python -m build --outdir dist/github packages/python/review-sensei-github",
     "install_hosted_wheel": "python -m pip install dist/github/*.whl",
     "core_only_smoke": "python -I -m review_sensei --help",
-    "assert_no_hosted": "python -I -c \"import importlib.util; assert importlib.util.find_spec('review_sensei_github') is None\""
+    "assert_no_hosted": "python -I -c \"import importlib.util; assert importlib.util.find_spec('review_sensei_github') is None\"",
+    "run_launcher_qualification": "python -I -m unittest discover -s tests/launcher_qualification -v"
   },
   "lanes": {
     "dist_safe": {
@@ -78,6 +79,7 @@
         "tests/literal_blocker_paths_contract.py",
         "tests/provider_deadline_contract.py",
         "tests/provider_https_contract.py",
+        "tests/effective_model_contract.py",
         "tests/conversation_deadline_contract.py",
         "tests/provider_common_flow_contract.py",
         "tests/github_ingress_contract.py",
@@ -180,11 +182,15 @@
         "tests/test_quarantine_published_tail.py",
         "tests/test_quarantine_published_tail_isolation.py",
         "tests/test_quarantine_published_tail_journey.py",
+        "tests/test_quarantine_v3_journey.py",
+        "tests/test_quarantine_v3_publication.py",
+        "tests/test_quarantine_v3_check_capacity.py",
         "tests/quarantine_published_tail_exposure.py",
         "tests/quarantine_inline_exposure.py",
         "tests/test_quarantine_rollover.py",
         "tests/test_controlled_restart.py",
-        "tests/test_controlled_restart_journeys.py"
+        "tests/test_controlled_restart_journeys.py",
+        "tests/test_controlled_restart_handoff.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },
@@ -209,6 +215,27 @@
         "tests/test_trusted_recovery_workflow.py",
         "tests/test_quarantine_workflow.py"
       ]
+    },
+    "launcher_qualification": {
+      "packaged": true,
+      "discover": [
+        "tests/launcher_qualification"
+      ],
+      "helpers": [
+        "tests/test_controlled_restart_late_binding.py",
+        "tests/test_controlled_restart_installer.py",
+        "tests/test_controlled_restart_caller_output.py",
+        "tests/test_controlled_restart_caller_journey.py",
+        "tests/strict_workflow_yaml.py",
+        "scripts/controlled_restart_launch.py",
+        "scripts/pypi_channel_publication.py",
+        "scripts/python_release_sources.py",
+        "scripts/release_docs.py",
+        "scripts/qualify_published_cli.py",
+        "requirements/major-tag-validation.txt"
+      ],
+      "requirements": "requirements/major-tag-validation.txt",
+      "description": "Required installed launcher composition checks after the independent bare-wheel lane. Explicitly installs test-only signature/YAML tooling; production package dependencies remain unchanged."
     }
   },
   "import_guard": {

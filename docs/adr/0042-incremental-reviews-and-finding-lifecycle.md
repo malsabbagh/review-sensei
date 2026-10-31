@@ -48,8 +48,10 @@ digests. Changed base, learnings, model, or configuration invalidate matching
 entries on every run that can name a cache identity, not only on incremental
 runs. Missing, stale, incomplete related context, a missing caller-supplied
 changed-path list, or incompatible state falls back to a full bounded review.
-Prior findings stay in scope for a fallback only when this run verified the
-prior key is compatible; an incompatible or unverifiable key discards them.
+Prior findings remain obligations during fallback when repository/PR/base scope
+is independently bound and the head has advanced. Incompatible execution identity
+withholds reuse and old resolution claims; it never establishes resolution.
+Unverifiable snapshot scope cannot authorize reconciliation.
 The cache stores only small metadata: never raw prompts or provider
 responses, and no hosted cache is required. Only a validated complete pass
 becomes the authoritative cache record, so a partial or incomplete aggregate
@@ -135,3 +137,35 @@ fields; no hosted data migration is required.
 Evaluation under #33 should later measure saved provider usage, duplicate
 comment reduction, and recall against full reviews on the same change
 sequences. This ADR does not enable that measurement.
+
+
+## Amendment: effective execution identity (2026-10-30, proposed)
+
+`ReviewService.context_cache_key(request, profile="default", provider_override=None)`
+resolves the same active provider and per-stage routing as `run()`. When model
+overrides are enabled, the request model wins over the adapter default; fixed-model
+adapters ignore that override. Unknown selected models disable cache identity and
+incremental reuse while ordinary bounded analysis remains available.
+
+The ten serialized key fields stay unchanged. `model` records the selected model;
+`stage_digest` uses the domain `reviewsensei:incremental-execution:v2` and binds the
+stage configuration, work policy and ordered stage/provider/model selections.
+Changing an unused default under an explicit enabled override does not invalidate
+coverage. A changed selected stage model or adapter does. The pure helper supports
+explicit homogeneous models, and requires exact bindings for routed stages.
+
+Legacy documents retain their original identities and continue to round-trip.
+Their unbound stage digests conservatively trigger a one-time full bounded
+fallback. Retained historical evidence, durable baselines, obligations and budgets
+are preserved; invalidating coverage never supplies evidence of resolution.
+Publication recovery constructs no provider and does no inference. It may derive
+current bindings only from independently trusted settings; unsupported or
+historically unprovable reconstruction withholds and requires the original context
+documents. It never rewrites an old retained key as v2 or creates new admission.
+
+Validation covers changed and unchanged defaults, override policies, stage routes,
+unknown models, provider overrides and budget wrappers, legacy/unified execution,
+closed baseline serialization, CLI checkpoints and credential-free recovery. Source
+and installed-wheel regressions exercise real synthetic provider dispatch. Rollback
+removes the new producer method and conservatively withholds incompatible coverage;
+retained historical records need no migration.
