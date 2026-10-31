@@ -42,6 +42,21 @@ on:
         required: false
         default: ''
         type: string
+      controlled_restart_hosted_version:
+        description: Reserved exact later signed hosted release; restart-only, unavailable until the protected hold
+        required: false
+        default: ''
+        type: string
+      controlled_restart_core_version:
+        description: Exact core release pinned by the later hosted package
+        required: false
+        default: ''
+        type: string
+      controlled_restart_parent_directory:
+        description: Approved private retained parent; the installed row selects its pre-created empty child
+        required: false
+        default: ''
+        type: string
       controlled_restart_id:
         description: Exact installed one-shot designation; empty keeps ordinary entry
         required: false
@@ -152,11 +167,39 @@ concurrency:
   cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}
 
 jobs:
+  restart_hold:
+    needs: [bootstrap, authoritative-preflight]
+    # Inert without explicit late-install intent. Live use requires separately
+    # approved protection of this environment and an eligible retained runner.
+    # Read-only planning precedes the hold. This job and its prerequisites
+    # acquire no OIDC/provider capability and never bootstrap the old ledger.
+    if: inputs.controlled_restart_hosted_version != '' || inputs.controlled_restart_core_version != '' || inputs.controlled_restart_parent_directory != ''
+    runs-on: ${{ inputs.hosted_runner || 'ubuntu-latest' }}
+    environment: reviewsensei-controlled-restart
+    permissions: {}
+    steps:
+      - name: Validate held restart intent
+        env:
+          MODE: ${{ inputs.mode }}
+          OPERATION: ${{ inputs.operation }}
+          HOSTED: ${{ inputs.controlled_restart_hosted_version }}
+          CORE: ${{ inputs.controlled_restart_core_version }}
+          PARENT: ${{ inputs.controlled_restart_parent_directory }}
+          PRIOR_ID: ${{ inputs.controlled_restart_id }}
+          PRIOR_DIRECTORY: ${{ inputs.controlled_restart_directory }}
+          QUARANTINE: ${{ inputs.quarantine_predecessor_comment_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$MODE" != manual || "$OPERATION" != review || "$GITHUB_EVENT_NAME" != workflow_dispatch || "$GITHUB_RUN_ATTEMPT" != 1 || "$RUNNER_ENVIRONMENT" != self-hosted || -n "$PRIOR_ID$PRIOR_DIRECTORY$QUARANTINE" || ! "$HOSTED" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$CORE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || "$PARENT" != /* ]]; then
+            echo '::error::late restart requires one protected manual first execution on approved retained storage' >&2
+            exit 1
+          fi
+
   bootstrap:
     # opened/synchronize/reopened still fire for drafts. Skip those review runs
     # so they are not failed by later eligibility checks; ready_for_review and
     # non-pull_request operations continue.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     # Scheduling precedes step validation, so bootstrap must honor the trusted
     # caller's label too. Its first step validates the label before any work;
     # downstream jobs consume only that validated output.
@@ -530,6 +573,29 @@ jobs:
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" host-plan \
             --github-output "$GITHUB_OUTPUT"
 
+      - name: Report frozen restart scope
+        if: inputs.controlled_restart_hosted_version != ''
+        env:
+          SCOPE_REPOSITORY: ${{ inputs.repository }}
+          SCOPE_REPOSITORY_ID: ${{ inputs.repository_id }}
+          SCOPE_PR: ${{ inputs.pull_request_number }}
+          SCOPE_BASE: ${{ inputs.base_sha }}
+          SCOPE_HEAD: ${{ inputs.head_sha }}
+          SCOPE_POLICY: ${{ steps.policy.outputs.commit }}
+          SCOPE_WORKFLOW: ${{ job.workflow_sha }}
+          SCOPE_JOB: ${{ steps.plan.outputs.runner_kind }}
+        run: |
+          "$RUNNER_TEMP/review-sensei-venv/bin/python" -I - <<'PYCODE'
+          import json, os
+          # Observed planning data, not a registration or a guessed request ID.
+          fields = {k: os.environ['SCOPE_' + v] for k, v in (
+              ('repository', 'REPOSITORY'), ('repository_id', 'REPOSITORY_ID'),
+              ('pull_request', 'PR'), ('base_sha', 'BASE'), ('head_sha', 'HEAD'),
+              ('policy_commit', 'POLICY'), ('workflow_sha', 'WORKFLOW'), ('job', 'JOB'))}
+          fields.update(run_id=os.environ['GITHUB_RUN_ID'], attempt=os.environ['GITHUB_RUN_ATTEMPT'])
+          print('Held restart scope: ' + json.dumps(fields, sort_keys=True))
+          PYCODE
+
   authoritative-preflight:
     needs: bootstrap
     # Routing only. The selected metered process authenticates live PR, source,
@@ -567,9 +633,14 @@ jobs:
           echo 'Live preflight belongs to the selected metered lifecycle.'
 
   command:
-    needs: [bootstrap, authoritative-preflight]
+    needs: [bootstrap, authoritative-preflight, restart_hold]
     # Commands share the same authenticated PR writer slot and run allowance.
-    if: inputs.operation == 'command' && needs.bootstrap.outputs.writes == 'true'
+    if: >-
+      always() && !cancelled() && needs.bootstrap.result == 'success' &&
+      needs.authoritative-preflight.result == 'success' &&
+      (needs.restart_hold.result == 'success' ||
+       (needs.restart_hold.result == 'skipped' && inputs.controlled_restart_hosted_version == '' && inputs.controlled_restart_core_version == '' && inputs.controlled_restart_parent_directory == '')) &&
+      (inputs.operation == 'command' && needs.bootstrap.outputs.writes == 'true')
     concurrency:
       group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}
       cancel-in-progress: false
@@ -698,17 +769,18 @@ jobs:
             --allow-write
 
   hosted:
-    needs: [bootstrap, authoritative-preflight]
+    needs: [bootstrap, authoritative-preflight, restart_hold]
     # The plan decides the backend and its runner requirement; this job is the
     # hosted half of that decision. Both the review and reply paths mutate
     # through the broker, so github.writes is a precondition. github.reviews
     # and github.learning travel to the package as explicit invocation flags
     # below and are never re-derived here.
     if: >-
-      needs.bootstrap.outputs.runner_kind == 'hosted' &&
-      needs.bootstrap.outputs.writes == 'true' &&
-      ((inputs.operation == 'review' && (inputs.mode == 'manual' || needs.bootstrap.outputs.automatic_reviews == 'true')) ||
-      (inputs.operation == 'reply' && needs.bootstrap.outputs.mentions == 'true'))
+      always() && !cancelled() && needs.bootstrap.result == 'success' &&
+      needs.authoritative-preflight.result == 'success' &&
+      (needs.restart_hold.result == 'success' ||
+       (needs.restart_hold.result == 'skipped' && inputs.controlled_restart_hosted_version == '' && inputs.controlled_restart_core_version == '' && inputs.controlled_restart_parent_directory == '')) &&
+      (needs.bootstrap.outputs.runner_kind == 'hosted' && needs.bootstrap.outputs.writes == 'true' && ((inputs.operation == 'review' && (inputs.mode == 'manual' || needs.bootstrap.outputs.automatic_reviews == 'true')) || (inputs.operation == 'reply' && needs.bootstrap.outputs.mentions == 'true')))
     concurrency:
       # Reviews, reassessments and commands share the authoritative PR slot.
       # Replies keep isolated workflow cancellation groups, while provider
@@ -904,6 +976,40 @@ jobs:
           echo "Installed ReviewSensei $installed_version from $install_source."
           echo "Installed review-sensei-github $github_installed from $github_source."
 
+      - name: Install designated restart package
+        id: restart-install
+        if: inputs.controlled_restart_hosted_version != ''
+        env:
+          CORE_VERSION: ${{ inputs.controlled_restart_core_version }}
+          HOSTED_VERSION: ${{ inputs.controlled_restart_hosted_version }}
+          RETAINED_PARENT: ${{ inputs.controlled_restart_parent_directory }}
+          FROZEN_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          FROZEN_WORKFLOW_COMMIT: ${{ needs.bootstrap.outputs.workflow_commit }}
+          POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
+          REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
+          PULL_REQUEST: ${{ needs.authoritative-preflight.outputs.pull_request_number }}
+          BASE_SHA: ${{ needs.authoritative-preflight.outputs.base_sha || inputs.base_sha }}
+          HEAD_SHA: ${{ needs.authoritative-preflight.outputs.head_sha || inputs.head_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$FROZEN_WORKFLOW_COMMIT" =~ ^[a-f0-9]{40}$ ]] || exit 1
+          source_dir="$RUNNER_TEMP/review-sensei-restart-source"
+          mkdir "$source_dir"
+          git init --bare "$source_dir.git"
+          git --git-dir="$source_dir.git" fetch --depth=1 https://github.com/malsabbagh/review-sensei.git "$FROZEN_WORKFLOW_COMMIT"
+          git --git-dir="$source_dir.git" archive "$FROZEN_WORKFLOW_COMMIT" scripts requirements/major-tag-validation.txt | tar -xf - -C "$source_dir"
+          python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
+          "$python_bin" -I -m pip install --disable-pip-version-check -r "$source_dir/requirements/major-tag-validation.txt"
+          "$python_bin" -I "$source_dir/scripts/controlled_restart_launch.py" \
+            --core-version "$CORE_VERSION" --hosted-version "$HOSTED_VERSION" \
+            --parent "$RETAINED_PARENT" --output "$RUNNER_TEMP/review-sensei-restart-verification" \
+            --python "$python_bin" --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
+            --pull-request "$PULL_REQUEST" --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
+            --policy-commit "$POLICY_COMMIT" --workflow-sha "$FROZEN_WORKFLOW_SHA" --job hosted
+
       - name: Scope the selected backend credential
         id: credential
         env:
@@ -952,8 +1058,8 @@ jobs:
         if: inputs.operation == 'review'
         env:
           QUARANTINE_PREDECESSOR_COMMENT_ID: ${{ inputs.quarantine_predecessor_comment_id }}
-          CONTROLLED_RESTART_ID: ${{ inputs.controlled_restart_id }}
-          CONTROLLED_RESTART_DIRECTORY: ${{ inputs.controlled_restart_directory }}
+          CONTROLLED_RESTART_ID: ${{ steps.restart-install.outputs.request_id || inputs.controlled_restart_id }}
+          CONTROLLED_RESTART_DIRECTORY: ${{ steps.restart-install.outputs.directory || inputs.controlled_restart_directory }}
           MODE: ${{ inputs.mode }}
           OPERATION: ${{ inputs.operation }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -1166,20 +1272,21 @@ jobs:
           retention-days: 7
 
   local:
-    needs: [bootstrap, authoritative-preflight]
+    needs: [bootstrap, authoritative-preflight, restart_hold]
     # Backend-aware runner planning: the same plan that selected the backend
     # selects this job when the backend declares a local runner.
     if: >-
-      needs.bootstrap.outputs.runner_kind == 'local' &&
-      needs.bootstrap.outputs.writes == 'true' &&
-      ((inputs.operation == 'review' && (inputs.mode == 'manual' || needs.bootstrap.outputs.automatic_reviews == 'true')) ||
-      (inputs.operation == 'reply' && needs.bootstrap.outputs.mentions == 'true'))
+      always() && !cancelled() && needs.bootstrap.result == 'success' &&
+      needs.authoritative-preflight.result == 'success' &&
+      (needs.restart_hold.result == 'success' ||
+       (needs.restart_hold.result == 'skipped' && inputs.controlled_restart_hosted_version == '' && inputs.controlled_restart_core_version == '' && inputs.controlled_restart_parent_directory == '')) &&
+      (needs.bootstrap.outputs.runner_kind == 'local' && needs.bootstrap.outputs.writes == 'true' && ((inputs.operation == 'review' && (inputs.mode == 'manual' || needs.bootstrap.outputs.automatic_reviews == 'true')) || (inputs.operation == 'reply' && needs.bootstrap.outputs.mentions == 'true')))
     concurrency:
       # Share the same validated PR slot with hosted reviews, reassessments
       # and commands. Runner/backend selection is not an authority partition.
       group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}
       cancel-in-progress: false
-    runs-on: [self-hosted, linux, x64, ollama]
+    runs-on: ${{ fromJSON(inputs.controlled_restart_hosted_version != '' && format('["self-hosted","linux","x64","ollama","{0}"]', needs.bootstrap.outputs.hosted_runner) || '["self-hosted","linux","x64","ollama"]') }}
     permissions:
       contents: read
       pull-requests: read
@@ -1363,6 +1470,40 @@ jobs:
           echo "Installed ReviewSensei $installed_version from $install_source."
           echo "Installed review-sensei-github $github_installed from $github_source."
 
+      - name: Install designated restart package
+        id: restart-install
+        if: inputs.controlled_restart_hosted_version != ''
+        env:
+          CORE_VERSION: ${{ inputs.controlled_restart_core_version }}
+          HOSTED_VERSION: ${{ inputs.controlled_restart_hosted_version }}
+          RETAINED_PARENT: ${{ inputs.controlled_restart_parent_directory }}
+          FROZEN_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          FROZEN_WORKFLOW_COMMIT: ${{ needs.bootstrap.outputs.workflow_commit }}
+          POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
+          REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
+          PULL_REQUEST: ${{ needs.authoritative-preflight.outputs.pull_request_number }}
+          BASE_SHA: ${{ needs.authoritative-preflight.outputs.base_sha || inputs.base_sha }}
+          HEAD_SHA: ${{ needs.authoritative-preflight.outputs.head_sha || inputs.head_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$FROZEN_WORKFLOW_COMMIT" =~ ^[a-f0-9]{40}$ ]] || exit 1
+          source_dir="$RUNNER_TEMP/review-sensei-restart-source"
+          mkdir "$source_dir"
+          git init --bare "$source_dir.git"
+          git --git-dir="$source_dir.git" fetch --depth=1 https://github.com/malsabbagh/review-sensei.git "$FROZEN_WORKFLOW_COMMIT"
+          git --git-dir="$source_dir.git" archive "$FROZEN_WORKFLOW_COMMIT" scripts requirements/major-tag-validation.txt | tar -xf - -C "$source_dir"
+          python_bin="$RUNNER_TEMP/review-sensei-venv/bin/python"
+          "$python_bin" -I -m pip install --disable-pip-version-check -r "$source_dir/requirements/major-tag-validation.txt"
+          "$python_bin" -I "$source_dir/scripts/controlled_restart_launch.py" \
+            --core-version "$CORE_VERSION" --hosted-version "$HOSTED_VERSION" \
+            --parent "$RETAINED_PARENT" --output "$RUNNER_TEMP/review-sensei-restart-verification" \
+            --python "$python_bin" --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
+            --pull-request "$PULL_REQUEST" --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
+            --policy-commit "$POLICY_COMMIT" --workflow-sha "$FROZEN_WORKFLOW_SHA" --job local
+
       - name: Scope the selected backend credential
         id: credential
         env:
@@ -1411,8 +1552,8 @@ jobs:
         if: inputs.operation == 'review'
         env:
           QUARANTINE_PREDECESSOR_COMMENT_ID: ${{ inputs.quarantine_predecessor_comment_id }}
-          CONTROLLED_RESTART_ID: ${{ inputs.controlled_restart_id }}
-          CONTROLLED_RESTART_DIRECTORY: ${{ inputs.controlled_restart_directory }}
+          CONTROLLED_RESTART_ID: ${{ steps.restart-install.outputs.request_id || inputs.controlled_restart_id }}
+          CONTROLLED_RESTART_DIRECTORY: ${{ steps.restart-install.outputs.directory || inputs.controlled_restart_directory }}
           MODE: ${{ inputs.mode }}
           OPERATION: ${{ inputs.operation }}
           GITHUB_TOKEN: ${{ github.token }}

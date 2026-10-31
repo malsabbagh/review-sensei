@@ -34,6 +34,8 @@ _PUBLIC = (
     "review",
     "review-run",
     "restart-run",
+    "restart-handoff",
+    "restart-caller",
     "command-run",
     "reply-run",
     "publish",
@@ -50,6 +52,8 @@ _HELP = {
     "review": "engine review plus hosted hooks",
     "review-run": "one metered review lifecycle",
     "restart-run": "one registered serialized fresh review",
+    "restart-handoff": "offline evidence mapping for a current-head human review",
+    "restart-caller": "print an explicit manual launcher caller for review",
     "command-run": "one metered maintainer command lifecycle",
     "reply-run": "one metered mention reply lifecycle",
     "publish": "publish a prepared review",
@@ -275,6 +279,30 @@ def _main(argv: list[str] | None = None) -> int:
         print(_usage(), file=sys.stderr)
         return 0 if args and args[0] in {"-h", "--help"} else 2
     command, rest = args[0], args[1:]
+    if command == "restart-caller":
+        import argparse
+
+        from .controlled_restart_caller import restart_caller
+
+        parser = argparse.ArgumentParser(
+            description="Print source only; no install, grant or dispatch."
+        )
+        parser.add_argument("--public-workflow-tag", default="v5")
+        options = parser.parse_args(rest)
+        try:
+            print(restart_caller(options.public_workflow_tag), end="")
+            return 0
+        except (ValueError, ReviewSenseiError) as error:
+            print(f"review-sensei: {error}", file=sys.stderr)
+            return 1
+    if command == "restart-handoff":
+        from .controlled_restart_review import main as handoff
+
+        try:
+            return handoff(rest)
+        except (OSError, ValueError, ReviewSenseiError) as error:
+            print(f"review-sensei: {error}", file=sys.stderr)
+            return 1
     if command in {"command-run", "reply-run"}:
         from .action_run import run_action
 

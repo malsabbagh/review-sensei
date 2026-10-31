@@ -1,5 +1,16 @@
 # Public Contracts
 
+## Controlled restart source tools
+
+`review-sensei-github restart-caller` prints an explicit manual launcher caller;
+it does not install, dispatch, register or grant access. Normal setup output is
+unchanged. `restart-handoff` accepts bounded archive/publication body files and
+optional semantic notes, and prints a `controlled-restart-review-worksheet-v1`.
+Its matches are reviewer suggestions, never authenticated current inventory,
+successor dispositions or approval. Both tools are optional and perform no HTTP.
+The actual `restart-run` still requires its verified installed compiled row and
+all existing live admission checks. See [ADR0120](adr/0120-controlled-serialized-restart.md).
+
 ## npm launcher contract (issue #103)
 
 `@reviewsensei/cli` exposes exactly one `review-sensei` bin and five exact

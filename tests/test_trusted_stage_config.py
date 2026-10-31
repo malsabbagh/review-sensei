@@ -224,6 +224,9 @@ class CallerRunnerInputContractTests(unittest.TestCase):
             | {
                 "hosted_runner",
                 "quarantine_predecessor_comment_id",
+                "controlled_restart_hosted_version",
+                "controlled_restart_core_version",
+                "controlled_restart_parent_directory",
                 "controlled_restart_id",
                 "controlled_restart_directory",
             },
