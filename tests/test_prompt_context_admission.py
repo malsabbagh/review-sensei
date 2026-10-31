@@ -26,7 +26,6 @@ from review_sensei.context import (
     PromptContextOverflow,
     ReviewContextCache,
     admit_prompt_context,
-    build_review_context_cache_key,
     finding_lifecycle_for_comment,
 )
 from review_sensei.convergence import derive_blocker_candidate
@@ -367,12 +366,8 @@ class PromptContextAdmissionTests(unittest.TestCase):
             request(diff=unfinished_diff()),
             work_policy_digest=reviewer.work_policy_digest,
         )
-        key = build_review_context_cache_key(
-            original,
-            provider_name=provider.name,
-            stages=reviewer.stages,
-            profile="default",
-        )
+        key = reviewer.context_cache_key(original)
+        self.assertIsNotNone(key)
         previous_key = replace(key, head_sha="c" * 40)
         cache.put(previous_key, (1, "previous-baseline"))
         prior = finding_lifecycle_for_comment(

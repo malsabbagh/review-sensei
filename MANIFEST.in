@@ -28,6 +28,7 @@ include tests/baseline_cli_contract.py
 include tests/literal_blocker_paths_contract.py
 include tests/provider_deadline_contract.py
 include tests/provider_https_contract.py
+include tests/effective_model_contract.py
 include tests/conversation_deadline_contract.py
 include tests/provider_common_flow_contract.py
 include tests/github_ingress_contract.py

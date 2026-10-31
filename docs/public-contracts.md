@@ -557,6 +557,15 @@ reclassifying a finding does not open a second discussion; a comment without
 `defect_kind` buckets under the canonical `unknown` kind. Legacy documents
 without those keys remain valid.
 
+`ReviewService.context_cache_key(request, *, profile="default", provider_override=None)`
+resolves execution-aware incremental identity. It honors fixed-model adapter policy
+and per-stage selections. Unknown effective models return `None`; callers may run
+ordinary bounded analysis but cannot claim cache reuse. The pure
+`build_review_context_cache_key` accepts an explicit/effective model and optional
+exact stage bindings; routed stages require those bindings. The closed ten-field
+serialized key shape is unchanged. Legacy keys remain readable and require full
+bounded fallback rather than being assigned today's execution identity.
+
 An incremental pass whose reviewed set is empty returns without calling a
 provider. Its `summary` is engine-authored rather than provider output and
 carries no findings, and the pass charges no provider call to the resource

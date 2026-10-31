@@ -149,6 +149,12 @@ def reconstruct_publication_contexts(
         provider_name=settings.name,
         stages=DEFAULT_STAGES,
         profile="default",
+        effective_model=model,
+        stage_provider_bindings={
+            stage.name: (settings.name, model) for stage in DEFAULT_STAGES
+        }
+        if model is not None
+        else None,
     )
     if key is None:
         raise ReviewInputError("original admission context is unavailable")
@@ -216,7 +222,8 @@ def reconstruct_publication_contexts(
         )
     ):
         raise ReviewInputError(
-            "reconstructed context does not match the original committed transaction"
+            "reconstructed context does not match the original committed transaction; "
+            "supply the original configuration and admission context documents"
         )
     baseline = read_session_baseline(ledger, record)
     if quarantine_full_analysis:

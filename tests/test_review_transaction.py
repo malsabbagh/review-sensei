@@ -1456,7 +1456,7 @@ diff --git a/src/helper.py b/src/helper.py
                     return_value=RecordingRegistry(provider),
                 ),
                 patch(
-                    "review_sensei.cli.build_review_context_cache_key",
+                    "review_sensei.cli.ReviewService.context_cache_key",
                     return_value=None,
                 ),
             ):

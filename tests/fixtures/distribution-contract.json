@@ -70,6 +70,7 @@
         "tests/literal_blocker_paths_contract.py",
         "tests/provider_deadline_contract.py",
         "tests/provider_https_contract.py",
+        "tests/effective_model_contract.py",
         "tests/conversation_deadline_contract.py",
         "tests/provider_common_flow_contract.py",
         "tests/github_ingress_contract.py",
