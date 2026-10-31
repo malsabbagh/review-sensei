@@ -30,6 +30,10 @@ class _NetworkFreeSuite(unittest.TestSuite):
 
 def load_tests(loader, tests, pattern):
     suite = _NetworkFreeSuite()
-    for module in ("test_controlled_restart", "test_controlled_restart_journeys"):
+    for module in (
+        "test_controlled_restart",
+        "test_controlled_restart_journeys",
+        "test_controlled_restart_handoff",
+    ):
         suite.addTests(loader.loadTestsFromModule(importlib.import_module(module)))
     return suite

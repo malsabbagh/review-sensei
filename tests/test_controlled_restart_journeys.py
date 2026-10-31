@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -165,6 +167,197 @@ class ControlledRestartLifecycleTests(unittest.TestCase):
                         any(r["state"] == "APPROVED" for r in journey.fixture.reviews)
                     )
                     self.assert_accounting(journey)
+
+    def test_valid_published_nonterminal_root_is_archived_without_successful_exit(self):
+        from review_sensei_github.publication import ReviewPublisher
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_api_work_persistence import IDENTITY
+
+        for runner in ("hosted", "local"):
+            with (
+                self.subTest(runner=runner),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                for name in ("prior", "ordinary", "restart"):
+                    (root / name).mkdir()
+                prior = EntryFixture(root / "prior", runner_kind=runner)
+                with patch.object(
+                    ReviewPublisher,
+                    "_finish_thread_cleanup",
+                    lambda _, value: replace(value, thread_resolution="unconfirmed"),
+                ):
+                    self.assertEqual(prior.invoke(human=True), 1, prior.error)
+                old = copy.deepcopy(prior.comment)
+                record = parse_session_comment(old["body"], identity=IDENTITY)
+                self.assertEqual(record.transaction.phase, "publication_succeeded")
+                self.assertIsNone(record.api_run_accounting["terminal_transaction"])
+                self.assertTrue(prior.reviews)
+                parts = copy.deepcopy(prior.extra_comments)
+                for item in parts.values():
+                    item["issue_url"] = (
+                        "https://api.github.test/repos/owner/repo/issues/7"
+                    )
+
+                def failed_owner(request, timeout, original):
+                    response = original(request, timeout)
+                    path = urlsplit(request.full_url).path
+                    if path == f"/repos/owner/repo/actions/runs/{prior.run_id}":
+                        value = json.loads(response.read(512 * 1024 + 1))
+                        value.update(
+                            conclusion="failure", head_sha=record.transaction.head_sha
+                        )
+                        return json_response(value)
+                    if path == (
+                        f"/repos/owner/repo/actions/runs/{prior.run_id}/attempts/1/jobs"
+                    ):
+                        value = json.loads(response.read(512 * 1024 + 1))
+                        for job in value["jobs"]:
+                            job["conclusion"] = "failure"
+                        return json_response(value)
+                    return response
+
+                # A new ordinary execution refuses this authentic old root.
+                probe = EntryFixture(root / "ordinary", runner_kind=runner)
+                probe.run_id = prior.run_id + 1
+                probe.live_head = probe.requested_head = "d" * 40
+                probe.comment = copy.deepcopy(old)
+                original = probe.external
+                probe.external = lambda request, timeout: failed_owner(
+                    request, timeout, original
+                )
+                self.assertEqual(probe.invoke(human=True), 1)
+                self.assertIn("successful review exit", probe.error)
+                self.assertEqual(probe.provider_calls, 0)
+                self.assertEqual(probe.comment, old)
+
+                # Only a separately designated synthetic restart can proceed.
+                journey = RestartJourney(
+                    root / "restart", runner=runner, body=old["body"]
+                )
+                fixture = journey.fixture
+                fixture.run_id = prior.run_id + 2
+                fixture.live_head = fixture.requested_head = "d" * 40
+                fixture.extra_comments = copy.deepcopy(parts)
+                fixture.reviews = copy.deepcopy(prior.reviews)
+                fixture.inline = copy.deepcopy(prior.inline)
+                old_reviews = copy.deepcopy(fixture.reviews)
+                old_inline = copy.deepcopy(fixture.inline)
+                archived = [journey.old, *parts.values()]
+                journey.row = registration(
+                    policy_commit=fixture.policy,
+                    workflow_sha="a" * 40,
+                    base_sha=fixture.live_base,
+                    head_sha=fixture.live_head,
+                    run_id=str(fixture.run_id),
+                    job=runner,
+                    old_runs=[prior.run_id],
+                    old_comments=[
+                        {
+                            "id": item["id"],
+                            "bytes": len(item["body"].encode()),
+                            "sha256": hashlib.sha256(item["body"].encode()).hexdigest(),
+                        }
+                        for item in archived
+                    ],
+                )
+                journey.external_hook = failed_owner
+                self.assertEqual(journey.invoke(), 0, fixture.error)
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertEqual(journey.archive()["historical_cost"], "unknown")
+                self.assertEqual(journey.archive()["historical_effects"], "unsettled")
+                self.assertEqual(
+                    [
+                        (item["id"], item["body"])
+                        for item in journey.archive()["comments"]
+                    ],
+                    [(item["id"], item["body"]) for item in archived],
+                )
+                self.assertEqual(fixture.reviews[: len(old_reviews)], old_reviews)
+                self.assertEqual(fixture.inline, old_inline)
+                for identifier, item in parts.items():
+                    self.assertEqual(fixture.extra_comments[identifier], item)
+                self.assertEqual(journey.old["body"], old["body"])
+                self.assertEqual(
+                    parse_session_comment(journey.old["body"], identity=IDENTITY),
+                    record,
+                )
+                self.assertNotEqual(fixture.comment["id"], journey.old["id"])
+                # Exercise the public, offline reviewer handoff against the
+                # actual old and successor publication bodies. Prior decisions
+                # remain evidence; no current disposition or approval is minted.
+                from contextlib import redirect_stdout
+                from io import StringIO
+
+                from review_sensei_github.publication import parse_finding_index
+
+                old_review = old_reviews[-1]
+                new_review = fixture.reviews[-1]
+                old_index = parse_finding_index(
+                    old_review["body"],
+                    repository_id=123,
+                    pull_request=7,
+                    head_sha=old_review["commit_id"],
+                )
+                self.assertIsNotNone(old_index)
+                notes = [
+                    dict(
+                        instance=item.instance,
+                        decision="advisory-deferred",
+                        reference="https://github.com/owner/repo/pull/7#issuecomment-321",
+                        rationale="Synthetic prior maintainer judgment; revalidate against this successor.",
+                    )
+                    for item in old_index.entries
+                ]
+                inputs = root / "reviewer-inputs"
+                inputs.mkdir()
+                (inputs / "old.txt").write_text(old_review["body"], encoding="utf-8")
+                (inputs / "current.txt").write_text(
+                    new_review["body"], encoding="utf-8"
+                )
+                (inputs / "notes.json").write_text(json.dumps(notes), encoding="utf-8")
+                observed = len(fixture.trace)
+                output = StringIO()
+                with redirect_stdout(output):
+                    result = cli.main(
+                        [
+                            "restart-handoff",
+                            "--archive",
+                            str(fixture.root / "abandoned-history.json"),
+                            "--prior-body",
+                            str(inputs / "old.txt"),
+                            "--prior-head",
+                            old_review["commit_id"],
+                            "--current-body",
+                            str(inputs / "current.txt"),
+                            "--notes",
+                            str(inputs / "notes.json"),
+                        ]
+                    )
+                self.assertEqual(result, 0, output.getvalue())
+                worksheet = json.loads(output.getvalue())
+                self.assertFalse(worksheet["approval_allowed"])
+                self.assertEqual(
+                    worksheet["next_action"], "qualified-current-head-human-review"
+                )
+                self.assertEqual(len(worksheet["mappings"]), len(old_index.entries))
+                self.assertTrue(
+                    all(
+                        m["successor_disposition"] is None
+                        for m in worksheet["mappings"]
+                    )
+                )
+                self.assertEqual(len(fixture.trace), observed)
+                self.assertEqual(fixture.reviews[: len(old_reviews)], old_reviews)
+                state = fixture.accounted.accounting
+                self.assertEqual(state.identity.run_id, fixture.run_id)
+                self.assertIsNotNone(state.terminal_transaction)
+                self.assertFalse(any(block.pending for block in state.blocks))
+                self.assertEqual(
+                    fixture.check_runs[-1]["conclusion"], "action_required"
+                )
+                self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
+                self.assert_accounting(journey)
 
     def test_archive_crash_consumes_slot_without_provider_or_native_write(self):
         for boundary in ("fsync", "after-archive"):

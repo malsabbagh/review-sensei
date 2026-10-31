@@ -136,7 +136,7 @@ def prepare_quarantine(
     scope = CurrentReadScope(
         ledger,
         identity,
-        registration["base_sha"],
+        slot.base_sha,
         registration["head_sha"],
         metadata_token,
     )
@@ -402,12 +402,15 @@ def _archive(prepared, origins):
             }
         ),
     }
+    if slot.publication_scope is not None:
+        archive["publication_scope"] = slot.publication_scope
     binding = origin_binding(
         identity,
         slot.registration,
         old,
         producer=ledger.evidence_producer(),
         configuration_digest=prepared.configuration.digest,
+        base_sha=prepared.scope.base_sha,
     )
     return archive, binding
 
@@ -643,7 +646,10 @@ def plan_quarantine(prepared):
         "future_bytes_upper_bound": future_bytes,
         # Three current fences plus one POST per part; two complete bounded
         # listings, slot revalidation, final current fences and one root POST.
-        "requests": 4 * parts + 2 * MAX_PAGINATION_PAGES + 6,
+        "requests": 4 * parts
+        + 2 * MAX_PAGINATION_PAGES
+        + 6
+        + (2 if prepared.slot.publication_scope is not None else 0),
     }
 
 

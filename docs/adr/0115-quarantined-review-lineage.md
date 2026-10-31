@@ -212,3 +212,52 @@ and source read-only, then review the separately scoped registration and activat
 Reconcile the live predecessor, current B/H/P, native original-review identity and
 authenticated cessation before the supported one-shot transition. Preserve all
 charges and individual held obligations through subsequent review and verification.
+
+## Inactive publication-source V3 candidate
+
+The dormant `quarantine-published-activation-v3` shape reserves exact core and
+hosted versions and a positive creator workflow ID/blob/run number. Its raw base
+is the literal `publication-source-v1`; no future run ID or self-referential
+publication commit is inserted into the compiled intent. The intent is included
+in prepared source S before publication and creator dispatch. Runtime resolves
+S from the independently verified immutable hosted release, then requires current
+policy/base S and the registered PR head H. Both publisher jobs must have
+completed before the creator's authenticated `created_at`. An unexpected creator
+ordinal or attempt refuses; it does not select a later slot.
+
+The issuer reads signed annotated tag objects, complete bounded publisher/job
+inventories, PyPI wheel digests and publication attestations on the original
+caller transport. Offline Sigstore verification binds repository, source, tag,
+workflow, run/attempt, hosted runner and environment. It checks both installed
+versions and the hosted distribution's exact core dependency. Normal trusted
+package installation remains the executable-byte boundary; this metadata issuer
+does not download or authenticate an installed wheel by reconstructing its ZIP.
+Exact running-package parity still requires separate release qualification.
+The optional verifier uses the already pinned major-tag-validation environment;
+missing verifier dependencies/trust roots refuse without an online TUF fallback.
+
+A process-issued publication proof is bound to the physical caller and intent.
+The immutable origin archive retains its resolved receipt, and cold commands
+reconstruct the original creator and publication authority before comparing it.
+Receipts, copied proof objects and supplied source dictionaries cannot grant
+native authority. A V3 lineage filters only exact authenticated predecessor
+publication digests owned by the numeric App Bot; unknown publications remain
+visible. Its check has a lineage-specific external ID, so delayed old same-head
+checks are retained separately. Historical holds still require individual exact
+origin/instance decisions. Successor completion leaves old accounting unknown.
+
+The original 512-request ceiling and terminal tails remain unchanged. V3 prepays
+32 extra startup reads in each attempt from ordinary work; one initial proof
+needs 14 reads and each immutable-tag revalidation needs two. Creation preflight
+also prices the two final tag reads and the actual durable receipt bytes. All
+existing evidence, comment, response and pagination ceilings remain in force;
+synthetic measurements are not an incident capacity certificate.
+
+`failed-published-tail-isolation-v1` selects only an exact source-qualified profile
+by canonical digest, including its complete failure/writer role union, package
+hashes, caller blob and explicit same-head support. Its production catalog and
+broker qualifications remain empty. No actual 89928b7b incident profile or
+activation is added by this candidate. The workflow remains disabled. Authentic
+historical issuance/writer evidence, complete incident byte bounds, normal
+bootstrap approval/DCO, independent patch review and separately authorized
+release/registration/activation remain required.

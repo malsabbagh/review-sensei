@@ -683,8 +683,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("review_args+=(--recovery-artifact recovery-artifact.json)", text)
 
         self.assertIn(
-            "if: github.event_name != 'pull_request' || github.event.pull_request.draft != true",
-            text,
+            "(github.event_name != 'pull_request' || github.event.pull_request.draft != true)",
+            _job_section(text, "bootstrap"),
         )
         self.assertEqual(text.count('review-sensei-github" reply-run \\\n'), 2)
         self.assertEqual(text.count('review-sensei-github" review-run \\\n'), 2)
@@ -703,18 +703,21 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count("Verify mention reply completed"), 2)
         self.assertEqual(text.count("always() && inputs.operation == 'reply' &&"), 2)
         self.assertEqual(text.count("steps.reply.outcome != 'success'"), 2)
-        # Bootstrap must start on the trusted caller's runner too; only later
-        # hosted jobs consume its validated output. Local routing is separate.
+        # Hold and bootstrap start on the trusted caller's label; three later
+        # hosted jobs consume its validated output. Local restart routing adds
+        # that label to the unchanged four-label local inference requirement.
         self.assertEqual(
             text.count("runs-on: ${{ inputs.hosted_runner || 'ubuntu-latest' }}"),
-            1,
+            2,
         )
         self.assertEqual(
             text.count("runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}"), 3
         )
         self.assertIn("hosted_runner: ${{ steps.hosted-runner.outputs.label }}", text)
         self.assertIn("HOSTED_RUNNER: ${{ inputs.hosted_runner }}", text)
-        self.assertEqual(text.count("runs-on: [self-hosted, linux, x64, ollama]"), 1)
+        self.assertEqual(
+            text.count('|| \'["self-hosted","linux","x64","ollama"]\')'), 1
+        )
 
     def test_reusable_workflow_has_no_profile_or_custom_url_surface(self):
         text = _reusable_workflow_text()
@@ -1164,11 +1167,11 @@ class ActionPinPolicyTests(unittest.TestCase):
         # plan's github policy.
         gate = (
             "((inputs.operation == 'review' && (inputs.mode == 'manual' || "
-            "needs.bootstrap.outputs.automatic_reviews == 'true')) ||\n"
-            "      (inputs.operation == 'reply' && "
+            "needs.bootstrap.outputs.automatic_reviews == 'true')) || "
+            "(inputs.operation == 'reply' && "
             "needs.bootstrap.outputs.mentions == 'true'))"
         )
-        self.assertEqual(text.count(gate), 2)
+        self.assertEqual(" ".join(text.split()).count(gate), 2)
         # Recovery regenerates its exact diff but cannot enter either inference
         # step. Normal review/reply operation gates stay explicit.
         self.assertEqual(text.count("if: inputs.operation == 'review'\n"), 2)
@@ -1233,7 +1236,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("default: User\n", text)
         # A stale or fabricated head SHA must fail the live-PR preflight before
         # the mutation is attempted.
-        self.assertIn("needs: [bootstrap, authoritative-preflight]", command)
+        self.assertIn(
+            "needs: [bootstrap, authoritative-preflight, restart_hold]", command
+        )
         preflight = _job_section(text, "authoritative-preflight")
         self.assertNotIn("gh api", preflight)
         self.assertIn('--policy-commit "$POLICY_COMMIT"', command)
@@ -1448,7 +1453,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("needs.bootstrap.outputs.runner_kind == 'hosted'", hosted)
         self.assertIn("needs.bootstrap.outputs.runner_kind == 'local'", local)
         self.assertIn("runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}", hosted)
-        self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", local)
+        self.assertIn('|| \'["self-hosted","linux","x64","ollama"]\')', local)
+        self.assertIn("needs.bootstrap.outputs.hosted_runner)", local)
         self.assertNotIn("inputs.provider_mode", workflow_text)
         self.assertNotIn("inputs.provider", workflow_text)
         # Each job re-checks the plan it was selected by, so a mismatch fails
@@ -2033,6 +2039,8 @@ class ActionPinPolicyTests(unittest.TestCase):
                             == "runs-on: ${{ inputs.hosted_runner || 'ubuntu-latest' }}"
                             or line
                             == "runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}"
+                            or line
+                            == 'runs-on: ${{ fromJSON(inputs.controlled_restart_hosted_version != \'\' && format(\'["self-hosted","linux","x64","ollama","{0}"]\', needs.bootstrap.outputs.hosted_runner) || \'["self-hosted","linux","x64","ollama"]\') }}'
                             or ollama_self_hosted.match(line),
                             msg=f"{workflow.name} has unrecognized runner: {line}",
                         )

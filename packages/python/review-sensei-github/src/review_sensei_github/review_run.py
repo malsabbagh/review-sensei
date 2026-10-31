@@ -749,7 +749,19 @@ def bootstrap(
     job = "command" if purpose == "command" else plan.runner_kind
     if restart_registration is not None and job != restart_registration["job"]:
         raise ReviewInputError("controlled restart runner differs from its designation")
-    startup = review_startup_plan(job)
+    from .quarantine_activation import registrations_for
+
+    startup = review_startup_plan(
+        job,
+        quarantine_v3=any(
+            row["schema_version"] == "quarantine-published-activation-v3"
+            for row in registrations_for(
+                SessionIdentity(
+                    args.repository, args.pull_request, repository_id=args.repository_id
+                )
+            )
+        ),
+    )
     # Source-controlled startup and both execution owners must fit even before
     # authentication requests. A malformed/undersized local config cannot start
     # requests by relying on a later failure at the first write.
@@ -933,6 +945,7 @@ def bootstrap(
     native._quarantine_origin_reader = QuarantineOriginReader(
         metadata_token=metadata_token,
         actions_token=actions_token,
+        policy_commit=policy_commit,
         current_scope=CurrentReadScope(
             native, identity, args.base_sha, args.head_sha, metadata_token
         ),

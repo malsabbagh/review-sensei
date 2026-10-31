@@ -61,6 +61,40 @@ failed run. Overflow or incomplete observations refuse within the existing limit
 
 ## Exact live confirmations still needed
 
+The source-only contract A launcher is implemented but inactive. Prepare its
+caller with `review-sensei-github restart-caller`; review the output for the existing
+`.github/workflows/review-sensei-review.yml` path. Normal setup output is unchanged.
+Installing this caller is a later explicit action, not part of printing it.
+
+The manual inputs reserve exact `controlled_restart_core_version` and
+`controlled_restart_hosted_version`, identify an approved
+`controlled_restart_runner`, and name `controlled_restart_parent_directory`.
+No request ID or archive child is predicted at dispatch. The reusable workflow's
+hosted route uses the approved label, and its local route additionally retains
+the existing self-hosted/Linux/x64/Ollama label requirements. The approved label
+must select the qualified retained host; an arbitrary matching local runner is
+not sufficient. Ordinary local routing retains its original four-label set.
+The reusable workflow's
+`restart_hold` environment is `reviewsensei-controlled-restart`; its protection
+must be configured and independently checked before live use. Merely naming an
+environment does not establish its protection or authorize a live run.
+
+Release the empty-registry frozen launcher first. Start one approved manual
+execution into its pre-capability hold. Record that actual run/job/attempt and
+frozen workflow plus the read-only bootstrap's reported policy/base/head and
+selected job, then independently review and publish the later hosted package
+with that compiled row and matching Worker designation. Do not promote v5 during
+this sequence. After exact registration and retirement/expiry approvals, release
+the hold. The frozen installer verifies the later publication before installing
+its exact wheels, derives the pre-created private child from the row and selects
+`restart-run`. A failure does not authorize a rerun, new row or provider repeat.
+
+The initial release and the later registered publication are separate artifacts.
+The installer reuses existing official release verification; no new signer,
+credential or permission is introduced. Public source/release reads have a finite
+installation-only bound and cannot read PR history. All lifecycle business HTTP,
+new root/publication readback and terminal accounting use the unchanged caller.
+
 1. Release the reviewed source through the existing publisher at new immutable
    versions, with exact workflow/package/Worker provenance.
 2. Identify the existing retained runner and archive path, and confirm its retention,
@@ -78,6 +112,25 @@ failed run. Overflow or incomplete observations refuse within the existing limit
 The predecessor stays abandoned history with unknown cost and unsettled effects.
 No terminal stamp, refund, historical deletion, native approval, branch-protection
 change, merge, capacity expansion or automatic review loop follows from restart.
+
+For the final human review, preserve the prior public finding dispositions and
+read the actual successor review. An optional `restart-handoff --archive ...
+--prior-body ... --prior-head ... --current-body ... --notes ...` worksheet proposes
+matches using published instance/concern identities. Input bodies and notes are
+offline evidence, not authenticated live inventory or commands. The worksheet
+never transfers an override across heads or marks an absent concern fixed.
+Old judgments need explicit revalidation. Ordinary bot review/reply/command entry
+is still held by the installed designation: this worksheet cannot issue a formal
+override or authorize another head/run. Any remaining code defect must be fixed;
+a changed head requires a separately reviewed recovery/continuation action, not
+an automatic repeat. Only a qualifying current-head reviewer
+can supply the ordinary required approval. The controlled bot check can remain
+`action_required` while historical obligations/occupancy remain unresolved.
+
+TaskAlong's be1 executor/body-limit incident is separately source-qualified as a
+prepublication overflow. It does not establish the published-tail exit proof for
+PR395–397, and its executor/caller must not simply be appended to the c7 catalog.
+No body-limit registration is activated by this launcher implementation.
 
 ## Review and qualification status
 
