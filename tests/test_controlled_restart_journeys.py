@@ -311,9 +311,11 @@ class ControlledRestartLifecycleTests(unittest.TestCase):
                 ]
                 inputs = root / "reviewer-inputs"
                 inputs.mkdir()
-                (inputs / "old.txt").write_text(old_review["body"])
-                (inputs / "current.txt").write_text(new_review["body"])
-                (inputs / "notes.json").write_text(json.dumps(notes))
+                (inputs / "old.txt").write_text(old_review["body"], encoding="utf-8")
+                (inputs / "current.txt").write_text(
+                    new_review["body"], encoding="utf-8"
+                )
+                (inputs / "notes.json").write_text(json.dumps(notes), encoding="utf-8")
                 observed = len(fixture.trace)
                 output = StringIO()
                 with redirect_stdout(output):

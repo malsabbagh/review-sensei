@@ -174,6 +174,9 @@ class LateBindingTests(unittest.TestCase):
             self.assertNotIn("secrets.", json.dumps(step))
             self.assertIn("controlled_restart_launch.py", step["run"])
 
+    @unittest.skipIf(
+        os.name == "nt", "retained Actions route requires POSIX ownership and modes"
+    )
     def test_compiled_row_binds_actual_run_and_derives_existing_private_child(self):
         row = registration()
         with tempfile.TemporaryDirectory() as temporary:

@@ -49,6 +49,9 @@ class InstallerTests(unittest.TestCase):
                     )
                 )
 
+    @unittest.skipIf(
+        os.name == "nt", "retained Actions route requires POSIX ownership and modes"
+    )
     def test_verified_wheel_registry_is_selected_before_install_and_rechecked(self):
         row = registration()
         with tempfile.TemporaryDirectory() as directory:
