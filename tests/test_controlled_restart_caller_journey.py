@@ -36,6 +36,7 @@ def expression(value, context):
     tree = ast.parse(
         value[3:-2]
         .strip()
+        .replace("!cancelled()", "not cancelled()")
         .replace("&&", " and ")
         .replace("||", " or ")
         .replace("resolve-trigger", "resolve_trigger")
@@ -47,7 +48,19 @@ def expression(value, context):
         if isinstance(node, ast.Constant):
             return node.value
         if isinstance(node, ast.Name):
-            return context.get(node.id, {})
+            return {"true": True, "false": False, "null": None}.get(
+                node.id, context.get(node.id, {})
+            )
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return not visit(node.operand)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and not node.args
+            and not node.keywords
+        ):
+            if node.func.id in {"always", "cancelled"}:
+                return node.func.id == "always"
         if isinstance(node, ast.Attribute):
             parent = visit(node.value)
             return parent.get(node.attr, "") if isinstance(parent, dict) else ""
@@ -142,6 +155,7 @@ class CallerJourneyTests(unittest.TestCase):
 
     def run_step(self, step, context, name):
         output = self.root / (name + ".out")
+        output.unlink(missing_ok=True)
         env = dict(self.env, GITHUB_OUTPUT=str(output))
         for key, value in step.get("env", {}).items():
             rendered = expression(value, context)
@@ -163,6 +177,17 @@ class CallerJourneyTests(unittest.TestCase):
         )
         return result, values
 
+    def caller_steps(self):
+        context = dict(inputs=self.inputs, github=self.github)
+        for index, step in enumerate(self.caller["resolve-trigger"]["steps"]):
+            if "run" in step:
+                self.assertNotIn("if", step)
+                self.assertNotIn("continue-on-error", step)
+                result, values = self.run_step(step, context, "caller-" + str(index))
+                if result.returncode or step.get("id") == "resolve":
+                    return result, values
+        raise AssertionError("caller has no resolver step")
+
     def planning(self, *, trusted=True):
         self.fixture.write_text(json.dumps(self.pull), encoding="utf-8")
         if trusted:
@@ -171,13 +196,8 @@ class CallerJourneyTests(unittest.TestCase):
             shutil.copyfile(
                 ROOT / "src/review_sensei/hosting/github/trigger.py", target
             )
-        resolver = next(
-            s
-            for s in self.caller["resolve-trigger"]["steps"]
-            if s.get("id") == "resolve"
-        )
         context = dict(inputs=self.inputs, github=self.github)
-        result, resolved = self.run_step(resolver, context, "resolve")
+        result, resolved = self.caller_steps()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         context["needs"] = {"resolve_trigger": {"outputs": resolved}}
         forwarded = {
@@ -388,26 +408,168 @@ class CallerJourneyTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "no unique execution binding"):
             self.select(options)
 
-    def test_partial_restart_intent_does_not_take_ordinary_routing_shortcut(self):
-        for field in ("hosted_version", "core_version", "parent_directory"):
-            with self.subTest(field=field):
-                original = dict(self.inputs)
+    def test_all_sixteen_restart_input_combinations_route_fail_closed(self):
+        original = dict(self.inputs)
+        fields = [key for key in original if key.startswith("controlled_restart_")]
+        self.assertEqual(len(fields), 4)
+        reusable = self.caller["review-or-reply"]
+        # GitHub skips a dependent job after failed resolve-trigger. Neither
+        # an always condition nor continue-on-error may erase this boundary.
+        self.assertEqual(reusable["needs"], "resolve-trigger")
+        self.assertNotIn("if", reusable)
+        self.assertNotIn("continue-on-error", self.caller["resolve-trigger"])
+        self.assertEqual(self.caller["resolve-trigger"]["runs-on"], "ubuntu-latest")
+        self.assertEqual(
+            self.caller["resolve-trigger"]["steps"][0]["name"],
+            "Validate controlled restart inputs",
+        )
+        for mask in range(16):
+            with self.subTest(mask=mask):
+                self.inputs = dict(original)
                 self.inputs.update(
                     {
-                        key: ""
-                        for key in self.inputs
-                        if key.startswith("controlled_restart_")
-                        and key != "controlled_restart_" + field
+                        key: original[key] if mask & (1 << i) else ""
+                        for i, key in enumerate(fields)
                     }
                 )
-                context, resolved = self.planning()
-                self.assertEqual(resolved["base_sha"], "a" * 40)
-                self.assertEqual(resolved["head_sha"], "b" * 40)
+                self.requests.unlink(missing_ok=True)
+                self.fixture.write_text(json.dumps(self.pull), encoding="utf-8")
+                result, resolved = self.caller_steps()
+                if mask not in (0, 15):
+                    self.assertNotEqual(
+                        result.returncode, 0, "partial restart reached routing"
+                    )
+                    self.assertIn("restart inputs", result.stdout + result.stderr)
+                    self.assertEqual(resolved, {})
+                    self.assertFalse(self.requests.exists())
+                    continue
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.requests.exists(), mask == 15)
+                context = dict(
+                    inputs=self.inputs,
+                    github=self.github,
+                    needs={"resolve_trigger": {"outputs": resolved}},
+                )
+                forwarded = {
+                    key: expression(value, context)
+                    for key, value in reusable["with"].items()
+                }
+                context["inputs"] = forwarded
+                context["needs"] = dict(
+                    bootstrap=dict(
+                        result="success",
+                        outputs=dict(
+                            runner_kind="hosted",
+                            writes="true",
+                            automatic_reviews="true",
+                        ),
+                    ),
+                    authoritative_preflight=dict(result="success"),
+                    restart_hold=dict(result="waiting" if mask else "skipped"),
+                )
+
+                def condition(text):
+                    return expression(
+                        "${{ " + " ".join(text.strip().splitlines()) + " }}", context
+                    )
+
+                self.assertEqual(
+                    bool(condition(self.jobs["restart_hold"]["if"])), mask == 15
+                )
+                self.assertEqual(bool(condition(self.jobs["hosted"]["if"])), mask == 0)
+                installer = next(
+                    step
+                    for step in self.jobs["hosted"]["steps"]
+                    if step["name"] == "Install designated restart package"
+                )
+                self.assertEqual(bool(condition(installer["if"])), mask == 15)
+                if mask:
+                    self.assertEqual(
+                        forwarded["hosted_runner"],
+                        original["controlled_restart_runner"],
+                    )
+                    self.assertEqual(forwarded["base_sha"], self.pull["base"]["sha"])
+                    self.assertEqual(forwarded["head_sha"], self.pull["head"]["sha"])
+                    context["needs"]["restart_hold"]["result"] = "success"
+                    self.assertTrue(condition(self.jobs["hosted"]["if"]))
+        self.inputs = original
+
+    def test_malformed_and_blank_restart_values_refuse_before_metadata(self):
+        original = dict(self.inputs)
+        bad_values = {
+            "hosted_version": [" ", "\t", "latest", "v0.3.99", "0.3", "0.3.99\n"],
+            "core_version": [" ", "\n", "latest", "v0.8.99", "0.8", "0.8.99;echo bad"],
+            "parent_directory": [
+                " ",
+                "\t",
+                "relative",
+                "/retained\nother",
+                "/retained/../other",
+                "/retained//other",
+                "/retained/./other",
+            ],
+            "runner": [
+                " ",
+                "\t",
+                "-runner",
+                "runner group",
+                "[self-hosted]",
+                "a" * 129,
+                "runner\nother",
+            ],
+        }
+        for field, values in bad_values.items():
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    self.inputs = dict(
+                        original, **{"controlled_restart_" + field: value}
+                    )
+                    self.requests.unlink(missing_ok=True)
+                    result, resolved = self.caller_steps()
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("restart inputs", result.stdout + result.stderr)
+                    self.assertFalse(self.requests.exists())
+                    self.assertEqual(resolved, {})
+        self.inputs = original
+
+    def test_complete_restart_validation_preserves_existing_label_and_path_forms(self):
+        for runner in ("r", "a" * 128, "approved.runner_1-linux"):
+            with self.subTest(runner=runner):
+                self.inputs["controlled_restart_runner"] = runner
+                self.inputs["controlled_restart_parent_directory"] = (
+                    "/approved/retained archive"
+                )
+                validation = self.caller["resolve-trigger"]["steps"][0]
+                self.assertEqual(
+                    validation.get("name"), "Validate controlled restart inputs"
+                )
+                result, values = self.run_step(
+                    validation, dict(inputs=self.inputs), "valid-inputs"
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(values, {})
+
+    def test_restart_validation_refuses_replayed_and_nonmanual_invocation(self):
+        validation = self.caller["resolve-trigger"]["steps"][0]
+        self.assertEqual(validation.get("name"), "Validate controlled restart inputs")
+        for changes in (
+            {"GITHUB_RUN_ATTEMPT": "2"},
+            {"GITHUB_EVENT_NAME": "pull_request"},
+            {"GITHUB_EVENT_NAME": "issue_comment"},
+        ):
+            with self.subTest(changes=changes):
+                previous = dict(self.env)
+                self.env.update(changes)
                 result, _ = self.run_step(
-                    self.jobs["restart_hold"]["steps"][0], context, "partial-hold"
+                    validation, dict(inputs=self.inputs), "invalid-invocation"
                 )
                 self.assertNotEqual(result.returncode, 0)
-                self.inputs = original
+                # The all-absent case never acquires a new invocation restriction.
+                result, _ = self.run_step(
+                    validation, dict(inputs={}), "ordinary-invocation"
+                )
+                self.assertEqual(result.returncode, 0)
+                self.env = previous
 
     def test_ordinary_manual_dispatch_remains_routing_only(self):
         self.inputs.update(

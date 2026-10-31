@@ -34,6 +34,29 @@ def restart_caller(tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
     if caller.count(anchor) != 1:
         raise GitHubSetupError("restart caller invocation seam is unavailable")
     caller = caller.replace(anchor, anchor + forwarded, 1)
+    # Fail before routing/checkout if any restart option is supplied without
+    # the complete valid set. A failed resolver job skips its reusable caller;
+    # partial intent must never fall through to an ordinary capability job.
+    anchor = "      - name: Check out trusted trigger resolver\n"
+    validation = "      - name: Validate controlled restart inputs\n        env:\n"
+    validation += "".join(
+        f"          RESTART_{name.upper()}: ${{{{ inputs.controlled_restart_{name} }}}}\n"
+        for name, _ in fields
+    )
+    validation += r"""        run: |
+          set -euo pipefail
+          if [[ -z "$RESTART_HOSTED_VERSION$RESTART_CORE_VERSION$RESTART_PARENT_DIRECTORY$RESTART_RUNNER" ]]; then
+            exit 0
+          fi
+          if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch || "$GITHUB_RUN_ATTEMPT" != 1 || ! "$RESTART_HOSTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$RESTART_CORE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$RESTART_RUNNER" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ || "$RESTART_PARENT_DIRECTORY" != /* || "$RESTART_PARENT_DIRECTORY" == *//* || "$RESTART_PARENT_DIRECTORY" == */./* || "$RESTART_PARENT_DIRECTORY" == */../* || "$RESTART_PARENT_DIRECTORY" == */. || "$RESTART_PARENT_DIRECTORY" == */.. || "$RESTART_PARENT_DIRECTORY" =~ [[:cntrl:]] ]]; then
+            echo '::error::restart inputs require all four valid values on one manual first execution' >&2
+            exit 1
+          fi
+
+"""
+    if caller.count(anchor) != 1:
+        raise GitHubSetupError("restart caller validation seam is unavailable")
+    caller = caller.replace(anchor, validation + anchor, 1)
     # Explicit restart intent needs the authenticated read-only metadata path
     # before the hold; ordinary manual review keeps its routing-only shortcut.
     anchor = "          RECOVER_PUBLICATION: ${{ inputs.recover_publication }}\n"
