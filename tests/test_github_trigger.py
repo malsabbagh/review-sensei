@@ -1,17 +1,20 @@
 import ast
+import io
 import itertools
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from review_sensei_github.setup import _tagged_workflow
+from review_sensei_github.setup import _pre_recovery_v5_workflow, _tagged_workflow
 from review_sensei_github.trigger import (
     TriggerResolution,
     choose_head_sha,
@@ -513,6 +516,120 @@ class GitHubTriggerTests(unittest.TestCase):
 
 
 class InlineCallerResolverTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "Actions fallback executes POSIX Bash")
+    def test_migrated_caller_routes_commands_without_a_local_python_resolver(self):
+        from review_sensei_github.cli import main as github_main
+        from strict_workflow_yaml import load_workflow
+
+        runner = "${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}"
+        runner_line = f"      hosted_runner: {runner}"
+        stale = re.sub(
+            r"(?m)^    with:$",
+            lambda match: match.group(0) + "\n" + runner_line,
+            _pre_recovery_v5_workflow("v5"),
+            count=1,
+        ).replace("    runs-on: ubuntu-latest", f"    runs-on: {runner}", 1)
+        coverage = (
+            "@reviewsensei accept-coverage-uncertainty --reason assessed remaining risk"
+        )
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workflow = root / ".github/workflows/review-sensei-review.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(stale)
+            # Exercise the emitted shell, including its file-existence branch.
+            # Both GitHub metadata and the Python executable are local fixtures.
+            self.assertFalse(
+                (root / "src/review_sensei/hosting/github/trigger.py").exists()
+            )
+            binaries = root / "bin"
+            binaries.mkdir()
+            (binaries / "python").symlink_to(sys.executable)
+            gh = binaries / "gh"
+            gh.write_text("#!/bin/sh\nprintf '%s' \"$FAKE_PULL_JSON\"\n")
+            gh.chmod(0o755)
+            output = root / "output"
+
+            def resolve(caller, body):
+                step = next(
+                    step
+                    for step in load_workflow(caller)["jobs"]["resolve-trigger"][
+                        "steps"
+                    ]
+                    if step.get("id") == "resolve"
+                )
+                output.unlink(missing_ok=True)
+                completed = subprocess.run(
+                    [bash, "-c", step["run"]],
+                    cwd=root,
+                    env={
+                        **os.environ,
+                        "PATH": str(binaries) + os.pathsep + os.environ.get("PATH", ""),
+                        "EVENT_NAME": "issue_comment",
+                        "REPOSITORY": "owner/repo",
+                        "PULL_REQUEST": "7",
+                        "COMMENT_BODY": body,
+                        "RUNNER_TEMP": str(root),
+                        "GITHUB_OUTPUT": str(output),
+                        "FAKE_PULL_JSON": json.dumps(_pull()),
+                    },
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                return dict(
+                    line.split("=", 1) for line in output.read_text().splitlines()
+                )
+
+            self.assertEqual(resolve(stale, coverage)["operation"], "reply")
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    github_main(["setup", "--check", "--context-root", str(root)]), 2
+                )
+                self.assertEqual(
+                    github_main(
+                        ["setup", "--migrate", "--write", "--context-root", str(root)]
+                    ),
+                    0,
+                )
+                self.assertEqual(
+                    github_main(["setup", "--check", "--context-root", str(root)]), 0
+                )
+            migrated = workflow.read_text()
+            self.assertEqual(migrated.count(runner_line), 1)
+            self.assertIn(f"    runs-on: {runner}", migrated)
+            commands = [
+                case["body"] for case in command_parity_cases() if case["accepted"]
+            ]
+            self.assertIn(
+                "@reviewsensei accept-coverage-uncertainty --reason remaining slices manually audited",
+                commands,
+            )
+            for caller in (migrated, _tagged_workflow("v5")):
+                for body in [coverage, *commands]:
+                    with self.subTest(body=body):
+                        resolved = resolve(caller, body)
+                        self.assertEqual(
+                            resolved,
+                            {
+                                "operation": "command",
+                                "head_sha": "b" * 40,
+                                "head_ref": "feature/providers",
+                                "base_ref": "main",
+                                "base_sha": "a" * 40,
+                                "pull_request_number": "7",
+                            },
+                        )
+                for body in (
+                    "> " + coverage,
+                    "Earlier we used " + coverage,
+                    "@reviewsensei why is coverage partial?",
+                ):
+                    with self.subTest(body=body):
+                        self.assertEqual(resolve(caller, body)["operation"], "reply")
+
     def test_generated_callers_run_trigger_as_a_standalone_script(self):
         expected = 'PYTHONPATH=src python "$resolver"'
         for name, text in (

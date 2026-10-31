@@ -2155,6 +2155,150 @@ class GitHubSetupClientTests(unittest.TestCase):
         self.assertEqual(repeated, migrated)
         self.assertEqual(difference, "")
 
+    def test_caller_migration_preserves_hosted_runner_input(self):
+        for value in (
+            "ubicloud-standard-2",
+            "'ubuntu-latest'",
+            "${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}",
+        ):
+            with self.subTest(value=value):
+                line = f"      hosted_runner: {value}\n"
+                stale = re.sub(
+                    r"(?m)^    with:$",
+                    lambda match: match.group(0) + "\n" + line.rstrip("\n"),
+                    _sensei_only_v5_workflow("v5"),
+                    count=1,
+                )
+                migrated, _ = migrate_caller_preserving_customizations(stale)
+                self.assertEqual(migrated.count(line), 1)
+                self.assertEqual(
+                    inspect_installed_caller_drift(migrated).customizations[
+                        "hosted_runner_line"
+                    ],
+                    line.rstrip("\n"),
+                )
+                repeated, difference = migrate_caller_preserving_customizations(
+                    migrated
+                )
+                self.assertEqual(repeated, migrated)
+                self.assertEqual(difference, "")
+
+    def test_caller_migration_refuses_ambiguous_hosted_runner_input(self):
+        for declaration in (
+            "      hosted_runner: one\n      hosted_runner: two\n",
+            "      hosted_runner:\n        - ubuntu-latest\n",
+            "      hosted_runner: >-\n        ubuntu-latest\n",
+        ):
+            with self.subTest(declaration=declaration):
+                stale = re.sub(
+                    r"(?m)^    with:$",
+                    lambda match: match.group(0) + "\n" + declaration.rstrip("\n"),
+                    _sensei_only_v5_workflow("v5"),
+                    count=1,
+                )
+                with self.assertRaisesRegex(GitHubSetupError, "hosted_runner"):
+                    migrate_caller_preserving_customizations(stale)
+
+    def test_public_migration_refuses_unsupported_input_yaml_without_writing(self):
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from review_sensei_github.cli import main as github_main
+        from strict_workflow_yaml import load_workflow
+
+        cases = (
+            (
+                "quoted_key",
+                "      'hosted_runner': self-hosted\n",
+                "with:",
+                "self-hosted",
+            ),
+            (
+                "double_quoted_key",
+                '      "hosted_runner": self-hosted\n',
+                "with:",
+                "self-hosted",
+            ),
+            (
+                "escaped_key",
+                '      "hosted\\u005frunner": self-hosted\n',
+                "with:",
+                "self-hosted",
+            ),
+            (
+                "key_spacing",
+                "      hosted_runner : self-hosted\n",
+                "with:",
+                "self-hosted",
+            ),
+            (
+                "seven_space_continuation",
+                "      hosted_runner: custom\n       gpu\n",
+                "with:",
+                "custom gpu",
+            ),
+            (
+                "single_quoted_continuation",
+                "      hosted_runner: 'custom\n       gpu'\n",
+                "with:",
+                "custom gpu",
+            ),
+            (
+                "double_quoted_continuation",
+                '      hosted_runner: "custom\n       gpu"\n',
+                "with:",
+                "custom gpu",
+            ),
+            (
+                "quoted_with",
+                "      hosted_runner: self-hosted\n",
+                "'with':",
+                "self-hosted",
+            ),
+            (
+                "spaced_with",
+                "      hosted_runner: self-hosted\n",
+                "with :",
+                "self-hosted",
+            ),
+            ("seven_space_entry", "       hosted_runner: self-hosted\n", "with:", None),
+            (
+                "mixed_duplicate",
+                '      hosted_runner: one\n      "hosted_runner": two\n',
+                "with:",
+                None,
+            ),
+        )
+        for name, declaration, mapping_key, expected in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                stale = re.sub(
+                    r"(?m)^    with:$",
+                    lambda _match: (
+                        "    " + mapping_key + "\n" + declaration.rstrip("\n")
+                    ),
+                    _sensei_only_v5_workflow("v5"),
+                    count=1,
+                )
+                if expected is not None:
+                    self.assertEqual(
+                        load_workflow(stale)["jobs"]["review-or-reply"]["with"][
+                            "hosted_runner"
+                        ],
+                        expected,
+                    )
+                workflow = Path(temporary) / WORKFLOW_PATH
+                workflow.parent.mkdir(parents=True)
+                before = stale.encode("utf-8")
+                workflow.write_bytes(before)
+                stderr = io.StringIO()
+                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    status = github_main(
+                        ["setup", "--migrate", "--write", "--context-root", temporary]
+                    )
+                self.assertEqual(status, 2)
+                self.assertIn("refusing", stderr.getvalue())
+                self.assertEqual(workflow.read_bytes(), before)
+
     def test_setup_write_requires_explicit_migration_and_preserves_file(self):
         import tempfile
         from contextlib import redirect_stderr, redirect_stdout

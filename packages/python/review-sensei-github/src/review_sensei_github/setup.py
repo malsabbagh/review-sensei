@@ -3162,6 +3162,47 @@ def _extract_caller_customizations(content: str) -> dict[str, object]:
         checkout_line = checkout_match.group(0)
         if checkout_line != _CANONICAL_CHECKOUT_LINE:
             customizations["checkout_uses"] = checkout_line.split("uses:", 1)[1].strip()
+    # This migration supports one explicit, plain job-level input mapping.
+    # Refuse alternate key spellings/merges rather than missing a hidden with
+    # mapping and silently replacing an operator's runner selection.
+    if any(re.match(r"    (?:[\"'?!&]|<<:|with[ \t]+:)", line) for line in lines):
+        raise GitHubSetupError(
+            "unsupported caller with declaration; refusing migration"
+        )
+    input_bounds = _caller_job_setting_bounds(lines, setting="with")
+    if input_bounds is not None:
+        start, end = input_bounds
+        seen: set[str] = set()
+        for line in lines[start:end]:
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            entry = re.fullmatch(r"      ([A-Za-z0-9_]+):(?:[ \t]+(.*))?", line)
+            if entry is None:
+                raise GitHubSetupError(
+                    "unsupported caller with mapping entry; refusing lossy migration"
+                )
+            key, raw_value = entry.groups()
+            if key in seen:
+                raise GitHubSetupError(f"ambiguous {key} input; refusing migration")
+            seen.add(key)
+            if key != "hosted_runner":
+                continue
+            value = (raw_value or "").strip()
+            if not value or value.startswith(("#", ">", "|", "&", "*", "!", "[", "{")):
+                raise GitHubSetupError(
+                    "unsupported hosted_runner input; refusing lossy migration"
+                )
+            if (
+                value.startswith("'")
+                and re.fullmatch(r"'(?:[^']|'')*'[ \t]*(?:#.*)?", value) is None
+            ) or (
+                value.startswith('"')
+                and re.fullmatch(r'"(?:[^"\\]|\\.)*"[ \t]*(?:#.*)?', value) is None
+            ):
+                raise GitHubSetupError(
+                    "unsupported hosted_runner quoted value; refusing lossy migration"
+                )
+            customizations["hosted_runner_line"] = line
     mapping_bounds = _caller_job_setting_bounds(lines, setting="secrets")
     if mapping_bounds is not None:
         custom_job_lines: list[str] = []
@@ -3287,6 +3328,10 @@ def migrate_caller_preserving_customizations(
     drift = inspect_installed_caller_drift(
         content, public_workflow_tag=public_workflow_tag
     )
+    if _caller_job_setting_bounds(content.splitlines(), setting="with") is None:
+        raise GitHubSetupError(
+            "caller has no supported with mapping; refusing migration"
+        )
     use_recovery = (
         drift.recovery_inputs_enabled
         if include_recovery_inputs is None
@@ -3322,6 +3367,14 @@ def migrate_caller_preserving_customizations(
             _CANONICAL_CHECKOUT_LINE,
             f"        uses: {checkout_uses}",
             1,
+        )
+    hosted_runner_line = drift.customizations.get("hosted_runner_line")
+    if isinstance(hosted_runner_line, str) and hosted_runner_line:
+        target = re.sub(
+            r"(?m)^    with:$",
+            lambda match: match.group(0) + "\n" + hosted_runner_line,
+            target,
+            count=1,
         )
     custom_job_lines = drift.customizations.get("custom_job_lines")
     if isinstance(custom_job_lines, tuple) and custom_job_lines:

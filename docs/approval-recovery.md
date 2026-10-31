@@ -274,6 +274,28 @@ clearing a flag or relabeling partial analysis complete.
 
 ## Explicitly accept an assessed coverage uncertainty
 
+The installed caller must route this command to the command handler. An older
+caller can send it to discussion even when the activated reusable workflow
+supports it. Updating `v5` does not replace the caller's embedded fallback.
+Check and review its migration before posting any new command:
+
+```bash
+review-sensei-github setup --check
+review-sensei-github setup --diff
+review-sensei-github setup --migrate --write
+review-sensei-github setup --check
+```
+
+The current source migration preserves the caller's runner label and its
+`hosted_runner` input, checkout pin and custom secrets. Confirm that the installed
+CLI includes this migration fix before writing a customized caller.
+Unsupported input-key spellings and multiline input mappings require manual
+assessment: migration refuses them without modifying the file. Review and
+publish the caller change through the repository's normal process; generating a
+local migration does not activate it. A previous discussion reply is not an
+accepted exception. Reconcile its original operation and accounting before
+deciding whether a new current-head command is justified.
+
 A maintainer/admin may make the separately audited coverage-risk decision when
 the current supported policy permits it. Assess the exact missing evidence
 first and explain the accepted risk. This is a human policy exception, not proof
