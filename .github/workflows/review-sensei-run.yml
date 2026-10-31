@@ -173,7 +173,7 @@ jobs:
     # approved protection of this environment and an eligible retained runner.
     # Read-only planning precedes the hold. This job and its prerequisites
     # acquire no OIDC/provider capability and never bootstrap the old ledger.
-    if: inputs.controlled_restart_hosted_version != '' || inputs.controlled_restart_core_version != '' || inputs.controlled_restart_parent_directory != ''
+    if: always() && !cancelled() && (inputs.controlled_restart_hosted_version != '' || inputs.controlled_restart_core_version != '' || inputs.controlled_restart_parent_directory != '')
     runs-on: ${{ inputs.hosted_runner || 'ubuntu-latest' }}
     environment: reviewsensei-controlled-restart
     permissions: {}
@@ -188,8 +188,14 @@ jobs:
           PRIOR_ID: ${{ inputs.controlled_restart_id }}
           PRIOR_DIRECTORY: ${{ inputs.controlled_restart_directory }}
           QUARANTINE: ${{ inputs.quarantine_predecessor_comment_id }}
+          BOOTSTRAP_RESULT: ${{ needs.bootstrap.result }}
+          PREFLIGHT_RESULT: ${{ needs.authoritative-preflight.result }}
         run: |
           set -euo pipefail
+          if [[ "$BOOTSTRAP_RESULT" != success || "$PREFLIGHT_RESULT" != success ]]; then
+            echo '::error::restart planning prerequisites did not succeed; no admission is authorized' >&2
+            exit 1
+          fi
           if [[ "$MODE" != manual || "$OPERATION" != review || "$GITHUB_EVENT_NAME" != workflow_dispatch || "$GITHUB_RUN_ATTEMPT" != 1 || "$RUNNER_ENVIRONMENT" != self-hosted || -n "$PRIOR_ID$PRIOR_DIRECTORY$QUARANTINE" || ! "$HOSTED" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$CORE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || "$PARENT" != /* ]]; then
             echo '::error::late restart requires one protected manual first execution on approved retained storage' >&2
             exit 1
@@ -1010,6 +1016,19 @@ jobs:
             --pull-request "$PULL_REQUEST" --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
             --policy-commit "$POLICY_COMMIT" --workflow-sha "$FROZEN_WORKFLOW_SHA" --job hosted
 
+      - name: Validate designated restart installation outputs
+        if: inputs.controlled_restart_hosted_version != ''
+        env:
+          REQUEST_ID: ${{ steps.restart-install.outputs.request_id }}
+          DIRECTORY: ${{ steps.restart-install.outputs.directory }}
+          PARENT: ${{ inputs.controlled_restart_parent_directory }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REQUEST_ID" =~ ^[a-f0-9]{64}$ || "$PARENT" != /* || "$DIRECTORY" != "${PARENT%/}/$REQUEST_ID" ]]; then
+            echo '::error::restart installer did not emit its exact retained designation; no review entry authorized' >&2
+            exit 1
+          fi
+
       - name: Scope the selected backend credential
         id: credential
         env:
@@ -1503,6 +1522,19 @@ jobs:
             --python "$python_bin" --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
             --pull-request "$PULL_REQUEST" --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
             --policy-commit "$POLICY_COMMIT" --workflow-sha "$FROZEN_WORKFLOW_SHA" --job local
+
+      - name: Validate designated restart installation outputs
+        if: inputs.controlled_restart_hosted_version != ''
+        env:
+          REQUEST_ID: ${{ steps.restart-install.outputs.request_id }}
+          DIRECTORY: ${{ steps.restart-install.outputs.directory }}
+          PARENT: ${{ inputs.controlled_restart_parent_directory }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REQUEST_ID" =~ ^[a-f0-9]{64}$ || "$PARENT" != /* || "$DIRECTORY" != "${PARENT%/}/$REQUEST_ID" ]]; then
+            echo '::error::restart installer did not emit its exact retained designation; no review entry authorized' >&2
+            exit 1
+          fi
 
       - name: Scope the selected backend credential
         id: credential

@@ -20,10 +20,8 @@ from review_sensei.errors import ReviewInputError
 class LateBindingTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "existing Actions metadata step uses POSIX")
     def test_scope_report_observes_planning_values_without_guessing_registration(self):
-        import yaml
-
         root = Path(__file__).resolve().parents[1]
-        jobs = yaml.safe_load(
+        jobs = load_workflow(
             (root / ".github/workflows/review-sensei-run.yml").read_text()
         )["jobs"]
         script = next(
@@ -64,8 +62,21 @@ class LateBindingTests(unittest.TestCase):
             self.assertEqual(observed["run_id"], "456")
             self.assertEqual(observed["policy_commit"], fields["POLICY"])
             self.assertEqual(observed["job"], "hosted")
-            self.assertNotIn("request_id", observed)
-            self.assertNotIn("old_comments", observed)
+            self.assertEqual(
+                observed,
+                dict(
+                    repository="owner/repo",
+                    repository_id="123",
+                    pull_request="7",
+                    base_sha="a" * 40,
+                    head_sha="b" * 40,
+                    policy_commit="c" * 40,
+                    workflow_sha="d" * 40,
+                    job="hosted",
+                    run_id="456",
+                    attempt="1",
+                ),
+            )
 
     def test_explicit_caller_forwards_late_intent_without_changing_normal_setup(self):
         from review_sensei_github.controlled_restart_caller import restart_caller
@@ -113,6 +124,8 @@ class LateBindingTests(unittest.TestCase):
             PRIOR_ID="",
             PRIOR_DIRECTORY="",
             QUARANTINE="",
+            BOOTSTRAP_RESULT="success",
+            PREFLIGHT_RESULT="success",
         )
         for changes, allowed in (
             ({}, True),
@@ -124,6 +137,9 @@ class LateBindingTests(unittest.TestCase):
             ({"PRIOR_ID": "e" * 64}, False),
             ({"OPERATION": "reply"}, False),
             ({"RUNNER_ENVIRONMENT": "github-hosted"}, False),
+            ({"BOOTSTRAP_RESULT": "failure"}, False),
+            ({"PREFLIGHT_RESULT": "skipped"}, False),
+            ({"BOOTSTRAP_RESULT": ""}, False),
         ):
             with self.subTest(changes=changes):
                 result = subprocess.run(
@@ -136,14 +152,13 @@ class LateBindingTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, allowed, result.stderr)
 
     def test_workflow_holds_every_capability_job_before_restart_installation(self):
-        import yaml
-
         root = Path(__file__).resolve().parents[1]
-        jobs = yaml.safe_load(
+        jobs = load_workflow(
             (root / ".github/workflows/review-sensei-run.yml").read_text()
         )["jobs"]
         hold = jobs["restart_hold"]
         self.assertEqual(hold["permissions"], {})
+        self.assertIn("always() && !cancelled()", hold["if"])
         self.assertEqual(hold["environment"], "reviewsensei-controlled-restart")
         self.assertNotIn("needs", jobs["bootstrap"])
         self.assertEqual(jobs["bootstrap"]["permissions"], {"contents": "read"})
@@ -171,6 +186,10 @@ class LateBindingTests(unittest.TestCase):
             names = [s["name"] for s in steps]
             self.assertLess(
                 names.index("Install designated restart package"),
+                names.index("Validate designated restart installation outputs"),
+            )
+            self.assertLess(
+                names.index("Validate designated restart installation outputs"),
                 names.index("Scope the selected backend credential"),
             )
             step = next(

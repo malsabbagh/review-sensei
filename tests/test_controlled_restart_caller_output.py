@@ -81,6 +81,23 @@ class CallerOutputTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(yaml.YAMLError):
                 load_workflow(text)
 
+    def test_forwarded_restart_fields_are_declared_and_normal_runner_is_unchanged(self):
+        root = Path(__file__).resolve().parents[1]
+        declared = load_workflow(
+            (root / ".github/workflows/review-sensei-run.yml").read_text()
+        )[True]["workflow_call"]["inputs"]
+        prepared = load_workflow(self.public_caller())
+        normal = load_workflow(_tagged_workflow())
+        forwarded = prepared["jobs"]["review-or-reply"]["with"]
+        self.assertLessEqual(set(forwarded), set(declared))
+        # The supported ordinary caller exposes no hosted_runner dispatch
+        # input and omits the reusable field; its declared default is retained.
+        self.assertNotIn("hosted_runner", normal[True]["workflow_dispatch"]["inputs"])
+        self.assertNotIn("hosted_runner", normal["jobs"]["review-or-reply"]["with"])
+        self.assertEqual(declared["hosted_runner"]["default"], "ubuntu-latest")
+        self.assertNotIn("controlled_restart_runner", forwarded)
+        self.assertIn("inputs.controlled_restart_runner", forwarded["hosted_runner"])
+
     def test_original_permissions_insertion_is_rejected_in_public_output(self):
         bad = self.public_caller().replace(
             "  resolve-trigger:\n", "  resolve-trigger:\n    permissions: {}\n", 1

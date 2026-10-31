@@ -235,12 +235,13 @@ class CallerJourneyTests(unittest.TestCase):
         result, routed = self.run_step(preflight, context, "preflight-" + lane)
         self.assertEqual(result.returncode, 0, result.stderr)
         context["needs"] = {
-            "authoritative_preflight": {"outputs": routed},
+            "authoritative_preflight": {"result": "success", "outputs": routed},
             "bootstrap": {
+                "result": "success",
                 "outputs": {
                     "workflow_commit": "e" * 40,
                     "policy_commit": self.row["policy_commit"],
-                }
+                },
             },
         }
         hold = self.jobs["restart_hold"]["steps"][0]
@@ -282,6 +283,56 @@ class CallerJourneyTests(unittest.TestCase):
             expected = scope[key]
             self.assertEqual(options["--" + key.replace("_", "-")], str(expected))
         return options
+
+    def test_installer_outputs_refuse_missing_or_foreign_designation_in_both_lanes(
+        self,
+    ):
+        request = self.row["request_id"]
+        parent = self.inputs["controlled_restart_parent_directory"]
+        for lane in ("hosted", "local"):
+            steps = self.jobs[lane]["steps"]
+            guard = next(
+                step
+                for step in steps
+                if step["name"] == "Validate designated restart installation outputs"
+            )
+            self.assertNotIn("continue-on-error", guard)
+            self.assertEqual(
+                guard["env"],
+                {
+                    "REQUEST_ID": "${{ steps.restart-install.outputs.request_id }}",
+                    "DIRECTORY": "${{ steps.restart-install.outputs.directory }}",
+                    "PARENT": "${{ inputs.controlled_restart_parent_directory }}",
+                },
+            )
+            for identity, directory, allowed in (
+                (request, parent + "/" + request, True),
+                ("", "", False),
+                (request, "", False),
+                ("", parent + "/" + request, False),
+                ("invalid", parent + "/invalid", False),
+                (request, "/foreign/" + request, False),
+                (request, parent + "/other", False),
+            ):
+                with self.subTest(lane=lane, identity=identity, directory=directory):
+                    # Execute the actual installed-output gate with the outputs
+                    # of a successful, silent or malformed external installer.
+                    env = {
+                        **self.env,
+                        "REQUEST_ID": identity,
+                        "DIRECTORY": directory,
+                        "PARENT": parent,
+                    }
+                    result = subprocess.run(
+                        ["bash", "-e", "-c", guard["run"]],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                    if not allowed:
+                        self.assertIn("no review entry authorized", result.stderr)
 
     def select(self, options):
         parent = Path(options["--parent"])
