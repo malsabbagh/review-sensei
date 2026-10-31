@@ -13,6 +13,7 @@ include src/review_sensei/schemas/*.json
 prune tests
 graft tests/dist_safe
 graft tests/downstream
+graft tests/launcher_qualification
 include tests/packaging_guard.py
 include tests/test_diff.py
 include tests/fake_github_http.py
@@ -152,7 +153,6 @@ include tests/strict_workflow_yaml.py
 include tests/test_controlled_restart_caller_output.py
 include tests/test_controlled_restart_caller_journey.py
 include tests/test_controlled_restart_installer.py
-include tests/test_ci_policy.py
 include .github/workflows/review-sensei-run.yml
 include scripts/check_action_pins.py
 include scripts/controlled_restart_launch.py

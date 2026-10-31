@@ -69,17 +69,19 @@ def archive_entries(archive: Path) -> set[str]:
 def required_entries(contract: dict) -> list[str]:
     """Return every path the dist-safe lane must find inside the sdist."""
 
-    lane = contract["lanes"]["dist_safe"]
     entries = list(contract["sdist_entries"]["required"])
-    entries.extend(lane["helpers"])
-    for relative in lane["discover"]:
-        directory = ROOT / relative
-        if not directory.is_dir():
-            raise SystemExit(f"contract discover path is missing: {relative}")
-        modules = sorted(directory.rglob("*.py"))
-        if not modules:
-            raise SystemExit(f"contract discover path has no modules: {relative}")
-        entries.extend(module.relative_to(ROOT).as_posix() for module in modules)
+    for lane in contract["lanes"].values():
+        if not lane.get("packaged"):
+            continue
+        entries.extend(lane.get("helpers", []))
+        for relative in lane.get("discover", []):
+            directory = ROOT / relative
+            if not directory.is_dir():
+                raise SystemExit(f"contract discover path is missing: {relative}")
+            modules = sorted(directory.rglob("*.py"))
+            if not modules:
+                raise SystemExit(f"contract discover path has no modules: {relative}")
+            entries.extend(module.relative_to(ROOT).as_posix() for module in modules)
     return sorted(dict.fromkeys(entries))
 
 

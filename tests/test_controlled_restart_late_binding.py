@@ -96,13 +96,10 @@ class LateBindingTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "Actions hold uses the existing POSIX runner")
     def test_actual_hold_script_rejects_automatic_partial_and_replayed_intent(self):
-        from test_ci_policy import _run_block_containing
-
         root = Path(__file__).resolve().parents[1]
-        script = _run_block_containing(
-            (root / ".github/workflows/review-sensei-run.yml").read_text(),
-            "late restart requires one protected",
-        )
+        script = load_workflow(
+            (root / ".github/workflows/review-sensei-run.yml").read_text()
+        )["jobs"]["restart_hold"]["steps"][0]["run"]
         base = dict(
             PATH=os.environ["PATH"],
             MODE="manual",

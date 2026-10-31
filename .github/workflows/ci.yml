@@ -279,6 +279,11 @@ jobs:
             --expected-version "$REVIEWSENSEI_EXPECTED_VERSION" \
             --report "$RUNNER_TEMP/openai-configuration-wheel.json"
           "$wheel_venv/bin/python" -m pip check
+          # Keep the bare-wheel consumer lane above independent of test tools.
+          # The separate installed launcher qualification needs the same pinned
+          # YAML/signature tools as the frozen post-hold release verifier.
+          "$wheel_venv/bin/python" -m pip install -r "$GITHUB_WORKSPACE/requirements/major-tag-validation.txt"
+          "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/launcher_qualification" -v
 
   npm:
     name: Node launcher and npm package contracts
