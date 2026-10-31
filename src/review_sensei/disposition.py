@@ -1450,8 +1450,21 @@ def _evolve_dispositions(
     if unheaded > MAX_UNHEADED_DISPOSITIONS:
         raise ReviewInputError("session disposition limit reached")
     headed = sum(1 for item in kept if item.get("head_sha") == head_sha)
+    from .disposition_snapshot import DISPOSITION_PAGE_ITEMS
+
+    # A qualified paged candidate closes the first page while it still fits
+    # one evidence promise. Waiting for the embedded byte ceiling can require
+    # several new pages in one command; the separate receipt is never spare
+    # evidence capacity. Existing v1 adapters retain their original threshold.
+    first_page = (
+        getattr(ledger, "enable_disposition_snapshot_writes", False) is True
+        and getattr(ledger, "supports_paged_disposition_snapshot_writes", False) is True
+        and callable(getattr(ledger, "stage_disposition_snapshot_batch", None))
+        and len(kept) >= DISPOSITION_PAGE_ITEMS
+    )
     needs_snapshot = (
         record.disposition_snapshot is not None
+        or first_page
         or (head_sha is not None and headed > MAX_DISPOSITIONS_PER_HEAD)
         or disposition_array_bytes(kept) > MAX_DISPOSITION_BYTES
     )

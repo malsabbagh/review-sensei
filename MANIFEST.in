@@ -65,6 +65,8 @@ include tests/test_local_partition_read_cache.py
 include tests/test_authenticated_partitions.py
 include tests/test_remaining_progress.py
 include tests/test_disposition_snapshots.py
+include tests/test_paged_disposition_snapshots.py
+include tests/test_bounded_snapshot_lifecycle.py
 include tests/test_command_capacity_recovery.py
 include tests/test_approval_progress.py
 include tests/test_publication_future_capacity.py
