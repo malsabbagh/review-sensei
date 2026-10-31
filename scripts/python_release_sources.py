@@ -51,6 +51,9 @@ REGISTRY_ONLY_WORKFLOWS = frozenset(
         # Controlled restart invocation; all four core installers retain
         # the independently reviewed registry-only installation contract.
         "27c3041eda29f4ac49240f00de0049b17a94654a9aada7e00d2c0efe3e806ab4",
+        # Independently reviewed protected hold and frozen later-package launch;
+        # normal core installation lanes retain their exact registry contract.
+        "c2044264760b7a1837fdf103926a877a4602403a1446a9b4380fdb41c4a215bd",
     }
 )
 
