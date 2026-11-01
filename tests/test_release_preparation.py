@@ -699,6 +699,186 @@ class PreparationRenderingTests(unittest.TestCase):
         self.assertEqual(remote_main(), sha)
         self.assertEqual(self.run_git("status", "--porcelain"), "")
 
+    def prepared_pair_remote(self):
+        remote_main = self.remote_fixture()
+        with patch.object(PREP, "unused"), patch.object(PREP, "unused_github"):
+            sha = PREP.prepare(self.root, VERSION, DATE, self.base, HOSTED_NEXT)
+        self.run_git("fetch", "origin", "refs/heads/main")
+        self.run_git("checkout", "--detach", sha)
+        return remote_main, sha
+
+    def advance_prepared_source(self):
+        path = self.root / "README.md"
+        path.write_text(path.read_text() + "\nReviewed source documentation.\n")
+        notes = self.root / "CHANGELOG.md"
+        notes.write_text(
+            notes.read_text().replace(
+                "## Unreleased\n", "## Unreleased\n\n- Additional reviewed note.\n", 1
+            )
+        )
+        self.run_git("add", "README.md", "CHANGELOG.md")
+        self.run_git("commit", "-qm", "Reviewed source after preparation")
+        self.run_git("push", "-q", "origin", "HEAD:refs/heads/main")
+        return self.run_git("rev-parse", "HEAD")
+
+    def test_paired_same_intent_retry_checks_absence_without_duplicate_commit(self):
+        remote_main, sha = self.prepared_pair_remote()
+        with (
+            patch.object(PREP, "unused") as core,
+            patch.object(PREP, "unused_github") as hosted,
+        ):
+            self.assertEqual(
+                PREP.prepare(self.root, VERSION, DATE, sha, HOSTED_NEXT), sha
+            )
+        core.assert_called_once_with(VERSION)
+        hosted.assert_called_once_with(HOSTED_NEXT)
+        self.assertEqual(remote_main(), sha)
+
+    def test_unpublished_pair_refreshes_reviewed_source_and_retains_both_tags(self):
+        remote_main, old_sha = self.prepared_pair_remote()
+        base = self.advance_prepared_source()
+        with (
+            patch.object(PREP, "unused") as core,
+            patch.object(PREP, "unused_github") as hosted,
+        ):
+            sha = PREP.prepare(self.root, VERSION, DATE, base, HOSTED_NEXT)
+        self.assertEqual(core.call_count, 2)
+        self.assertEqual(hosted.call_count, 2)
+        self.assertEqual(remote_main(), sha)
+        self.assertNotIn(sha, {old_sha, base})
+        self.run_git("fetch", "origin", "refs/heads/main")
+        self.run_git("checkout", "--detach", sha)
+        receipt = PREP.verify_commit(self.root, sha)
+        self.assertEqual(receipt["base_sha"], base)
+        self.assertEqual(receipt["engine_tag"], "v" + VERSION)
+        self.assertEqual(receipt["github_tag"], "github-v" + HOSTED_NEXT)
+        notes = (self.root / "CHANGELOG.md").read_text()
+        self.assertEqual(notes.count(f"## {VERSION} - {DATE}"), 1)
+        self.assertEqual(
+            notes.count(f"## review-sensei-github {HOSTED_NEXT} - {DATE}"), 1
+        )
+        self.assertIn(
+            "Additional reviewed note.", PREP.released_notes(notes, VERSION, DATE)
+        )
+        self.assertEqual(self.hosted_state(), (HOSTED_NEXT, VERSION))
+
+    def test_prepared_pair_refuses_partial_publication_or_unknown_absence(self):
+        remote_main, sha = self.prepared_pair_remote()
+        for refresh in (False, True):
+            if refresh:
+                sha = self.advance_prepared_source()
+            for channel in ("unused", "unused_github"):
+                with (
+                    self.subTest(refresh=refresh, channel=channel),
+                    patch.object(PREP, "unused"),
+                    patch.object(PREP, "unused_github"),
+                    patch.object(
+                        PREP,
+                        channel,
+                        side_effect=ValueError("publication exists or absence unknown"),
+                    ),
+                    self.assertRaisesRegex(ValueError, "absence unknown"),
+                ):
+                    PREP.prepare(self.root, VERSION, DATE, sha, HOSTED_NEXT)
+                self.assertEqual(remote_main(), sha)
+
+    def test_resume_rejects_modified_receipt_and_missing_reviewed_ci(self):
+        remote_main, _ = self.prepared_pair_remote()
+        base = self.advance_prepared_source()
+        with (
+            patch.object(PREP, "unused"),
+            patch.object(PREP, "unused_github"),
+            patch.object(PREP, "ci_once", return_value=None),
+            self.assertRaisesRegex(ValueError, "CI is not terminal success"),
+        ):
+            PREP.prepare(self.root, VERSION, DATE, base, HOSTED_NEXT)
+        self.assertEqual(remote_main(), base)
+        path = self.root / PREP.RECEIPT
+        record = json.loads(path.read_text())
+        record["notes_sha256"] = "0" * 64
+        path.write_text(json.dumps(record))
+        self.run_git("add", PREP.RECEIPT)
+        self.run_git("commit", "-qm", "Alter inherited receipt")
+        self.run_git("push", "-q", "origin", "HEAD:refs/heads/main")
+        base = self.run_git("rev-parse", "HEAD")
+        with (
+            patch.object(PREP, "unused") as core,
+            patch.object(PREP, "unused_github") as hosted,
+            self.assertRaises(ValueError),
+        ):
+            PREP.prepare(self.root, VERSION, DATE, base, HOSTED_NEXT)
+        core.assert_not_called()
+        hosted.assert_not_called()
+        self.assertEqual(remote_main(), base)
+
+    def test_resume_retains_exact_date_and_publication_selection(self):
+        remote_main, sha = self.prepared_pair_remote()
+        for date, hosted in (
+            ("2026-10-09", HOSTED_NEXT),
+            (DATE, None),
+            (DATE, HOSTED_CURRENT),
+        ):
+            with (
+                self.subTest(date=date, hosted=hosted),
+                patch.object(PREP, "unused"),
+                patch.object(PREP, "unused_github"),
+                self.assertRaises(ValueError),
+            ):
+                PREP.prepare(self.root, VERSION, date, sha, hosted)
+            self.assertEqual(remote_main(), sha)
+
+    def test_hosted_only_resume_never_selects_existing_engine(self):
+        remote_main = self.remote_fixture()
+        with patch.object(PREP, "unused") as core, patch.object(PREP, "unused_github"):
+            sha = PREP.prepare(self.root, CURRENT, DATE, self.base, HOSTED_NEXT)
+        core.assert_not_called()
+        self.run_git("fetch", "origin", "refs/heads/main")
+        self.run_git("checkout", "--detach", sha)
+        base = self.advance_prepared_source()
+        with (
+            patch.object(PREP, "unused") as core,
+            patch.object(PREP, "unused_github") as hosted,
+        ):
+            sha = PREP.prepare(self.root, CURRENT, DATE, base, HOSTED_NEXT)
+        core.assert_not_called()
+        self.assertEqual(hosted.call_count, 2)
+        self.assertEqual(remote_main(), sha)
+        self.run_git("fetch", "origin", "refs/heads/main")
+        self.run_git("checkout", "--detach", sha)
+        receipt = PREP.verify_commit(self.root, sha)
+        self.assertEqual(receipt["engine_tag"], "")
+        self.assertEqual(receipt["github_tag"], "github-v" + HOSTED_NEXT)
+        self.assertEqual(receipt["base_sha"], base)
+        self.assertEqual(self.hosted_state(), (HOSTED_NEXT, CURRENT))
+        self.assertIn(
+            "Additional reviewed note.",
+            PREP.hosted_released_notes(
+                (self.root / "CHANGELOG.md").read_text(), HOSTED_NEXT, DATE
+            ),
+        )
+
+    def test_resume_preserves_concurrent_main_fence(self):
+        remote_main, _ = self.prepared_pair_remote()
+        base = self.advance_prepared_source()
+        calls = []
+
+        def race(_version):
+            calls.append(True)
+            if len(calls) == 2:
+                self.run_git(
+                    "commit", "--allow-empty", "-qm", "Concurrent reviewed source"
+                )
+                self.run_git("push", "-q", "origin", "HEAD:refs/heads/main")
+
+        with (
+            patch.object(PREP, "unused", side_effect=race),
+            patch.object(PREP, "unused_github"),
+            self.assertRaisesRegex(ValueError, "advanced before push"),
+        ):
+            PREP.prepare(self.root, VERSION, DATE, base, HOSTED_NEXT)
+        self.assertEqual(remote_main(), self.run_git("rev-parse", "HEAD"))
+        self.assertEqual(self.run_git("status", "--porcelain"), "")
+
     def test_real_git_concurrent_main_advance_is_preserved_without_release_push(self):
         remote_main = self.remote_fixture()
         calls = []

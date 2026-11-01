@@ -387,6 +387,46 @@ def hosted_pin_note(engine_version: str) -> str:
     return f"- Pin `review-sensei=={engine_version}`."
 
 
+def same_version_intent(
+    root: Path, version: str, date: str, github_version: str | None
+) -> dict[str, Any]:
+    """Retain selected publications; equal metadata alone never selects a tag."""
+    previous = receipt_record(root)
+    if (
+        previous["version"] != version
+        or previous["release_date"] != date
+        or (github_version is not None and previous["github_version"] != github_version)
+        or (previous["github_tag"] and github_version is None)
+        or not (previous["engine_tag"] or previous["github_tag"])
+    ):
+        raise ValueError(
+            "same-version preparation intent differs; a current version skips that package"
+        )
+    return previous
+
+
+def verify_previous_preparation(
+    root: Path, base: str, previous: dict[str, Any]
+) -> None:
+    """Prove an inherited receipt came from a bounded, valid prepared ancestor."""
+    ancestor = git(
+        root, "log", "--first-parent", "-1", "--format=%H", base, "--", RECEIPT
+    )
+    chain = git(
+        root, "rev-list", "--first-parent", f"--max-count={MAX_NOTE_COMMITS}", base
+    ).splitlines()
+    if ancestor not in chain:
+        raise ValueError("previous preparation is outside bounded main history")
+    with tempfile.TemporaryDirectory(prefix="verify-preparation-") as temporary:
+        checkout = Path(temporary) / "prepared"
+        git(root, "worktree", "add", "--detach", str(checkout), ancestor)
+        try:
+            if verify_commit(checkout, ancestor) != previous:
+                raise ValueError("inherited preparation receipt differs")
+        finally:
+            git(root, "worktree", "remove", "--force", str(checkout))
+
+
 def generate(
     root: Path,
     version: str,
@@ -418,10 +458,31 @@ def generate(
         ):
             raise ValueError("hosted release cannot decrease the package version")
         release_github = github_version != current_hosted
-    if github_version is not None and version == current and not release_github:
-        raise ValueError(
-            "pass a new engine or hosted version; a current version skips that package"
-        )
+    previous = None
+    if version == current and not release_github:
+        previous = same_version_intent(root, version, date, github_version)
+        if not previous["engine_tag"]:
+            # Hosted-only retry: retain the existing section and core selection.
+            text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+            prefix, pending, rest = changelog_parts(text)
+            old_notes = hosted_released_notes(text, previous["github_version"], date)
+            notes = (pending + "\n\n" + old_notes).strip() if pending else old_notes
+            (root / "CHANGELOG.md").write_text(
+                prefix + "\n\n" + rest.replace(old_notes, notes, 1),
+                encoding="utf-8",
+                newline="\n",
+            )
+            previous.update(
+                base_sha=base,
+                notes_sha256=hashlib.sha256(notes.encode()).hexdigest(),
+                files=file_hashes(root),
+            )
+            (root / RECEIPT).write_text(
+                json.dumps(previous, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            return validate_payload(root)
     if release_github and version == current:
         return render_hosted_only(
             root, version, date, base, github_version, current_hosted
@@ -429,9 +490,7 @@ def generate(
     text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     prefix, pending, rest = changelog_parts(text)
     if current == version:
-        previous = receipt_record(root)
-        if previous["version"] != version or previous["release_date"] != date:
-            raise ValueError("same-version preparation intent differs")
+        assert previous is not None
         old_notes = released_notes(text, version, date)
         notes = (pending + "\n\n" + old_notes).strip() if pending else old_notes
         rest = rest.replace(old_notes, notes, 1)
@@ -488,7 +547,7 @@ def generate(
     )
     docs.rewrite_installation_versions(root / "docs/site", version)
     recorded_github = current_hosted
-    github_tag = ""
+    github_tag = previous["github_tag"] if previous is not None else ""
     if release_github:
         assert github_version is not None
         changelog = root / "CHANGELOG.md"
@@ -784,14 +843,6 @@ def prepare(
         "project"
     ]["version"]
     release_github = github_version is not None and github_version != current_hosted
-    if github_version is not None and not release_engine and not release_github:
-        raise ValueError(
-            "pass a new engine or hosted version; a current version skips that package"
-        )
-    if release_engine:
-        unused(version)
-    if release_github:
-        unused_github(github_version)
     with tempfile.TemporaryDirectory(prefix="prepare-release-") as temporary:
         checkout = Path(temporary) / "main"
         git(root, "fetch", "--no-tags", "origin", "refs/heads/main")
@@ -804,6 +855,21 @@ def prepare(
         try:
             if git(checkout, "status", "--porcelain=v1", "--untracked-files=all"):
                 raise ValueError("preparation checkout must be clean")
+            if version == versions.project_version(checkout) and (
+                github_version is None
+                or github_version == versions.hosted_project(checkout)[0]
+            ):
+                previous_intent = same_version_intent(
+                    checkout, version, date, github_version
+                )
+                verify_previous_preparation(checkout, observed, previous_intent)
+                release_engine = bool(previous_intent["engine_tag"])
+                release_github = bool(previous_intent["github_tag"])
+            if release_engine:
+                unused(version)
+            if release_github:
+                assert github_version is not None
+                unused_github(github_version)
             if (checkout / RECEIPT).exists():
                 try:
                     previous = verify_commit(checkout, observed)
