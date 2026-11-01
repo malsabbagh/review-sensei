@@ -54,3 +54,64 @@ prose can propose status, not approval. Even maintain/admin and admitted
 extraction do not bypass current-head, evidence, native-effect or accounting
 gates. Model quality, speed and cost have not been measured. See
 [ADR 0121](adr/0121-proposal-only-comment-intent.md) for boundaries and follow-ups.
+
+## Multi-item batch proposals
+
+`review_sensei_github.comment_intent.prepare_comment_batch` prepares an offline
+batch from one authenticated original observation and current host facts.
+`normalize_decision_groups` in `review_sensei.comment_intent_batch` validates
+complete named-choice response groups. `complete_comment_batch` returns a
+`CommentBatchProposal` with individually attributable item results.
+
+The first batch grammar uses LF-separated statements, bullets and semicolon
+units. A canonical displayed finding ID followed by a colon can label its
+explanation. Quote and fence context is tracked across the original comment;
+protected and unsupported units remain visible. Indivisible explanations with
+multiple finding targets require clarification. Richer sentence segmentation
+and generative span extraction are separate work.
+
+Each item has an identity derived from the original authenticated source,
+segmentation version and exact original UTF-8 range. Its explanation, references,
+claim stance, current finding target, pending evidence and result stay together.
+Extraction-array order and a sibling's interpretation do not rename that item.
+Different occurrences of identical text have distinct delivery identities.
+Equivalent proposed operations can share an `operation_key`; all original
+claims, including contradictory evidence, stay in the results. The key is data,
+not a durable receipt or an execution grant.
+
+For example, one comment can propose assessment of RS-ABC123, request risk
+acceptance for RS-DEF456, give thanks and ask not to verify. These produce
+separate assessment, explicit-command-required, no-action and evidence-only
+results. An ambiguous reference in one independent item does not redirect a
+valid sibling. Restrictions derive from unquoted original text even when the restricting item is static, pending, invalid, or model-misclassified. Explicitly targeted restrictions constrain related findings; targetless PR restrictions constrain their action family. Quoted fragments contribute neither restrictions nor targets. Cross-item qualifiers such as “do not assess either” mark the
+plausibly affected requests ambiguous. A verify proposal performs finalization
+semantics and cannot supply the code assessment or coverage missing elsewhere.
+Global items carry the whole current PR scope; inline items keep their exact
+root and cannot use another item to target a different concern.
+
+Legacy explicit parsing applies to the complete original comment. An embedded
+command-looking fragment has no standalone command authority. No sliced source
+comment is manufactured for planning: each proposal binds the original complete
+observation and an independently validated item range.
+
+The complete inventory contains at most ten items and ten reference candidates.
+At most forty questions are deterministically packed into at most three requests, with complete
+item question sets in each group. Each request keeps the existing sixteen-question,
+4096-byte input and 16-KiB envelope bounds. Original source and complete manifest
+identity appear in every group; oversized frames are refused without truncation.
+Returning requests does not fund them. A future dispatcher must admit their
+complete liability under the original shared call/byte/deadline/privacy allowance;
+there is no fresh window per item.
+
+Changed source/state or a forged manifest invalidates the shared interpretation.
+An incomplete or invalid native group leaves its dependent items pending/refused;
+valid groups remain observations and the batch reports incomplete extraction.
+Missing answers are not `no_action`; unknown usage stays unknown. Semantically
+uncertain, negated or root-conflicting items have individual outcomes. No response
+is retried or replaced by another provider. Every item and batch has
+`executable == False`; extraction completeness is distinct from assessment,
+review coverage, authorization and approval.
+
+This is an offline library extension. No caller, event subscription, provider
+transport, persistent per-item receipt, action admission or automatic comment
+handling is enabled by these APIs.

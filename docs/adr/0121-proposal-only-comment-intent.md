@@ -114,3 +114,53 @@ the general criterion-bound assessment adapter separately. Executable NL,
 all-comment intake, edits/deletes and source-bound action grants require later
 reviewed phases. The sub-line design and Vault historical recovery remain
 separate work items.
+
+## Amendment: bounded per-item batch proposals
+
+User acceptance includes multiple finding IDs with distinct explanations and
+actions in a single original comment. A single aggregate stance/request cannot
+represent that intent safely. Add a separate normalized per-item core boundary,
+without changing the original one-clause facade or enabling execution.
+
+The host builds a versioned item manifest with exact original UTF-8 ranges,
+reference candidates and quote/fence context. The first grammar uses explicitly
+delimited lines/bullets and semicolon units, with one finding target per semantic
+item. Ambiguous indivisible multi-target explanations require clarification.
+All meaningful source regions remain represented; source is not rewritten into
+fabricated human comments. Explicit parsing sees the complete original only.
+
+Use distinct source, item, request/manifest and interpreted-proposal identities.
+Item identity is independent of extraction array order, model interpretation and
+sibling results. Repeated or conflicting claims remain separate observations;
+a shared proposed-operation key does not discard them, grant work, refund cost
+or prove replay safety. Persistent admission/idempotency remains a later stage.
+
+The native producer prepares its entire finite question inventory before packing
+complete item question sets: at most ten items, ten references, forty questions,
+three requests, sixteen questions per request and 4096 input bytes. All requests
+bind the same original source and complete manifest. Actual dispatch needs one
+original shared allowance covering the full liability; no per-item fresh window,
+transport, retry, fallback or provider selection is supplied here.
+
+Failure boundaries remain distinct: invalid shared source/state/manifest rejects
+the shared interpretation; an invalid/incomplete native group leaves dependent
+items unextracted; semantic ambiguity, negation and inline-target conflict affect
+their own items and any source-linked qualification dependencies. Independent
+valid siblings keep their own result. Missing extraction is not no-action.
+Risk requests stay explicit-command-required; verify cannot satisfy sibling
+assessment obligations. No group success clears findings or supplies approval.
+
+Validation adds original-source public-entry tests for mixed actions and
+explanations, ambiguity isolation, opposite/repeated claims, stable identities,
+quote/fence and UTF-8 ownership, shared-integrity/group/semantic failure scopes,
+exact question/input bounds, role/funding/history gates, and installed-wheel
+batch imports and results. Existing command and single-clause tests remain
+compatibility oracles. The APIs are inactive and have no recovery, renderer,
+ledger, caller/broker, qualification or deployed-provider integration.
+
+Alternative substring observations were rejected because they misrepresent
+source authority. One aggregate intent was rejected because it loses per-item
+meaning. Arbitrary generative span extraction remains an explicitly selected,
+separately validated alternative; this stage normalizes the existing closed
+native decision-response contract. Rollback removes the unused batch API; it
+changes no active state, history, permissions or source authority.

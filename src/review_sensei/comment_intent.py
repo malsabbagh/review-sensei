@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import asdict, dataclass
-from typing import TypedDict
+from typing import Mapping, TypedDict
 
 from .decision_provider import (
     DecisionQuestion,
@@ -339,26 +339,33 @@ def _references(body: str) -> tuple[tuple[str, str, int, int], ...]:
     return tuple(refs)
 
 
-def prepare_intent_request(
-    observation: CommentObservation, facts: ResolvedActionFacts
-) -> PreparedComment:
-    refusal = current_source_refusal(observation, facts)
-    if refusal:
-        return PreparedComment(proposal=refusal)
-    body = observation.body
-    if not body or len(body.encode("utf-8")) > 4096:
-        return PreparedComment(
-            proposal=proposal(observation, facts, "refused", "comment-byte-limit")
+def _requires_explicit_command(body: str) -> bool:
+    """Recognize reserved syntax without granting or executing a command."""
+    return (
+        re.match(
+            r"^\s*(?:[-*+][ \t]+|[0-9]{1,2}[.)][ \t]+)?@(?:reviewsensei|sensei)\s+(?:"
+            r"(?:override|accept-risk|dismiss|defer|approve-media|accept-coverage-uncertainty|reenroll|quarantine|verify|rescan)\b"
+            r"|review\s+(?:remaining|continue|pause|status|reenroll|accept-coverage-uncertainty)\b"
+            r"|i\s+reviewed\s+the\s+media\b"
+            r"|(?:rs-)?[a-f0-9]{6,64}\b[^\r\n]*\bacceptable\s+risk\b)",
+            body,
+            re.I,
         )
-    if not facts.extraction_admitted:
-        return PreparedComment(
-            proposal=proposal(observation, facts, "refused", "extraction-not-admitted")
-        )
-    # First slice intentionally abstains on quotation/multiple clauses. It does
-    # not strip text into a different source or invent arbitrary clause spans.
+        is not None
+    )
+
+
+def _clause_refusal(body: str, *, labelled: bool = False) -> tuple[str, str] | None:
+    """Conservative semantic eligibility; this view never becomes a source."""
+    label = (
+        re.match(r"^\s*(?:[-*][ \t]+|[0-9]{1,2}\.[ \t]+)?RS-[A-Fa-f0-9]{6}:", body)
+        if labelled
+        else None
+    )
+    syntax = body if label is None else body[label.end() :]
     if (
         any(
-            c in body
+            c in syntax
             for c in (
                 "`",
                 '"',
@@ -383,23 +390,15 @@ def prepare_intent_request(
         or re.search(
             r"(?<!\w)'[^']+'(?!\w)|[.!?]\s+\S|\b(?:and|or|but|however|except|yet|while|although|whereas)\b"
             r"|[ \t]-[ \t]",
-            body,
+            syntax,
             re.I,
         )
     ):
-        return PreparedComment(
-            proposal=proposal(
-                observation, facts, "clarify", "quoted-or-multiclause-input"
-            )
-        )
+        return ("clarify", "quoted-or-multiclause-input")
     if any(
         ord(c) > 127 and unicodedata.category(c)[0] in {"L", "N", "C"} for c in body
     ):
-        return PreparedComment(
-            proposal=proposal(
-                observation, facts, "clarify", "unsupported-language-or-reference"
-            )
-        )
+        return ("clarify", "unsupported-language-or-reference")
     if any(
         re.fullmatch(r"RS-[a-fA-F0-9]{6}", m.group()) is None
         for m in re.finditer(
@@ -408,11 +407,7 @@ def prepare_intent_request(
             re.I,
         )
     ):
-        return PreparedComment(
-            proposal=proposal(
-                observation, facts, "clarify", "unsupported-finding-reference"
-            )
-        )
+        return ("clarify", "unsupported-finding-reference")
     # An explicitly named claimed change must not disappear just because its
     # token cannot be represented by the supported native candidate grammar.
     # This is a bounded lexical marker, not arbitrary prose reference inference.
@@ -420,11 +415,28 @@ def prepare_intent_request(
         re.fullmatch(r"[A-Fa-f0-9]{7,40}[.!?)]*", match.group(1)) is None
         for match in re.finditer(r"\bcommit\b[ \t]*(\S*)", body, re.I)
     ):
+        return ("clarify", "unsupported-commit-reference")
+    return None
+
+
+def prepare_intent_request(
+    observation: CommentObservation, facts: ResolvedActionFacts
+) -> PreparedComment:
+    refusal = current_source_refusal(observation, facts)
+    if refusal:
+        return PreparedComment(proposal=refusal)
+    body = observation.body
+    if not body or len(body.encode("utf-8")) > 4096:
         return PreparedComment(
-            proposal=proposal(
-                observation, facts, "clarify", "unsupported-commit-reference"
-            )
+            proposal=proposal(observation, facts, "refused", "comment-byte-limit")
         )
+    if not facts.extraction_admitted:
+        return PreparedComment(
+            proposal=proposal(observation, facts, "refused", "extraction-not-admitted")
+        )
+    rejected = _clause_refusal(body)
+    if rejected:
+        return PreparedComment(proposal=proposal(observation, facts, *rejected))
     refs = _references(body)
     if len(refs) > 10:
         return PreparedComment(
@@ -477,9 +489,48 @@ def plan_comment_action(
     if len(dict(response.answers)) != len(response.answers):
         raise ReviewInputError("duplicate decision answer")
     validated = parse_decision_response(canonical(response.to_dict()), request)
-    answers = dict(validated.answers)
+    return _plan_clause_action(
+        observation,
+        facts,
+        body=observation.body,
+        source_span=(0, utf8_size(observation.body)),
+        answers=dict(validated.answers),
+        decision_sha256=digest(validated.to_dict()),
+    )
+
+
+def _plan_clause_action(
+    observation: CommentObservation,
+    facts: ResolvedActionFacts,
+    *,
+    body: str,
+    source_span: tuple[int, int],
+    answers: Mapping[str, str],
+    decision_sha256: str,
+) -> ActionProposal:
+    """Plan a validated item in its ORIGINAL observation, never a fake comment.
+
+    This internal semantic seam supplies no explicit-command route or admission.
+    The caller validates complete closed choices and source/state provenance.
+    """
+    if (
+        type(source_span) is not tuple
+        or len(source_span) != 2
+        or any(type(v) is not int for v in source_span)
+        or not 0 <= source_span[0] < source_span[1] <= utf8_size(observation.body)
+        or not sha256(decision_sha256)
+    ):
+        raise ReviewInputError("comment item source binding is invalid")
+    try:
+        actual = observation.body.encode("utf-8")[
+            source_span[0] : source_span[1]
+        ].decode("utf-8")
+    except UnicodeError as exc:
+        raise ReviewInputError("comment item source boundary is invalid") from exc
+    if actual != body:
+        raise ReviewInputError("comment item source bytes conflict")
     intent, stance, polarity = (answers[k] for k in ("intent", "stance", "polarity"))
-    refs = _references(observation.body)
+    refs = _references(body)
     targets: list[str] = []
     commits: list[str] = []
     for i, (kind, literal, _, _) in enumerate(refs):
@@ -534,8 +585,8 @@ def plan_comment_action(
     fields: _Selection = dict(
         targets=tuple(dict.fromkeys(targets)),
         commits=tuple(dict.fromkeys(commits)),
-        decision_sha256=digest(validated.to_dict()),
-        claim=AttributedClaim(stance, polarity, (0, utf8_size(observation.body)))
+        decision_sha256=decision_sha256,
+        claim=AttributedClaim(stance, polarity, source_span)
         if stance in {"fixed", "not_fixed", "disputed", "risk_accepted"}
         else None,
     )
@@ -559,7 +610,7 @@ def plan_comment_action(
         r"\b(?:if|unless|maybe|perhaps|possibly)\b"
         r"|\b(?:do[ \t]+not|don't|never|cannot|can't|not[ \t]+to|no[ \t]+need[ \t]+to)"
         r"[ \t]+(?:assess|review|verify|rescan|recheck|resume|continue|approve|override)\b",
-        observation.body,
+        body,
         re.I,
     )
     # Negative fix evidence ('did not fix it') is distinct from a request not
@@ -571,7 +622,7 @@ def plan_comment_action(
             intent not in {"none", "assess_claim"}
             and re.search(
                 r"\b(?:not|never|don't|cannot|can't|unless|if|maybe)\b",
-                observation.body,
+                body,
                 re.I,
             )
         )
@@ -584,7 +635,7 @@ def plan_comment_action(
             **fields,
         )
     if stance == "fixed" and re.search(
-        r"\b(?:not|isn't|wasn't|didn't|never)\b", observation.body, re.I
+        r"\b(?:not|isn't|wasn't|didn't|never)\b", body, re.I
     ):
         return proposal(
             observation, facts, "clarify", "claim-polarity-conflicts", **fields

@@ -126,6 +126,13 @@ qualification. General finding assessment is also deferred. Existing commands,
 review limits and historical accounting holds have their current semantics.
 The linked proposal guide records the detailed contract and Proposed ADR 0121.
 
+The batch proposal API adds a host-owned original-source item manifest,
+individually attributable results and distinct source/item/request identities.
+Bounded native question groups are prepared as data under one original shared
+allowance. Item ambiguity, invalid groups and invalid shared identity have
+separate outcomes; quotes and cross-item qualifications stay represented.
+The linked proposal guide describes the supported grammar and inactive scope.
+
 ## npm launcher and standalone boundary (issue #103)
 
 The npm surface is an adapter around the existing Python engine, not a second
