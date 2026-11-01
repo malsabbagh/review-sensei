@@ -4,7 +4,7 @@
 - Date: 2026-11-01
 - Decision owner/reviewers: ReviewSensei maintainer and independent reviewer
 - Linked GitHub Issue: [#161](https://github.com/malsabbagh/review-sensei/issues/161)
-- Linked PR: to be assigned
+- Linked PR: [#403](https://github.com/malsabbagh/review-sensei/pull/403)
 
 ## Context
 
