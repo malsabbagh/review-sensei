@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+Changes since the published core `0.8.18` / hosted `0.3.24` release. The
+`0.8.19` / hosted `0.3.25` sections below retain an unpublished preparation.
+
+- Preserve supported `hosted_runner` overrides when migrating installed callers;
+  refuse ambiguous input mappings without changing the caller file ([#402](https://github.com/malsabbagh/review-sensei/pull/402)).
+- Add inactive, non-executable comment-intent proposals and a provider-neutral
+  decision-provider seam, including source-bound multi-item planning that keeps
+  independent claims, restrictions and pending evidence separate ([#403](https://github.com/malsabbagh/review-sensei/pull/403),
+  [#404](https://github.com/malsabbagh/review-sensei/pull/404)).
+- Emit bounded, sanitized hosted lifecycle diagnostics that distinguish admission,
+  publication and caller completion without adding requests or approval authority
+  ([#405](https://github.com/malsabbagh/review-sensei/pull/405)).
+- Propagate authenticated confirmation of current thread-resolution effects into
+  caller accounting while retaining lost-response uncertainty, charges and
+  unrelated unknown effects ([#406](https://github.com/malsabbagh/review-sensei/pull/406)).
+- Restore same-version preparation retries for unpublished engine/hosted releases,
+  preserving selected tags, dates and reviewed notes while checking receipt
+  ancestry and unused publication versions ([#408](https://github.com/malsabbagh/review-sensei/pull/408)).
+- Clarify agent guidance and remote-authoritative release qualification: required
+  exact-commit remote CI remains authoritative; redundant local release tests and
+  builds are not prerequisites ([#407](https://github.com/malsabbagh/review-sensei/pull/407)).
+
+Comment-intent proposals remain inactive. Publishing this release does not
+activate historical recovery or establish that earlier review effects are settled.
+
 ## 0.8.19 - 2026-11-01
 
 Changes since [v0.8.18](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.18), from [d626185fff387dab14aedd48b2b0684e92c84739](https://github.com/malsabbagh/review-sensei/commit/d626185fff387dab14aedd48b2b0684e92c84739) through [322bed4d494cd10689c5499faba8c3be80fc01a7](https://github.com/malsabbagh/review-sensei/commit/322bed4d494cd10689c5499faba8c3be80fc01a7).
