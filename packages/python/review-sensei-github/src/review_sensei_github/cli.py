@@ -305,22 +305,32 @@ def _main(argv: list[str] | None = None) -> int:
             return 1
     if command in {"command-run", "reply-run"}:
         from .action_run import run_action
+        from .review_lifecycle_diagnostics import lifecycle
 
-        try:
-            return run_action(rest, purpose=command.removesuffix("-run"))
-        except (OSError, ValueError, ReviewSenseiError) as error:
-            print(f"review-sensei: {error}", file=sys.stderr)
-            return 1
+        with lifecycle(command.removesuffix("-run")) as diagnostic:
+            try:
+                return diagnostic.returned(
+                    run_action(rest, purpose=command.removesuffix("-run"))
+                )
+            except (OSError, ValueError, ReviewSenseiError) as error:
+                diagnostic.failed(error)
+                print(f"review-sensei: {error}", file=sys.stderr)
+                return diagnostic.returned(1)
     if command.startswith("-") or command in {"publish", "reply", "command"}:
         return _publication(args)
     if command in {"review-run", "restart-run"}:
+        from .review_lifecycle_diagnostics import lifecycle
         from .review_run import run_review
 
-        try:
-            return run_review(rest, controlled_restart=command == "restart-run")
-        except (OSError, ValueError, ReviewSenseiError) as error:
-            print(f"review-sensei: {error}", file=sys.stderr)
-            return 1
+        with lifecycle(command.removesuffix("-run")) as diagnostic:
+            try:
+                return diagnostic.returned(
+                    run_review(rest, controlled_restart=command == "restart-run")
+                )
+            except (OSError, ValueError, ReviewSenseiError) as error:
+                diagnostic.failed(error)
+                print(f"review-sensei: {error}", file=sys.stderr)
+                return diagnostic.returned(1)
     if command == "review":
         print(
             "review-sensei: hosted phase entry is retired; use review-run",
