@@ -515,6 +515,15 @@ aggregate size violations. Selection and serialization are deterministic.
 
 ## Failure behavior
 
+Hosted lifecycle entry points emit a bounded versioned stderr observation from
+existing in-memory facts, independently of optional artifacts. Requested,
+bootstrap-observed, admitted, frozen transaction and predecessor scopes remain
+separate; missing values stay unknown. No authority path consumes the collector.
+It performs no additional requests, writes or retries and cannot close accounting
+or grant approval. Rendering/sink failure preserves the original exit. See
+[the lifecycle guide](review-lifecycle-diagnostics.md) and
+[ADR 0123](adr/0123-review-lifecycle-diagnostics.md).
+
 - Provider transport or envelope failures raise `ProviderError`.
 - Invalid JSON, stage output, categories, or learning proposals receive one
   sanitized provider correction attempt. The rejected attempt is discarded

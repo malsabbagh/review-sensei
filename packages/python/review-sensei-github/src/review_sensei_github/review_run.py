@@ -37,6 +37,7 @@ from review_sensei.models import ReviewResult, ReviewTransaction
 from review_sensei.session import SessionIdentity
 from review_sensei.workflow import prepare_diff
 
+from . import review_lifecycle_diagnostics as lifecycle_diagnostics
 from .api_run_host import (
     ApiRunReviewHooks,
     policy_bytes,
@@ -340,6 +341,7 @@ class ReviewRun:
         )
 
     def execute(self, argv: list[str], *, publication_output: Path) -> int:
+        lifecycle_diagnostics.phase("analysis")
         retained = self.retained_analysis(argv)
         if retained is None and self.plan.runner_kind == "local":
             # Provider discovery is caller API work; inference remains governed
@@ -395,6 +397,7 @@ class ReviewRun:
         ):
             raise ReviewInputError("frozen policy configuration changed during review")
         analysis = hooks.completed
+        lifecycle_diagnostics.analysis(analysis)
         if analysis is None:
             if hooks.skipped_transaction is None:
                 raise ReviewInputError(
@@ -412,7 +415,14 @@ class ReviewRun:
                 or current.get("base", {}).get("sha") != self.base_sha
             ):
                 raise ReviewInputError("already published review head or base changed")
+            lifecycle_diagnostics.publication(
+                {
+                    "status": "already_published",
+                    "publication_status": "already_published",
+                }
+            )
             terminal_reason = None
+            lifecycle_diagnostics.phase("caller_close")
             try:
                 self.caller.begin_terminal("already-published")
                 self.caller.finish_review_run(
@@ -420,21 +430,19 @@ class ReviewRun:
                 )
             except ReviewSenseiError:
                 terminal_reason = "terminal_close_unconfirmed"
-            publication_output.write_text(
-                json.dumps(
-                    {
-                        "status": "published_terminal_pending"
-                        if terminal_reason
-                        else "already_published",
-                        "publication_status": "already_published",
-                        "accounting_terminal": terminal_reason is None,
-                        "terminal_reason": terminal_reason,
-                        "review_id": None,
-                        "diagnostic": None,
-                    }
-                )
-                + "\n"
-            )
+            outcome: dict[str, object] = {
+                "status": "published_terminal_pending"
+                if terminal_reason
+                else "already_published",
+                "publication_status": "already_published",
+                "accounting_terminal": terminal_reason is None,
+                "terminal_reason": terminal_reason,
+                "review_id": None,
+                "diagnostic": None,
+            }
+            lifecycle_diagnostics.publication(outcome)
+            lifecycle_diagnostics.phase("outcome_write")
+            publication_output.write_text(json.dumps(outcome) + "\n")
             return 1 if terminal_reason else 0
         application = GitHubApplication(
             broker=self.broker,
@@ -455,6 +463,7 @@ class ReviewRun:
                     original_reference=hooks.prior_inventory_reference,
                 )
             )
+        lifecycle_diagnostics.phase("publication")
         publication: PublicationResult = hooks.publish_review(
             application,
             options=GitHubWriteOptions(
@@ -483,6 +492,13 @@ class ReviewRun:
             current_key=analysis.current_key,
             changed_paths=analysis.changed_paths,
         )
+        lifecycle_diagnostics.publication(
+            {
+                "status": publication.status,
+                "publication_status": publication.status,
+                "diagnostic": publication.diagnostic,
+            }
+        )
         published = publication.status in {
             "published",
             "already_published",
@@ -506,6 +522,7 @@ class ReviewRun:
             }
             and publication.thread_resolution != "unconfirmed"
         ):
+            lifecycle_diagnostics.phase("caller_close")
             try:
                 self.caller.finish_review_run(
                     self.ledger, self.identity, analysis.result.transaction
@@ -515,22 +532,19 @@ class ReviewRun:
             else:
                 accounting_terminal = True
                 terminal_reason = None
-        publication_output.write_text(
-            json.dumps(
-                {
-                    "status": "published_terminal_pending"
-                    if published and not accounting_terminal
-                    else publication.status,
-                    "publication_status": publication.status,
-                    "accounting_terminal": accounting_terminal,
-                    "terminal_reason": terminal_reason,
-                    "review_id": publication.review_id,
-                    "diagnostic": publication.diagnostic,
-                },
-                indent=2,
-            )
-            + "\n"
-        )
+        outcome = {
+            "status": "published_terminal_pending"
+            if published and not accounting_terminal
+            else publication.status,
+            "publication_status": publication.status,
+            "accounting_terminal": accounting_terminal,
+            "terminal_reason": terminal_reason,
+            "review_id": publication.review_id,
+            "diagnostic": publication.diagnostic,
+        }
+        lifecycle_diagnostics.publication(outcome)
+        lifecycle_diagnostics.phase("outcome_write")
+        publication_output.write_text(json.dumps(outcome, indent=2) + "\n")
         return 0 if published and accounting_terminal else 1
 
 
@@ -549,6 +563,7 @@ def _configuration(
     path: Path | None,
     repository_id: int,
 ) -> tuple[FrozenApiConfiguration, str]:
+    lifecycle_diagnostics.step("repository_policy")
     info = _get(http, http.repository_path(repository), token)
     if (
         type(info.get("id")) is not int
@@ -567,18 +582,22 @@ def _configuration(
         or branch.endswith("/")
     ):
         raise ReviewInputError("default policy branch identity is invalid")
+    lifecycle_diagnostics.step("default_policy_ref")
     reference = _get(
         http,
         http.repository_path(repository, "/git/ref/heads/" + quote(branch, safe="/")),
         token,
     )
     obj = reference.get("object")
+    if isinstance(obj, dict) and obj.get("type") == "commit":
+        lifecycle_diagnostics.observed_policy(branch, obj.get("sha"))
     if (
         not isinstance(obj, dict)
         or obj.get("type") != "commit"
         or obj.get("sha") != policy_commit
     ):
         raise ReviewInputError("trusted policy commit changed before admission")
+    lifecycle_diagnostics.step("policy_content")
     status, document = http.request(
         "GET",
         http.repository_path(
@@ -609,8 +628,10 @@ def _configuration(
     if raw != local:
         raise ReviewInputError("local policy bytes differ from authenticated commit")
     configuration = load_configuration(path)
+    digest = hashlib.sha256(raw).hexdigest()
+    lifecycle_diagnostics.observed_policy(branch, policy_commit, digest)
     return FrozenApiConfiguration(
-        policy_commit, hashlib.sha256(raw).hexdigest(), configuration.api_request_limit
+        policy_commit, digest, configuration.api_request_limit
     ), branch
 
 
@@ -625,6 +646,9 @@ def bootstrap(
     restart_id: str | None = None,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
+    lifecycle_diagnostics.phase("bootstrap")
+    lifecycle_diagnostics.step("policy_checkout")
+    lifecycle_diagnostics.requested(args, policy_commit)
     event = os.environ.get("GITHUB_EVENT_NAME", "")
     allowed_events = {
         "review": {"pull_request", "workflow_dispatch", "issue_comment"},
@@ -777,6 +801,7 @@ def bootstrap(
         attempt=int(attempt),
         opener=physical_opener,
     )
+    lifecycle_diagnostics.caller(caller)
     budget = caller.budget_view
     operation_id = hashlib.sha256(
         f"review-run:{args.repository_id}:{run_id}".encode()
@@ -813,12 +838,14 @@ def bootstrap(
         raise ReviewInputError(
             "learning publication is not qualified in this lifecycle"
         )
+    lifecycle_diagnostics.step("live_pr")
     pull = _get(
         http,
         http.repository_path(args.repository, f"/pulls/{args.pull_request}"),
         metadata_token,
     )
     base, head = pull.get("base"), pull.get("head")
+    lifecycle_diagnostics.observed(pull)
     if not isinstance(base, dict) or not isinstance(head, dict):
         raise ReviewInputError("live reviewed revision metadata is invalid")
     if args.base_sha is None:
@@ -859,6 +886,7 @@ def bootstrap(
     if getattr(args, "title", None) not in {None, "", title}:
         raise ReviewInputError("review title differs from the live pull request")
     # Read-only authority/owner checks precede enrollment's durable witness.
+    lifecycle_diagnostics.step("run_authority")
     authority = request_authority(
         purpose=purpose,
         repository=args.repository,
@@ -873,11 +901,14 @@ def bootstrap(
         control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
         authority=authority,
     )
+    lifecycle_diagnostics.step("broker_oidc")
     oidc = actions.request_oidc_token()
+    lifecycle_diagnostics.step("broker_actions")
     actions_token = actions.exchange(oidc, capability="review_actions")
     evidence = ApiRunActionsEvidence(
         http, token=actions_token, command_run_id=run_id, job=job
     )
+    lifecycle_diagnostics.step("actions_owner")
     owner = evidence.current_owner(
         SessionIdentity(
             args.repository, args.pull_request, repository_id=args.repository_id
@@ -894,6 +925,7 @@ def bootstrap(
         control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
         authority=authority,
     )
+    lifecycle_diagnostics.step("broker_session")
     session = broker.open_session(
         oidc,
         repository_id=args.repository_id,
@@ -979,6 +1011,7 @@ def bootstrap(
             directory=run_directory,
         )
         install_admission(native, proof)
+    lifecycle_diagnostics.step("ledger_discovery")
     loaded = native.load(identity)
     if int(attempt) == 1:
         try:
@@ -1001,12 +1034,15 @@ def bootstrap(
                 )
                 create_quarantine(prepared, actions_token=actions_token)
             elif loaded.status == "missing":
+                lifecycle_diagnostics.step("initial_enrollment")
                 caller.initialize_and_activate(native, identity, frozen, owner)
             elif loaded.status == "ok" and loaded.record is not None:
                 previous_root = loaded.record
                 previous = ApiRunAccounting.from_document(
                     previous_root.api_run_accounting
                 )
+                lifecycle_diagnostics.predecessor(previous_root, previous)
+                lifecycle_diagnostics.step("predecessor_admission")
                 if previous.identity == caller.run:
                     raise ReviewInputError("caller run already started")
                 historical_candidate = (
@@ -1086,6 +1122,8 @@ def bootstrap(
         ):
             raise ReviewInputError("original caller accounting cannot be established")
         previous = ApiRunAccounting.from_document(loaded.record.api_run_accounting)
+        lifecycle_diagnostics.predecessor(loaded.record, previous)
+        lifecycle_diagnostics.step("predecessor_admission")
         previous.require_binding(caller.run, frozen)
         if (
             previous.terminal_transaction is not None
@@ -1172,7 +1210,7 @@ def bootstrap(
         control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
         authority=authority,
     )
-    return ReviewRun(
+    result = ReviewRun(
         caller,
         ledger,
         http,
@@ -1191,6 +1229,8 @@ def bootstrap(
         actions_token,
         restart_id,
     )
+    lifecycle_diagnostics.admitted(result)
+    return result
 
 
 def _has_option(argv: Sequence[str], name: str) -> bool:

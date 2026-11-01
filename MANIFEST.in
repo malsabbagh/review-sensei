@@ -168,4 +168,9 @@ include requirements/major-tag-validation.txt
 include tests/test_publication_selection_handoff.py
 include tests/test_publication_selection_boundaries.py
 include tests/test_native_publication_occupancy.py
+include tests/test_review_lifecycle_diagnostics.py
+include tests/review_lifecycle_incident_fixture.py
+include tests/fixtures/regressions/review-lifecycle-403.json
+include tests/fixtures/regressions/review-lifecycle-session122.json
+include tests/fixtures/regressions/review-lifecycle-sitevault141.json
 global-exclude *.py[cod]

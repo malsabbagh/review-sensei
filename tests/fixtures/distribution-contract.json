@@ -191,7 +191,12 @@
         "tests/test_quarantine_rollover.py",
         "tests/test_controlled_restart.py",
         "tests/test_controlled_restart_journeys.py",
-        "tests/test_controlled_restart_handoff.py"
+        "tests/test_controlled_restart_handoff.py",
+        "tests/test_review_lifecycle_diagnostics.py",
+        "tests/review_lifecycle_incident_fixture.py",
+        "tests/fixtures/regressions/review-lifecycle-403.json",
+        "tests/fixtures/regressions/review-lifecycle-session122.json",
+        "tests/fixtures/regressions/review-lifecycle-sitevault141.json"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },

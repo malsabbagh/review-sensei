@@ -1,0 +1,366 @@
+{
+  "schema_version": "review-lifecycle-incident-fixture-v1",
+  "authority": false,
+  "scope": "Captured public incident data for synthetic service regressions; not runtime completion or recovery authority",
+  "repository": "malsabbagh/review-sensei",
+  "repository_id": 1336322077,
+  "pull_request": 403,
+  "comment": {
+    "id": 6553804695,
+    "body": "ReviewSensei session ledger (round counters only; no source).\n\n```json\n{\"api_run_accounting\":{\"action\":null,\"analysis_abort\":null,\"blocks\":[{\"block_id\":\"hosted-review\",\"issued_by\":{\"generation\":0,\"job\":\"hosted\",\"run_attempt\":1},\"pending\":[],\"undispatched\":81},{\"block_id\":\"hosted-terminal\",\"issued_by\":{\"generation\":0,\"job\":\"hosted\",\"run_attempt\":1},\"pending\":[],\"undispatched\":49}],\"completed\":[[\"c-0-15\",1793511970283],[\"c-0-16\",1793511970843],[\"c-0-17\",1793511971203],[\"c-0-18\",1793511971477],[\"c-0-19\",1793511971804],[\"c-0-1a\",1793511972133],[\"c-0-1b\",1793511973137],[\"c-0-1c\",1793511973486],[\"c-0-1d\",1793511973916],[\"c-0-1e\",1793511974235],[\"c-0-1f\",1793511975167],[\"c-0-20\",1793511975523],[\"c-0-21\",1793511975931],[\"c-0-22\",1793512004338],[\"c-0-23\",1793512005650],[\"c-0-24\",1793512006519],[\"c-0-25\",1793512006720],[\"c-0-26\",1793512007747],[\"c-0-27\",1793512008239],[\"c-0-28\",1793512009228],[\"c-0-29\",1793512009813],[\"c-0-2a\",1793512010213],[\"c-0-2b\",1793512010511],[\"c-0-2c\",1793512011316],[\"c-0-2d\",1793512011677],[\"c-0-2e\",1793512012206],[\"c-0-2f\",1793512012575],[\"c-0-30\",1793512014398],[\"c-0-31\",1793512014674],[\"c-0-32\",1793512015369],[\"c-0-33\",1793512015819],[\"c-0-34\",1793512016191],[\"c-0-35\",1793512016604],[\"c-0-36\",1793512017021],[\"c-0-37\",1793512017891],[\"c-0-38\",1793512018256],[\"c-0-39\",1793512018565],[\"c-0-3a\",1793512018858],[\"c-0-3b\",1793512019448],[\"c-0-3c\",1793512021108],[\"c-0-3d\",1793512021685],[\"c-0-3e\",1793512022147],[\"c-0-3f\",1793512022691],[\"c-0-40\",1793512023133],[\"c-0-41\",1793512023498],[\"c-0-42\",1793512023767],[\"c-0-43\",1793512024249],[\"c-0-44\",1793512024676],[\"c-0-45\",1793512025282],[\"c-0-46\",1793512025760],[\"c-0-47\",1793512026489],[\"c-0-48\",1793512026857],[\"c-0-49\",1793512027065],[\"c-0-4a\",1793512027700],[\"c-0-4b\",1793512028169],[\"c-0-4c\",1793512028718],[\"c-0-4d\",1793512029041],[\"c-0-4e\",1793512029533],[\"c-0-4f\",1793512029832],[\"c-0-50\",1793512030350],[\"c-0-51\",1793512035504]],\"configuration\":{\"commit\":\"d4615ac33199480a423630425b991cee52e1cfff\",\"digest\":\"1c5297c57cf8e3aa1df4ab1facc1746a62409ceb81db153e1abc3bd52b173772\",\"limit\":512},\"identity\":{\"repository_id\":1336322077,\"run_id\":41278091816},\"owner\":{\"generation\":0,\"job\":\"hosted\",\"run_attempt\":1},\"previous_record\":{\"manifest\":{\"binding\":{\"base_sha\":\"d4615ac33199480a423630425b991cee52e1cfff\",\"configuration_digest\":\"1c5297c57cf8e3aa1df4ab1facc1746a62409ceb81db153e1abc3bd52b173772\",\"generation\":11,\"head_sha\":\"d8f4b97e418ded8920fd4fe4874acbc8a0d68350\",\"policy_digest\":\"9db6e5e03cdc333007a45660dc2e7474051b66c9244a4693359f25eb7c3d7c9d\",\"producer\":\"github-bot:317764649\",\"pull_request\":403,\"purpose\":\"evidence\",\"repository\":\"malsabbagh/review-sensei\",\"repository_id\":1336322077,\"schema_version\":\"1.0\"},\"decoded_bytes\":14364,\"encoded_bytes\":8531,\"encoding\":\"partitioned-json-v1\",\"item_count\":1,\"parts\":[{\"bytes\":8019,\"sha256\":\"e792007b1daf5fae61378a93998b0cf7dcb8af58f9c52a7fa718f673181f15b9\",\"storage_id\":\"6554062635\"}],\"sha256\":\"7f0da538c6e71fc25b7aeb349cc0d523b2958a06ff33f332d2d0bacee4e189fd\"},\"root_sha256\":\"5806adb3d405cd02291c3d95315a6837535a5e047d2d778d8731c17697c13911\",\"run_id\":41276927381},\"prior_nonstartup_liability\":0,\"startup\":{\"slots\":[{\"attempt\":1,\"job\":\"hosted\",\"requests\":[\"repository-policy\",\"default-policy-ref\",\"configuration\",\"pull\",\"oidc\",\"actions-token\",\"run\",\"jobs\",\"session\",\"initial-discovery\",\"initial-discovery\",\"initial-discovery\",\"initial-discovery\",\"initial-discovery\",\"initial-discovery\",\"initial-discovery\",\"initial-discovery\",\"initial-discovery\",\"initial-discovery\",\"previous-owner\",\"previous-owner\",\"previous-owner\",\"previous-owner\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"rollover-lists\",\"retained-create\",\"retained-reconcile\",\"retained-reconcile\",\"retained-reconcile\",\"retained-reconcile\",\"retained-reconcile\",\"retained-reconcile\",\"retained-reconcile\",\"retained-reconcile\",\"retained-reconcile\",\"retained-reconcile\",\"retained-readback\",\"head\",\"update\"]},{\"attempt\":2,\"job\":\"hosted\",\"requests\":[\"repository-policy\",\"default-policy-ref\",\"configuration\",\"pull\",\"oidc\",\"actions-token\",\"run\",\"jobs\",\"session\",\"ceased-job\",\"ceased-job\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"recovery-lists\",\"head\",\"update\"]}]},\"startup_used\":[[\"hosted\",1]],\"terminal_transaction\":null,\"version\":\"caller-requests-v2\"},\"completed_initial_reviews\":1,\"completed_verification_rounds\":0,\"convergence_history\":{\"baseline\":{\"data\":\"eNrtmktzIzcOgP+LzqMxwTd926rNMZdct6ZUIABKvW53K90tJ67U/PdFax6ZZCZeeaOq3droYlt8AfwAggDlXzaEdJDdgzxv7n/ZVJxlNx9wc79hHyEgOQel+GzQWxed8TbUUoBEghWg1trmzYbGYZGflx13e5kXneuBE6dYyBVTjHDl3GxtCIGhsDOcUs1eoDYTJBniJlwg+RodJkTWNWXYd4PoWmPf4yNqy0GQP+mWm68liYfMwrlY09g38Tl5pEoZDcfsgtFZveA0dMP+C+VacMQImWxFNGRc8LWGVtAJVQnCYLF6zgJQMSdHtgFABGtsLT7ooo8jS7/qIXKcRR62T/4tbFuP8+Ge+vG0buA4ja3r5Tyq4alf1rZT3+8m+fF01sQb92YzyXGcu2WclP/mEfsZa8X94W6Sp05+2s4yzNLp1HnBvfy6iZSDuIol1GCxGWUsxkVxERs0JG9zzmo8k4FLTuRyNA1bct6X1SRt83412+Oxl0VVXKaTrJ+fZFql/L6jdQMrwnlz/w91kX6kB/20uW+q7XnaQDINqhSkHEMLglWpga+JBNRopliVrtbPOajCxWl7AQOueGcwopUE6I1fXUlZCS07FcC64Gl4GMafhs1Zhb1Mx6kblusI2sugm126URW3ahlcDrrwonTnu/XnCuFRhmWnEvXX2+PzZjXWPPanddKOpm6R6Tx9g+iLEka2RJ5VaKqF1H9iKJGCFwrVWywIJfvSUsHA5JqPVALHIrCa9/mxjupSg3rI+zc3yjfKN8o3yv8Z5U/R/DNkvVKkAjIa8E63SdVFxkiWOZpCYPWGrpKoGL04PcTWCpWCrUBpsfjLIf95Qd+GfER60Itpvjs+L4dx+O3luN13y+FU7+aJPnbsPnTsPna8xi4ZUyO0VsmbCmSSpgDgmaQWFl81D6gmOFt1d2saE23jVFKi0KTplXyzy80uN7tcyS5f3xY3w9wOzM0uF9vFG6mN1pq2lbVc9OTF5KiCLYVsdFmnGZCPWvmWmqylnJLRv3LMARToxXa5gqCXsivuNLuascm38qzd+vowIb3MnWIrmnGhl1Qiutoc2NZEJCEYNsZikqxtwYoPVjMyMHXNz2IiYuvC6wLVDfx/CXzU1UxO7EwVdIiuianV6gnSXD9yAhcoW1YRuSJaJwWTqgdQhLNiuhj8FQR9G/xXQeZupoM8ohpDqJt19FZJH0ftevuh5+0/53H4YwOUJMUELWYEjZCNwQGXVAib84FVoVhCBqdRBgWpRCnZQKNgUmTShldFHN1/sBik1RJVFCV0vlQtbBCIIHHM0doQILqqQkVFQHVWe7GWlou9mP8VBL3k+K37eTkp0PMJmLp6xrr97PAvE9d6Ues5n6yWa9jYmugiilZvrXmRIBr8OWUUE1tqoK7PqEaoXmu9bFPyr3N5McKpilasWjvm1mrVM+Vbjs4nUJZ6WXrW8le9wHMEbpV9jKnY1LJp4XKXv4KgS13+NReqyRS9l7K+R0eR9ek3RNCyOSp67xESno9g9Rw0WupIaNXV4n1S7zY32DfYN9g32DfY/6+wW9EU2NjKFQNGXzl5LbiSZU2eIa4PsSZoguasMQCSNWnwORnByCIu2HAx7CsIuhT2p1xwd5zGp45lepF3rDHY4rBGWw06BzGn0JrThISiQ6MFZ4FEEr2axWVNVTE6odS0StVcyd5433j/lXi/+1rRse/o+dev34OpmrBDAgwxxUxN03tOTB6CWZ+awLeaaig5aOmllaHTAtBxwcxsMIA976XHRXi3Mli/Wd/wSPMd8nRnwMJWN34cZ+y349A/bz8G1+3H4Pq4/oPB5/E/fPe3v3//3ZeNEx2UDq0lzBfNv13ks4T5w5DLIvqFpnq37m8d9T+0weu/8V0V2Zs/Ufq//rXmNWXu78Z+Umo/9izDN3R7edogez1XT/LvJv7BV6rv3v8LjKG8Tg==\",\"decoded_bytes\":9395,\"encoding\":\"zlib-json-v1\",\"sha256\":\"9273d205ad04a6f7c32bcfcf77fac5d08c7759ffa3e15903d17c89efcc5fc648\"},\"progress\":[{\"blocker_count\":0,\"blocker_set_sha256\":\"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\",\"event\":\"completed\",\"generation\":3,\"transaction_id\":\"12ea921ef10735977e65933dff3d88758535c90204558208461e2d9206109016\"}],\"provenance\":{\"ledger_digest\":\"af757d6955138a32ef42ecbfe5ed0eecb14f54db3d38b35946dd9b4419be61c9\"},\"state\":\"completed\"},\"created_at\":\"2026-11-01T05:14:40Z\",\"dispositions\":[{\"action\":\"accept-risk\",\"actor\":\"malsabbagh\",\"actor_role\":\"admin\",\"expires_at\":null,\"finding_reference\":\"RS-285961\",\"fingerprint\":\"285961cd9dfd538333268f45a6b1843ea908c991e3da7b3f0b9df226c319407a\",\"head_sha\":\"d8f4b97e418ded8920fd4fe4874acbc8a0d68350\",\"policy_digest\":\"50b9b4171a56768cfef4d7dc415019f614fb7b5985050e0b33e93d9a8dd0a512\",\"provenance\":\"comment:6553904230\",\"reason\":\"acceptable risk\",\"recorded_at\":\"2026-11-01T05:27:11Z\",\"resolution_kind\":\"accepted_unresolved\",\"target_kind\":\"finding\"},{\"action\":\"accept-risk\",\"actor\":\"malsabbagh\",\"actor_role\":\"admin\",\"expires_at\":null,\"finding_reference\":\"RS-CE6864\",\"fingerprint\":\"ce686444b4d6c5281d742b2d8251948a3940e8c7d51c3aed551f523f4727b6ac\",\"head_sha\":\"d8f4b97e418ded8920fd4fe4874acbc8a0d68350\",\"policy_digest\":\"50b9b4171a56768cfef4d7dc415019f614fb7b5985050e0b33e93d9a8dd0a512\",\"provenance\":\"comment:6553904230\",\"reason\":\"acceptable risk\",\"recorded_at\":\"2026-11-01T05:27:11Z\",\"resolution_kind\":\"accepted_unresolved\",\"target_kind\":\"finding\"},{\"action\":\"accept-risk\",\"actor\":\"malsabbagh\",\"actor_role\":\"admin\",\"expires_at\":null,\"finding_reference\":\"RS-EB2976\",\"fingerprint\":\"eb29762cb24b2c1ad476bdc12bdb0d2c4dc6db133d1ec70c207e2a01ca8371ea\",\"head_sha\":\"d8f4b97e418ded8920fd4fe4874acbc8a0d68350\",\"policy_digest\":\"50b9b4171a56768cfef4d7dc415019f614fb7b5985050e0b33e93d9a8dd0a512\",\"provenance\":\"comment:6553904230\",\"reason\":\"acceptable risk\",\"recorded_at\":\"2026-11-01T05:27:11Z\",\"resolution_kind\":\"accepted_unresolved\",\"target_kind\":\"finding\"},{\"action\":\"accept-risk\",\"actor\":\"malsabbagh\",\"actor_role\":\"admin\",\"expires_at\":null,\"finding_reference\":\"RS-F4D912\",\"fingerprint\":\"f4d912f3ed4bfc7104a3094ab40428a3980ff2fc424dc445fbf7b9a1e8740e31\",\"head_sha\":\"d8f4b97e418ded8920fd4fe4874acbc8a0d68350\",\"policy_digest\":\"50b9b4171a56768cfef4d7dc415019f614fb7b5985050e0b33e93d9a8dd0a512\",\"provenance\":\"comment:6553904230\",\"reason\":\"acceptable risk\",\"recorded_at\":\"2026-11-01T05:27:11Z\",\"resolution_kind\":\"accepted_unresolved\",\"target_kind\":\"finding\"}],\"expires_at\":\"2026-12-01T05:14:40Z\",\"failed_attempts\":1,\"failed_attempts_head_sha\":\"a316c61125af467438562d1fe791701c1896c733\",\"generation\":16,\"last_committed_reservation_id\":\"7d33f05155c120b50fe074d131c1d6a853560f8d0744677dcd43f05da1082673\",\"operator_paused\":false,\"pull_request\":403,\"record_sha256\":\"da3783134fb5dcd4b0aa7aa8547680295f08feb87171b23b7c7639a47285206f\",\"repository\":\"malsabbagh/review-sensei\",\"repository_id\":1336322077,\"reservation_id\":null,\"reserved_slot\":null,\"schema_version\":\"1.0\",\"transaction\":{\"base_sha\":\"d4615ac33199480a423630425b991cee52e1cfff\",\"configuration_digest\":\"81be787c099a1a4a5e115ec0fbd367b5cd2c6be8fe5dccfc75041bee9b6eca5f\",\"evidence_digest\":\"40b3259bb30ffa4869cb909bf5ff99539086b07a075f27f55eb70744cfe9c7d8\",\"generation\":16,\"head_sha\":\"a316c61125af467438562d1fe791701c1896c733\",\"phase\":\"publication_succeeded\",\"policy_digest\":\"50b9b4171a56768cfef4d7dc415019f614fb7b5985050e0b33e93d9a8dd0a512\",\"pull_request\":403,\"repository\":\"malsabbagh/review-sensei\",\"reservation_id\":\"7d33f05155c120b50fe074d131c1d6a853560f8d0744677dcd43f05da1082673\",\"result_sha256\":\"6512ec144bce948870b56cee40a5bc5c3aaab2eada58979750f5b37e93dbfbec\",\"transaction_id\":\"73820eb6be34206b8cf5d5e42a76667ff6440825cb2899a13cd19e423f324a92\"},\"updated_at\":\"2026-11-01T05:46:45Z\"}\n```\n\n<!-- reviewsensei:session:v1 repo=1336322077 pr=403 gen=16 digest=da3783134fb5dcd4b0aa7aa8547680295f08feb87171b23b7c7639a47285206f -->",
+    "user": {
+      "login": "reviewsensei[bot]",
+      "name": "reviewsensei[bot]",
+      "email": null,
+      "avatar_url": "https://avatars.githubusercontent.com/in/4619866?v=4",
+      "id": 317764649
+    },
+    "created_at": null,
+    "updated_at": null
+  },
+  "source": {
+    "id": 6554175545,
+    "body": "@reviewsensei override RS-0D0530 RS-151807 RS-38BB1D RS-8BFB71 RS-8D944A RS-90387C RS-9F6A30 RS-AE6955 RS-D3CA7E RS-E0542A acceptable risk",
+    "user": {
+      "login": "malsabbagh",
+      "id": 13791232,
+      "type": "User"
+    },
+    "created_at": "2026-11-01T05:59:08Z",
+    "updated_at": "2026-11-01T05:59:08Z"
+  },
+  "command_run_id": 41278979192,
+  "predecessor_run_id": 41278091816,
+  "predecessor_jobs": [
+    {
+      "id": 124764271689,
+      "name": "resolve-trigger",
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 41278091816,
+      "logs_url": null,
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Check out trusted trigger resolver",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Resolve pull-request trigger metadata",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        },
+        {
+          "name": "Post Check out trusted trigger resolver",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7
+        }
+      ]
+    },
+    {
+      "id": 124764297455,
+      "name": "review-or-reply / bootstrap",
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 41278091816,
+      "logs_url": null,
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Resolve hosted runner label",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Reject unsupported invocation inputs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        },
+        {
+          "name": "Check out the trusted policy commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4
+        },
+        {
+          "name": "Resolve the trusted policy commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5
+        },
+        {
+          "name": "Set up Python",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6
+        },
+        {
+          "name": "Resolve the exact package release",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7
+        },
+        {
+          "name": "Install ReviewSensei package (PyPI first, GitHub fallback)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8
+        },
+        {
+          "name": "Report retired repository variables",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9
+        },
+        {
+          "name": "Resolve the hosted plan",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10
+        },
+        {
+          "name": "Report frozen restart scope",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11
+        },
+        {
+          "name": "Post Set up Python",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21
+        },
+        {
+          "name": "Post Check out the trusted policy commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 23
+        }
+      ]
+    },
+    {
+      "id": 124764371901,
+      "name": "review-or-reply / authoritative-preflight",
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 41278091816,
+      "logs_url": null,
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Validate live pull-request identity before provider execution",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        }
+      ]
+    },
+    {
+      "id": 124764389706,
+      "name": "review-or-reply / hosted",
+      "status": "completed",
+      "conclusion": "failure",
+      "run_id": 41278091816,
+      "logs_url": null,
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Check out the trusted policy commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Check out the trusted reviewed base",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        },
+        {
+          "name": "Resolve trusted base SHA",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4
+        },
+        {
+          "name": "Set up Python",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5
+        },
+        {
+          "name": "Validate trusted workflow inputs",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6
+        },
+        {
+          "name": "Install ReviewSensei package (PyPI first, GitHub fallback)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7
+        },
+        {
+          "name": "Install designated restart package",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 8
+        },
+        {
+          "name": "Validate designated restart installation outputs",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 9
+        },
+        {
+          "name": "Scope the selected backend credential",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10
+        },
+        {
+          "name": "Run hosted review",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 11
+        },
+        {
+          "name": "Generate and publish hosted mention reply",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12
+        },
+        {
+          "name": "Verify mention reply completed",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13
+        },
+        {
+          "name": "Upload diagnostics artifact",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 14
+        },
+        {
+          "name": "Post Set up Python",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 26
+        },
+        {
+          "name": "Post Check out the trusted reviewed base",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 27
+        },
+        {
+          "name": "Post Check out the trusted policy commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 28
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 29
+        }
+      ]
+    },
+    {
+      "id": 124764390047,
+      "name": "review-or-reply / restart_hold",
+      "status": "completed",
+      "conclusion": "skipped",
+      "run_id": 41278091816,
+      "logs_url": null,
+      "steps": null
+    },
+    {
+      "id": 124764390891,
+      "name": "review-or-reply / command",
+      "status": "completed",
+      "conclusion": "skipped",
+      "run_id": 41278091816,
+      "logs_url": null,
+      "steps": null
+    },
+    {
+      "id": 124764390961,
+      "name": "review-or-reply / local",
+      "status": "completed",
+      "conclusion": "skipped",
+      "run_id": 41278091816,
+      "logs_url": null,
+      "steps": null
+    }
+  ],
+  "expected": {
+    "record_sha256": "da3783134fb5dcd4b0aa7aa8547680295f08feb87171b23b7c7639a47285206f",
+    "generation": 16,
+    "transaction_id": "73820eb6be34206b8cf5d5e42a76667ff6440825cb2899a13cd19e423f324a92",
+    "head_sha": "a316c61125af467438562d1fe791701c1896c733",
+    "base_sha": "d4615ac33199480a423630425b991cee52e1cfff",
+    "policy_commit": "d4615ac33199480a423630425b991cee52e1cfff",
+    "policy_content_sha256": "1c5297c57cf8e3aa1df4ab1facc1746a62409ceb81db153e1abc3bd52b173772",
+    "frozen_limit": 512,
+    "recorded_completed": 61,
+    "historical_dispositions": 4,
+    "current_dispositions": 0,
+    "unresolved_decisions": 19,
+    "unsent_at_capture": 9,
+    "original_tail_reason": "unavailable"
+  },
+  "clock_evidence": {},
+  "synthetic_service_note": "Current policy checkout, current broker attestations and missing per-job completion timestamps in the fake service are synthetic controls, never operational incident evidence.",
+  "source_metadata_verification": {
+    "url": "https://api.github.com/repos/malsabbagh/review-sensei/issues/comments/6554175545",
+    "body_unchanged": true,
+    "body_sha256": "53517886d358f0b25c493e80794fb9aa38fceada32744da06d1b5d760a557667"
+  }
+}
