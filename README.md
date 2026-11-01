@@ -130,8 +130,8 @@ provider-neutral `@reviewsensei/cli` launcher:
 
 <!-- release-installation:package-npm-1:start -->
 ```bash
-npx --yes @reviewsensei/cli@0.8.18 --version
-npx --yes @reviewsensei/cli@0.8.18 --help
+npx --yes @reviewsensei/cli@0.8.19 --version
+npx --yes @reviewsensei/cli@0.8.19 --help
 ```
 <!-- release-installation:package-npm-1:end -->
 
