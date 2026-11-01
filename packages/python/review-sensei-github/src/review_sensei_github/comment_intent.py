@@ -87,6 +87,12 @@ def complete_comment_proposal(
 ) -> ActionProposal:
     prepared = prepare_comment_proposal(observation, facts)
     if prepared.proposal:
+        if prepared.proposal.status == "explicit":
+            # Static commands finish during preparation. An extraction response
+            # cannot be rebound to a different explicit source operation.
+            return proposal(
+                observation, facts, "refused", "completion-has-no-extraction-request"
+            )
         return prepared.proposal
     assert prepared.request is not None
     return plan_comment_action(observation, facts, prepared.request, response)

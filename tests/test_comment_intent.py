@@ -82,6 +82,50 @@ def decision(
     )
 
 
+class CompletionCorrelationTests(unittest.TestCase):
+    def test_response_completion_cannot_switch_to_edited_explicit_source(self):
+        original = observation("RS-ABC123 fixed")
+        response = decision(prepare_comment_proposal(original, facts(original)))
+        for command in ("verify", "override RS-ABC123 acceptable risk"):
+            with self.subTest(command=command):
+                edited = replace(
+                    original, body="@reviewsensei " + command, revision="edited"
+                )
+                result = complete_comment_proposal(edited, facts(edited), response)
+                self.assertEqual(result.status, "refused")
+                self.assertIsNone(result.action)
+                self.assertEqual(result.reason, "completion-has-no-extraction-request")
+                self.assertFalse(result.executable)
+
+    def test_response_completion_cannot_switch_to_another_explicit_source_id(self):
+        original = observation("RS-ABC123 fixed")
+        response = decision(prepare_comment_proposal(original, facts(original)))
+        other = replace(original, source_id=43, body="@reviewsensei verify")
+        result = complete_comment_proposal(other, facts(other), response)
+        self.assertEqual(result.status, "refused")
+        self.assertIsNone(result.action)
+
+    def test_static_preparation_and_current_source_vetoes_remain_authoritative(self):
+        original = observation("RS-ABC123 fixed")
+        response = decision(prepare_comment_proposal(original, facts(original)))
+        explicit = observation("@reviewsensei verify")
+        prepared = prepare_comment_proposal(explicit, facts(explicit))
+        self.assertIsNone(prepared.request)
+        self.assertEqual(prepared.proposal.status, "explicit")
+        self.assertEqual(prepared.proposal.action, "verify")
+        self.assertFalse(prepared.proposal.executable)
+        self.assertEqual(
+            complete_comment_proposal(
+                explicit, facts(explicit, pr_open=False), response
+            ).reason,
+            "pull-request-closed",
+        )
+        self.assertEqual(
+            complete_comment_proposal(explicit, facts(original), response).reason,
+            "source-or-current-snapshot-changed",
+        )
+
+
 class CommentIntentTests(unittest.TestCase):
     def test_display_reference_must_match_actual_instance_prefix(self):
         with self.assertRaises(ReviewInputError):

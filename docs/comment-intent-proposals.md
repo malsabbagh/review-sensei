@@ -21,6 +21,10 @@ choices and request identity require the Python parser too.
 
 `complete_comment_proposal` rechecks the current source/state and consumes a
 validated typed response. Its output always has `executable == False`.
+Static explicit results finish during preparation. Response completion refuses
+an explicit preparation because no extraction request exists to bind that
+response; it cannot switch an older response into a new source operation.
+Current source/state refusals retain precedence.
 Actions name existing semantics for future admission, not generated command
 text. No returned object is accepted by a command handler or broker as a grant.
 The provisional single-clause stance and original UTF-8 span are retained in

@@ -40,6 +40,9 @@ does not introduce persistent authority or an execution receipt store.
 Exact standalone commands are recognized first using existing parsers and
 head selection. A malformed sharp command cannot fall through to NL. Their
 returned `explicit` proposal is still not an executable command or admission.
+Explicit proposals finish during preparation. Completing a typed extraction
+response against an explicit source refuses rather than ignoring the response
+and switching to that source operation. Current source/state vetoes still win.
 Global claims retain the complete current PR scope. Inline claims inherit one
 exact current finding instance and cannot target another concern. Commit
 references must resolve uniquely in PR ancestry, including full object IDs.
