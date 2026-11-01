@@ -402,6 +402,14 @@ def same_version_intent(
         raise ValueError(
             "same-version preparation intent differs; a current version skips that package"
         )
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    notes = (
+        released_notes(changelog, version, date)
+        if previous["engine_tag"]
+        else hosted_released_notes(changelog, previous["github_version"], date)
+    )
+    if hashlib.sha256(notes.encode()).hexdigest() != previous["notes_sha256"]:
+        raise ValueError("same-version preparation reviewed notes differ")
     return previous
 
 
@@ -409,12 +417,15 @@ def verify_previous_preparation(
     root: Path, base: str, previous: dict[str, Any]
 ) -> None:
     """Prove an inherited receipt came from a bounded, valid prepared ancestor."""
-    ancestor = git(
-        root, "log", "--first-parent", "-1", "--format=%H", base, "--", RECEIPT
-    )
     chain = git(
         root, "rev-list", "--first-parent", f"--max-count={MAX_NOTE_COMMITS}", base
     ).splitlines()
+    # Limit the path query itself to the same inclusive first-parent window.
+    parents = git(root, "rev-list", "--parents", "-n", "1", chain[-1]).split()
+    revisions = [base, *(["^" + parents[1]] if len(parents) > 1 else [])]
+    ancestor = git(
+        root, "log", "--first-parent", "-1", "--format=%H", *revisions, "--", RECEIPT
+    )
     if ancestor not in chain:
         raise ValueError("previous preparation is outside bounded main history")
     with tempfile.TemporaryDirectory(prefix="verify-preparation-") as temporary:
