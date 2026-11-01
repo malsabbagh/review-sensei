@@ -38,7 +38,7 @@ from review_sensei.session import SessionIdentity, SessionRecord
 
 from .api_run_owner import claim_review_startup
 from .caller_operation import CallerOperation
-from .errors import GitHubPublicationTransientError
+from .errors import GitHubHTTPError, GitHubPublicationTransientError
 from .http import Opener
 from .session_ledger import GitHubIssueCommentSessionLedger
 
@@ -59,8 +59,14 @@ class _RefuseCallerRedirects(HTTPRedirectHandler):
 
 
 class _AccountedResponse:
-    def __init__(self, response: Any, confirmed: Callable[[], None]):
+    def __init__(
+        self,
+        response: Any,
+        confirmed: Callable[[], None],
+        observed: Callable[[Any], None] | None = None,
+    ):
         self._response, self._confirmed = response, confirmed
+        self._observed = observed
         self._read = False
 
     def __getattr__(self, name: str) -> Any:
@@ -77,6 +83,8 @@ class _AccountedResponse:
         value = self._response.read(size)
         if not self._read:
             self._confirmed()
+            if self._observed is not None:
+                self._observed(value)
             self._read = True
         return value
 
@@ -105,6 +113,24 @@ class ActionResultProof:
     boundary: ActionEffectBoundary
     manifest: dict[str, object]
     outcome: dict[str, object]
+
+
+@dataclass
+class _ThreadResolutionCapture:
+    """Private, one-invocation correlation; never imported from a ledger."""
+
+    token: object
+    scope: tuple[Any, ...]
+    url: str
+    mutation_bytes: bytes
+    readback_bytes: bytes
+    thread_id: str
+    mutation: dict[str, Any] | None = None
+    readback: dict[str, Any] | None = None
+    credential: str | None = None
+    validated: bool = False
+    consumed: bool = False
+    invalid: bool = False
 
 
 class ApiRunRequestTransport:
@@ -162,6 +188,8 @@ class ApiRunRequestTransport:
         self._provider_effect_unresolved = False
         self._abort_close_attempted = False
         self._reconciled_mutations: set[str] = set()
+        self._effect_record: SessionRecord | None = None
+        self._thread_resolution_capture: _ThreadResolutionCapture | None = None
         self._checkpoint_write_request_id: str | None = None
         self._activation_write_request_id: str | None = None
         self._terminal_block: str | None = None
@@ -323,6 +351,170 @@ class ApiRunRequestTransport:
             prewrite_reads=fences,
         )
 
+    def _thread_resolution_scope(self) -> tuple[Any, ...] | None:
+        record = self._effect_record
+        if (
+            self._state is None
+            or self._activation is None
+            or record is None
+            or record.record_sha256 != self._root
+            or record.transaction is None
+            or self._checkpoint is not None
+        ):
+            return None
+        transaction = record.transaction
+        # Routine confirmed checkpoints may advance the current record hash.
+        # The activated root, issuer, owner and transaction remain the subject.
+        return (
+            self,
+            self.run,
+            self.attempt,
+            self.job,
+            self.accounting.identity,
+            self.accounting.owner,
+            self._producer,
+            self._activation[0].record_sha256,
+            transaction.transaction_id,
+            transaction.base_sha,
+            transaction.head_sha,
+            transaction.result_sha256,
+            self._action_effect_boundary,
+        )
+
+    @contextmanager
+    def thread_resolution_readback(
+        self, http: Any, *, thread_id: str
+    ) -> Iterator[Callable[[], None] | None]:
+        """Correlate one real resolve dispatch and its existing exact readback.
+
+        The yielded opaque callback conveys only this live resolver's successful
+        validation. It is ineffective without the matching physical requests and
+        authenticated response, and expires when this invocation exits.
+        """
+        from .caller_operation import caller_for_http
+        from .thread_resolution import _MUTATION, _RESOLUTION_READBACK_QUERY
+
+        scope = self._thread_resolution_scope()
+        if scope is None:
+            yield None
+            return
+        if (
+            caller_for_http(http) is not self
+            or not isinstance(thread_id, str)
+            or not thread_id
+            or self._thread_resolution_capture is not None
+        ):
+            raise ReviewInputError("thread resolution correlation is unavailable")
+        capture = _ThreadResolutionCapture(
+            token=object(),
+            scope=scope,
+            url=http.api_url + "/graphql",
+            mutation_bytes=json.dumps(
+                {
+                    "operationName": "ResolveReviewThread",
+                    "query": _MUTATION,
+                    "variables": {"input": {"threadId": thread_id}},
+                },
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            readback_bytes=json.dumps(
+                {
+                    "operationName": "ResolutionReadback",
+                    "query": _RESOLUTION_READBACK_QUERY,
+                    "variables": {"id": thread_id},
+                },
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            thread_id=thread_id,
+        )
+        self._thread_resolution_capture = capture
+        try:
+            yield lambda: self._confirm_thread_resolution(capture.token)
+        finally:
+            self._thread_resolution_capture = None
+
+    def _capture_thread_request(
+        self, request: Request, observation: dict[str, Any]
+    ) -> _ThreadResolutionCapture | None:
+        capture = self._thread_resolution_capture
+        if capture is None:
+            return None
+        if (
+            capture.invalid
+            or capture.consumed
+            or self._thread_resolution_scope() != capture.scope
+            or request.full_url != capture.url
+            or request.get_method() != "POST"
+            or observation["phase"] != "ordinary"
+        ):
+            capture.invalid = True
+            return None
+        credential = hashlib.sha256(
+            str(request.get_header("Authorization")).encode("utf-8")
+        ).hexdigest()
+        if capture.mutation is None and request.data == capture.mutation_bytes:
+            capture.mutation, capture.credential = observation, credential
+            return None
+        if (
+            capture.mutation is not None
+            and capture.readback is None
+            and request.data == capture.readback_bytes
+            and credential == capture.credential
+        ):
+            capture.readback = observation
+            return capture
+        capture.invalid = True
+        return None
+
+    def _observe_thread_readback(
+        self, capture: _ThreadResolutionCapture, raw: Any, status: Any
+    ) -> None:
+        from .http import MAX_GITHUB_RESPONSE_BYTES, GitHubHttp
+
+        if (
+            capture is not self._thread_resolution_capture
+            or capture.invalid
+            or status != 200
+            or not isinstance(raw, bytes)
+            or len(raw) > MAX_GITHUB_RESPONSE_BYTES
+        ):
+            return
+        try:
+            value = GitHubHttp._parse_body(raw)
+        except GitHubHTTPError:
+            # The normal HTTP parser still raises its original typed failure.
+            return
+        data = value.get("data") if isinstance(value, dict) else None
+        capture.validated = bool(
+            isinstance(value, dict)
+            and value.get("errors") in (None, [])
+            and isinstance(data, dict)
+            and data.get("node") == {"id": capture.thread_id, "isResolved": True}
+        )
+
+    def _confirm_thread_resolution(self, token: object) -> None:
+        capture = self._thread_resolution_capture
+        if (
+            capture is None
+            or token is not capture.token
+            or capture.invalid
+            or capture.consumed
+            or not capture.validated
+            or capture.scope != self._thread_resolution_scope()
+            or capture.mutation is None
+            or capture.readback is None
+            or not any(capture.mutation is o for o in self.observations)
+            or not any(capture.readback is o for o in self.observations)
+            or capture.readback["outcome"] != "response"
+            or capture.readback.get("uncertain_effect")
+            or int(self._clock() * 1000) > capture.readback["deadline_unix_ms"]
+        ):
+            raise ReviewInputError("thread resolution readback is unconfirmed")
+        # This settles an idempotent effect, not the lost HTTP response. Keep
+        # its debit, unknown receipt, deadline and pending charge unchanged.
+        self._reconciled_mutations.add(str(capture.mutation["request_id"]))
+        capture.consumed = True
+
     @contextmanager
     def staged_part_operation(self, key: str) -> Iterator[CallerOperation]:
         """A bounded immutable write inside the existing root allocation.
@@ -458,6 +650,7 @@ class ApiRunRequestTransport:
         self._last_method = request.get_method()
 
         observed_status = None
+        resolution_readback = self._capture_thread_request(request, observation)
 
         def confirmed() -> None:
             if observation["outcome"] == "expired":
@@ -493,7 +686,15 @@ class ApiRunRequestTransport:
             confirmed()
             raise
         observed_status = getattr(response, "status", None)
-        return _AccountedResponse(response, confirmed)
+        return _AccountedResponse(
+            response,
+            confirmed,
+            None
+            if resolution_readback is None
+            else lambda raw: self._observe_thread_readback(
+                resolution_readback, raw, observed_status
+            ),
+        )
 
     def _require_ledger(
         self, ledger: GitHubIssueCommentSessionLedger, identity: SessionIdentity
@@ -540,6 +741,7 @@ class ApiRunRequestTransport:
             raise ReviewInputError("confirmed caller reservation owner conflicts")
         self._has_quarantine_assessments = record.quarantine_lineage is not None
         self._state, self._block, self._root = state, block_id, record.record_sha256
+        self._effect_record = record
         self._has_historical_assessments = record.historical_assessments is not None
         if self._activation_write_request_id is not None:
             self._reconciled_mutations.add(self._activation_write_request_id)
@@ -1380,6 +1582,7 @@ class ApiRunRequestTransport:
 
         expire(getattr(self, "_quarantine_checkpoint_snapshot", None))
         self._root, self._checkpoint = record.record_sha256, None
+        self._effect_record = record
         if (
             self._analysis_boundary is None
             and not self._operation_entry_started

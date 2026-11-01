@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
@@ -25,6 +26,7 @@ _QUERY = """query FindingResolutionThreads($owner: String!, $name: String!, $num
  } } }"""
 _MUTATION = """mutation ResolveReviewThread($input: ResolveReviewThreadInput!) {
  resolveReviewThread(input: $input) { thread { id isResolved } } }"""
+_RESOLUTION_READBACK_QUERY = "query ResolutionReadback($id: ID!) { node(id: $id) { ... on PullRequestReviewThread { id isResolved } } }"
 
 
 def graphql_app_author(author: object, app_slug: str) -> bool:
@@ -258,6 +260,27 @@ class FindingThreadResolver:
         self, *, token: str, thread_id: str, observer: OperationObserver | None = None
     ) -> bool:
         """Reconcile an ambiguous response once, without repeating a mutation."""
+        from .caller_operation import caller_for_http
+
+        caller = caller_for_http(self.http)
+        correlation = (
+            caller.thread_resolution_readback(self.http, thread_id=thread_id)
+            if caller is not None
+            else nullcontext(None)
+        )
+        with correlation as confirm:
+            return self._resolve_with_readback(
+                token=token, thread_id=thread_id, observer=observer, confirm=confirm
+            )
+
+    def _resolve_with_readback(
+        self,
+        *,
+        token: str,
+        thread_id: str,
+        observer: OperationObserver | None,
+        confirm: Callable[[], None] | None,
+    ) -> bool:
         try:
             status, payload = self.http.request(
                 "POST",
@@ -292,20 +315,23 @@ class FindingThreadResolver:
                 token=token,
                 body={
                     "operationName": "ResolutionReadback",
-                    "query": "query ResolutionReadback($id: ID!) { node(id: $id) { ... on PullRequestReviewThread { id isResolved } } }",
+                    "query": _RESOLUTION_READBACK_QUERY,
                     "variables": {"id": thread_id},
                 },
             )
             # A denied readback cannot confirm the uncertain prior mutation.
             # Preserve that uncertainty and stop further writes in the batch.
             _check_resolution_permission(status, payload)
-            return bool(
+            resolved = bool(
                 status == 200
                 and isinstance(payload, dict)
                 and payload.get("errors") in (None, [])
                 and payload.get("data", {}).get("node")
                 == {"id": thread_id, "isResolved": True}
             )
+            if resolved and confirm is not None:
+                confirm()
+            return resolved
         except (GitHubHTTPError, AttributeError, TypeError):
             return False
 

@@ -674,6 +674,119 @@ class _CleanupTailFixture(EntryFixture):
         return response
 
 
+class _ResolutionSettlementFixture(_CleanupTailFixture):
+    """Complete native inventory for a selected replacement and its media tail."""
+
+    def __init__(self, directory, mode="lost-ack", **kwargs):
+        super().__init__(directory, mode, **kwargs)
+        self.readback_fault = None
+        self.media_fault = False
+        target = self.root / "review.patch"
+        target.write_text(
+            target.read_text()
+            + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\n"
+            "index 0000000..1111111\nBinary files /dev/null and b/image.bin differ\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    def external(self, request, timeout):
+        import json
+        from urllib.parse import urlsplit
+
+        from fake_github_http import json_response
+
+        path = urlsplit(request.full_url).path
+        payload = json.loads(request.data) if request.data else {}
+        if payload.get("operationName") == "ResolutionReadback" and self.readback_fault:
+            self.trace.append((self.attempt, request.get_method(), path))
+            self.graphql_operations.append("ResolutionReadback")
+            if self.readback_fault == "failed":
+                raise TimeoutError("synthetic lost readback")
+            if self.readback_fault == "denied":
+                return json_response({}, 403)
+            if self.readback_fault == "malformed":
+                return json_response({"data": {"node": {"id": "LIVE_200"}}})
+            if self.readback_fault == "wrong-thread":
+                return json_response(
+                    {"data": {"node": {"id": "OTHER", "isResolved": True}}}
+                )
+            if self.readback_fault == "errors":
+                return json_response(
+                    {
+                        "errors": [{"type": "FORBIDDEN"}],
+                        "data": {"node": {"id": "LIVE_200", "isResolved": True}},
+                    }
+                )
+            if self.readback_fault == "expired":
+                deadline = self.accounted.observations[-1]["deadline_unix_ms"]
+                self.accounted._clock = lambda: deadline / 1000 + 1
+                return json_response(
+                    {"data": {"node": {"id": "LIVE_200", "isResolved": True}}}
+                )
+        if (
+            self.media_fault
+            and request.get_method() == "POST"
+            and path.endswith("/issues/7/comments")
+            and "reviewsensei:human-files:request" in payload.get("body", "")
+        ):
+            self.trace.append((self.attempt, request.get_method(), path))
+            raise TimeoutError("synthetic unknown selected media tail")
+        if "/git/commits/" in path or "/git/trees/" in path:
+            self.trace.append((self.attempt, request.get_method(), path))
+            identifier = path.rsplit("/", 1)[1]
+            if "/git/commits/" in path:
+                return json_response(
+                    {
+                        "sha": identifier,
+                        "tree": {"sha": ("e" if identifier == BASE else "f") * 40},
+                    }
+                )
+            return json_response(
+                {
+                    "sha": identifier,
+                    "truncated": False,
+                    "tree": []
+                    if identifier == "e" * 40
+                    else [
+                        {
+                            "path": "image.bin",
+                            "sha": "1" * 40,
+                            "type": "blob",
+                            "mode": "100644",
+                        }
+                    ],
+                }
+            )
+        try:
+            response = super().external(request, timeout)
+        except TimeoutError:
+            if (
+                self.readback_fault == "unfunded"
+                and payload.get("operationName") == "ResolveReviewThread"
+            ):
+                # Existing caller-budget reservations consume all confirmation
+                # room; they do not dispatch, refund or create new allowance.
+                self.accounted.budget_view._ordinary_hold = self.accounted.usable
+            raise
+        if path.endswith("/pulls/7/files"):
+            value = json.loads(response.read(524288))
+            value.append(
+                {
+                    "filename": "image.bin",
+                    "status": "added",
+                    "additions": 0,
+                    "deletions": 0,
+                }
+            )
+            return json_response(value)
+        if path.endswith("/pulls/7"):
+            value = json.loads(response.read(524288))
+            value["changed_files"] = 2
+            return json_response(value)
+        return response
+
+
 class _CompletionFixture(_CleanupTailFixture):
     """Native metadata from external HTTP, with the real completion path intact."""
 
@@ -1369,6 +1482,468 @@ os._exit(92)
 
 
 class ConsecutiveReviewRunTests(unittest.TestCase):
+    def test_confirmed_resolution_readback_closes_without_refunding_lost_response(self):
+        import json
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.api_work import ApiRunAccounting
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = _ResolutionSettlementFixture(directory)
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            f.next_run()
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            durable = ApiRunAccounting.from_document(record.api_run_accounting)
+            self.assertEqual(
+                durable.terminal_transaction, record.transaction.transaction_id
+            )
+            self.assertEqual(durable.configuration.limit, 512)
+            lost = [o for o in f.accounted.observations if o["outcome"] == "unknown"]
+            self.assertEqual(len(lost), 1)
+            self.assertTrue(lost[0]["mutation"])
+            self.assertTrue(
+                any(
+                    p.request_id == lost[0]["request_id"]
+                    for b in durable.blocks
+                    for p in b.pending
+                )
+            )
+            self.assertEqual(f.mutations, ["LIVE_200"])
+            self.assertEqual(f.graphql_operations.count("ResolutionReadback"), 1)
+            self.assertEqual(f.provider_calls, 2)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+            self.assertEqual(
+                json.loads((f.root / "publication.json").read_text())[
+                    "accounting_terminal"
+                ],
+                True,
+            )
+
+    def test_unconfirmed_resolution_readbacks_and_other_unknown_effects_stay_open(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        for fault in (
+            "lost-unstored",
+            "denied",
+            "malformed",
+            "wrong-thread",
+            "errors",
+            "failed",
+            "expired",
+            "media",
+        ):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = _ResolutionSettlementFixture(directory)
+                self.assertEqual(f.invoke(human=True), 0, f.error)
+                f.next_run()
+                if fault == "lost-unstored":
+                    f.mode = fault
+                elif fault == "media":
+                    f.media_fault = True
+                else:
+                    f.readback_fault = fault
+                self.assertEqual(f.invoke(human=True), 1, f.error)
+                record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertIsNone(record.api_run_accounting["terminal_transaction"])
+                unknown = [
+                    o
+                    for o in f.accounted.observations
+                    if o["outcome"] in {"unknown", "expired"}
+                ]
+                self.assertTrue(unknown)
+                self.assertTrue(
+                    any(
+                        o["request_id"] not in f.accounted._reconciled_mutations
+                        for o in unknown
+                    )
+                )
+                self.assertEqual(f.mutations, ["LIVE_200"])
+                self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+
+    def test_separate_resolution_effects_keep_each_lost_response_charged(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = _ResolutionSettlementFixture(directory)
+            f.provider_comments = [
+                {
+                    "path": "src/app.py",
+                    "line": 2,
+                    "side": "RIGHT",
+                    "body": body,
+                    "severity": "high",
+                    "blocking": False,
+                    "needs_human": True,
+                }
+                for body in (
+                    "Confirm the external caller contract.",
+                    "Confirm the database isolation contract.",
+                )
+            ]
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            f.next_run()
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNotNone(record.api_run_accounting["terminal_transaction"])
+            lost = [o for o in f.accounted.observations if o["outcome"] == "unknown"]
+            self.assertEqual(len(lost), 2)
+            self.assertTrue(
+                all(o["request_id"] in f.accounted._reconciled_mutations for o in lost)
+            )
+            self.assertEqual(f.mutations, ["LIVE_200", "LIVE_201"])
+            self.assertEqual(f.graphql_operations.count("ResolutionReadback"), 2)
+
+    def test_resolution_correlation_is_issued_scoped_one_use_and_does_no_io(self):
+        from contextlib import contextmanager
+        from unittest.mock import patch
+
+        from review_sensei_github.api_run_requests import ApiRunRequestTransport
+
+        from review_sensei.errors import ReviewInputError
+
+        original = ApiRunRequestTransport.thread_resolution_readback
+        callbacks = []
+        checked = []
+        first_caller = None
+
+        @contextmanager
+        def observed(caller, http, **kwargs):
+            with original(caller, http, **kwargs) as confirm:
+                self.assertIsNotNone(confirm)
+                callbacks.append(confirm)
+                before = caller.accounting.to_document()
+                calls = len(caller.observations)
+                with self.assertRaises(ReviewInputError):
+                    caller._confirm_thread_resolution(object())
+                with self.assertRaises(ReviewInputError):
+                    confirm()  # No mutation or readback dispatched yet.
+                self.assertEqual(caller.accounting.to_document(), before)
+                self.assertEqual(len(caller.observations), calls)
+
+                def check_scope_then_confirm():
+                    capture = caller._thread_resolution_capture
+                    before = caller.accounting.to_document()
+                    calls = len(caller.observations)
+                    reconciled = set(caller._reconciled_mutations)
+                    transaction = caller._effect_record.transaction
+                    identity = {
+                        name: getattr(transaction, name)
+                        for name in (
+                            "repository",
+                            "pull_request",
+                            "base_sha",
+                            "head_sha",
+                            "policy_digest",
+                            "configuration_digest",
+                            "evidence_digest",
+                            "reservation_id",
+                        )
+                    }
+                    identity["policy_digest"] = "f" * 64
+                    foreign_record = caller._effect_record.evolve(
+                        transaction=replace(
+                            transaction,
+                            **identity,
+                            transaction_id=transaction.derive_id(**identity),
+                        )
+                    )
+                    for changes in (
+                        {"attempt": 2},
+                        {"_root": "f" * 64},
+                        {"_producer": "foreign"},
+                        {"_effect_record": None},
+                        {
+                            "_state": replace(
+                                caller.accounting,
+                                owner=replace(
+                                    caller.accounting.owner,
+                                    generation=caller.accounting.owner.generation + 1,
+                                ),
+                            )
+                        },
+                        {
+                            "_activation": (
+                                caller._activation[0].evolve(
+                                    generation=caller._activation[0].generation + 1
+                                ),
+                                caller._activation[1],
+                            )
+                        },
+                        {
+                            "_effect_record": foreign_record,
+                            "_root": foreign_record.record_sha256,
+                        },
+                    ):
+                        valid = {
+                            attribute: getattr(caller, attribute)
+                            for attribute in changes
+                        }
+                        try:
+                            for attribute, invalid in changes.items():
+                                setattr(caller, attribute, invalid)
+                            with self.assertRaises(ReviewInputError):
+                                confirm()
+                        finally:
+                            for attribute, value in valid.items():
+                                setattr(caller, attribute, value)
+                    first_caller._thread_resolution_capture = capture
+                    try:
+                        with self.assertRaises(ReviewInputError):
+                            first_caller._confirm_thread_resolution(capture.token)
+                    finally:
+                        first_caller._thread_resolution_capture = None
+                    self.assertEqual(caller._reconciled_mutations, reconciled)
+                    confirm()
+                    self.assertEqual(
+                        caller._reconciled_mutations - reconciled,
+                        {capture.mutation["request_id"]},
+                    )
+                    self.assertEqual(caller.accounting.to_document(), before)
+                    self.assertEqual(len(caller.observations), calls)
+                    with self.assertRaises(ReviewInputError):
+                        confirm()  # Already consumed, cannot settle another effect.
+                    checked.append(capture.mutation["request_id"])
+
+                yield check_scope_then_confirm
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = _ResolutionSettlementFixture(directory)
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            first_caller = f.accounted
+            f.next_run()
+            with patch.object(
+                ApiRunRequestTransport, "thread_resolution_readback", observed
+            ):
+                self.assertEqual(f.invoke(human=True), 0, f.error)
+            self.assertEqual(len(checked), 1)
+            self.assertEqual(len(callbacks), 1)
+            with self.assertRaises(ReviewInputError):
+                callbacks[0]()  # Expired invocation; no process-restorable evidence.
+
+    def test_unfunded_readback_never_dispatches_or_settles_lost_resolution(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = _ResolutionSettlementFixture(directory)
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            f.next_run()
+            f.readback_fault = "unfunded"
+            self.assertEqual(f.invoke(human=True), 1, f.error)
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(record.api_run_accounting["terminal_transaction"])
+            self.assertEqual(f.mutations, ["LIVE_200"])
+            self.assertNotIn("ResolutionReadback", f.graphql_operations)
+            lost = [o for o in f.accounted.observations if o["outcome"] == "unknown"]
+            self.assertEqual(len(lost), 1)
+            self.assertNotIn(lost[0]["request_id"], f.accounted._reconciled_mutations)
+            self.assertTrue(
+                any(
+                    p.request_id == lost[0]["request_id"]
+                    for b in f.accounted.accounting.blocks
+                    for p in b.pending
+                )
+            )
+
+    def test_cached_success_cannot_replace_actual_mutation_or_readback_dispatch(self):
+        from review_sensei_github.errors import GitHubHTTPTransientError
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        for missing in ("readback", "mutation-and-readback"):
+            with (
+                self.subTest(missing=missing),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = _ResolutionSettlementFixture(directory)
+                self.assertEqual(f.invoke(human=True), 0, f.error)
+                f.next_run()
+
+                def cache_request():
+                    request = f.http.request
+
+                    def cached(method, path, *, token, body=None, **kwargs):
+                        operation = (
+                            body.get("operationName")
+                            if isinstance(body, dict)
+                            else None
+                        )
+                        if (
+                            operation == "ResolveReviewThread"
+                            and missing == "mutation-and-readback"
+                        ):
+                            raise GitHubHTTPTransientError(
+                                "synthetic refusal before physical dispatch"
+                            )
+                        if operation == "ResolutionReadback":
+                            return 200, {
+                                "data": {"node": {"id": "LIVE_200", "isResolved": True}}
+                            }
+                        return request(method, path, token=token, body=body, **kwargs)
+
+                    f.http.request = cached
+
+                f.before_publication = cache_request
+                self.assertEqual(f.invoke(human=True), 1, f.error)
+                record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertIsNone(record.api_run_accounting["terminal_transaction"])
+                self.assertNotIn("ResolutionReadback", f.graphql_operations)
+                self.assertEqual(
+                    f.mutations, ["LIVE_200"] if missing == "readback" else []
+                )
+                lost = [
+                    o for o in f.accounted.observations if o["outcome"] == "unknown"
+                ]
+                self.assertEqual(len(lost), 1 if missing == "readback" else 0)
+                self.assertTrue(
+                    all(
+                        o["request_id"] not in f.accounted._reconciled_mutations
+                        for o in lost
+                    )
+                )
+
+    def test_resolution_correlation_rejects_changed_serialized_requests(self):
+        import copy
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        for changed in ("mutation-query", "readback-query", "readback-credential"):
+            with (
+                self.subTest(changed=changed),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = _ResolutionSettlementFixture(directory)
+                self.assertEqual(f.invoke(human=True), 0, f.error)
+                f.next_run()
+
+                def change_request():
+                    request = f.http.request
+
+                    def rewrite(method, path, *, token, body=None, **kwargs):
+                        operation = (
+                            body.get("operationName")
+                            if isinstance(body, dict)
+                            else None
+                        )
+                        if (
+                            changed == "mutation-query"
+                            and operation == "ResolveReviewThread"
+                        ) or (
+                            changed == "readback-query"
+                            and operation == "ResolutionReadback"
+                        ):
+                            body = copy.deepcopy(body)
+                            body["query"] += "\n"
+                        if (
+                            changed == "readback-credential"
+                            and operation == "ResolutionReadback"
+                        ):
+                            token = "other-synthetic-credential"
+                        return request(method, path, token=token, body=body, **kwargs)
+
+                    f.http.request = rewrite
+
+                f.before_publication = change_request
+                self.assertEqual(f.invoke(human=True), 1, f.error)
+                record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertIsNone(record.api_run_accounting["terminal_transaction"])
+                unknown = [
+                    o for o in f.accounted.observations if o["outcome"] == "unknown"
+                ]
+                self.assertEqual(len(unknown), 1)
+                self.assertNotIn(
+                    unknown[0]["request_id"], f.accounted._reconciled_mutations
+                )
+
+    def test_settled_thread_does_not_settle_unrelated_unknown_mutation(self):
+        from fake_github_http import json_response
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = _ResolutionSettlementFixture(directory)
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            f.next_run()
+
+            def unrelated_unknown():
+                original = f.accounted._opener
+
+                def unavailable(request, timeout):
+                    f.trace.append(
+                        (
+                            f.attempt,
+                            request.get_method(),
+                            "/repos/owner/repo/issues/7/comments",
+                        )
+                    )
+                    return json_response({}, 503)
+
+                f.accounted._opener = unavailable
+                try:
+                    f.http.request(
+                        "POST",
+                        "/repos/owner/repo/issues/7/comments",
+                        token="synthetic",
+                        body={"body": "unrelated"},
+                    )
+                finally:
+                    f.accounted._opener = original
+
+            f.before_publication = unrelated_unknown
+            self.assertEqual(f.invoke(human=True), 1, f.error)
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(record.api_run_accounting["terminal_transaction"])
+            unknown = [
+                o
+                for o in f.accounted.observations
+                if o["outcome"] == "unknown" or o.get("uncertain_effect")
+            ]
+            self.assertEqual(len(unknown), 2)
+            self.assertEqual(
+                sum(
+                    o["request_id"] in f.accounted._reconciled_mutations
+                    for o in unknown
+                ),
+                1,
+            )
+
+    def test_local_resolution_settlement_cannot_replace_durable_caller_close(self):
+        from unittest.mock import patch
+
+        from review_sensei_github.api_run_requests import ApiRunRequestTransport
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.errors import ReviewInputError
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = _ResolutionSettlementFixture(directory)
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            f.next_run()
+            with patch.object(
+                ApiRunRequestTransport,
+                "finish_review_run",
+                side_effect=ReviewInputError(
+                    "synthetic interruption before durable close"
+                ),
+            ):
+                self.assertEqual(f.invoke(human=True), 1, f.error)
+            previous = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(previous.api_run_accounting["terminal_transaction"])
+            old_caller = f.accounted
+            unknown = [o for o in old_caller.observations if o["outcome"] == "unknown"]
+            self.assertEqual(len(unknown), 1)
+            self.assertIn(unknown[0]["request_id"], old_caller._reconciled_mutations)
+            provider_calls, mutations = f.provider_calls, list(f.mutations)
+            f.next_run()
+            self.assertEqual(f.invoke(human=True), 1, f.error)
+            self.assertEqual(
+                parse_session_comment(f.comment["body"], identity=IDENTITY), previous
+            )
+            self.assertEqual(f.provider_calls, provider_calls)
+            self.assertEqual(f.mutations, mutations)
+            self.assertNotIn(
+                unknown[0]["request_id"], f.accounted._reconciled_mutations
+            )
+
     def test_historical_fixture_keeps_canonical_diff_bytes_with_crlf_defaults(self):
         from unittest.mock import patch
 
@@ -2118,12 +2693,11 @@ os._exit(92)
                 initial = parse_session_comment(f.comment["body"], identity=IDENTITY)
                 self.assertIsNotNone(initial.api_run_accounting["terminal_transaction"])
                 f.next_run()
-                self.assertEqual(
-                    f.invoke(human=True), 0 if mode == "confirmed" else 1, f.error
-                )
+                settled = mode in {"confirmed", "lost-ack"}
+                self.assertEqual(f.invoke(human=True), 0 if settled else 1, f.error)
                 before = parse_session_comment(f.comment["body"], identity=IDENTITY)
                 self.assertEqual(before.transaction.phase, "publication_succeeded")
-                if mode == "confirmed":
+                if settled:
                     self.assertIsNotNone(
                         before.api_run_accounting["terminal_transaction"]
                     )
