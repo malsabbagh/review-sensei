@@ -397,6 +397,31 @@ signed tag. Merge and qualify this reviewed workflow implementation first.
 changes the main metadata through the dedicated App; tagging an unchanged
 0.6.16 source as 0.6.17 still fails the release contract.
 
+### Remote qualification is authoritative
+
+For a selected immutable commit with complete, successful required remote CI,
+local release qualification is **not required**. Use the existing Release Marshal
+workflow and its signed-tag-triggered release workflows. They own generated-source
+qualification, package builds, publication and installed-consumer verification.
+Do not rebuild the candidate or rerun full local suites as an additional release
+prerequisite. Local inspection and targeted diagnosis remain optional tools; a
+local result never replaces a required remote gate.
+
+Dispatch the normal owner/main `prepare-release.yml` path with the intended unused
+versions, retained release date and `sign_tag=true`. Marshal must qualify both the
+exact reviewed base and the exact generated commit before its dedicated signer
+creates the immutable tags. A green base does not waive generated-commit CI,
+protected publication approvals, provenance, installed-consumer qualification or
+the separate admission required before moving `v5`.
+
+Agents and release operators must report the actual dispatch/run URL, selected
+source and versions, and the current remote gate. Local preparation is not a
+running Marshal. If a required remote check fails or an operation has an uncertain
+outcome, retain its receipts and reconcile the existing run before recovery;
+never manufacture success with a local run, duplicate publication, move an
+immutable tag or weaken a protection. Keep documentation follow-ups outside the
+frozen release candidate and use an already-authorized existing PR when available.
+
 1. Complete [the dedicated App setup and real readiness check](release-docs-bot.md).
    The existing main-only environment and isolated PR-rule exception are required.
    A broad exception on a mixed PR/core ruleset is rejected. Repository rules
@@ -410,7 +435,8 @@ changes the main metadata through the dedicated App; tagging an unchanged
 
    ```bash
    gh workflow run prepare-release.yml --ref main \
-     -f version=0.6.17 -f github_version=0.1.0 -f release_date=2026-10-08
+     -f version=0.6.17 -f github_version=0.1.0 -f release_date=2026-10-08 \
+     -f sign_tag=true
    ```
 
    `github_version` is the hosted package version. Pass its current version,
@@ -498,8 +524,10 @@ silently incorporate another source. Any existing tag or PyPI/npm version stops
 preparation, including partial publications. Recover a tagged release by retrying
 its existing jobs/artifacts; never regenerate that version or move the tag.
 
-For offline inspection, use `prepare_release.py render` only in a disposable
-checkout with explicit version, date and base SHA. It performs no network or
+Offline rendering is optional contributor tooling, not release admission or a
+prerequisite for dispatching Marshal on exact-green remote source. For offline
+inspection, use `prepare_release.py render` only in a disposable checkout with
+explicit version, date and base SHA. It performs no network or
 publication. Validate the generated candidate, then compare version/entry points,
 all six npm manifests, provider facts/current installation pins and legacy fixture
 behavior with PR #226. Complete bytes may differ because main includes later
