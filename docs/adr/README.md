@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0121](0121-proposal-only-comment-intent.md) | Proposed | Proposal-only comment intent and typed closed choices | #161 | No provider dispatch, source authority or activation; exact current-head/evidence bindings |
 | [0120](0120-controlled-serialized-restart.md) | Proposed | Admit one isolated code-only restart while retaining historical uncertainty | [#238](https://github.com/malsabbagh/review-sensei/issues/238), PR387 | Empty registry; no deployment, activation or historical settlement |
 | [0119](0119-high-signal-review-verdict.md) | Proposed | Preserve high-signal completion and required review verdicts across selection and replay | User-directed strict publication policy | Opt-in quality and durable verdict slice; numeric cap, occupancy and native reuse remain unfinished |
 | [0118](0118-finite-recovery-accounting-and-snapshot-batches.md) | Proposed | Preserve finite caller accounting and preflight lossless decision batches | User-directed recovery capacity correction | Monotone per-owner funding, complete activation reads, production v1 retained; unchanged storage/census limits |

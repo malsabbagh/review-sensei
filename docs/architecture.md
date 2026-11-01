@@ -100,6 +100,32 @@ This change activates no qualified profile or workflow. Remote tokenizer mapping
 producer authority and full lifecycle qualification remain separate gates. See
 [ADR 0075](adr/0075-complete-provider-response-contract.md).
 
+## Inactive comment intent proposals
+
+The [comment proposal library](comment-intent-proposals.md) separates
+closed-choice intent extraction from evidence assessment and action admission.
+The core owns immutable comment/PR scope types, a provider-neutral
+`DecisionProvider` protocol, strict response validation and pure proposals.
+The GitHub adapter preserves literal command precedence. Authenticated source,
+thread/finding identity, current snapshot, permissions, funding and ancestry are
+host-owned facts; none can come from a model response.
+
+The initial consumer supports one bounded unquoted English clause and abstains
+on unsupported references, mixed clauses, conflicting stance/action choices
+and common negated or conditional requests. Global claims carry whole-PR
+scope; inline claims keep their exact root. Fix claims carry pending independent
+criterion-bound current-head assessment obligations. Verification is separate.
+Proposals always have `executable == False` and provide no assessed evidence,
+complete coverage, finding disposition, provider grant or approval authority.
+
+No caller, broker, command handler or live reply path invokes this library.
+No provider adapter, selection, transport, automatic retry or fallback is enabled.
+Future dispatch needs separate capability/privacy/budget admission, durable
+attempt accounting, original-source action envelopes and installed caller/Worker
+qualification. General finding assessment is also deferred. Existing commands,
+review limits and historical accounting holds have their current semantics.
+The linked proposal guide records the detailed contract and Proposed ADR 0121.
+
 ## npm launcher and standalone boundary (issue #103)
 
 The npm surface is an adapter around the existing Python engine, not a second

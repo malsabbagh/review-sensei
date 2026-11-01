@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "provider": "synthetic",
+  "model": "choice-fixture-v1",
+  "completion": "complete",
+  "answers": {"intent": "assess_claim", "stance": "not_fixed", "polarity": "affirmative"},
+  "usage": {"input_tokens": 20, "output_tokens": null}
+}
