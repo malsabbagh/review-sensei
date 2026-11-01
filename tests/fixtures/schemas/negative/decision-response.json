@@ -1,0 +1,10 @@
+{
+  "schema_version": "1.0",
+  "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "provider": "synthetic",
+  "model": "choice-fixture-v1",
+  "completion": "complete",
+  "answers": {"intent": "approve"},
+  "usage": {"input_tokens": true, "output_tokens": 0},
+  "command": "override all"
+}
