@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.8.19 - 2026-11-01
+
+Changes since [v0.8.18](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.18), from [d626185fff387dab14aedd48b2b0684e92c84739](https://github.com/malsabbagh/review-sensei/commit/d626185fff387dab14aedd48b2b0684e92c84739) through [322bed4d494cd10689c5499faba8c3be80fc01a7](https://github.com/malsabbagh/review-sensei/commit/322bed4d494cd10689c5499faba8c3be80fc01a7).
+
+Previous annotated tag object: `d0daf24cacc506009ae3a81f9c4eb6f460fab0b8`.
+
+- Preserve hosted runner overrides during caller migration \(\#402\) ([186b4093c036642c0c7b8351fe9ad9454db3c0fb](https://github.com/malsabbagh/review-sensei/commit/186b4093c036642c0c7b8351fe9ad9454db3c0fb)).
+- docs: record released v0.8.18 ([d4615ac33199480a423630425b991cee52e1cfff](https://github.com/malsabbagh/review-sensei/commit/d4615ac33199480a423630425b991cee52e1cfff)).
+- Add inactive comment-intent proposals and decision-provider seam \(\#403\) ([63d6141d2a8621116a7ec013179c9126337d5bff](https://github.com/malsabbagh/review-sensei/commit/63d6141d2a8621116a7ec013179c9126337d5bff)).
+- Add source-bound multi-item comment intent proposals \(\#404\) ([d9a9239251a54f9b9abea96a6beb6c12dd11824f](https://github.com/malsabbagh/review-sensei/commit/d9a9239251a54f9b9abea96a6beb6c12dd11824f)).
+- Add bounded hosted lifecycle diagnostics \(\#405\) ([322bed4d494cd10689c5499faba8c3be80fc01a7](https://github.com/malsabbagh/review-sensei/commit/322bed4d494cd10689c5499faba8c3be80fc01a7)).
+
+## review-sensei-github 0.3.25 - 2026-11-01
+
+- Pin `review-sensei==0.8.19`.
+
 ## 0.8.18 - 2026-10-31
 
 Changes since [v0.8.17](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.17), from [15c08938bfbd2a2501ac418bdb3a4fed41406458](https://github.com/malsabbagh/review-sensei/commit/15c08938bfbd2a2501ac418bdb3a4fed41406458) through [59b30b0e2104f67be05d4009995fbaa2136ffa58](https://github.com/malsabbagh/review-sensei/commit/59b30b0e2104f67be05d4009995fbaa2136ffa58).

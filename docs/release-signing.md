@@ -72,6 +72,13 @@ file or secret value and can be run by the assistant with existing owner access:
 python3 scripts/setup_release_signing.py --verify-only
 ```
 
+Local release builds and full-suite qualification are not required when the
+selected immutable source already passes the required remote CI. Follow the
+[remote-authoritative release rule](releasing.md#remote-qualification-is-authoritative):
+Marshal and the tag-triggered workflows perform the required build, publication
+and installed-consumer checks. Preserve every remote gate and protected approval;
+do not add a redundant local full-suite prerequisite.
+
 This is metadata verification, not proof of a live signed tag. Complete
 [App readiness and the existing readers-first release qualification](releasing.md#prepare-main-before-signing-and-building),
 then explicitly request automation in an owner/main dispatch:

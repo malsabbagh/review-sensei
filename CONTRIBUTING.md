@@ -25,8 +25,16 @@ responses in the repository, tests, logs, or issue/PR descriptions.
 
 ## Development commands and expectations
 
-Before opening a pull request, run the complete local gate sequence without
-provider or GitHub credentials:
+The commands below support local implementation and diagnosis and must run without
+provider or GitHub credentials. Required exact-head remote PR/main CI and normal
+review remain authoritative. When the selected immutable commit already passes
+those required remote checks, agents and release operators must not repeat a full
+local suite or local release build as an additional qualification prerequisite.
+Local results never substitute for missing, failing or incomplete remote checks.
+For release operations, follow the
+[remote-authoritative Marshal rule](docs/releasing.md#remote-qualification-is-authoritative).
+Use targeted local checks when they help develop or diagnose an actual change;
+keep the complete command sequence available as a local validation tool:
 
 ```bash
 python scripts/check_action_pins.py
