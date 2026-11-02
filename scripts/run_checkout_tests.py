@@ -22,6 +22,8 @@ from pathlib import Path
 
 
 def test_ids(suite: unittest.TestSuite) -> list[str]:
+    if type(suite) is not unittest.TestSuite:
+        raise ValueError("custom unittest suite wrappers cannot be sharded safely")
     identities = []
     for item in suite:
         if isinstance(item, unittest.TestSuite):

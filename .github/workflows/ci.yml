@@ -49,8 +49,13 @@ jobs:
           python -m pip install -e packages/python/review-sensei-github --no-deps
       - name: Compile sources
         run: python -m compileall -q src
+      # Seeded from Linux coverage CI run 41379517658, not macOS timings;
+      # retain the macOS report so future hints can use measured macOS data.
+      - name: Run every macOS test in isolated processes
+        if: runner.os == 'macOS'
+        run: python scripts/run_checkout_tests.py --workers 4 --costs tests/fixtures/checkout-class-seconds-macos-seed.json --report "${{ runner.temp }}/checkout-timings.json"
       - name: Run tests
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux'
         run: python -m unittest discover -s tests -v
       - name: Run every Windows test in isolated processes
         if: runner.os == 'Windows'

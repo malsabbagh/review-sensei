@@ -140,6 +140,94 @@ class CaseB(unittest.TestCase):
         self.assertIn("[checkout worker 1/2: 1 tests, exit 0]", result.stderr)
         self.assertIn("[checkout worker 2/2: 1 tests, exit 0]", result.stderr)
 
+    def test_custom_suite_wrapper_fails_before_any_worker(self):
+        source = """import pathlib, unittest
+class GuardedSuite(unittest.TestSuite):
+    def run(self, result, debug=False):
+        raise AssertionError("custom wrapper must not be discarded")
+def load_tests(loader, tests, pattern):
+    return GuardedSuite(tests)
+class Case(unittest.TestCase):
+    def test_example(self):
+        pathlib.Path(__file__).with_name("receipt-executed").touch()
+"""
+        result, receipts = self.run_fixture(source)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "custom unittest suite wrappers cannot be sharded safely", result.stderr
+        )
+        self.assertEqual(receipts, [])
+
+    def test_macos_route_uses_complete_isolated_runner_with_seed_costs(self):
+        import shlex
+
+        import yaml
+
+        jobs = yaml.safe_load(
+            (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        )["jobs"]
+        compatibility = jobs["compatibility"]
+        self.assertIn(
+            {"os": "macos-latest", "python-version": "3.13"},
+            compatibility["strategy"]["matrix"]["include"],
+        )
+        macos = next(
+            step
+            for step in compatibility["steps"]
+            if step.get("if") == "runner.os == 'macOS'"
+        )
+        command = shlex.split(macos["run"])
+        self.assertIn("scripts/run_checkout_tests.py", command)
+        self.assertEqual(command[command.index("--workers") + 1], "4")
+        fixture_name = command[command.index("--costs") + 1]
+        self.assertEqual(
+            fixture_name, "tests/fixtures/checkout-class-seconds-macos-seed.json"
+        )
+        self.assertIn("--report", command)
+        self.assertNotIn("--coverage", command)
+        self.assertFalse(macos.get("continue-on-error", False))
+        upload = next(
+            step
+            for step in compatibility["steps"]
+            if "upload-artifact@" in step.get("uses", "")
+        )
+        self.assertEqual(upload.get("if"), "always()")
+        self.assertEqual(
+            upload["with"]["path"], "${{ runner.temp }}/checkout-timings.json"
+        )
+
+        loader = unittest.TestLoader()
+        suite = loader.discover(
+            str(ROOT / "tests"),
+            pattern="test_quarantine_checkpoint.py",
+            top_level_dir=str(ROOT / "tests"),
+        )
+        self.assertEqual(loader.errors, [])
+        discovered = sorted(RUNNER.test_ids(suite))
+        names = (
+            "QuarantineCarrierPlanningTests",
+            "QuarantineCheckpointTests",
+            "QuarantineDecisionScopeFenceTests",
+            "QuarantineRolloverTests",
+        )
+        selected = [
+            next(identity for identity in discovered if f".{name}." in identity)
+            for name in names
+        ]
+        costs = json.loads((ROOT / fixture_name).read_text(encoding="utf-8"))
+        keys = [identity.rpartition(".")[0] for identity in selected]
+        for key in keys:
+            self.assertIn(key, costs)
+        checkpoint = next(
+            key for key in keys if key.endswith("QuarantineCheckpointTests")
+        )
+        reduced = {key: value for key, value in costs.items() if key != checkpoint}
+        full = RUNNER.partition(selected, 2, costs)
+        partial = RUNNER.partition(selected, 2, reduced)
+        for groups in (full, partial):
+            self.assertEqual(sorted(sum(groups, [])), sorted(selected))
+        self.assertNotEqual(full, partial)
+
     def test_real_workers_report_success_for_the_complete_inventory(self):
         source = """import pathlib, unittest
 class Case(unittest.TestCase):
