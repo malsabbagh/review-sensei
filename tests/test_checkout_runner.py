@@ -172,6 +172,37 @@ class Case(unittest.TestCase):
                 )
                 self.assertEqual(receipts, [])
 
+        # A future interpreter may add an ordinary default field. Compare to
+        # that interpreter's fresh suite while still rejecting modified state.
+        probe = """\
+import importlib.util, sys, unittest
+original = unittest.TestSuite.__init__
+def future_init(self, tests=()):
+    original(self, tests)
+    self.future_default_field = 0
+unittest.TestSuite.__init__ = future_init
+spec = importlib.util.spec_from_file_location('runner_under_test', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+test = unittest.FunctionTestCase(lambda: None)
+suite = unittest.TestSuite([test])
+assert module.test_ids(suite) == [test.id()]
+suite.future_default_field = 1
+try:
+    module.test_ids(suite)
+except ValueError:
+    pass
+else:
+    raise AssertionError('modified future field was accepted')
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", probe, str(SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_macos_route_uses_complete_isolated_runner_with_seed_costs(self):
         import shlex
 

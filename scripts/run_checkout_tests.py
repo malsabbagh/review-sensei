@@ -21,14 +21,24 @@ import unittest
 from pathlib import Path
 
 
+def _unmodified_builtin_suite(suite: unittest.TestSuite) -> bool:
+    """Compare against this interpreter's fresh built-in suite, with the same tests."""
+    if type(suite) is not unittest.TestSuite:
+        return False
+    try:
+        reference = unittest.TestSuite(list(suite))
+        actual_state, reference_state = vars(suite), vars(reference)
+        return actual_state.keys() == reference_state.keys() and all(
+            type(actual_state[key]) is type(value) and actual_state[key] == value
+            for key, value in reference_state.items()
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def test_ids(suite: unittest.TestSuite) -> list[str]:
     # This check runs at every recursive level, including nested load_tests suites.
-    if (
-        type(suite) is not unittest.TestSuite
-        or set(vars(suite)) != {"_tests", "_removed_tests"}
-        or type(suite._tests) is not list
-        or suite._removed_tests != 0
-    ):
+    if not _unmodified_builtin_suite(suite):
         raise ValueError("custom unittest suite wrappers cannot be sharded safely")
     identities = []
     for item in suite:
