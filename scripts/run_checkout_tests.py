@@ -22,6 +22,7 @@ from pathlib import Path
 
 
 def test_ids(suite: unittest.TestSuite) -> list[str]:
+    # This check runs at every recursive level, including nested load_tests suites.
     if type(suite) is not unittest.TestSuite:
         raise ValueError("custom unittest suite wrappers cannot be sharded safely")
     identities = []

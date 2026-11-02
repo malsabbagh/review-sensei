@@ -146,7 +146,7 @@ class GuardedSuite(unittest.TestSuite):
     def run(self, result, debug=False):
         raise AssertionError("custom wrapper must not be discarded")
 def load_tests(loader, tests, pattern):
-    return GuardedSuite(tests)
+    return unittest.TestSuite([unittest.TestSuite([GuardedSuite(tests)])])
 class Case(unittest.TestCase):
     def test_example(self):
         pathlib.Path(__file__).with_name("receipt-executed").touch()
