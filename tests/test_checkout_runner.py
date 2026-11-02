@@ -245,6 +245,86 @@ class Malformed(unittest.TestCase):
                 0,
             ),
             (
+                "colliding class names with an omission",
+                """import unittest
+class A(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('unavailable')
+    def id(self): return 'test_example.AliasA.test_a'
+    def test_a(self): pass
+class B(unittest.TestCase):
+    def id(self): return 'test_example.AliasB.test_b'
+    def run(self, result): return result
+    def test_b(self): pass
+A.__qualname__ = B.__qualname__ = 'Same'
+AliasA, AliasB = A, B
+del A, B
+""",
+                1,
+                1,
+                0,
+                0,
+            ),
+            (
+                "colliding class names with one completed",
+                """import unittest
+class A(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('unavailable')
+    def id(self): return 'test_example.AliasA.test_a'
+    def test_a(self): pass
+class B(unittest.TestCase):
+    def id(self): return 'test_example.AliasB.test_b'
+    def test_b(self): pass
+A.__qualname__ = B.__qualname__ = 'Same'
+AliasA, AliasB = A, B
+del A, B
+""",
+                1,
+                0,
+                1,
+                1,
+            ),
+            (
+                "colliding class names both skipped",
+                """import unittest
+class A(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('unavailable')
+    def id(self): return 'test_example.AliasA.test_a'
+    def test_a(self): pass
+class B(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('unavailable')
+    def id(self): return 'test_example.AliasB.test_b'
+    def test_b(self): pass
+A.__qualname__ = B.__qualname__ = 'Same'
+AliasA, AliasB = A, B
+del A, B
+""",
+                1,
+                1,
+                0,
+                0,
+            ),
+            (
+                "proxy fixture class",
+                """import unittest
+class Fixture(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('unavailable')
+class ProxyCase(unittest.TestCase):
+    @property
+    def __class__(self): return Fixture
+    def id(self): return 'test_example.ProxyCase.test_a'
+    def test_a(self): pass
+""",
+                1,
+                0,
+                0,
+                1,
+            ),
+            (
                 "omission",
                 """import unittest
 class Skipped(unittest.TestCase):
@@ -393,10 +473,11 @@ class Runs(unittest.TestCase):
         )
         self.assertEqual(remaining, Counter({"unknown.Case.test_case": 1}))
         remaining = Counter({"m.A.test_1": 1, "m.A.test_2": 1, "m.B.test_3": 1})
+        class_a, class_b = object(), object()
         scopes = {
-            "m.A.test_1": ("m.A", "m"),
-            "m.A.test_2": ("m.A", "m"),
-            "m.B.test_3": ("m.B", "m"),
+            "m.A.test_1": ("m.A", "m", class_a),
+            "m.A.test_2": ("m.A", "m", class_a),
+            "m.B.test_3": ("m.B", "m", class_b),
         }
         first = SimpleNamespace(id=lambda: "setUpClass (m.A)")
         second = SimpleNamespace(id=lambda: "setUpClass (m.B)")
@@ -405,6 +486,17 @@ class Runs(unittest.TestCase):
             RUNNER.count_fixture_skips(remaining, scopes, events), (3, False)
         )
         self.assertFalse(remaining)
+        remaining = Counter({"m.AliasA.test": 1, "m.AliasB.test": 1})
+        scopes = {
+            "m.AliasA.test": ("m.Same", "m", class_a),
+            "m.AliasB.test": ("m.Same", "m", class_b),
+        }
+        ambiguous = SimpleNamespace(id=lambda: "setUpClass (m.Same)")
+        self.assertEqual(
+            RUNNER.count_fixture_skips(remaining, scopes, [(ambiguous, "skip")]),
+            (0, False),
+        )
+        self.assertEqual(remaining.total(), 2)
 
     def _check_fixture_skip_uses_case_module_not_discovery_file(self):
         with tempfile.TemporaryDirectory() as scratch:

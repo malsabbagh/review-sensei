@@ -66,10 +66,22 @@ def count_fixture_skips(remaining, scopes, skipped_events) -> tuple[int, bool]:
         if not match:
             continue
         scope_index = 0 if match.group(1) == "Class" else 1
-        for identity in list(remaining):
-            scope = scopes.get(identity)
-            if scope is not None and scope[scope_index] == match.group(2):
-                fixture_skipped += remaining.pop(identity)
+        matches = [
+            identity
+            for identity in remaining
+            if (scope := scopes.get(identity)) is not None
+            and scope[scope_index] == match.group(2)
+        ]
+        # unittest's class skip holder only identifies the qualified class
+        # name. Different class objects can share that name, so do not guess
+        # which unstarted class was skipped when the holder is ambiguous.
+        if (
+            scope_index == 0
+            and len({id(scopes[identity][2]) for identity in matches}) > 1
+        ):
+            continue
+        for identity in matches:
+            fixture_skipped += remaining.pop(identity)
     return fixture_skipped, malformed
 
 
@@ -176,14 +188,18 @@ def main() -> int:
         identities = json.loads(args.worker_manifest.read_text(encoding="utf-8"))
         suite = loader.loadTestsFromNames(identities)
         cases = test_cases(suite)
-        loaded = [
-            (
-                case.id(),
-                f"{type(case).__module__}.{type(case).__qualname__}",
-                type(case).__module__,
+        loaded = []
+        for case in cases:
+            # unittest selects class/module fixtures via test.__class__.
+            fixture_class = case.__class__
+            loaded.append(
+                (
+                    case.id(),
+                    f"{fixture_class.__module__}.{fixture_class.__qualname__}",
+                    fixture_class.__module__,
+                    fixture_class,
+                )
             )
-            for case in cases
-        ]
         if loader.errors or sorted(item[0] for item in loaded) != sorted(identities):
             print(
                 "Worker failed to load its exact assigned test inventory",
@@ -192,7 +208,8 @@ def main() -> int:
             return 1
 
         scopes = {
-            identity: (class_name, module) for identity, class_name, module in loaded
+            identity: (class_name, module, fixture_class)
+            for identity, class_name, module, fixture_class in loaded
         }
 
         class TimedResult(unittest.TextTestResult):
