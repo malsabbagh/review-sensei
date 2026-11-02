@@ -158,6 +158,124 @@ class Case(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Discovered 2 tests; running 1 disjoint workers", result.stdout)
 
+    @staticmethod
+    def _workflow_jobs():
+        workflow = ROOT / ".github" / "workflows" / "ci.yml"
+        return yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
+
+    def test_compatibility_routes_each_matrix_entry_to_one_complete_suite(self):
+        job = self._workflow_jobs()["compatibility"]
+        matrix = job["strategy"]["matrix"]["include"]
+        self.assertEqual(
+            {(item["os"], item["python-version"]) for item in matrix},
+            {
+                ("ubuntu-latest", "3.11"),
+                ("ubuntu-latest", "3.14"),
+                ("macos-latest", "3.13"),
+                ("windows-latest", "3.12"),
+            },
+        )
+        steps = [
+            step
+            for step in job["steps"]
+            if "scripts/run_checkout_tests.py" in step.get("run", "")
+            or "unittest discover -s tests" in step.get("run", "")
+        ]
+        self.assertEqual(len(steps), 3)
+        commands = {
+            "Linux": [
+                "python",
+                "scripts/run_checkout_tests.py",
+                "--workers",
+                "4",
+                "--costs",
+                "tests/fixtures/checkout-class-seconds-linux.json",
+                "--report",
+                "${{ runner.temp }}/checkout-timings.json",
+            ],
+            "Windows": [
+                "python",
+                "scripts/run_checkout_tests.py",
+                "--workers",
+                "4",
+                "--costs",
+                "tests/fixtures/checkout-class-seconds.json",
+                "--report",
+                "${{ runner.temp }}/checkout-timings.json",
+            ],
+            "macOS": ["python", "-m", "unittest", "discover", "-s", "tests", "-v"],
+        }
+        conditions = {}
+        for step in steps:
+            condition = re.fullmatch(r"runner\.os == '([^']+)'", step.get("if", ""))
+            self.assertIsNotNone(condition, step)
+            platform = condition.group(1)
+            self.assertNotIn(platform, conditions)
+            self.assertFalse(step.get("continue-on-error", False))
+            conditions[platform] = shlex.split(step["run"])
+        self.assertEqual(conditions, commands)
+        self.assertFalse(job.get("continue-on-error", False))
+
+    def test_timing_artifact_and_coverage_floor_are_retained(self):
+        jobs = self._workflow_jobs()
+        steps = jobs["compatibility"]["steps"]
+        upload = next(
+            step for step in steps if "upload-artifact@" in step.get("uses", "")
+        )
+        self.assertEqual(upload["if"], "always()")
+        self.assertEqual(
+            upload["with"]["path"], "${{ runner.temp }}/checkout-timings.json"
+        )
+        self.assertIn(
+            "${{ matrix.os }}-py${{ matrix.python-version }}", upload["with"]["name"]
+        )
+        quality = jobs["quality"]["steps"]
+        coverage = next(
+            step for step in quality if step.get("name") == "Branch coverage"
+        )
+        self.assertFalse(coverage.get("continue-on-error", False))
+        commands = [shlex.split(line) for line in coverage["run"].splitlines() if line]
+        self.assertEqual(
+            commands,
+            [
+                [
+                    "python",
+                    "scripts/run_checkout_tests.py",
+                    "--workers",
+                    "4",
+                    "--coverage",
+                    "--costs",
+                    "tests/fixtures/checkout-class-seconds.json",
+                    "--report",
+                    "$RUNNER_TEMP/checkout-timings.json",
+                ],
+                [
+                    "python",
+                    "-m",
+                    "coverage",
+                    "report",
+                    "--precision=2",
+                    "--show-missing",
+                    "--fail-under=80",
+                ],
+            ],
+        )
+
+    def test_linux_scheduling_costs_are_valid(self):
+        path = ROOT / "tests" / "fixtures" / "checkout-class-seconds-linux.json"
+        costs = json.loads(path.read_text(encoding="utf-8"))
+        self.assertTrue(costs)
+        self.assertTrue(
+            all(
+                isinstance(name, str)
+                and "." in name
+                and type(seconds) in (int, float)
+                and math.isfinite(seconds)
+                and seconds > 0
+                for name, seconds in costs.items()
+            )
+        )
+
 
 class MeasuredRunnerTests(unittest.TestCase):
     def test_measured_costs_schedule_expensive_classes_without_changing_inventory(self):
@@ -582,122 +700,3 @@ class Case(unittest.TestCase):
                     self.assertEqual(proc.returncode, 1, proc.stderr)
                     self.assertNotIn("Traceback", proc.stderr)
                     self.assertFalse((root / "executed").exists())
-
-
-class CheckoutWorkflowContractTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        workflow = ROOT / ".github" / "workflows" / "ci.yml"
-        cls.jobs = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
-
-    def test_compatibility_routes_each_matrix_entry_to_one_complete_suite(self):
-        job = self.jobs["compatibility"]
-        matrix = job["strategy"]["matrix"]["include"]
-        self.assertEqual(
-            {(item["os"], item["python-version"]) for item in matrix},
-            {
-                ("ubuntu-latest", "3.11"),
-                ("ubuntu-latest", "3.14"),
-                ("macos-latest", "3.13"),
-                ("windows-latest", "3.12"),
-            },
-        )
-        steps = [
-            step
-            for step in job["steps"]
-            if "scripts/run_checkout_tests.py" in step.get("run", "")
-            or "unittest discover -s tests" in step.get("run", "")
-        ]
-        self.assertEqual(len(steps), 3)
-        commands = {
-            "Linux": [
-                "python",
-                "scripts/run_checkout_tests.py",
-                "--workers",
-                "4",
-                "--costs",
-                "tests/fixtures/checkout-class-seconds-linux.json",
-                "--report",
-                "${{ runner.temp }}/checkout-timings.json",
-            ],
-            "Windows": [
-                "python",
-                "scripts/run_checkout_tests.py",
-                "--workers",
-                "4",
-                "--costs",
-                "tests/fixtures/checkout-class-seconds.json",
-                "--report",
-                "${{ runner.temp }}/checkout-timings.json",
-            ],
-            "macOS": ["python", "-m", "unittest", "discover", "-s", "tests", "-v"],
-        }
-        conditions = {}
-        for step in steps:
-            condition = re.fullmatch(r"runner\.os == '([^']+)'", step.get("if", ""))
-            self.assertIsNotNone(condition, step)
-            platform = condition.group(1)
-            self.assertNotIn(platform, conditions)
-            self.assertFalse(step.get("continue-on-error", False))
-            conditions[platform] = shlex.split(step["run"])
-        self.assertEqual(conditions, commands)
-        self.assertFalse(job.get("continue-on-error", False))
-
-    def test_timing_artifact_and_coverage_floor_are_retained(self):
-        steps = self.jobs["compatibility"]["steps"]
-        upload = next(
-            step for step in steps if "upload-artifact@" in step.get("uses", "")
-        )
-        self.assertEqual(upload["if"], "always()")
-        self.assertEqual(
-            upload["with"]["path"], "${{ runner.temp }}/checkout-timings.json"
-        )
-        self.assertIn(
-            "${{ matrix.os }}-py${{ matrix.python-version }}", upload["with"]["name"]
-        )
-        quality = self.jobs["quality"]["steps"]
-        coverage = next(
-            step for step in quality if step.get("name") == "Branch coverage"
-        )
-        self.assertFalse(coverage.get("continue-on-error", False))
-        commands = [shlex.split(line) for line in coverage["run"].splitlines() if line]
-        self.assertEqual(
-            commands,
-            [
-                [
-                    "python",
-                    "scripts/run_checkout_tests.py",
-                    "--workers",
-                    "4",
-                    "--coverage",
-                    "--costs",
-                    "tests/fixtures/checkout-class-seconds-linux.json",
-                    "--report",
-                    "$RUNNER_TEMP/checkout-timings.json",
-                ],
-                [
-                    "python",
-                    "-m",
-                    "coverage",
-                    "report",
-                    "--precision=2",
-                    "--show-missing",
-                    "--fail-under=80",
-                ],
-            ],
-        )
-
-    def test_linux_scheduling_costs_are_valid(self):
-        path = ROOT / "tests" / "fixtures" / "checkout-class-seconds-linux.json"
-        costs = json.loads(path.read_text(encoding="utf-8"))
-        self.assertTrue(costs)
-        self.assertTrue(
-            all(
-                isinstance(name, str)
-                and "." in name
-                and type(seconds) in (int, float)
-                and math.isfinite(seconds)
-                and seconds > 0
-                for name, seconds in costs.items()
-            )
-        )
