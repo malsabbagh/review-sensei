@@ -2398,7 +2398,7 @@ class Second(unittest.TestCase):
                 "did not account for its exact test inventory", completed.stderr
             )
 
-    def test_installed_suite_runner_rejects_worker_without_report(self):
+    def test_installed_suite_class_skip_cannot_mask_another_class_omission(self):
         runner = (
             Path(__file__).resolve().parents[1]
             / "scripts"
@@ -2407,10 +2407,20 @@ class Second(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             suite = Path(temporary) / "suite"
             suite.mkdir()
-            (suite / "test_exit.py").write_text(
-                "import os, unittest\n"
-                "class Tests(unittest.TestCase):\n"
-                "    def test_exit(self): os._exit(0)\n",
+            (suite / "test_skip_and_omit.py").write_text(
+                "import unittest\n"
+                "class Skipped(unittest.TestCase):\n"
+                "    @classmethod\n"
+                "    def setUpClass(cls): raise unittest.SkipTest('class skipped')\n"
+                "    def test_skipped(self): pass\n"
+                "class Omitted(unittest.TestCase):\n"
+                "    def test_omitted(self): pass\n"
+                "class Incomplete(unittest.TestSuite):\n"
+                "    def run(self, result, debug=False):\n"
+                "        self._tests[0](result)\n"
+                "        return result\n"
+                "def load_tests(loader, tests, pattern):\n"
+                "    return Incomplete([loader.loadTestsFromTestCase(Skipped), loader.loadTestsFromTestCase(Omitted)])\n",
                 encoding="utf-8",
             )
             completed = subprocess.run(
@@ -2421,7 +2431,47 @@ class Second(unittest.TestCase):
                 timeout=30,
             )
             self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("class skipped", completed.stderr)
+            self.assertIn(
+                "did not account for its exact test inventory", completed.stderr
+            )
+
+    def test_installed_suite_runner_rejects_worker_without_report(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            suite = Path(temporary) / "suite"
+            suite.mkdir()
+            report = Path(temporary) / "report.json"
+            (suite / "test_exit.py").write_text(
+                "import os, unittest\n"
+                "class Tests(unittest.TestCase):\n"
+                "    def test_exit(self): os._exit(0)\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    str(runner),
+                    "--start-directory",
+                    str(suite),
+                    "--report",
+                    str(report),
+                ],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
             self.assertIn("Worker 1:", completed.stderr)
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertFalse(data["complete"])
+            self.assertFalse(data["workers"][0]["execution_complete"])
 
     def test_installed_suite_runner_rejects_shared_fixture_scope_before_workers(self):
         runner = (
