@@ -1,4 +1,5 @@
 import catalog from "../../../src/review_sensei/schemas/broker-diagnostics.json";
+import { temporaryWorkflowLookup } from "./broker-lookup-diagnostic";
 
 const reasons: Record<string, { stage: string; action: string; hint: string }> = catalog;
 
@@ -6,8 +7,10 @@ const reasons: Record<string, { stage: string; action: string; hint: string }> =
 export function brokerDiagnostic(error: unknown, correlationId?: string) {
   const message = error instanceof Error && error.message.length <= 160 ? error.message : "";
   const family = /^(github_workflow_tag_unavailable|github_installation_token_failed|github_capability_issue_failed)_([1-5][0-9]{2})$/.exec(message);
-  const candidate = family?.[1] ?? message;
-  const code = Object.hasOwn(reasons, candidate) ? candidate : "broker_unknown";
+  const temporary = temporaryWorkflowLookup(error);
+  const candidate = temporary ? "github_workflow_lookup_temporary" : family?.[1] ?? message;
+  const code = Object.hasOwn(reasons, candidate) &&
+    (candidate !== "github_workflow_lookup_temporary" || temporary) ? candidate : "broker_unknown";
   const entry = reasons[code];
   return {
     version: 1,

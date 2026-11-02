@@ -196,7 +196,8 @@ For example, `broker_workflow_rejected` reports `workflow_identity` and
 event and runner against the existing broker policy. `broker_ledger_unavailable`
 reports `broker_ledger` and asks the operator to inspect ledger health if a retry
 fails. These diagnostics do not change authorization, capability permissions,
-HTTP status selection, retry behavior or CLI exit conventions.
+retry behavior or CLI exit conventions. The narrowly scoped temporary lookup
+classification below amends HTTP status selection for that typed failure only.
 
 When available, `correlation_id` contains only a validated Cloudflare Ray ID.
 `upstream_status` is included only for a known GitHub failure family whose
@@ -204,6 +205,32 @@ exception includes an actual numeric status. An upstream 500 inside an outer
 403 remains a broker rejection; it is not promoted to a transient exception.
 No repository names, tokens, JWTs, authentication headers or response bodies
 are copied into diagnostic output. Unknown code-shaped strings are redacted too.
+
+### Amendment: temporary public-workflow lookup failures (2026-11-02)
+
+The Worker selects HTTP 503 and `github_workflow_lookup_temporary` only for an
+actual `WorkflowLookupError` describing upstream 429/5xx, HTTP 403 with numeric
+remaining zero or validated positive Retry-After, or a lookup timeout/transport
+failure without a known authorization rejection. Both token and session-grant
+routes use the same predicate and return no token or verified attestation.
+Malformed/oversized response failures take precedence; ordinary 401/403/404,
+untyped code-shaped errors and all identity/policy/control refusals keep their
+existing behavior. The original workflow/tag/OIDC trust checks are unchanged.
+
+The existing client's outer-503 transient exception preserves only bounded
+catalog/lookup facts. Old outer-403 responses and unrelated GitHub failures
+retain their classification; upstream metadata alone never promotes them.
+Public-route and caller regressions cover both classifications, safe cause-chain
+diagnostics, one POST per call and no issued authority on failure.
+
+There are no added HTTP requests, retries, credentials, storage, deadline or
+allowance changes. Guidance requires inspecting the original attempt before
+any authorized next action; a temporary lookup failure or elapsed rate-limit
+reset cannot settle historical accounting or authorize a fresh run. Rollback
+restores the previous outer-403 classification without changing trust checks
+or retained history. Deployment and package release remain separate maintainer
+operations. Short lookup retries remain deferred until continuation funding,
+timing precedence and truthful retry observations are independently qualified.
 
 The CLI reads at most 4097 error-body bytes and accepts a diagnostic only within
 the 4096-byte limit, using strict UTF-8 and rejecting duplicate, unknown or

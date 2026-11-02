@@ -269,6 +269,11 @@
     "action": "check_workflow",
     "hint": "Workflow identity was not accepted. Confirm the supported release, workflow ref/SHA, event and runner against broker policy; do not loosen policy."
   },
+  "github_workflow_lookup_temporary": {
+    "stage": "workflow_identity",
+    "action": "inspect_original_attempt",
+    "hint": "GitHub workflow identity lookup is temporarily unavailable; no capability or verified session was returned. Inspect the original attempt, retry/reset metadata and uncertain effects before selecting an authorized next action. A rate-limit reset does not settle the original attempt; do not loosen policy or blindly retry."
+  },
   "oidc_actor_invalid": {
     "stage": "oidc_validation",
     "action": "check_workflow",
