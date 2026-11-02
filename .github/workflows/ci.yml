@@ -50,8 +50,13 @@ jobs:
       - name: Compile sources
         run: python -m compileall -q src
       - name: Run tests
-        if: runner.os != 'Windows'
+        if: runner.os == 'macOS'
         run: python -m unittest discover -s tests -v
+      # Scheduling hints from the coverage-instrumented timings in CI run
+      # 41379517658; test discovery and execution remain exhaustive.
+      - name: Run every Linux test in isolated processes
+        if: runner.os == 'Linux'
+        run: python scripts/run_checkout_tests.py --workers 4 --costs tests/fixtures/checkout-class-seconds-linux.json --report "${{ runner.temp }}/checkout-timings.json"
       - name: Run every Windows test in isolated processes
         if: runner.os == 'Windows'
         run: python scripts/run_checkout_tests.py --workers 4 --costs tests/fixtures/checkout-class-seconds.json --report "${{ runner.temp }}/checkout-timings.json"
@@ -98,7 +103,7 @@ jobs:
         run: python -m compileall -q src
       - name: Branch coverage
         run: |
-          python scripts/run_checkout_tests.py --workers 4 --coverage --costs tests/fixtures/checkout-class-seconds.json --report "$RUNNER_TEMP/checkout-timings.json"
+          python scripts/run_checkout_tests.py --workers 4 --coverage --costs tests/fixtures/checkout-class-seconds-linux.json --report "$RUNNER_TEMP/checkout-timings.json"
           python -m coverage report --precision=2 --show-missing --fail-under=80
 
       - name: Retain checkout inventory and worker timings
