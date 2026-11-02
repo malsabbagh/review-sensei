@@ -71,6 +71,73 @@ class CheckoutRunnerTests(unittest.TestCase):
             receipts = sorted(path.name for path in directory.glob("receipt-*"))
             return result, receipts
 
+    def test_windows_costs_route_and_schedule_discovered_classes(self):
+        import shlex
+
+        import yaml
+
+        jobs = yaml.safe_load(
+            (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        )["jobs"]
+        windows = next(
+            step
+            for step in jobs["compatibility"]["steps"]
+            if step.get("if") == "runner.os == 'Windows'"
+        )
+        command = shlex.split(windows["run"])
+        fixture_name = command[command.index("--costs") + 1]
+        self.assertEqual(
+            fixture_name, "tests/fixtures/checkout-class-seconds-windows.json"
+        )
+        self.assertEqual(command[command.index("--workers") + 1], "4")
+        self.assertNotIn("--coverage", command)
+        self.assertFalse(windows.get("continue-on-error", False))
+        coverage = next(
+            step
+            for step in jobs["quality"]["steps"]
+            if step.get("name") == "Branch coverage"
+        )
+        coverage_command = next(
+            shlex.split(line)
+            for line in coverage["run"].splitlines()
+            if "scripts/run_checkout_tests.py" in line
+        )
+        self.assertNotEqual(
+            coverage_command[coverage_command.index("--costs") + 1], fixture_name
+        )
+
+        loader = unittest.TestLoader()
+        suite = loader.discover(
+            str(ROOT / "tests"),
+            pattern="test_quarantine_checkpoint.py",
+            top_level_dir=str(ROOT / "tests"),
+        )
+        self.assertEqual(loader.errors, [])
+        discovered = sorted(RUNNER.test_ids(suite))
+        names = (
+            "QuarantineCarrierPlanningTests",
+            "QuarantineCheckpointTests",
+            "QuarantineDecisionScopeFenceTests",
+            "QuarantineRolloverTests",
+        )
+        selected = [
+            next(identity for identity in discovered if f".{name}." in identity)
+            for name in names
+        ]
+        costs = json.loads((ROOT / fixture_name).read_text(encoding="utf-8"))
+        keys = [identity.rpartition(".")[0] for identity in selected]
+        for key in keys:
+            self.assertIn(key, costs)
+        checkpoint = next(
+            key for key in keys if key.endswith("QuarantineCheckpointTests")
+        )
+        reduced = {key: value for key, value in costs.items() if key != checkpoint}
+        full = RUNNER.partition(selected, 2, costs)
+        partial = RUNNER.partition(selected, 2, reduced)
+        for groups in (full, partial):
+            self.assertEqual(sorted(sum(groups, [])), sorted(selected))
+        self.assertNotEqual(full, partial)
+
     def test_real_workers_finish_all_tests_and_preserve_fixtures_on_failure(self):
         source = """import pathlib, unittest
 class Case(unittest.TestCase):
