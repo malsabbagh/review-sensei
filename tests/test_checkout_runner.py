@@ -158,6 +158,8 @@ class Case(unittest.TestCase):
             self._check_fixture_skips_keep_coverage_and_the_accounting_distinct()
         with self.subTest(check="fixture module identity"):
             self._check_fixture_skip_uses_case_module_not_discovery_file()
+        with self.subTest(check="unknown fixture scope"):
+            self._check_unknown_fixture_scope_stays_unaccounted()
 
     def _check_fixture_skips_account_only_for_the_matching_inventory(self):
         cases = (
@@ -190,6 +192,24 @@ class Second(unittest.TestCase):
                 0,
                 0,
                 2,
+            ),
+            (
+                "two skipped classes",
+                """import unittest
+class First(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('first unavailable')
+    def test_a(self): pass
+    def test_b(self): pass
+class Second(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('second unavailable')
+    def test_c(self): pass
+""",
+                1,
+                0,
+                0,
+                3,
             ),
             (
                 "omission",
@@ -302,6 +322,28 @@ class Runs(unittest.TestCase):
                 source = str((root / package / "__init__.py").resolve())
                 self.assertIn(source, coverage.measured_files())
                 self.assertIn(1, coverage.lines(source))
+
+    def _check_unknown_fixture_scope_stays_unaccounted(self):
+        from collections import Counter
+        from types import SimpleNamespace
+
+        remaining = Counter({"unknown.Case.test_case": 1})
+        event = SimpleNamespace(id=lambda: "setUpModule (unknown)")
+        self.assertEqual(
+            RUNNER.count_fixture_skips(remaining, {}, [(event, "skip")]), 0
+        )
+        self.assertEqual(remaining, Counter({"unknown.Case.test_case": 1}))
+        remaining = Counter({"m.A.test_1": 1, "m.A.test_2": 1, "m.B.test_3": 1})
+        scopes = {
+            "m.A.test_1": ("m.A", "m"),
+            "m.A.test_2": ("m.A", "m"),
+            "m.B.test_3": ("m.B", "m"),
+        }
+        first = SimpleNamespace(id=lambda: "setUpClass (m.A)")
+        second = SimpleNamespace(id=lambda: "setUpClass (m.B)")
+        events = [(first, "skip"), (first, "duplicate"), (second, "skip")]
+        self.assertEqual(RUNNER.count_fixture_skips(remaining, scopes, events), 3)
+        self.assertFalse(remaining)
 
     def _check_fixture_skip_uses_case_module_not_discovery_file(self):
         with tempfile.TemporaryDirectory() as scratch:

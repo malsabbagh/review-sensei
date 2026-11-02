@@ -43,6 +43,23 @@ def test_cases(suite: unittest.TestSuite) -> list[unittest.TestCase]:
     return cases
 
 
+def count_fixture_skips(remaining, scopes, skipped_events) -> int:
+    """Consume each matching identity once; unknown scopes remain unaccounted."""
+    fixture_skipped = 0
+    for skipped, _reason in skipped_events:
+        if isinstance(skipped, unittest.TestCase):
+            continue
+        match = re.fullmatch(r"setUp(Class|Module) \((.+)\)", skipped.id())
+        if not match:
+            continue
+        scope_index = 0 if match.group(1) == "Class" else 1
+        for identity in list(remaining):
+            scope = scopes.get(identity)
+            if scope is not None and scope[scope_index] == match.group(2):
+                fixture_skipped += remaining.pop(identity)
+    return fixture_skipped
+
+
 def partition(
     identities: list[str], workers: int, costs: dict[str, float] | None = None
 ) -> list[list[str]]:
@@ -194,17 +211,7 @@ def main() -> int:
         expected = Counter(identities)
         observed = Counter(result.started_ids)
         remaining = expected - observed
-        fixture_skipped = 0
-        for skipped, _reason in result.skipped:
-            if isinstance(skipped, unittest.TestCase):
-                continue
-            match = re.fullmatch(r"setUp(Class|Module) \((.+)\)", skipped.id())
-            if not match:
-                continue
-            scope_index = 0 if match.group(1) == "Class" else 1
-            for identity in list(remaining):
-                if scopes[identity][scope_index] == match.group(2):
-                    fixture_skipped += remaining.pop(identity)
+        fixture_skipped = count_fixture_skips(remaining, scopes, result.skipped)
         inventory_complete = (
             not (observed - expected)
             and not remaining
