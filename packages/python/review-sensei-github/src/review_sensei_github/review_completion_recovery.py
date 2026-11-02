@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
 from typing import Any, NoReturn
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
+from review_sensei.session import SessionIdentity
 
 from .approval import approval_facts_from_result, evaluate_approval_facts
 from .checks import (
@@ -30,6 +32,90 @@ from .publication import (
     review_result_digest,
 )
 
+_THREADS_QUERY = (
+    "query ReviewCompletionThreads($owner:String!,$name:String!,$number:Int!,$after:String){"
+    "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+    "headRefOid baseRefOid reviewThreads(first:100,after:$after){"
+    "pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:1){nodes{"
+    "databaseId body createdAt updatedAt author{login __typename}}}}}}}}"
+)
+_REVIEW_DATES_QUERY = (
+    "query ReviewCompletionReviewDates($ids:[ID!]!){nodes(ids:$ids){"
+    "...on PullRequestReview{databaseId createdAt updatedAt lastEditedAt commit{oid}}}}"
+)
+_MAX_COMPLETION_QUERY_BYTES = 8192
+
+
+def _is_completion_query(body):
+    """Accept only the two closed query documents used by this reader."""
+    if (
+        not isinstance(body, dict)
+        or len(body) != 3
+        or set(body)
+        != {
+            "operationName",
+            "query",
+            "variables",
+        }
+    ):
+        return False
+    variables = body["variables"]
+    if not isinstance(variables, dict):
+        return False
+    if body["operationName"] == "ReviewCompletionThreads":
+        if (
+            body["query"] != _THREADS_QUERY
+            or len(variables) != 4
+            or set(variables)
+            != {
+                "owner",
+                "name",
+                "number",
+                "after",
+            }
+        ):
+            return False
+        owner, name, number, after = (
+            variables["owner"],
+            variables["name"],
+            variables["number"],
+            variables["after"],
+        )
+        if (
+            not isinstance(owner, str)
+            or not 1 <= len(owner) <= 39
+            or not isinstance(name, str)
+            or not 1 <= len(name) <= 100
+        ):
+            return False
+        try:
+            SessionIdentity(f"{owner}/{name}", number)
+        except ReviewInputError:
+            return False
+        if after is not None and (
+            not isinstance(after, str) or len(after) > _MAX_COMPLETION_QUERY_BYTES
+        ):
+            return False
+    elif body["operationName"] == "ReviewCompletionReviewDates":
+        if (
+            body["query"] != _REVIEW_DATES_QUERY
+            or len(variables) != 1
+            or set(variables) != {"ids"}
+        ):
+            return False
+        ids = variables["ids"]
+        if (
+            not isinstance(ids, list)
+            or not 1 <= len(ids) <= 100
+            or any(not isinstance(item, str) or not item for item in ids)
+            or sum(map(len, ids)) > _MAX_COMPLETION_QUERY_BYTES
+            or len(set(ids)) != len(ids)
+        ):
+            return False
+    else:
+        return False
+    return True
+
 
 def _refuse(reason: str) -> NoReturn:
     raise ReviewInputError("successor publication tail is unverified: " + reason)
@@ -45,16 +131,22 @@ class _ReadOnlyHttp(GitHubHttp):
         self.transport = transport
 
     def request(self, method, path, *, token, body=None, timeout_seconds=None):
-        if method != "GET" and not (
-            method == "POST"
-            and path == "/graphql"
-            and isinstance(body, dict)
-            and body.get("operationName")
-            in {"ReviewCompletionThreads", "ReviewCompletionReviewDates"}
-            and isinstance(body.get("query"), str)
-            and body["query"].startswith("query ")
-        ):
-            _refuse("completion authentication is read-only")
+        if method != "GET":
+            if method != "POST" or path != "/graphql" or not isinstance(body, dict):
+                _refuse("completion authentication is read-only")
+            if not _is_completion_query(body):
+                _refuse("completion authentication is read-only")
+            try:
+                encoded = json.dumps(body, separators=(",", ":")).encode("utf-8")
+                if len(encoded) > _MAX_COMPLETION_QUERY_BYTES:
+                    _refuse("completion authentication is read-only")
+                # Validate and forward the same detached document: caller-owned
+                # mutable values cannot change after this check.
+                body = json.loads(encoded)
+            except (TypeError, ValueError, RecursionError):
+                _refuse("completion authentication is read-only")
+            if not _is_completion_query(body):
+                _refuse("completion authentication is read-only")
         return self.transport.request(
             method, path, token=token, body=body, timeout_seconds=timeout_seconds
         )
@@ -88,13 +180,6 @@ def _owned(value, producer, app_slug):
 
 
 def _threads(http, token, identity):
-    query = (
-        "query ReviewCompletionThreads($owner:String!,$name:String!,$number:Int!,$after:String){"
-        "repository(owner:$owner,name:$name){pullRequest(number:$number){"
-        "headRefOid baseRefOid reviewThreads(first:100,after:$after){"
-        "pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:1){nodes{"
-        "databaseId body createdAt updatedAt author{login __typename}}}}}}}}"
-    )
     owner, name = identity.repository.split("/", 1)
     after = None
     nodes = []
@@ -106,7 +191,7 @@ def _threads(http, token, identity):
             token=token,
             body={
                 "operationName": "ReviewCompletionThreads",
-                "query": query,
+                "query": _THREADS_QUERY,
                 "variables": {
                     "owner": owner,
                     "name": name,
@@ -161,17 +246,13 @@ def _review_dates(http, token, reviews):
         or len({r["node_id"] for r in reviews}) != len(reviews)
     ):
         _refuse("historical review identities are unavailable")
-    query = (
-        "query ReviewCompletionReviewDates($ids:[ID!]!){nodes(ids:$ids){"
-        "...on PullRequestReview{databaseId createdAt updatedAt lastEditedAt commit{oid}}}}"
-    )
     status, payload = http.request(
         "POST",
         "/graphql",
         token=token,
         body={
             "operationName": "ReviewCompletionReviewDates",
-            "query": query,
+            "query": _REVIEW_DATES_QUERY,
             "variables": {"ids": [r["node_id"] for r in reviews]},
         },
     )
