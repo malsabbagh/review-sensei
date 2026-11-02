@@ -2063,6 +2063,8 @@ class ActionPinPolicyTests(unittest.TestCase):
             '-I "$GITHUB_WORKSPACE/scripts/run_installed_test_suites.py"', text
         )
         self.assertIn('--start-directory "$suite/dist_safe" --workers 4', text)
+        self.assertIn("--split-module test_quarantine_contract.py", text)
+        self.assertIn("tests/fixtures/installed-unit-log-delta-seconds.json", text)
         self.assertIn('unittest discover -s "$suite/downstream" -v', text)
         self.assertNotIn(
             'unittest discover -s "$GITHUB_WORKSPACE/tests" -v',
@@ -2155,6 +2157,8 @@ class ActionPinPolicyTests(unittest.TestCase):
                 str(suite),
                 "--workers",
                 "2",
+                "--split-module",
+                "test_a.py",
                 "--report",
                 str(report),
             ]
@@ -2171,9 +2175,12 @@ class ActionPinPolicyTests(unittest.TestCase):
             self.assertEqual(
                 completed.returncode, 0, completed.stdout + completed.stderr
             )
+            self.assertIn("test_wrapper_and_module_fixture", completed.stderr)
             data = json.loads(report.read_text(encoding="utf-8"))
             self.assertTrue(data["complete"])
             self.assertEqual(data["discovered"], 5)
+            # The custom outer wrapper remains one whole scheduling unit.
+            self.assertEqual(data["units"], 3)
             self.assertEqual(sum(worker["started"] for worker in data["workers"]), 2)
             self.assertEqual(
                 sum(worker["fixture_skipped"] for worker in data["workers"]), 3
@@ -2193,6 +2200,173 @@ class ActionPinPolicyTests(unittest.TestCase):
             self.assertNotEqual(failed.returncode, 0)
             self.assertIn("FAIL: test_condition", failed.stderr)
             self.assertFalse(json.loads(report.read_text(encoding="utf-8"))["complete"])
+
+    def test_installed_suite_splits_only_at_fixture_boundaries_and_uses_costs(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite = root / "suite"
+            suite.mkdir()
+            for label in ("a", "b", "c"):
+                source = f"""\
+import os, pathlib, unittest
+ready = False
+def setUpModule():
+    global ready
+    ready = True
+    with (pathlib.Path(os.environ['SHARD_EVIDENCE_DIR']) / '{label}-setup').open('x') as out:
+        out.write(str(os.getpid()))
+class First(unittest.TestCase):
+    def test_first(self):
+        self.assertTrue(ready)
+        (pathlib.Path(os.environ['SHARD_EVIDENCE_DIR']) / '{label}-first').write_text(str(os.getpid()))
+"""
+                if label == "a":
+                    source += """\
+class Second(unittest.TestCase):
+    def test_second(self):
+        self.assertTrue(ready)
+        (pathlib.Path(os.environ['SHARD_EVIDENCE_DIR']) / 'a-second').write_text(str(os.getpid()))
+"""
+                (suite / f"support_{label}.py").write_text(source, encoding="utf-8")
+            (suite / "test_split.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import os, pathlib, unittest
+                    from support_a import First as A1, Second as A2
+                    from support_b import First as B
+                    from support_c import First as C
+                    class Wrapped(unittest.TestSuite):
+                        def run(self, result, debug=False):
+                            (pathlib.Path(os.environ['SHARD_EVIDENCE_DIR']) / 'wrapped').write_text(str(os.getpid()))
+                            return super().run(result, debug)
+                    def load_tests(loader, tests, pattern):
+                        if pattern != 'test*.py': raise AssertionError('wrong pattern')
+                        first = loader.loadTestsFromTestCase(A1)
+                        if os.environ.get('SHARD_NESTED_WRAPPER') == '1': first = Wrapped(first)
+                        if os.environ.get('SHARD_NESTED_WRAPPER') == '2':
+                            original = first.run
+                            def custom_run(result, debug=False):
+                                (pathlib.Path(os.environ['SHARD_EVIDENCE_DIR']) / 'wrapped').write_text(str(os.getpid()))
+                                return original(result, debug)
+                            first.run = custom_run
+                        return unittest.TestSuite([
+                            first,
+                            loader.loadTestsFromTestCase(A2),
+                            loader.loadTestsFromTestCase(B),
+                            loader.loadTestsFromTestCase(C),
+                        ])
+                    """
+                ),
+                encoding="utf-8",
+            )
+            costs = root / "costs.json"
+            report = root / "report.json"
+            command = [
+                sys.executable,
+                "-I",
+                str(runner),
+                "--start-directory",
+                str(suite),
+                "--workers",
+                "2",
+                "--split-module",
+                "test_split.py",
+                "--costs",
+                str(costs),
+                "--report",
+                str(report),
+            ]
+            prefix = "test_split.py::support_"
+            for iteration, weights in enumerate(((10, 2, 1), (1, 10, 2))):
+                costs.write_text(
+                    json.dumps(
+                        {
+                            prefix + label: weight
+                            for label, weight in zip("abc", weights)
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                evidence = root / f"evidence-{iteration}"
+                evidence.mkdir()
+                environment = dict(os.environ, SHARD_EVIDENCE_DIR=str(evidence))
+                environment.pop("SHARD_NESTED_WRAPPER", None)
+                result = subprocess.run(
+                    command,
+                    cwd=root,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                data = json.loads(report.read_text(encoding="utf-8"))
+                self.assertTrue(data["complete"])
+                self.assertEqual((data["discovered"], data["units"]), (4, 3))
+                self.assertEqual(data["uncosted_units"], [])
+                self.assertEqual(data["unused_costs"], [])
+                pids = {
+                    name: (evidence / name).read_text()
+                    for name in (
+                        "a-setup",
+                        "a-first",
+                        "a-second",
+                        "b-setup",
+                        "b-first",
+                        "c-setup",
+                        "c-first",
+                    )
+                }
+                self.assertEqual(pids["a-setup"], pids["a-first"])
+                self.assertEqual(pids["a-setup"], pids["a-second"])
+                self.assertEqual(pids["b-setup"], pids["b-first"])
+                self.assertEqual(pids["c-setup"], pids["c-first"])
+                if iteration == 0:
+                    self.assertNotEqual(pids["a-first"], pids["b-first"])
+                    self.assertEqual(pids["b-first"], pids["c-first"])
+                else:
+                    self.assertNotEqual(pids["a-first"], pids["b-first"])
+                    self.assertEqual(pids["a-first"], pids["c-first"])
+            for mode in ("1", "2"):
+                evidence = root / f"evidence-nested-{mode}"
+                evidence.mkdir()
+                environment = dict(
+                    os.environ,
+                    SHARD_EVIDENCE_DIR=str(evidence),
+                    SHARD_NESTED_WRAPPER=mode,
+                )
+                result = subprocess.run(
+                    command,
+                    cwd=root,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                data = json.loads(report.read_text(encoding="utf-8"))
+                self.assertEqual(data["units"], 1)
+                self.assertEqual(data["uncosted_units"], ["test_split.py"])
+                self.assertEqual(
+                    (evidence / "wrapped").read_text(),
+                    (evidence / "a-first").read_text(),
+                )
+                self.assertEqual(
+                    (evidence / "a-first").read_text(),
+                    (evidence / "b-first").read_text(),
+                )
+            costs.write_text('{"invalid": NaN}', encoding="utf-8")
+            invalid = subprocess.run(
+                command, cwd=root, capture_output=True, text=True, timeout=30
+            )
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("finite nonnegative weights", invalid.stderr)
+            self.assertNotIn("installed worker", invalid.stdout)
 
     def test_installed_suite_runner_rejects_omitted_tests(self):
         runner = (

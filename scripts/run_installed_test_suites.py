@@ -1,9 +1,10 @@
 """Run installed-wheel test modules in isolated processes without flattening suites.
 
 The unpacked sdist's dist-safe lane may return custom ``load_tests`` suites.
-Workers rediscover the complete suite and run whole top-level module suites,
-preserving their wrappers. Ambiguous discovery or fixture ownership fails before
-workers start instead of silently omitting tests or suite behavior.
+Workers rediscover the complete suite and preserve custom wrappers. An opted-in
+plain suite may split only at complete module-fixture boundaries. Ambiguous
+discovery or fixture ownership fails before workers start instead of silently
+omitting tests or suite behavior.
 """
 
 from __future__ import annotations
@@ -99,19 +100,112 @@ def discover(directory: Path, pattern: str):
     return files, descriptions, children
 
 
-def partition_modules(descriptions, workers):
+def plain_suite_tree(item):
+    if isinstance(item, unittest.TestSuite):
+        if (
+            type(item) is not unittest.TestSuite
+            or set(vars(item)) != {"_tests", "_removed_tests"}
+            or type(item._tests) is not list
+            or item._removed_tests != 0
+        ):
+            return False
+        return all(plain_suite_tree(child) for child in item)
+    return True
+
+
+def build_units(files, descriptions, children, split_files):
+    """Split opted-in plain suites only at complete module-fixture boundaries."""
+    names = [path.name for path in files]
+    if len(split_files) != len(set(split_files)) or not set(split_files) <= set(names):
+        raise ValueError("requested split modules must be distinct discovered files")
+    units = []
+    for index, (path, description, suite) in enumerate(
+        zip(files, descriptions, children)
+    ):
+        unit = {"key": path.name, "file": index, "children": None}
+        if (
+            path.name not in split_files
+            or type(suite) is not unittest.TestSuite
+            or not plain_suite_tree(suite)
+        ):
+            units.append(unit)
+            continue
+        parts = description["children"]
+        part_leaves = [leaves(part) for part in parts]
+        # Empty children may have custom run behavior; keep their parent whole.
+        if not parts or any(not group for group in part_leaves):
+            units.append(unit)
+            continue
+        scopes = [{leaf["module"] for leaf in group} for group in part_leaves]
+        last = {
+            scope: position for position, group in enumerate(scopes) for scope in group
+        }
+        start, end = 0, -1
+        for position, group in enumerate(scopes):
+            end = max([end, *(last[scope] for scope in group)])
+            if position != end:
+                continue
+            members = list(range(start, position + 1))
+            modules = sorted(set().union(*(scopes[i] for i in members)))
+            units.append(
+                {
+                    "key": path.name + "::" + ",".join(modules),
+                    "file": index,
+                    "children": members,
+                }
+            )
+            start = position + 1
+        if start != len(parts):
+            raise ValueError("could not preserve module fixture boundaries")
+    if len({unit["key"] for unit in units}) != len(units):
+        raise ValueError("discovery produced ambiguous scheduling units")
+    return units
+
+
+def unit_leaves(unit, descriptions):
+    description = descriptions[unit["file"]]
+    if unit["children"] is None:
+        return leaves(description)
+    return [
+        leaf
+        for index in unit["children"]
+        for leaf in leaves(description["children"][index])
+    ]
+
+
+def partition_units(units, descriptions, workers, costs=None):
     if workers < 1 or workers > 16:
         raise ValueError("workers must be between 1 and 16")
-    if not descriptions:
+    if not units:
         raise ValueError("discovery must contain test modules")
-    groups = [[] for _ in range(min(workers, len(descriptions)))]
-    loads = [0] * len(groups)
-    for index in sorted(
-        range(len(descriptions)), key=lambda i: (-len(leaves(descriptions[i])), i)
+    if costs is not None and (
+        not isinstance(costs, dict)
+        or any(
+            not isinstance(name, str)
+            or not name
+            or type(value) not in (int, float)
+            or not math.isfinite(value)
+            or value < 0
+            for name, value in costs.items()
+        )
     ):
+        raise ValueError(
+            "unit costs must be a JSON object of finite nonnegative weights"
+        )
+    costs = costs or {}
+    groups = [[] for _ in range(min(workers, len(units)))]
+    loads = [0.0] * len(groups)
+
+    def cost(index):
+        # Missing measurements still schedule every test with a small weight.
+        return costs.get(
+            units[index]["key"], len(unit_leaves(units[index], descriptions)) * 0.02
+        )
+
+    for index in sorted(range(len(units)), key=lambda i: (-cost(i), units[i]["key"])):
         worker = min(range(len(groups)), key=lambda i: (loads[i], i))
         groups[worker].append(index)
-        loads[worker] += len(leaves(descriptions[index]))
+        loads[worker] += cost(index)
     return [sorted(group) for group in groups]
 
 
@@ -126,25 +220,34 @@ def worker(directory: Path, manifest_path: Path, report_path: Path) -> int:
         "descriptions"
     ]:
         raise ValueError("worker discovery differs from the original suite")
+    units = build_units(files, descriptions, children, manifest["split_files"])
+    if units != manifest["units"]:
+        raise ValueError("worker fixture-boundary units differ from discovery")
     indices = manifest["indices"]
     if not indices or any(
-        type(index) is not int or not 0 <= index < len(files) for index in indices
+        type(index) is not int or not 0 <= index < len(units) for index in indices
     ):
         raise ValueError("worker manifest has invalid module indices")
     if indices != sorted(set(indices)):
         raise ValueError("worker manifest has duplicate or unordered module indices")
 
-    # Run the actual suites produced by discovery, without invoking load_tests
-    # again in the worker or flattening custom wrappers into test names.
+    # Select original suite objects. Split only a plain outer suite, keeping
+    # each child wrapper and complete module-fixture scope together.
     selected = []
     expected = []
     owner = {}
     for index in indices:
-        selected.append(children[index])
-        for leaf in leaves(descriptions[index]):
+        unit = units[index]
+        suite = children[unit["file"]]
+        if unit["children"] is None:
+            selected.append(suite)
+        else:
+            parts = list(suite)
+            selected.append(unittest.TestSuite(parts[i] for i in unit["children"]))
+        for leaf in unit_leaves(unit, descriptions):
             key = identity(leaf)
             expected.append(key)
-            owner[key] = files[index].name
+            owner[key] = (files[unit["file"]].name, unit["key"])
 
     class TimedResult(unittest.TextTestResult):
         def __init__(self, *args, **kwargs):
@@ -152,6 +255,7 @@ def worker(directory: Path, manifest_path: Path, report_path: Path) -> int:
             self.started = []
             self.started_at = None
             self.module_seconds = {}
+            self.unit_seconds = {}
 
         def startTest(self, test):
             self.started.append(identity(describe(test)))
@@ -161,12 +265,10 @@ def worker(directory: Path, manifest_path: Path, report_path: Path) -> int:
         def stopTest(self, test):
             key = identity(describe(test))
             if self.started_at is not None and key in owner:
-                name = owner[key]
-                self.module_seconds[name] = (
-                    self.module_seconds.get(name, 0.0)
-                    + time.monotonic()
-                    - self.started_at
-                )
+                name, unit = owner[key]
+                elapsed = time.monotonic() - self.started_at
+                self.module_seconds[name] = self.module_seconds.get(name, 0.0) + elapsed
+                self.unit_seconds[unit] = self.unit_seconds.get(unit, 0.0) + elapsed
             self.started_at = None
             super().stopTest(test)
 
@@ -196,6 +298,7 @@ def worker(directory: Path, manifest_path: Path, report_path: Path) -> int:
                 "skip_events": len(result.skipped),
                 "execution_complete": execution_complete,
                 "module_seconds": result.module_seconds,
+                "unit_seconds": result.unit_seconds,
             }
         ),
         encoding="utf-8",
@@ -210,6 +313,8 @@ def main() -> int:
     parser.add_argument("--start-directory", type=Path, required=True)
     parser.add_argument("--pattern", default="test*.py")
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--split-module", action="append", default=[])
+    parser.add_argument("--costs", type=Path, help="Measured scheduling weights")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--worker-manifest", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--worker-report", type=Path, help=argparse.SUPPRESS)
@@ -223,15 +328,19 @@ def main() -> int:
             if not args.worker_report:
                 raise ValueError("worker report is required")
             return worker(directory, args.worker_manifest, args.worker_report)
-        files, descriptions, _children = discover(directory, args.pattern)
-        groups = partition_modules(descriptions, args.workers)
+        files, descriptions, children = discover(directory, args.pattern)
+        units = build_units(files, descriptions, children, args.split_module)
+        costs = (
+            json.loads(args.costs.read_text(encoding="utf-8")) if args.costs else None
+        )
+        groups = partition_units(units, descriptions, args.workers, costs)
     except (ValueError, OSError, ImportError, json.JSONDecodeError) as error:
         print(f"Installed suite discovery failed: {error}", file=sys.stderr)
         return 1
 
     expected = [leaf for description in descriptions for leaf in leaves(description)]
     print(
-        f"Discovered {len(expected)} tests in {len(files)} modules; running {len(groups)} isolated workers",
+        f"Discovered {len(expected)} tests in {len(files)} modules and {len(units)} fixture-safe units; running {len(groups)} isolated workers",
         flush=True,
     )
     started = time.monotonic()
@@ -250,6 +359,8 @@ def main() -> int:
                         "pattern": args.pattern,
                         "files": [path.name for path in files],
                         "descriptions": descriptions,
+                        "split_files": args.split_module,
+                        "units": units,
                         "indices": groups[index],
                     }
                 ),
@@ -309,10 +420,11 @@ def main() -> int:
                     "skip_events",
                     "execution_complete",
                     "module_seconds",
+                    "unit_seconds",
                 }:
                     raise ValueError("invalid worker report")
                 if data["assigned"] != sum(
-                    len(leaves(descriptions[i])) for i in groups[index]
+                    len(unit_leaves(units[i], descriptions)) for i in groups[index]
                 ):
                     raise ValueError("worker assignment count differs")
                 for key in ("assigned", "started", "fixture_skipped", "skip_events"):
@@ -324,14 +436,19 @@ def main() -> int:
                     )
                 module_seconds = data["module_seconds"]
                 if not isinstance(module_seconds, dict) or not set(module_seconds) <= {
-                    files[i].name for i in groups[index]
+                    files[units[i]["file"]].name for i in groups[index]
                 }:
                     raise ValueError("worker report contains unexpected module timings")
+                unit_seconds = data["unit_seconds"]
+                if not isinstance(unit_seconds, dict) or not set(unit_seconds) <= {
+                    units[i]["key"] for i in groups[index]
+                }:
+                    raise ValueError("worker report contains unexpected unit timings")
                 if any(
                     type(value) not in (int, float)
                     or not math.isfinite(value)
                     or value < 0
-                    for value in module_seconds.values()
+                    for value in (*module_seconds.values(), *unit_seconds.values())
                 ):
                     raise ValueError("worker report contains invalid timings")
                 if data["execution_complete"] is not True:
@@ -345,6 +462,7 @@ def main() -> int:
                     "skip_events": None,
                     "execution_complete": False,
                     "module_seconds": {},
+                    "unit_seconds": {},
                 }
             reports.append(
                 {
@@ -367,6 +485,19 @@ def main() -> int:
                         ).hexdigest(),
                         "discovered": len(expected),
                         "modules": len(files),
+                        "units": len(units),
+                        "uncosted_units": sorted(
+                            unit["key"]
+                            for unit in units
+                            if unit["key"] not in (costs or {})
+                        )
+                        if costs is not None
+                        else [],
+                        "unused_costs": sorted(
+                            set(costs) - {unit["key"] for unit in units}
+                        )
+                        if costs is not None
+                        else [],
                         "complete": complete,
                         "elapsed_seconds": round(time.monotonic() - started, 3),
                         "workers": reports,
