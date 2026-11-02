@@ -181,7 +181,7 @@ class Case(unittest.TestCase):
         self.assertEqual(command[command.index("--workers") + 1], "4")
         fixture_name = command[command.index("--costs") + 1]
         self.assertEqual(
-            fixture_name, "tests/fixtures/checkout-class-seconds-macos-seed.json"
+            fixture_name, "tests/fixtures/checkout-class-seconds-macos.json"
         )
         self.assertIn("--report", command)
         self.assertNotIn("--coverage", command)
