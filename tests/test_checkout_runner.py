@@ -141,7 +141,7 @@ class CaseB(unittest.TestCase):
         self.assertIn("[checkout worker 2/2: 1 tests, exit 0]", result.stderr)
 
     def test_custom_suite_wrapper_fails_before_any_worker(self):
-        source = """import pathlib, unittest
+        subclass = """import pathlib, unittest
 class GuardedSuite(unittest.TestSuite):
     def run(self, result, debug=False):
         raise AssertionError("custom wrapper must not be discarded")
@@ -151,12 +151,26 @@ class Case(unittest.TestCase):
     def test_example(self):
         pathlib.Path(__file__).with_name("receipt-executed").touch()
 """
-        result, receipts = self.run_fixture(source)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn(
-            "custom unittest suite wrappers cannot be sharded safely", result.stderr
-        )
-        self.assertEqual(receipts, [])
+        instance = """import pathlib, unittest
+def load_tests(loader, tests, pattern):
+    inner = unittest.TestSuite([tests])
+    def custom_run(result, debug=False):
+        raise AssertionError("instance wrapper must not be discarded")
+    inner.run = custom_run
+    return unittest.TestSuite([inner])
+class Case(unittest.TestCase):
+    def test_example(self):
+        pathlib.Path(__file__).with_name("receipt-executed").touch()
+"""
+        for source in (subclass, instance):
+            with self.subTest(source=source):
+                result, receipts = self.run_fixture(source)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "custom unittest suite wrappers cannot be sharded safely",
+                    result.stderr,
+                )
+                self.assertEqual(receipts, [])
 
     def test_macos_route_uses_complete_isolated_runner_with_seed_costs(self):
         import shlex
