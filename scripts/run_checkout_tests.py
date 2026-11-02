@@ -145,7 +145,16 @@ def main() -> int:
     if args.worker_manifest is not None:
         identities = json.loads(args.worker_manifest.read_text(encoding="utf-8"))
         suite = loader.loadTestsFromNames(identities)
-        if loader.errors or sorted(test_ids(suite)) != sorted(identities):
+        cases = test_cases(suite)
+        loaded = [
+            (
+                case.id(),
+                f"{type(case).__module__}.{type(case).__qualname__}",
+                type(case).__module__,
+            )
+            for case in cases
+        ]
+        if loader.errors or sorted(item[0] for item in loaded) != sorted(identities):
             print(
                 "Worker failed to load its exact assigned test inventory",
                 file=sys.stderr,
@@ -153,11 +162,7 @@ def main() -> int:
             return 1
 
         scopes = {
-            case.id(): (
-                f"{type(case).__module__}.{type(case).__qualname__}",
-                type(case).__module__,
-            )
-            for case in test_cases(suite)
+            identity: (class_name, module) for identity, class_name, module in loaded
         }
 
         class TimedResult(unittest.TextTestResult):

@@ -156,6 +156,8 @@ class Case(unittest.TestCase):
             self._check_fixture_skips_account_only_for_the_matching_inventory()
         with self.subTest(check="fixture skip coverage"):
             self._check_fixture_skips_keep_coverage_and_the_accounting_distinct()
+        with self.subTest(check="fixture module identity"):
+            self._check_fixture_skip_uses_case_module_not_discovery_file()
 
     def _check_fixture_skips_account_only_for_the_matching_inventory(self):
         cases = (
@@ -253,6 +255,8 @@ class Duplicate(unittest.TestCase):
                 )
 
     def _check_fixture_skips_keep_coverage_and_the_accounting_distinct(self):
+        from coverage import CoverageData
+
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
             for package in ("review_sensei", "review_sensei_github"):
@@ -291,6 +295,47 @@ class Runs(unittest.TestCase):
             self.assertTrue(data["execution_complete"])
             self.assertTrue(data["coverage_ok"])
             self.assertEqual(data["workers"][0]["executed"], 1)
+            self.assertEqual(data["workers"][0]["fixture_skipped"], 1)
+            coverage = CoverageData(basename=str(root / ".coverage"))
+            coverage.read()
+            for package in ("review_sensei", "review_sensei_github"):
+                source = str((root / package / "__init__.py").resolve())
+                self.assertIn(source, coverage.measured_files())
+                self.assertIn(1, coverage.lines(source))
+
+    def _check_fixture_skip_uses_case_module_not_discovery_file(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "helper_suite.py").write_text("""import unittest
+def setUpModule(): raise unittest.SkipTest('optional fixture unavailable')
+class ForeignCase(unittest.TestCase):
+    def test_a(self): pass
+""")
+            (root / "test_example.py").write_text("""import helper_suite
+def load_tests(loader, tests, pattern):
+    return loader.loadTestsFromTestCase(helper_suite.ForeignCase)
+""")
+            report = root / "report.json"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--workers",
+                    "1",
+                    "--start-directory",
+                    str(root),
+                    "--report",
+                    str(report),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("setUpModule (helper_suite)", proc.stderr)
+            data = json.loads(report.read_text())
+            self.assertTrue(data["execution_complete"])
+            self.assertEqual(data["workers"][0]["executed"], 0)
             self.assertEqual(data["workers"][0]["fixture_skipped"], 1)
 
 
