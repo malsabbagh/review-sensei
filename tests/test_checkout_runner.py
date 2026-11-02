@@ -275,6 +275,40 @@ class Case(unittest.TestCase):
                 for name, seconds in costs.items()
             )
         )
+        loader = unittest.TestLoader()
+        suite = loader.discover(
+            str(ROOT / "tests"),
+            pattern="test_quarantine_checkpoint.py",
+            top_level_dir=str(ROOT / "tests"),
+        )
+        self.assertEqual(loader.errors, [])
+        discovered = RUNNER.test_ids(suite)
+        self.assertTrue(discovered)
+        by_class = {}
+        for identity in sorted(discovered):
+            by_class.setdefault(identity.rpartition(".")[0], []).append(identity)
+        expected_classes = {
+            "test_quarantine_checkpoint.QuarantineCarrierPlanningTests",
+            "test_quarantine_checkpoint.QuarantineCheckpointTests",
+            "test_quarantine_checkpoint.QuarantineDecisionScopeFenceTests",
+            "test_quarantine_checkpoint.QuarantineRolloverTests",
+        }
+        self.assertTrue(expected_classes.issubset(by_class))
+        self.assertTrue(expected_classes.issubset(costs))
+        selected = [by_class[name][0] for name in sorted(expected_classes)]
+        checkpoint_class = "test_quarantine_checkpoint.QuarantineCheckpointTests"
+        with_costs = RUNNER.partition(selected, 2, costs)
+        reduced_costs = {
+            name: seconds for name, seconds in costs.items() if name != checkpoint_class
+        }
+        self.assertNotIn(checkpoint_class, reduced_costs)
+        without_checkpoint_cost = RUNNER.partition(selected, 2, reduced_costs)
+        self.assertNotEqual(with_costs, without_checkpoint_cost)
+        for groups in (with_costs, without_checkpoint_cost):
+            self.assertEqual(len(groups), 2)
+            flat = [identity for group in groups for identity in group]
+            self.assertEqual(sorted(flat), sorted(selected))
+            self.assertEqual(len(set(flat)), len(selected))
 
 
 class MeasuredRunnerTests(unittest.TestCase):
