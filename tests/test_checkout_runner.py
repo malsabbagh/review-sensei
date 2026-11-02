@@ -228,6 +228,32 @@ class Case(unittest.TestCase):
             self.assertEqual(sorted(sum(groups, [])), sorted(selected))
         self.assertNotEqual(full, partial)
 
+        # Discover in a fresh process so this check does not import every test
+        # module into the worker executing the checkout-runner tests.
+        code = """\
+import json, pathlib, sys, unittest
+from scripts.run_checkout_tests import test_ids
+root, output = map(pathlib.Path, sys.argv[1:])
+loader = unittest.TestLoader()
+suite = loader.discover(str(root / 'tests'), top_level_dir=str(root / 'tests'))
+if loader.errors:
+    raise SystemExit('\\n'.join(loader.errors))
+classes = sorted({identity.rpartition('.')[0] for identity in test_ids(suite)})
+output.write_text(json.dumps(classes), encoding='utf-8')
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "classes.json"
+            result = subprocess.run(
+                [sys.executable, "-c", code, str(ROOT), str(output)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            classes = set(json.loads(output.read_text(encoding="utf-8")))
+        self.assertFalse(set(costs) - classes, "macOS cost fixture has orphaned keys")
+
     def test_real_workers_report_success_for_the_complete_inventory(self):
         source = """import pathlib, unittest
 class Case(unittest.TestCase):
