@@ -12,12 +12,14 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from collections import Counter
 from pathlib import Path
 
 
@@ -29,6 +31,16 @@ def test_ids(suite: unittest.TestSuite) -> list[str]:
         else:
             identities.append(item.id())
     return identities
+
+
+def test_cases(suite: unittest.TestSuite) -> list[unittest.TestCase]:
+    cases = []
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            cases.extend(test_cases(item))
+        else:
+            cases.append(item)
+    return cases
 
 
 def partition(
@@ -76,14 +88,21 @@ def read_worker_report(path: Path) -> tuple[dict[str, object], str | None]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as error:
-        return {"executed": None, "class_seconds": {}}, (
-            "Worker timing report unreadable: " + type(error).__name__
-        )
+        return {
+            "executed": None,
+            "fixture_skipped": None,
+            "inventory_complete": False,
+            "class_seconds": {},
+        }, ("Worker timing report unreadable: " + type(error).__name__)
     if (
         not isinstance(data, dict)
-        or set(data) != {"executed", "class_seconds"}
+        or set(data)
+        != {"executed", "fixture_skipped", "inventory_complete", "class_seconds"}
         or type(data["executed"]) is not int
         or data["executed"] < 0
+        or type(data["fixture_skipped"]) is not int
+        or data["fixture_skipped"] < 0
+        or type(data["inventory_complete"]) is not bool
         or not isinstance(data["class_seconds"], dict)
         or any(
             not isinstance(name, str)
@@ -92,9 +111,12 @@ def read_worker_report(path: Path) -> tuple[dict[str, object], str | None]:
             for name, seconds in data["class_seconds"].items()
         )
     ):
-        return {"executed": None, "class_seconds": {}}, (
-            "Worker timing report has invalid fields"
-        )
+        return {
+            "executed": None,
+            "fixture_skipped": None,
+            "inventory_complete": False,
+            "class_seconds": {},
+        }, ("Worker timing report has invalid fields")
     return data, None
 
 
@@ -130,13 +152,23 @@ def main() -> int:
             )
             return 1
 
+        scopes = {
+            case.id(): (
+                f"{type(case).__module__}.{type(case).__qualname__}",
+                type(case).__module__,
+            )
+            for case in test_cases(suite)
+        }
+
         class TimedResult(unittest.TextTestResult):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 self.class_seconds: dict[str, float] = {}
                 self.started: float | None = None
+                self.started_ids: list[str] = []
 
             def startTest(self, test):
+                self.started_ids.append(test.id())
                 self.started = time.monotonic()
                 super().startTest(test)
 
@@ -154,14 +186,38 @@ def main() -> int:
         result = unittest.TextTestRunner(verbosity=2, resultclass=TimedResult).run(
             suite
         )
+        expected = Counter(identities)
+        observed = Counter(result.started_ids)
+        remaining = expected - observed
+        fixture_skipped = 0
+        for skipped, _reason in result.skipped:
+            if isinstance(skipped, unittest.TestCase):
+                continue
+            match = re.fullmatch(r"setUp(Class|Module) \((.+)\)", skipped.id())
+            if not match:
+                continue
+            scope_index = 0 if match.group(1) == "Class" else 1
+            for identity in list(remaining):
+                if scopes[identity][scope_index] == match.group(2):
+                    fixture_skipped += remaining.pop(identity)
+        inventory_complete = (
+            not (observed - expected)
+            and not remaining
+            and result.testsRun == len(result.started_ids)
+        )
         if args.worker_report is not None:
             args.worker_report.write_text(
                 json.dumps(
-                    {"class_seconds": result.class_seconds, "executed": result.testsRun}
+                    {
+                        "class_seconds": result.class_seconds,
+                        "executed": result.testsRun,
+                        "fixture_skipped": fixture_skipped,
+                        "inventory_complete": inventory_complete,
+                    }
                 ),
                 encoding="utf-8",
             )
-        return 0 if result.wasSuccessful() else 1
+        return 0 if result.wasSuccessful() and inventory_complete else 1
     suite = loader.discover(str(directory))
     if loader.errors:
         for error in loader.errors:
@@ -246,7 +302,11 @@ def main() -> int:
         for index, code in enumerate(results):
             timing = Path(scratch) / f"timing-{index}.json"
             data, timing_error = read_worker_report(timing)
-            execution_complete &= data.get("executed") == len(groups[index])
+            execution_complete &= (
+                timing_error is None
+                and data["inventory_complete"] is True
+                and data["executed"] + data["fixture_skipped"] == len(groups[index])
+            )
             if timing_error:
                 print(f"Worker {index + 1}: {timing_error}", file=sys.stderr)
             workers.append(

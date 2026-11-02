@@ -152,6 +152,146 @@ class Case(unittest.TestCase):
         result, _ = self.run_fixture(source)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Discovered 2 tests; running 1 disjoint workers", result.stdout)
+        with self.subTest(check="fixture skip accounting"):
+            self._check_fixture_skips_account_only_for_the_matching_inventory()
+        with self.subTest(check="fixture skip coverage"):
+            self._check_fixture_skips_keep_coverage_and_the_accounting_distinct()
+
+    def _check_fixture_skips_account_only_for_the_matching_inventory(self):
+        cases = (
+            (
+                "class",
+                """import unittest
+class Skipped(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('unavailable')
+    def test_a(self): pass
+    def test_b(self): pass
+class Runs(unittest.TestCase):
+    def test_c(self): pass
+""",
+                1,
+                0,
+                1,
+                2,
+            ),
+            (
+                "module",
+                """import unittest
+def setUpModule(): raise unittest.SkipTest('unavailable')
+class First(unittest.TestCase):
+    def test_a(self): pass
+class Second(unittest.TestCase):
+    def test_b(self): pass
+""",
+                2,
+                0,
+                0,
+                2,
+            ),
+            (
+                "omission",
+                """import unittest
+class Skipped(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('setUpModule (test_example)')
+    def test_a(self): pass
+class Omitted(unittest.TestCase):
+    def run(self, result): return result
+    def test_b(self): pass
+""",
+                1,
+                1,
+                0,
+                1,
+            ),
+            (
+                "duplicate start",
+                """import unittest
+class Duplicate(unittest.TestCase):
+    def run(self, result):
+        result.startTest(self); result.stopTest(self)
+        result.startTest(self); result.stopTest(self)
+        return result
+    def test_a(self): pass
+""",
+                1,
+                1,
+                2,
+                0,
+            ),
+        )
+        for label, source, workers, expected_exit, executed, skipped in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                (root / "test_example.py").write_text(source, encoding="utf-8")
+                report = root / "report.json"
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--workers",
+                        str(workers),
+                        "--start-directory",
+                        str(root),
+                        "--report",
+                        str(report),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(proc.returncode, expected_exit, proc.stderr)
+                data = json.loads(report.read_text())
+                self.assertEqual(data["execution_complete"], expected_exit == 0)
+                self.assertEqual(
+                    sum(worker["executed"] for worker in data["workers"]), executed
+                )
+                self.assertEqual(
+                    sum(worker["fixture_skipped"] for worker in data["workers"]),
+                    skipped,
+                )
+
+    def _check_fixture_skips_keep_coverage_and_the_accounting_distinct(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            for package in ("review_sensei", "review_sensei_github"):
+                (root / package).mkdir()
+                (root / package / "__init__.py").write_text("value = 1\n")
+            (root / "test_example.py").write_text("""import unittest
+class Skipped(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('not applicable')
+    def test_a(self): pass
+class Runs(unittest.TestCase):
+    def test_b(self):
+        import review_sensei, review_sensei_github
+        self.assertEqual(review_sensei.value + review_sensei_github.value, 2)
+""")
+            report = root / "report.json"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--workers",
+                    "1",
+                    "--start-directory",
+                    str(root),
+                    "--coverage",
+                    "--report",
+                    str(report),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            data = json.loads(report.read_text())
+            self.assertTrue(data["execution_complete"])
+            self.assertTrue(data["coverage_ok"])
+            self.assertEqual(data["workers"][0]["executed"], 1)
+            self.assertEqual(data["workers"][0]["fixture_skipped"], 1)
 
 
 class MeasuredRunnerTests(unittest.TestCase):
@@ -270,7 +410,14 @@ class No(unittest.TestCase):
                     Path(command[command.index("--worker-manifest") + 1]).read_text()
                 )
                 Path(command[command.index("--worker-report") + 1]).write_text(
-                    json.dumps({"executed": len(assigned), "class_seconds": {}})
+                    json.dumps(
+                        {
+                            "executed": len(assigned),
+                            "fixture_skipped": 0,
+                            "inventory_complete": True,
+                            "class_seconds": {},
+                        }
+                    )
                 )
                 Path(command[command.index("--data-file") + 1]).write_bytes(
                     b"corrupt SQLite data"
@@ -320,6 +467,8 @@ class No(unittest.TestCase):
             b'{"executed":true,"class_seconds":{}}',
             b'{"executed":1,"class_seconds":{"Case":NaN}}',
             b'{"executed":1,"class_seconds":{},"exit":0}',
+            b'{"executed":1,"fixture_skipped":true,"inventory_complete":true,"class_seconds":{}}',
+            b'{"executed":1,"fixture_skipped":0,"inventory_complete":"yes","class_seconds":{}}',
         )
         for payload in payloads:
             with (
@@ -456,6 +605,8 @@ class Second(unittest.TestCase):
                             json.dumps(
                                 {
                                     "executed": 0 if fault == "zero-execution" else 1,
+                                    "fixture_skipped": 0,
+                                    "inventory_complete": fault != "zero-execution",
                                     "class_seconds": {},
                                 }
                             )
@@ -534,7 +685,7 @@ class BrokenProtocol(unittest.TestCase):
             data = json.loads(report.read_text())
             self.assertFalse(data["execution_complete"])
             self.assertEqual(data["workers"][0]["executed"], 0)
-            self.assertEqual(data["workers"][0]["exit"], 0)
+            self.assertEqual(data["workers"][0]["exit"], 1)
             self.assertIsNone(data["workers"][0]["timing_error"])
 
     def test_invalid_cost_files_fail_before_executing_any_workers(self):
