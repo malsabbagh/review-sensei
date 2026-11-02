@@ -1434,8 +1434,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         command = next(c for c in commands if "scripts/run_checkout_tests.py" in c)
         self.assertIn("--coverage", command)
         self.assertEqual(command[command.index("--workers") + 1], "4")
+        coverage_costs = command[command.index("--costs") + 1]
         self.assertEqual(
-            command[command.index("--costs") + 1],
+            coverage_costs,
             "tests/fixtures/checkout-class-seconds-coverage.json",
         )
         self.assertTrue(any("--fail-under=80" in c for c in commands))
@@ -1446,10 +1447,11 @@ class ActionPinPolicyTests(unittest.TestCase):
             if step.get("if") == "runner.os == 'Windows'"
         )
         windows_command = shlex.split(windows["run"])
-        self.assertEqual(
-            windows_command[windows_command.index("--costs") + 1],
-            "tests/fixtures/checkout-class-seconds.json",
-        )
+        windows_costs = windows_command[windows_command.index("--costs") + 1]
+        self.assertNotEqual(windows_costs, coverage_costs)
+        self.assertTrue((root / windows_costs).is_file())
+        self.assertNotIn("--coverage", windows_command)
+        self.assertEqual(windows_command[windows_command.index("--workers") + 1], "4")
         self.assertFalse(windows.get("continue-on-error", False))
         lifecycle = (
             root
