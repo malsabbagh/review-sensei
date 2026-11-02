@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.20 - 2026-11-01
+
 Changes since the published core `0.8.18` / hosted `0.3.24` release. The
 `0.8.19` / hosted `0.3.25` sections below retain an unpublished preparation.
 
@@ -26,6 +28,10 @@ Changes since the published core `0.8.18` / hosted `0.3.24` release. The
 
 Comment-intent proposals remain inactive. Publishing this release does not
 activate historical recovery or establish that earlier review effects are settled.
+
+## review-sensei-github 0.3.26 - 2026-11-01
+
+- Pin `review-sensei==0.8.20`.
 
 ## 0.8.19 - 2026-11-01
 
