@@ -212,6 +212,39 @@ class Second(unittest.TestCase):
                 3,
             ),
             (
+                "nested skipped class",
+                """import unittest
+class Outer:
+    class Inner(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls): raise unittest.SkipTest('unavailable')
+        def test_a(self): pass
+def load_tests(loader, tests, pattern):
+    return loader.loadTestsFromTestCase(Outer.Inner)
+""",
+                1,
+                0,
+                0,
+                1,
+            ),
+            (
+                "malformed skip holder",
+                """import unittest
+class InvalidHolder:
+    def shortDescription(self): return None
+    def __str__(self): return 'invalid holder'
+class Malformed(unittest.TestCase):
+    def run(self, result):
+        result.addSkip(InvalidHolder(), 'invalid skip holder')
+        return super().run(result)
+    def test_a(self): pass
+""",
+                1,
+                1,
+                1,
+                0,
+            ),
+            (
                 "omission",
                 """import unittest
 class Skipped(unittest.TestCase):
@@ -351,7 +384,12 @@ class Runs(unittest.TestCase):
         remaining = Counter({"unknown.Case.test_case": 1})
         event = SimpleNamespace(id=lambda: "setUpModule (unknown)")
         self.assertEqual(
-            RUNNER.count_fixture_skips(remaining, {}, [(event, "skip")]), 0
+            RUNNER.count_fixture_skips(remaining, {}, [(event, "skip")]), (0, False)
+        )
+        self.assertEqual(remaining, Counter({"unknown.Case.test_case": 1}))
+        self.assertEqual(
+            RUNNER.count_fixture_skips(remaining, {}, [("invalid", "skip")]),
+            (0, True),
         )
         self.assertEqual(remaining, Counter({"unknown.Case.test_case": 1}))
         remaining = Counter({"m.A.test_1": 1, "m.A.test_2": 1, "m.B.test_3": 1})
@@ -363,7 +401,9 @@ class Runs(unittest.TestCase):
         first = SimpleNamespace(id=lambda: "setUpClass (m.A)")
         second = SimpleNamespace(id=lambda: "setUpClass (m.B)")
         events = [(first, "skip"), (first, "duplicate"), (second, "skip")]
-        self.assertEqual(RUNNER.count_fixture_skips(remaining, scopes, events), 3)
+        self.assertEqual(
+            RUNNER.count_fixture_skips(remaining, scopes, events), (3, False)
+        )
         self.assertFalse(remaining)
 
     def _check_fixture_skip_uses_case_module_not_discovery_file(self):

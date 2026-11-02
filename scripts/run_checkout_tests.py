@@ -43,13 +43,26 @@ def test_cases(suite: unittest.TestSuite) -> list[unittest.TestCase]:
     return cases
 
 
-def count_fixture_skips(remaining, scopes, skipped_events) -> int:
-    """Consume each matching identity once; unknown scopes remain unaccounted."""
+def count_fixture_skips(remaining, scopes, skipped_events) -> tuple[int, bool]:
+    """Consume matching identities once and report malformed skip holders."""
     fixture_skipped = 0
+    malformed = False
     for skipped, _reason in skipped_events:
         if isinstance(skipped, unittest.TestCase):
             continue
-        match = re.fullmatch(r"setUp(Class|Module) \((.+)\)", skipped.id())
+        holder_id = getattr(skipped, "id", None)
+        if not callable(holder_id):
+            malformed = True
+            continue
+        try:
+            descriptor = holder_id()
+        except Exception:
+            malformed = True
+            continue
+        if not isinstance(descriptor, str):
+            malformed = True
+            continue
+        match = re.fullmatch(r"setUp(Class|Module) \((.+)\)", descriptor)
         if not match:
             continue
         scope_index = 0 if match.group(1) == "Class" else 1
@@ -57,7 +70,7 @@ def count_fixture_skips(remaining, scopes, skipped_events) -> int:
             scope = scopes.get(identity)
             if scope is not None and scope[scope_index] == match.group(2):
                 fixture_skipped += remaining.pop(identity)
-    return fixture_skipped
+    return fixture_skipped, malformed
 
 
 def partition(
@@ -213,12 +226,15 @@ def main() -> int:
         expected = Counter(identities)
         observed = Counter(result.started_ids)
         remaining = expected - observed
-        fixture_skipped = count_fixture_skips(remaining, scopes, result.skipped)
+        fixture_skipped, malformed_skip = count_fixture_skips(
+            remaining, scopes, result.skipped
+        )
         inventory_complete = (
             not (observed - expected)
             and not remaining
             and result.testsRun == len(result.started_ids)
             and Counter(result.stopped_ids) == observed
+            and not malformed_skip
         )
         if not inventory_complete:
             print(
