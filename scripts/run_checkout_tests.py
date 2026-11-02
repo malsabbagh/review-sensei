@@ -188,6 +188,7 @@ def main() -> int:
                 self.class_seconds: dict[str, float] = {}
                 self.started: float | None = None
                 self.started_ids: list[str] = []
+                self.stopped_ids: list[str] = []
 
             def startTest(self, test):
                 self.started_ids.append(test.id())
@@ -195,6 +196,7 @@ def main() -> int:
                 super().startTest(test)
 
             def stopTest(self, test):
+                self.stopped_ids.append(test.id())
                 if self.started is not None:
                     name = test.id().rpartition(".")[0]
                     self.class_seconds[name] = (
@@ -216,7 +218,13 @@ def main() -> int:
             not (observed - expected)
             and not remaining
             and result.testsRun == len(result.started_ids)
+            and Counter(result.stopped_ids) == observed
         )
+        if not inventory_complete:
+            print(
+                "Worker did not account for its exact assigned test inventory",
+                file=sys.stderr,
+            )
         if args.worker_report is not None:
             args.worker_report.write_text(
                 json.dumps(

@@ -242,6 +242,20 @@ class Duplicate(unittest.TestCase):
                 2,
                 0,
             ),
+            (
+                "start without stop",
+                """import unittest
+class Unfinished(unittest.TestCase):
+    def run(self, result):
+        result.startTest(self)
+        return result
+    def test_a(self): pass
+""",
+                1,
+                1,
+                1,
+                0,
+            ),
         )
         for label, source, workers, expected_exit, executed, skipped in cases:
             with self.subTest(case=label), tempfile.TemporaryDirectory() as scratch:
@@ -266,6 +280,13 @@ class Duplicate(unittest.TestCase):
                 self.assertEqual(proc.returncode, expected_exit, proc.stderr)
                 data = json.loads(report.read_text())
                 self.assertEqual(data["execution_complete"], expected_exit == 0)
+                if expected_exit:
+                    self.assertIn(
+                        "did not account for its exact assigned test inventory",
+                        proc.stderr,
+                    )
+                    self.assertFalse(data["workers"][0]["inventory_complete"])
+                    self.assertIsNone(data["workers"][0]["timing_error"])
                 self.assertEqual(
                     sum(worker["executed"] for worker in data["workers"]), executed
                 )
