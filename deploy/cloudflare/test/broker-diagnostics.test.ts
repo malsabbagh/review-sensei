@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { brokerDiagnostic } from "../src/broker-diagnostics";
+import { WorkflowLookupError } from "../src/broker-lookup-diagnostic";
 
 const ray = "0123456789abcdef-YYZ";
 
 describe("closed broker diagnostics", () => {
+  it("does not promote a control refusal or a duck-typed error as a lookup outage", () => {
+    const error = new WorkflowLookupError({ phase: "rest_ref", failure: "http" }, 429);
+    error.message = "broker_control_budget_exhausted";
+    expect(brokerDiagnostic(error).code).toBe("broker_control_budget_exhausted");
+    expect(brokerDiagnostic({ message: "github_workflow_tag_unavailable_429", status: 429, lookup: error.lookup }).code).toBe("broker_unknown");
+    expect(brokerDiagnostic(new Error("github_workflow_lookup_temporary")).code).toBe("broker_unknown");
+  });
+
   it("uses an exact allowlist, not a code-shaped text allowlist", () => {
     for (const message of [
       "broker_ghs_sensitive_token", "oidc_repo_private_name", "github_arbitrary_secret",

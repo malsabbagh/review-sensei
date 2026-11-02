@@ -1,5 +1,5 @@
 import { BrokerObservation } from "./broker-observation";
-import { WorkflowLookupError } from "./broker-lookup-diagnostic";
+import { WorkflowLookupError, temporaryWorkflowLookup } from "./broker-lookup-diagnostic";
 import { BrokerDispatchControl } from "./broker-dispatch-control";
 import type { WorkerEnv, WorkerExecution } from "./env";
 import { TokenBroker } from "./token-broker";
@@ -286,7 +286,7 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
     failure = error;
     outcome = "refused";
     const message = error instanceof Error ? error.message : "";
-    const status = message === "configuration_unavailable" ? 503 : 403;
+    const status = message === "configuration_unavailable" || temporaryWorkflowLookup(error) ? 503 : 403;
     const rayId = brokerRayId(request);
     const diagnostic = brokerDiagnostic(error, rayId);
     const lookup =
@@ -468,7 +468,7 @@ async function sessionGrant(
       ...(rayId === undefined ? {} : { cf_ray: rayId }),
     });
     const unavailable = error instanceof Error && error.message === "configuration_unavailable";
-    const status = unavailable ? 503 : 403;
+    const status = unavailable || temporaryWorkflowLookup(error) ? 503 : 403;
     const errorCode = unavailable ? "configuration_unavailable" : "session_grant_not_verified";
     return response({ error: errorCode, diagnostic, ...(lookup === undefined ? {} : {lookup}) }, status, true);
   } finally { observation.finish(outcome, failure); }

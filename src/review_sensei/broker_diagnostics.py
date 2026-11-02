@@ -76,6 +76,7 @@ class BrokerDiagnostic:
             or self.code
             not in {
                 "github_workflow_tag_unavailable",
+                "github_workflow_lookup_temporary",
                 "github_installation_token_failed",
                 "github_capability_issue_failed",
             }

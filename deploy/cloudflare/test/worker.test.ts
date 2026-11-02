@@ -12,6 +12,7 @@ vi.mock("../src/token-broker", () => ({
 import type { WorkerEnv } from "../src/env";
 import worker, { brokerErrorCode, setupErrorCode } from "../src/worker";
 import { brokerDiagnostic } from "../src/broker-diagnostics";
+import { WorkflowLookupError, type LookupDiagnostic } from "../src/broker-lookup-diagnostic";
 
 const env = {} as WorkerEnv;
 
@@ -280,6 +281,90 @@ describe("failure diagnostics", () => {
 });
 
 describe("broker diagnostic response contract", () => {
+  const lookupFailure = (status: number | undefined, failure: LookupDiagnostic["failure"] = "http", metadata: Partial<LookupDiagnostic> = {}) =>
+    new WorkflowLookupError({ phase: "rest_tag", failure, ...metadata }, status);
+
+  describe.each(["token", "session-grant"])("%s lookup classification", route => {
+    it.each([
+      ["primary exhaustion", lookupFailure(403, "http", { rate_limit_limit: 60, rate_limit_remaining: 0, rate_limit_reset: 1_793_574_563, rate_limit_resource: "core" })],
+      ["secondary throttle", lookupFailure(403, "http", { retry_after: 1 })],
+      ["429 without timing", lookupFailure(429)],
+      ["upstream unavailable", lookupFailure(503)],
+      ["upstream timeout", lookupFailure(undefined, "timeout")],
+      ["upstream transport", lookupFailure(undefined, "transport")],
+      ["failed 502 body read", lookupFailure(502, "timeout")],
+      ["successful-status body timeout", lookupFailure(200, "timeout")],
+      ["successful-status body transport", lookupFailure(200, "transport")],
+    ])("reports %s as temporary, retaining facts without authority", async (_label, error) => {
+      const exchange = route === "token" ? broker.exchange : broker.verifySessionGrant;
+      exchange.mockRejectedValueOnce(error);
+      const headers = { "cf-ray": "0123456789abcdef-YYZ" };
+      const result = await worker.fetch(route === "token" ? request(undefined, headers) : grantRequest(undefined, headers), env);
+      expect(result.status).toBe(503);
+      expect(result.headers.get("cache-control")).toBe("no-store");
+      expect(await result.json()).toEqual({
+        error: route === "token" ? "capability_not_issued" : "session_grant_not_verified",
+        diagnostic: {
+          version: 1, code: "github_workflow_lookup_temporary", stage: "workflow_identity",
+          action: "inspect_original_attempt", correlation_id: "0123456789abcdef-YYZ",
+          ...(error.status === undefined ? {} : { upstream_status: error.status }),
+        },
+        lookup: error.lookup,
+      });
+      expect(exchange).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["unauthorized", lookupFailure(401)],
+      ["ordinary forbidden", lookupFailure(403)],
+      ["tag absent", lookupFailure(404)],
+      ["forbidden body timeout", lookupFailure(403, "timeout", { retry_after: 1 })],
+      ["absent body transport", lookupFailure(404, "transport")],
+      ["zero retry", lookupFailure(403, "http", { retry_after: 0 })],
+      ["negative retry", lookupFailure(403, "http", { retry_after: -1 })],
+      ["fractional retry", lookupFailure(403, "http", { retry_after: 0.5 })],
+      ["unbounded retry", lookupFailure(403, "http", { retry_after: Infinity })],
+      ["string retry", lookupFailure(403, "http", { retry_after: "1" as never })],
+      ["boolean remaining", lookupFailure(403, "http", { rate_limit_remaining: false as never })],
+      ["malformed throttled body", lookupFailure(429, "malformed", { retry_after: 1 })],
+      ["oversized unavailable body", lookupFailure(503, "oversized")],
+      ["malformed successful body", lookupFailure(200, "malformed")],
+      ["oversized successful body", lookupFailure(200, "oversized")],
+      ["untyped upstream code", new Error("github_workflow_tag_unavailable_429")],
+      ["untyped temporary code", new Error("github_workflow_lookup_temporary")],
+      ...["broker_workflow_rejected", "github_workflow_tag_invalid", "oidc_token_invalid", "broker_control_deadline_exhausted", "broker_control_budget_exhausted", "broker_control_clock_regressed", "broker_control_redirect_refused"].map(code => [code, new Error(code)] as const),
+    ])("keeps %s refused without another call", async (_label, error) => {
+      const exchange = route === "token" ? broker.exchange : broker.verifySessionGrant;
+      exchange.mockRejectedValueOnce(error);
+      const result = await worker.fetch(route === "token" ? request() : grantRequest(), env);
+      expect(result.status).toBe(403);
+      const body = await result.json() as { diagnostic: { code: string }; token?: string; session_attestation?: object };
+      expect(body.diagnostic.code).not.toBe("github_workflow_lookup_temporary");
+      expect(body).not.toHaveProperty("token");
+      expect(body).not.toHaveProperty("session_attestation");
+      expect(exchange).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it.each(["token", "session-grant"])("reports a temporary workflow lookup failure on %s without issuing authority", async route => {
+    const lookup = { phase: "rest_ref", failure: "http", git_failure: "http", retry_after: 1 } as const;
+    const error = new WorkflowLookupError(lookup, 429);
+    const exchange = route === "token" ? broker.exchange : broker.verifySessionGrant;
+    exchange.mockRejectedValueOnce(error);
+    const result = await worker.fetch(route === "token" ? request() : grantRequest(), env);
+    expect(result.status).toBe(503);
+    expect(result.headers.get("cache-control")).toBe("no-store");
+    expect(await result.json()).toEqual({
+      error: route === "token" ? "capability_not_issued" : "session_grant_not_verified",
+      diagnostic: {
+        version: 1, code: "github_workflow_lookup_temporary", stage: "workflow_identity",
+        action: "inspect_original_attempt", upstream_status: 429,
+      },
+      lookup,
+    });
+    expect(exchange).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["broker_workflow_rejected", 403],
     ["broker_rate_limited", 403],

@@ -332,6 +332,20 @@ identify GitHub API or App failures. A code such as
 `github_capability_issue_failed_422` preserves only GitHub's HTTP status; raw
 tokens, claims, response bodies, and exception text are never logged or returned.
 
+The token and session-grant routes report typed temporary workflow-identity
+lookup failures as HTTP 503 with `github_workflow_lookup_temporary`. This covers
+upstream 429/5xx, explicit 403 rate exhaustion or positive Retry-After, and
+lookup transport failures/timeouts without a known authorization rejection.
+Malformed/oversized responses, ordinary 401/403/404 and identity/policy/control
+refusals retain their existing refusal behavior. No token or verified session
+is returned on either failure route. Older outer-403 responses retain their
+existing client classification; upstream metadata alone does not promote them.
+
+There is no automatic lookup or capability-request retry. Inspect the original
+attempt, safe retry/reset metadata and uncertain effects before choosing an
+authorized next action. An elapsed reset does not settle an unfinished caller
+or authorize a fresh review, recovery, allowance or policy change.
+
 Capability and setup installation tokens require the returned permission map to
 exactly match the requested map plus GitHub's mandatory `metadata: read`;
 responses that omit metadata fail closed. `review_publish` alone may also

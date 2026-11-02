@@ -26,7 +26,7 @@ from review_sensei.cli import _report_broker_failure, main
 from review_sensei.errors import ReviewInputError
 from review_sensei.outcomes import RunOutcome, render_actions_summary
 from review_sensei.schemas import validate_public_document
-from tests.test_github_broker_client import current_authority
+from tests.test_github_broker_client import current_authority, current_grant
 
 RAY = "0123456789abcdef-YYZ"
 SECRET = "ghs_synthetic_secret_do_not_log"
@@ -57,6 +57,101 @@ def http_error(body, status=403, ray=RAY):
 
 
 class BrokerDiagnosticTests(unittest.TestCase):
+    def test_temporary_lookup_reaches_exchange_and_grant_callers_without_replay(self):
+        for operation in ("exchange", "session-grant"):
+            for upstream, lookup in (
+                (
+                    403,
+                    {"phase": "rest_tag", "failure": "http", "rate_limit_remaining": 0},
+                ),
+                (503, {"phase": "rest_ref", "failure": "http"}),
+                (None, {"phase": "rest_ref", "failure": "timeout"}),
+                (200, {"phase": "rest_tag", "failure": "timeout"}),
+            ):
+                with self.subTest(operation=operation, upstream=upstream):
+                    body = payload("github_workflow_lookup_temporary")
+                    if upstream is not None:
+                        body["diagnostic"]["upstream_status"] = upstream
+                    body["lookup"] = lookup
+                    calls = []
+
+                    def opener(request, timeout):
+                        calls.append(request)
+                        raise http_error(json.dumps(body).encode(), status=503)
+
+                    client = BrokerClient(opener=opener, authority=current_authority())
+                    with self.assertRaises(GitHubHTTPTransientError) as raised:
+                        if operation == "exchange":
+                            client.exchange("synthetic-oidc")
+                        else:
+                            client.verify_session_grant(
+                                "sg1.1780000000000." + "a" * 43,
+                                current_grant(current_authority()),
+                            )
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(calls[0].method, "POST")
+                    diagnostic = exception_broker_diagnostic(raised.exception)
+                    self.assertEqual(
+                        diagnostic.code, "github_workflow_lookup_temporary"
+                    )
+                    self.assertEqual(diagnostic.upstream_status, upstream)
+                    self.assertEqual(
+                        diagnostic.metadata()["broker.lookup_failure"],
+                        lookup["failure"],
+                    )
+                    wrapper = ReviewInputError("session grant verification failed")
+                    wrapper.__cause__ = raised.exception
+                    self.assertEqual(exception_broker_diagnostic(wrapper), diagnostic)
+                    self.assertNotIn(SECRET, diagnostic.message())
+
+    def test_legacy_outer_403_is_not_promoted_by_upstream_rate_metadata(self):
+        body = payload("github_workflow_tag_unavailable", upstream_status=429)
+        body["lookup"] = {"phase": "rest_ref", "failure": "http", "retry_after": 1}
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request)
+            raise http_error(json.dumps(body).encode(), status=403)
+
+        client = BrokerClient(opener=opener, authority=current_authority())
+        with self.assertRaises(GitHubBrokerClientError) as raised:
+            client.exchange("synthetic-oidc")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(type(raised.exception), GitHubBrokerClientError)
+        self.assertEqual(
+            exception_broker_diagnostic(raised.exception).upstream_status, 429
+        )
+
+    def test_temporary_workflow_lookup_survives_one_exchange_without_retry(self):
+        body = {
+            "error": SECRET,
+            "diagnostic": {
+                "version": 1,
+                "code": "github_workflow_lookup_temporary",
+                "stage": "workflow_identity",
+                "action": "inspect_original_attempt",
+                "upstream_status": 429,
+            },
+            "lookup": {"phase": "rest_ref", "failure": "http", "retry_after": 1},
+        }
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request)
+            raise http_error(json.dumps(body).encode(), status=503)
+
+        client = BrokerClient(opener=opener, authority=current_authority())
+        with self.assertRaises(GitHubHTTPTransientError) as raised:
+            client.exchange("synthetic-oidc")
+        self.assertEqual(len(calls), 1)
+        diagnostic = exception_broker_diagnostic(raised.exception)
+        self.assertEqual(diagnostic.code, "github_workflow_lookup_temporary")
+        self.assertEqual(diagnostic.upstream_status, 429)
+        self.assertEqual(diagnostic.metadata()["broker.lookup_retry_after"], "1")
+        self.assertIn("original attempt", diagnostic.hint)
+        self.assertNotIn("Confirm the supported release", str(raised.exception))
+        self.assertNotIn(SECRET, str(raised.exception))
+
     def test_lookup_envelope_is_closed_and_does_not_replace_legacy_reason(self):
         body = payload("github_workflow_tag_unavailable", upstream_status=403)
         body["lookup"] = {
