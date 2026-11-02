@@ -96,9 +96,11 @@ jobs:
         run: python -m mypy src packages/python/review-sensei-github/src
       - name: Compile sources
         run: python -m compileall -q src
+      # The 100 slowest measured classes from complete coverage CI run
+      # 41390172802; this affects scheduling, not discovery or test scope.
       - name: Branch coverage
         run: |
-          python scripts/run_checkout_tests.py --workers 4 --coverage --costs tests/fixtures/checkout-class-seconds.json --report "$RUNNER_TEMP/checkout-timings.json"
+          python scripts/run_checkout_tests.py --workers 4 --coverage --costs tests/fixtures/checkout-class-seconds-coverage.json --report "$RUNNER_TEMP/checkout-timings.json"
           python -m coverage report --precision=2 --show-missing --fail-under=80
 
       - name: Retain checkout inventory and worker timings

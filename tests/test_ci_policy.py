@@ -1411,6 +1411,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("advisory", text)
 
     def test_ci_restores_strict_branch_coverage_and_bounds_workflow_identity(self):
+        import shlex
+
+        import yaml
+
         root = Path(__file__).resolve().parents[1]
         ci_text = (root / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
@@ -1420,6 +1424,33 @@ class ActionPinPolicyTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("--fail-under=80", ci_text)
         self.assertNotIn("--fail-under=75", ci_text)
+        jobs = yaml.safe_load(ci_text)["jobs"]
+        coverage = next(
+            step
+            for step in jobs["quality"]["steps"]
+            if step.get("name") == "Branch coverage"
+        )
+        commands = [shlex.split(line) for line in coverage["run"].splitlines() if line]
+        command = next(c for c in commands if "scripts/run_checkout_tests.py" in c)
+        self.assertIn("--coverage", command)
+        self.assertEqual(command[command.index("--workers") + 1], "4")
+        self.assertEqual(
+            command[command.index("--costs") + 1],
+            "tests/fixtures/checkout-class-seconds-coverage.json",
+        )
+        self.assertTrue(any("--fail-under=80" in c for c in commands))
+        self.assertFalse(coverage.get("continue-on-error", False))
+        windows = next(
+            step
+            for step in jobs["compatibility"]["steps"]
+            if step.get("if") == "runner.os == 'Windows'"
+        )
+        windows_command = shlex.split(windows["run"])
+        self.assertEqual(
+            windows_command[windows_command.index("--costs") + 1],
+            "tests/fixtures/checkout-class-seconds.json",
+        )
+        self.assertFalse(windows.get("continue-on-error", False))
         lifecycle = (
             root
             / "packages/python/review-sensei-github/src/review_sensei_github/review_run.py"

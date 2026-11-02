@@ -51,6 +51,40 @@ class CheckoutRunnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 RUNNER.partition(identities, workers)
 
+    def test_coverage_costs_change_checkpoint_assignment(self):
+        loader = unittest.TestLoader()
+        suite = loader.discover(
+            str(ROOT / "tests"),
+            pattern="test_quarantine_checkpoint.py",
+            top_level_dir=str(ROOT / "tests"),
+        )
+        self.assertEqual(loader.errors, [])
+        discovered = sorted(RUNNER.test_ids(suite))
+        names = (
+            "QuarantineCarrierPlanningTests",
+            "QuarantineCheckpointTests",
+            "QuarantineDecisionScopeFenceTests",
+            "QuarantineRolloverTests",
+        )
+        selected = [
+            next(identity for identity in discovered if f".{name}." in identity)
+            for name in names
+        ]
+        fixture = ROOT / "tests/fixtures/checkout-class-seconds-coverage.json"
+        costs = json.loads(fixture.read_text(encoding="utf-8"))
+        keys = [identity.rpartition(".")[0] for identity in selected]
+        for key in keys:
+            self.assertIn(key, costs)
+        checkpoint = next(
+            key for key in keys if key.endswith("QuarantineCheckpointTests")
+        )
+        reduced = {key: value for key, value in costs.items() if key != checkpoint}
+        full = RUNNER.partition(selected, 2, costs)
+        partial = RUNNER.partition(selected, 2, reduced)
+        for groups in (full, partial):
+            self.assertEqual(sorted(sum(groups, [])), sorted(selected))
+        self.assertNotEqual(full, partial)
+
     def run_fixture(self, source, *, manifest=None):
         with tempfile.TemporaryDirectory() as scratch:
             directory = Path(scratch)
