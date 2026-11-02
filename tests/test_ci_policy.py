@@ -2059,7 +2059,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("REVIEWSENSEI_DIST_SAFE_LANE=1", text)
         self.assertIn('REVIEWSENSEI_CHECKOUT_ROOT="$GITHUB_WORKSPACE"', text)
         self.assertIn("pip install dist/*.whl", text)
-        self.assertIn('unittest discover -s "$suite/dist_safe" -v', text)
+        self.assertIn(
+            '-I "$GITHUB_WORKSPACE/scripts/run_installed_test_suites.py"', text
+        )
+        self.assertIn('--start-directory "$suite/dist_safe" --workers 4', text)
         self.assertIn('unittest discover -s "$suite/downstream" -v', text)
         self.assertNotIn(
             'unittest discover -s "$GITHUB_WORKSPACE/tests" -v',
@@ -2068,6 +2071,241 @@ class ActionPinPolicyTests(unittest.TestCase):
         block = _run_block_containing(text, "REVIEWSENSEI_DIST_SAFE_LANE")
         self.assertNotIn("requirements/ci.txt", block)
         self.assertIn('test ! -e "$suite/test_ci_policy.py"', block)
+
+    def test_installed_suite_runner_preserves_wrappers_fixtures_and_failures(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite = root / "suite"
+            suite.mkdir()
+            (suite / "test_a.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import socket
+                    import unittest
+                    from unittest.mock import patch
+
+                    active = False
+                    ready = False
+                    calls = 0
+
+                    def setUpModule():
+                        global ready
+                        ready = True
+
+                    class Wrapped(unittest.TestSuite):
+                        def run(self, result, debug=False):
+                            global active
+                            active = True
+                            try:
+                                with patch.object(socket.socket, "connect", side_effect=RuntimeError("blocked")):
+                                    return super().run(result, debug)
+                            finally:
+                                active = False
+
+                    def load_tests(loader, tests, pattern):
+                        global calls
+                        calls += 1
+                        if calls != 1 or pattern != "test*.py":
+                            raise AssertionError("load_tests changed")
+                        return Wrapped(tests)
+
+                    class Tests(unittest.TestCase):
+                        def test_wrapper_and_module_fixture(self):
+                            self.assertTrue(active and ready)
+                            with socket.socket() as sock:
+                                with self.assertRaisesRegex(RuntimeError, "blocked"):
+                                    sock.connect(("127.0.0.1", 1))
+
+                    class Skipped(unittest.TestCase):
+                        @classmethod
+                        def setUpClass(cls):
+                            raise unittest.SkipTest("fixture skipped")
+                        def test_skipped(self):
+                            raise AssertionError("unreachable")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (suite / "test_b.py").write_text(
+                "import os, unittest\n"
+                "class Tests(unittest.TestCase):\n"
+                "    def test_condition(self):\n"
+                "        self.assertNotEqual(os.environ.get('SHARD_TEST_FAIL'), '1')\n",
+                encoding="utf-8",
+            )
+            (suite / "test_c.py").write_text(
+                "import unittest\n"
+                "def setUpModule(): raise unittest.SkipTest('module skipped')\n"
+                "class Tests(unittest.TestCase):\n"
+                "    def test_one(self): pass\n"
+                "    def test_two(self): pass\n",
+                encoding="utf-8",
+            )
+            report = root / "report.json"
+            command = [
+                sys.executable,
+                "-I",
+                str(runner),
+                "--start-directory",
+                str(suite),
+                "--workers",
+                "2",
+                "--report",
+                str(report),
+            ]
+            environment = dict(os.environ)
+            environment.pop("SHARD_TEST_FAIL", None)
+            completed = subprocess.run(
+                command,
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(
+                completed.returncode, 0, completed.stdout + completed.stderr
+            )
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertTrue(data["complete"])
+            self.assertEqual(data["discovered"], 5)
+            self.assertEqual(sum(worker["started"] for worker in data["workers"]), 2)
+            self.assertEqual(
+                sum(worker["fixture_skipped"] for worker in data["workers"]), 3
+            )
+            self.assertEqual(
+                sum(worker["skip_events"] for worker in data["workers"]), 2
+            )
+            environment["SHARD_TEST_FAIL"] = "1"
+            failed = subprocess.run(
+                command,
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("FAIL: test_condition", failed.stderr)
+            self.assertFalse(json.loads(report.read_text(encoding="utf-8"))["complete"])
+
+    def test_installed_suite_runner_rejects_omitted_tests(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            suite = Path(temporary) / "suite"
+            suite.mkdir()
+            (suite / "test_omitted.py").write_text(
+                "import unittest\n"
+                "class Omit(unittest.TestSuite):\n"
+                "    def run(self, result, debug=False): return result\n"
+                "def load_tests(loader, tests, pattern): return Omit(tests)\n"
+                "class Tests(unittest.TestCase):\n"
+                "    def test_never_run(self): pass\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [sys.executable, "-I", str(runner), "--start-directory", str(suite)],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "did not account for its exact test inventory", completed.stderr
+            )
+
+    def test_installed_suite_runner_rejects_worker_without_report(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            suite = Path(temporary) / "suite"
+            suite.mkdir()
+            (suite / "test_exit.py").write_text(
+                "import os, unittest\n"
+                "class Tests(unittest.TestCase):\n"
+                "    def test_exit(self): os._exit(0)\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [sys.executable, "-I", str(runner), "--start-directory", str(suite)],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("Worker 1:", completed.stderr)
+
+    def test_installed_suite_runner_rejects_shared_fixture_scope_before_workers(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            suite = Path(temporary) / "suite"
+            suite.mkdir()
+            (suite / "support.py").write_text(
+                "import unittest\nclass Shared(unittest.TestCase):\n    def test_shared(self): pass\n",
+                encoding="utf-8",
+            )
+            for name in ("test_a.py", "test_b.py"):
+                (suite / name).write_text(
+                    "from support import Shared\n", encoding="utf-8"
+                )
+            completed = subprocess.run(
+                [sys.executable, "-I", str(runner), "--start-directory", str(suite)],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "fixture scope spans multiple discovered modules", completed.stderr
+            )
+            self.assertNotIn("installed worker", completed.stdout)
+
+    def test_installed_suite_runner_rejects_repeated_fixture_blocks(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            suite = Path(temporary) / "suite"
+            suite.mkdir()
+            (suite / "test_blocks.py").write_text(
+                "import unittest\n"
+                "class A(unittest.TestCase):\n    def test_a(self): pass\n"
+                "class B(unittest.TestCase):\n    def test_b(self): pass\n"
+                "def load_tests(loader, tests, pattern):\n"
+                "    return unittest.TestSuite([A('test_a'), B('test_b'), A('test_a')])\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [sys.executable, "-I", str(runner), "--start-directory", str(suite)],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("fixture scope occurs in multiple blocks", completed.stderr)
+            self.assertNotIn("installed worker", completed.stdout)
 
     def test_downstream_canary_is_operator_gated_and_excluded_from_required_checks(
         self,
