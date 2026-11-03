@@ -54,6 +54,7 @@ from .errors import GitHubPublicationTransientError
 from .http import GitHubHttp
 from .learning_pr import LearningPRPublisher
 from .publication import PublicationResult, ReviewPublisher
+from .review_finalization_diagnostics import close_not_entered, close_review_run
 from .run_authority import request_authority
 from .session_ledger import GitHubIssueCommentSessionLedger
 
@@ -424,9 +425,13 @@ class ReviewRun:
             terminal_reason = None
             lifecycle_diagnostics.phase("caller_close")
             try:
-                self.caller.begin_terminal("already-published")
-                self.caller.finish_review_run(
-                    self.ledger, self.identity, hooks.skipped_transaction
+                try:
+                    self.caller.begin_terminal("already-published")
+                except BaseException:
+                    close_not_entered("terminal_entry_failed")
+                    raise
+                close_review_run(
+                    self.caller, self.ledger, self.identity, hooks.skipped_transaction
                 )
             except ReviewSenseiError:
                 terminal_reason = "terminal_close_unconfirmed"
@@ -524,14 +529,16 @@ class ReviewRun:
         ):
             lifecycle_diagnostics.phase("caller_close")
             try:
-                self.caller.finish_review_run(
-                    self.ledger, self.identity, analysis.result.transaction
+                close_review_run(
+                    self.caller, self.ledger, self.identity, analysis.result.transaction
                 )
             except ReviewSenseiError:
                 terminal_reason = "terminal_close_unconfirmed"
             else:
                 accounting_terminal = True
                 terminal_reason = None
+        else:
+            close_not_entered(terminal_reason)
         outcome = {
             "status": "published_terminal_pending"
             if published and not accounting_terminal

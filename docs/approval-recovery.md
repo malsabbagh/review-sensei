@@ -207,6 +207,17 @@ is not that receipt.
 
 ### Operational failure observation (hosted 0.3.14+)
 
+Candidate hosted sources also emit `review-sensei: finalization` observations
+around the accounting close. `not_entered` means its publication/cleanup gate
+refused entry (or `terminal_entry_failed` identifies failed terminal setup);
+`entered` has unknown dispatch counts. A subsequent `returned`
+or `raised` observation reports mutation dispatches observed during that close
+interval and how many remain uncertain. They are not necessarily terminal
+PATCHes, and a response does not prove its effect. An entry without a closing
+observation cannot establish non-dispatch. These bounded log observations add
+no HTTP work, retain no exception text, and confer no recovery authority.
+They do not repair historical runs whose finalization evidence is absent.
+
 The separate `approval-operation-failure` schema 1.0 observation was introduced
 in hosted 0.3.14 for `verify` and finding-disposition re-finalization. It is not
 available in hosted 0.3.13. When one of those operations observes a failure, the
