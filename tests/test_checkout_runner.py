@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from checkout_accounting_cases import CheckoutAccountingChecks
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/run_checkout_tests.py"
 # Checkout-only: the sdist contract excludes this module from installed lanes.
@@ -18,7 +20,7 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 
 
-class CheckoutRunnerTests(unittest.TestCase):
+class CheckoutRunnerTests(CheckoutAccountingChecks, unittest.TestCase):
     def test_partition_covers_every_identity_once_and_stays_deterministic(self):
         identities = [
             f"module.Case_{index // 10:03d}.test_{index:04d}" for index in range(2700)
@@ -419,6 +421,14 @@ class Case(unittest.TestCase):
             self._check_fixture_skip_uses_case_module_not_discovery_file()
         with self.subTest(check="unknown fixture scope"):
             self._check_unknown_fixture_scope_stays_unaccounted()
+        for check in (
+            self._check_original_suite_and_exact_accounting,
+            self._check_observer_restores_existing_profiler_and_preserves_trace,
+            self._check_early_success_exit_cannot_waive_inventory,
+            self._check_hook_fallback_keeps_import_and_branch_coverage,
+        ):
+            with self.subTest(check=check.__name__):
+                check()
 
     def _check_fixture_skips_account_only_for_the_matching_inventory(self):
         cases = (

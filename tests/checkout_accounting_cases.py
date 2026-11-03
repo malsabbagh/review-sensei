@@ -80,8 +80,8 @@ CASES.extend(
 )
 
 
-class RunnerAccountingRegressions(unittest.TestCase):
-    def test_original_suite_and_exact_accounting(self):
+class CheckoutAccountingChecks:
+    def _check_original_suite_and_exact_accounting(self):
         runner = Path(__file__).resolve().parents[1] / "scripts" / SCRIPT
         for label, source, success in CASES:
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
@@ -114,7 +114,7 @@ class RunnerAccountingRegressions(unittest.TestCase):
                         sum(w["fixture_skipped"] for w in data["workers"]), 1
                     )
 
-    def test_observer_restores_existing_profiler_and_preserves_trace(self):
+    def _check_observer_restores_existing_profiler_and_preserves_trace(self):
         import importlib.util
         import io
         from collections import Counter
@@ -206,7 +206,7 @@ class RunnerAccountingRegressions(unittest.TestCase):
         finally:
             sys.setprofile(original)
 
-    def test_early_success_exit_cannot_waive_inventory(self):
+    def _check_early_success_exit_cannot_waive_inventory(self):
         runner = Path(__file__).resolve().parents[1] / "scripts" / SCRIPT
         for exit_code in ("raise SystemExit(0)", "os._exit(0)"):
             with (
@@ -235,7 +235,7 @@ class RunnerAccountingRegressions(unittest.TestCase):
                 self.assertNotEqual(completed.returncode, 0, completed.stderr)
                 self.assertIn("without its final completion receipt", completed.stderr)
 
-    def test_hook_fallback_keeps_import_and_branch_coverage(self):
+    def _check_hook_fallback_keeps_import_and_branch_coverage(self):
         import os
 
         from coverage import CoverageData
