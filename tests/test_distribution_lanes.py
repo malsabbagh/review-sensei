@@ -87,7 +87,8 @@ class DistributionLaneTests(unittest.TestCase):
         self.assertIn(command["build"], ci)
         self.assertIn(command["record_digests"], ci)
         self.assertIn("pip install dist/*.whl", ci)
-        self.assertIn('unittest discover -s "$suite/dist_safe" -v', ci)
+        self.assertIn('-I "$GITHUB_WORKSPACE/scripts/run_installed_test_suites.py"', ci)
+        self.assertIn('--start-directory "$suite/dist_safe"', ci)
         self.assertIn('unittest discover -s "$suite/downstream" -v', ci)
         self.assertIn("prune tests", manifest)
         self.assertIn("graft tests/dist_safe", manifest)
@@ -98,26 +99,63 @@ class DistributionLaneTests(unittest.TestCase):
         self.assertIn(CONTRACT["canary"]["environment"], canary_text)
 
     def test_ci_lane_commands_match_the_contract_modulo_the_extracted_suite(self):
-        """Tie the CI invocation to the contract's canonical command.
+        """Tie CI's isolated runner and downstream command to the contract.
 
         Compared as argument lists rather than substrings, so shell quoting and
         the interpreter path are free to change while a dropped or reordered
-        flag still fails. CI runs the suite from the unpacked sdist, so the only
-        normalisation is the ``$suite`` prefix standing in for ``tests``.
+        flag still fails. The canonical dist-safe command remains a supported
+        sequential reproduction; CI uses a wrapper-preserving parallel runner
+        over the same extracted directory and discovery pattern.
         """
 
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         command = CONTRACT["supported_command"]
+        self.assertEqual(
+            shlex.split(command["run_dist_safe"]),
+            [
+                "python",
+                "-I",
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests/dist_safe",
+                "-v",
+            ],
+        )
+        invocations = [
+            shlex.split(line.strip())
+            for line in ci.replace("\\\n", " ").splitlines()
+            if "scripts/run_installed_test_suites.py" in line
+        ]
+        self.assertEqual(len(invocations), 1)
+        self.assertEqual(
+            ["python", *invocations[0][1:]],
+            [
+                "python",
+                "-I",
+                "$GITHUB_WORKSPACE/scripts/run_installed_test_suites.py",
+                "--start-directory",
+                "$suite/dist_safe",
+                "--workers",
+                "4",
+                "--pattern",
+                "test*.py",
+                "--split-module",
+                "test_quarantine_contract.py",
+                "--costs",
+                "$GITHUB_WORKSPACE/tests/fixtures/installed-unit-log-delta-seconds.json",
+                "--report",
+                "$RUNNER_TEMP/installed-suite-timings.json",
+            ],
+        )
         invocations = [
             shlex.split(line.strip())
             for line in ci.splitlines()
             if "unittest discover" in line
         ]
         self.assertTrue(invocations)
-        for key, lane in (
-            ("run_dist_safe", "dist_safe"),
-            ("run_downstream", "downstream"),
-        ):
+        for key, lane in (("run_downstream", "downstream"),):
             canonical = shlex.split(command[key])
             self.assertIn(f"tests/{lane}", canonical)
             matching = [
