@@ -49,8 +49,13 @@ jobs:
           python -m pip install -e packages/python/review-sensei-github --no-deps
       - name: Compile sources
         run: python -m compileall -q src
+      # The 100 slowest measured classes from complete macOS CI run
+      # 41457607346; these hints affect scheduling, not discovery or scope.
+      - name: Run every macOS test in isolated processes
+        if: runner.os == 'macOS'
+        run: python scripts/run_checkout_tests.py --workers 4 --costs tests/fixtures/checkout-class-seconds-macos.json --report "${{ runner.temp }}/checkout-timings.json"
       - name: Run tests
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux'
         run: python -m unittest discover -s tests -v
       # The 100 slowest measured classes from complete Windows CI run
       # 41456441033; these hints affect scheduling, not discovery or scope.
