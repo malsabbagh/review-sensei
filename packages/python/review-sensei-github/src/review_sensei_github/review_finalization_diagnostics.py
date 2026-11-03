@@ -14,7 +14,7 @@ def _emit(value: dict[str, object]) -> None:
             + json.dumps(value, sort_keys=True, separators=(",", ":"))
             + "\n"
         )
-    except Exception:
+    except BaseException:
         pass
 
 
@@ -37,7 +37,7 @@ def close_review_run(caller: Any, ledger: Any, identity: Any, transaction: Any) 
     _emit(value)
     try:
         before = len(caller.observations)
-    except Exception:
+    except BaseException:
         before = None
     returned = False
     try:
@@ -55,7 +55,7 @@ def close_review_run(caller: Any, ledger: Any, identity: Any, transaction: Any) 
                     o.get("outcome") != "response" or bool(o.get("uncertain_effect"))
                     for o in writes
                 )
-        except Exception:
+        except BaseException:
             value["mutation_dispatches"] = value["unknown_mutations"] = None
         value.update(
             stage="returned" if returned else "raised", close_returned=returned

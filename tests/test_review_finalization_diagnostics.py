@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
+from review_sensei_github.publication import PublicationResult, ReviewPublisher
 from review_sensei_github.review_finalization_diagnostics import close_review_run
 from review_sensei_github.session_ledger import parse_session_comment
 from test_api_work_persistence import IDENTITY
@@ -32,6 +33,66 @@ def observations(text):
 
 
 class ReviewFinalizationDiagnosticsTests(unittest.TestCase):
+    def test_observation_interrupt_preserves_original_business_error(self):
+        for interruption in (KeyboardInterrupt(), SystemExit(97)):
+            with self.subTest(interruption=type(interruption).__name__):
+
+                class InterruptingObservations(list):
+                    def __getitem__(self, key):
+                        raise interruption
+
+                original = ReviewInputError("original private failure")
+
+                def fail(*args):
+                    raise original
+
+                caller = SimpleNamespace(
+                    observations=InterruptingObservations(), finish_review_run=fail
+                )
+                captured = io.StringIO()
+                with (
+                    redirect_stderr(captured),
+                    self.assertRaises(ReviewInputError) as raised,
+                ):
+                    close_review_run(caller, None, None, None)
+                self.assertIs(raised.exception, original)
+                value = observations(captured.getvalue())[-1]
+                self.assertEqual(value["stage"], "raised")
+                self.assertIsNone(value["mutation_dispatches"])
+                self.assertIsNone(value["unknown_mutations"])
+
+    def test_interrupting_sink_cannot_change_business_return(self):
+        class InterruptingSink:
+            def write(self, value):
+                raise KeyboardInterrupt()
+
+        marker = object()
+        caller = SimpleNamespace(
+            observations=[], finish_review_run=lambda *args: marker
+        )
+        with redirect_stderr(InterruptingSink()):
+            self.assertIs(close_review_run(caller, None, None, None), marker)
+
+    def test_refused_publication_reports_reason_without_entering_close(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            with (
+                patch.object(
+                    ReviewPublisher,
+                    "publish",
+                    return_value=PublicationResult(status="not_published"),
+                ),
+                patch.object(ApiRunRequestTransport, "finish_review_run") as close,
+            ):
+                self.assertEqual(f.invoke(), 1, f.error)
+                close.assert_not_called()
+            observed = observations(f.error)
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0]["stage"], "not_entered")
+            self.assertEqual(
+                observed[0]["reason"], "publication_finalization_incomplete"
+            )
+
     def test_diff_fixtures_preserve_lf_under_crlf_platform_defaults(self):
         write_text = Path.write_text
 
