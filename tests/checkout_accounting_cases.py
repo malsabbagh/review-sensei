@@ -80,6 +80,43 @@ CASES.extend(
 )
 
 
+CASES.extend(
+    [
+        (
+            "forwarded class fixture skip",
+            'import unittest\nclass Forwarding(unittest.TestSuite):\n    def _handleModuleFixture(self, test, result):\n        return super()._handleModuleFixture(test, result)\n    def _handleClassSetUp(self, test, result):\n        return super()._handleClassSetUp(test, result)\nclass Skipped(unittest.TestCase):\n    @classmethod\n    def setUpClass(cls): raise unittest.SkipTest("actual forwarded class skip")\n    def test_a(self): pass\n    def test_b(self): pass\ndef load_tests(loader, tests, pattern):\n    return Forwarding([Skipped("test_a"), Skipped("test_b")])\n',
+            True,
+        ),
+        (
+            "forwarded module fixture skip",
+            'import unittest\nclass Forwarding(unittest.TestSuite):\n    def _handleModuleFixture(self, test, result):\n        return super()._handleModuleFixture(test, result)\n    def _handleClassSetUp(self, test, result):\n        return super()._handleClassSetUp(test, result)\ndef setUpModule(): raise unittest.SkipTest("actual forwarded module skip")\nclass Skipped(unittest.TestCase):\n    def test_a(self): pass\n    def test_b(self): pass\ndef load_tests(loader, tests, pattern):\n    return Forwarding([Skipped("test_a"), Skipped("test_b")])\n',
+            True,
+        ),
+    ]
+)
+
+
+CASES.extend(
+    [
+        (
+            "manual fixture call after dispatch",
+            "import unittest\nsuite_ref = None\nclass Omitted(unittest.TestCase):\n    calls = 0\n    @classmethod\n    def setUpClass(cls):\n        cls.calls += 1\n        if cls.calls == 2: raise unittest.SkipTest('manual later setup')\n    def run(self, result):\n        result._previousTestClass = None\n        suite_ref._handleClassSetUp(self, result)\n        return result\n    def test_body(self): self.fail('must execute')\ndef load_tests(loader, tests, pattern):\n    global suite_ref\n    suite_ref = unittest.TestSuite([Omitted('test_body')])\n    return suite_ref\n",
+            False,
+        ),
+        (
+            "repeated super recovers then omits",
+            "import unittest\nclass Omitted(unittest.TestCase):\n    calls = 0\n    @classmethod\n    def setUpClass(cls):\n        cls.calls += 1\n        if cls.calls == 1: raise unittest.SkipTest('first setup only')\n    def run(self, result): return result\n    def test_body(self): self.fail('must execute')\nclass RetryingSuite(unittest.TestSuite):\n    def _handleClassSetUp(self, test, result):\n        super()._handleClassSetUp(test, result)\n        return super()._handleClassSetUp(test, result)\ndef load_tests(loader, tests, pattern):\n    return RetryingSuite([Omitted('test_body')])\n",
+            False,
+        ),
+        (
+            "changed allocated case type",
+            "import unittest\nclass Replacement(unittest.TestCase):\n    def run(self, result): return result\n    def test_body(self): self.fail('must execute')\nclass Original(unittest.TestCase):\n    @classmethod\n    def setUpClass(cls): raise unittest.SkipTest('original fixture')\n    def test_body(self): self.fail('must execute')\nclass ChangingSuite(unittest.TestSuite):\n    def _handleClassSetUp(self, test, result):\n        super()._handleClassSetUp(test, result)\n        test.__class__ = Replacement\ndef load_tests(loader, tests, pattern):\n    return ChangingSuite([Original('test_body')])\n",
+            False,
+        ),
+    ]
+)
+
+
 class CheckoutAccountingChecks:
     def _check_original_suite_and_exact_accounting(self):
         runner = Path(__file__).resolve().parents[1] / "scripts" / SCRIPT

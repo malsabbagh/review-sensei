@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import dis
 import hashlib
 import json
 import re
@@ -26,22 +27,33 @@ from pathlib import Path
 
 
 class FixtureDispatchTracker:
-    """Observe default unittest fixture dispatch without changing suite objects.
+    """Credit skips only at the default runner's completed fixture dispatch.
 
-    Fixture holders do not identify the tests they blocked. The stdlib class
-    setup handler is called for every selected leaf, including leaves blocked
-    by module setup. Observe its return and the actual setup episode instead.
+    Original handler locals identify the fixture; the outer dispatch return
+    supplies its final flags. This preserves forwarding handlers without
+    trusting a later manual handler call from a test body. Forwarding handlers
+    must preserve the selected test's effective fixture class; replacing the
+    allocated concrete TestCase type fails accounting.
     """
 
     def __init__(self, cases, identity):
         self.identities = {id(case): identity(case) for case in cases}
+        self.case_types = {id(case): type(case) for case in cases}
         self.skipped = Counter()
         self.episodes = {}
-        self.entries = {}
+        self.dispatches = {}
         self.module_dispatch = None
         self.codes = {
             unittest.TestSuite._handleModuleFixture.__code__: "Module",
             unittest.TestSuite._handleClassSetUp.__code__: "Class",
+        }
+        self.run_code = unittest.TestSuite.run.__code__
+        names = {"_handleModuleFixture": "Module", "_handleClassSetUp": "Class"}
+        self.call_lines = {
+            instruction.positions.lineno: names[instruction.argval]
+            for instruction in dis.get_instructions(unittest.TestSuite.run)
+            if instruction.opname in {"LOAD_ATTR", "LOAD_METHOD"}
+            and instruction.argval in names
         }
 
     def __enter__(self):
@@ -53,6 +65,41 @@ class FixtureDispatchTracker:
         if self.active and sys.getprofile() == self.observe:
             sys.setprofile(self.previous)
         self.active = False
+
+    def dispatch_phase(self, caller):
+        if (
+            caller is not None
+            and caller.f_code is self.run_code
+            and caller.f_locals.get("result") is self.result
+        ):
+            return self.call_lines.get(caller.f_lineno)
+        return None
+
+    def boundary(self, frame, phase):
+        selected = frame.f_locals.get("test")
+        current = frame
+        while current.f_back is not None:
+            caller = current.f_back
+            if caller.f_code is self.run_code:
+                if (
+                    self.dispatch_phase(caller) == phase
+                    and caller.f_locals.get("test") is selected
+                ):
+                    return current
+                return None
+            current = caller
+        return None
+
+    def register(self, frame, phase):
+        return self.dispatches.setdefault(
+            id(frame),
+            {
+                "phase": phase,
+                "test": frame.f_back.f_locals["test"],
+                "skip_scopes": [],
+                "locals": None,
+            },
+        )
 
     def note_skip(self):
         frame = sys._getframe(1)
@@ -68,16 +115,18 @@ class FixtureDispatchTracker:
                 name = frame.f_locals.get("errorName", "")
             phase = self.codes.get(frame.f_code)
             if phase is not None:
-                caller = frame.f_back
+                boundary = self.boundary(frame, phase)
                 if (
                     actual_skip
                     and name.startswith(f"setUp{phase} (")
                     and frame.f_locals.get("result") is self.result
-                    and caller is not None
-                    and caller.f_code is unittest.TestSuite.run.__code__
-                    and caller.f_locals.get("test") is frame.f_locals.get("test")
+                    and boundary is not None
                 ):
-                    self.entries[id(frame)] = True
+                    self.register(boundary, phase)["skip_scopes"].append(
+                        frame.f_locals[
+                            "currentModule" if phase == "Module" else "currentClass"
+                        ]
+                    )
                     if not self.active:
                         self.previous = sys.getprofile()
                         self.active = True
@@ -88,47 +137,75 @@ class FixtureDispatchTracker:
     def observe(self, frame, event, arg):
         if self.previous is not None:
             self.previous(frame, event, arg)
-        phase = self.codes.get(frame.f_code)
-        if phase is None or event not in {"call", "return"}:
+        if event not in {"call", "return"}:
             return
-        result = frame.f_locals.get("result")
-        if result is not getattr(self, "result", None) or result is None:
-            return
+        original_phase = self.codes.get(frame.f_code)
         caller = frame.f_back
+        possible_boundary = caller is not None and caller.f_code is self.run_code
         if (
-            caller is None
-            or caller.f_code is not unittest.TestSuite.run.__code__
-            or caller.f_locals.get("test") is not frame.f_locals.get("test")
+            original_phase is None
+            and not possible_boundary
+            and id(frame) not in self.dispatches
         ):
             return
+        phase = self.dispatch_phase(caller) if possible_boundary else None
         if event == "call":
-            self.entries[id(frame)] = False
+            if phase is not None:
+                self.register(frame, phase)
             return
-        skipped = self.entries.pop(id(frame), False)
-        state = self.episodes.setdefault(id(result), [result, None, None])
-        if phase == "Module":
-            module = frame.f_locals["currentModule"]
-            self.module_dispatch = (result, frame.f_locals["test"], module)
-            if module != frame.f_locals["previousModule"]:
-                state[1] = module if skipped else None
+        if original_phase is not None and frame.f_locals.get("result") is self.result:
+            boundary = self.boundary(frame, original_phase)
+            if boundary is not None:
+                self.register(boundary, original_phase)["locals"] = dict(frame.f_locals)
+        dispatch = self.dispatches.pop(id(frame), None)
+        if dispatch is None:
             return
-        cls = frame.f_locals["currentClass"]
-        previous = frame.f_locals["previousClass"]
-        if cls != previous:
-            state[2] = cls if skipped else None
+        # The same frame may be both original handler and outer boundary;
+        # capture its locals before examining the completed dispatch.
+        if phase == dispatch["phase"]:
+            self.complete_dispatch(dispatch)
         if (
-            getattr(result, "_moduleSetUpFailed", False)
-            and self.module_dispatch is not None
-            and self.module_dispatch[0] is result
-            and self.module_dispatch[1] is frame.f_locals["test"]
-            and state[1] == self.module_dispatch[2]
-        ) or (getattr(cls, "_classSetupFailed", False) and state[2] is cls):
-            key = self.identities.get(id(frame.f_locals["test"]))
-            if key is not None:
-                self.skipped[key] += 1
-        if state[1] is None and state[2] is None:
+            dispatch["phase"] == "Class"
+            and not self.dispatches
+            and all(value is None for value in self.episodes.values())
+        ):
             self.active = False
             sys.setprofile(self.previous)
+
+    def complete_dispatch(self, dispatch):
+        local = dispatch["locals"]
+        if local is None:
+            return  # A complete private reimplementation cannot supply proof.
+        result = self.result
+        selected = dispatch["test"]
+        if type(selected) is not self.case_types.get(id(selected)):
+            return  # A replacement TestCase type is not the allocated fixture.
+        phase = dispatch["phase"]
+        if phase == "Module":
+            current = local["currentModule"]
+            failed = getattr(result, "_moduleSetUpFailed", False)
+            self.module_dispatch = (selected, current)
+            had_skip = current in dispatch["skip_scopes"]
+            if current != local["previousModule"] or not failed or had_skip:
+                self.episodes["Module"] = current if had_skip and failed else None
+            return
+        cls = local["currentClass"]
+        failed = getattr(cls, "_classSetupFailed", False)
+        had_skip = any(scope is cls for scope in dispatch["skip_scopes"])
+        if cls != local["previousClass"] or not failed or had_skip:
+            self.episodes["Class"] = cls if had_skip and failed else None
+        module_blocked = (
+            getattr(result, "_moduleSetUpFailed", False)
+            and self.module_dispatch is not None
+            and self.module_dispatch[0] is selected
+            and self.episodes.get("Module") is not None
+            and self.episodes.get("Module") == self.module_dispatch[1]
+        )
+        class_blocked = failed and self.episodes.get("Class") is cls
+        if module_blocked or class_blocked:
+            identity = self.identities.get(id(selected))
+            if identity is not None:
+                self.skipped[identity] += 1
 
 
 class HookAwareLoader(unittest.TestLoader):
