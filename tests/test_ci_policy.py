@@ -9,6 +9,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from installed_accounting_cases import InstalledAccountingChecks
 from review_sensei_github.setup import _tagged_workflow
 
 from review_sensei.configuration import parse_configuration_text
@@ -283,7 +284,7 @@ def _hosted_provider_group(
     )
 
 
-class ActionPinPolicyTests(unittest.TestCase):
+class ActionPinPolicyTests(InstalledAccountingChecks, unittest.TestCase):
     def test_pinned_actions_with_release_comments_pass(self):
         text = """
         steps:

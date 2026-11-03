@@ -86,7 +86,7 @@ CASES.extend(
 )
 
 
-class RunnerAccountingRegressions(unittest.TestCase):
+class InstalledAccountingChecks:
     def test_original_suite_and_exact_accounting(self):
         runner = Path(__file__).resolve().parents[1] / "scripts" / SCRIPT
         for label, source, success in CASES:
