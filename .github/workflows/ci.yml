@@ -286,7 +286,13 @@ jobs:
           export REVIEWSENSEI_DIST_SAFE_LANE=1
           REVIEWSENSEI_EXPECTED_VERSION="$(cd "$GITHUB_WORKSPACE" && python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])')"
           export REVIEWSENSEI_EXPECTED_VERSION
-          "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/dist_safe" -v
+          # Scheduling weights are completion-log deltas from CI run 41455717540;
+          # they include fixture and output overhead and are only hints.
+          "$wheel_venv/bin/python" -I "$GITHUB_WORKSPACE/scripts/run_installed_test_suites.py" \
+            --start-directory "$suite/dist_safe" --workers 4 --pattern 'test*.py' \
+            --split-module test_quarantine_contract.py \
+            --costs "$GITHUB_WORKSPACE/tests/fixtures/installed-unit-log-delta-seconds.json" \
+            --report "$RUNNER_TEMP/installed-suite-timings.json"
           "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/downstream" -v
           # Exercise canonical custom-endpoint authority using the exact wheel
           # and an injected transport; this suite forbids socket connections.
@@ -302,6 +308,13 @@ jobs:
           # Publication proof tests also require these optional verifiers.
           "$wheel_venv/bin/python" -I -m unittest discover -s "$suite" -p 'test_quarantine_v3*.py' -v
           "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/launcher_qualification" -v
+      - name: Retain installed suite inventory and worker timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: installed-suite-timings
+          path: ${{ runner.temp }}/installed-suite-timings.json
+          if-no-files-found: warn
 
   npm:
     name: Node launcher and npm package contracts

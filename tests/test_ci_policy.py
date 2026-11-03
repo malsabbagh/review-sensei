@@ -9,6 +9,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from installed_accounting_cases import InstalledAccountingChecks
 from review_sensei_github.setup import _tagged_workflow
 
 from review_sensei.configuration import parse_configuration_text
@@ -283,7 +284,7 @@ def _hosted_provider_group(
     )
 
 
-class ActionPinPolicyTests(unittest.TestCase):
+class ActionPinPolicyTests(InstalledAccountingChecks, unittest.TestCase):
     def test_pinned_actions_with_release_comments_pass(self):
         text = """
         steps:
@@ -2092,7 +2093,12 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("REVIEWSENSEI_DIST_SAFE_LANE=1", text)
         self.assertIn('REVIEWSENSEI_CHECKOUT_ROOT="$GITHUB_WORKSPACE"', text)
         self.assertIn("pip install dist/*.whl", text)
-        self.assertIn('unittest discover -s "$suite/dist_safe" -v', text)
+        self.assertIn(
+            '-I "$GITHUB_WORKSPACE/scripts/run_installed_test_suites.py"', text
+        )
+        self.assertIn('--start-directory "$suite/dist_safe" --workers 4', text)
+        self.assertIn("--split-module test_quarantine_contract.py", text)
+        self.assertIn("tests/fixtures/installed-unit-log-delta-seconds.json", text)
         self.assertIn('unittest discover -s "$suite/downstream" -v', text)
         self.assertNotIn(
             'unittest discover -s "$GITHUB_WORKSPACE/tests" -v',
@@ -2101,6 +2107,576 @@ class ActionPinPolicyTests(unittest.TestCase):
         block = _run_block_containing(text, "REVIEWSENSEI_DIST_SAFE_LANE")
         self.assertNotIn("requirements/ci.txt", block)
         self.assertIn('test ! -e "$suite/test_ci_policy.py"', block)
+
+    def test_installed_suite_runner_preserves_wrappers_fixtures_and_failures(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite = root / "suite"
+            suite.mkdir()
+            (suite / "test_a.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import socket
+                    import unittest
+                    from unittest.mock import patch
+
+                    active = False
+                    ready = False
+                    calls = 0
+
+                    def setUpModule():
+                        global ready
+                        ready = True
+
+                    class Wrapped(unittest.TestSuite):
+                        def run(self, result, debug=False):
+                            global active
+                            active = True
+                            try:
+                                with patch.object(socket.socket, "connect", side_effect=RuntimeError("blocked")):
+                                    return super().run(result, debug)
+                            finally:
+                                active = False
+
+                    def load_tests(loader, tests, pattern):
+                        global calls
+                        calls += 1
+                        if calls != 1 or pattern != "test*.py":
+                            raise AssertionError("load_tests changed")
+                        return Wrapped(tests)
+
+                    class Tests(unittest.TestCase):
+                        def test_wrapper_and_module_fixture(self):
+                            self.assertTrue(active and ready)
+                            with socket.socket() as sock:
+                                with self.assertRaisesRegex(RuntimeError, "blocked"):
+                                    sock.connect(("127.0.0.1", 1))
+
+                    class Skipped(unittest.TestCase):
+                        @classmethod
+                        def setUpClass(cls):
+                            raise unittest.SkipTest("fixture skipped")
+                        def test_skipped(self):
+                            raise AssertionError("unreachable")
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (suite / "test_b.py").write_text(
+                "import os, unittest\n"
+                "class Tests(unittest.TestCase):\n"
+                "    def test_condition(self):\n"
+                "        self.assertNotEqual(os.environ.get('SHARD_TEST_FAIL'), '1')\n",
+                encoding="utf-8",
+            )
+            (suite / "test_c.py").write_text(
+                "import unittest\n"
+                "def setUpModule(): raise unittest.SkipTest('module skipped')\n"
+                "class Tests(unittest.TestCase):\n"
+                "    def test_one(self): pass\n"
+                "    def test_two(self): pass\n",
+                encoding="utf-8",
+            )
+            report = root / "report.json"
+            command = [
+                sys.executable,
+                "-I",
+                str(runner),
+                "--start-directory",
+                str(suite),
+                "--workers",
+                "2",
+                "--split-module",
+                "test_a.py",
+                "--report",
+                str(report),
+            ]
+            environment = dict(os.environ)
+            environment.pop("SHARD_TEST_FAIL", None)
+            completed = subprocess.run(
+                command,
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(
+                completed.returncode, 0, completed.stdout + completed.stderr
+            )
+            self.assertIn("test_wrapper_and_module_fixture", completed.stderr)
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertTrue(data["complete"])
+            self.assertEqual(data["discovered"], 5)
+            # The custom outer wrapper remains one whole scheduling unit.
+            self.assertEqual(data["units"], 3)
+            self.assertEqual(sum(worker["started"] for worker in data["workers"]), 2)
+            self.assertEqual(
+                sum(worker["fixture_skipped"] for worker in data["workers"]), 3
+            )
+            self.assertEqual(
+                sum(worker["skip_events"] for worker in data["workers"]), 2
+            )
+            environment["SHARD_TEST_FAIL"] = "1"
+            failed = subprocess.run(
+                command,
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("FAIL: test_condition", failed.stderr)
+            self.assertFalse(json.loads(report.read_text(encoding="utf-8"))["complete"])
+
+    def test_installed_suite_splits_only_at_fixture_boundaries_and_uses_costs(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite = root / "suite"
+            suite.mkdir()
+            for label in ("a", "b", "c"):
+                source = f"""\
+import os, pathlib, unittest
+ready = False
+def setUpModule():
+    global ready
+    ready = True
+    with (pathlib.Path(os.environ['SHARD_EVIDENCE_DIR']) / '{label}-setup').open('x') as out:
+        out.write(str(os.getpid()))
+class First(unittest.TestCase):
+    def test_first(self):
+        self.assertTrue(ready)
+        (pathlib.Path(os.environ['SHARD_EVIDENCE_DIR']) / '{label}-first').write_text(str(os.getpid()))
+"""
+                if label == "a":
+                    source += """\
+class Second(unittest.TestCase):
+    def test_second(self):
+        self.assertTrue(ready)
+        (pathlib.Path(os.environ['SHARD_EVIDENCE_DIR']) / 'a-second').write_text(str(os.getpid()))
+"""
+                (suite / f"support_{label}.py").write_text(source, encoding="utf-8")
+            (suite / "test_split.py").write_text(
+                textwrap.dedent(
+                    """\
+                    import os, pathlib, unittest
+                    from support_a import First as A1, Second as A2
+                    from support_b import First as B
+                    from support_c import First as C
+                    class Wrapped(unittest.TestSuite):
+                        def run(self, result, debug=False):
+                            (pathlib.Path(os.environ['SHARD_EVIDENCE_DIR']) / 'wrapped').write_text(str(os.getpid()))
+                            return super().run(result, debug)
+                    def load_tests(loader, tests, pattern):
+                        if pattern != 'test*.py': raise AssertionError('wrong pattern')
+                        first = loader.loadTestsFromTestCase(A1)
+                        if os.environ.get('SHARD_NESTED_WRAPPER') == '1': first = Wrapped(first)
+                        if os.environ.get('SHARD_NESTED_WRAPPER') == '2':
+                            original = first.run
+                            def custom_run(result, debug=False):
+                                (pathlib.Path(os.environ['SHARD_EVIDENCE_DIR']) / 'wrapped').write_text(str(os.getpid()))
+                                return original(result, debug)
+                            first.run = custom_run
+                        return unittest.TestSuite([
+                            first,
+                            loader.loadTestsFromTestCase(A2),
+                            loader.loadTestsFromTestCase(B),
+                            loader.loadTestsFromTestCase(C),
+                        ])
+                    """
+                ),
+                encoding="utf-8",
+            )
+            costs = root / "costs.json"
+            report = root / "report.json"
+            command = [
+                sys.executable,
+                "-I",
+                str(runner),
+                "--start-directory",
+                str(suite),
+                "--workers",
+                "2",
+                "--split-module",
+                "test_split.py",
+                "--costs",
+                str(costs),
+                "--report",
+                str(report),
+            ]
+            prefix = "test_split.py::support_"
+            for iteration, weights in enumerate(((10, 2, 1), (1, 10, 2))):
+                costs.write_text(
+                    json.dumps(
+                        {
+                            prefix + label: weight
+                            for label, weight in zip("abc", weights)
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                evidence = root / f"evidence-{iteration}"
+                evidence.mkdir()
+                environment = dict(os.environ, SHARD_EVIDENCE_DIR=str(evidence))
+                environment.pop("SHARD_NESTED_WRAPPER", None)
+                result = subprocess.run(
+                    command,
+                    cwd=root,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                data = json.loads(report.read_text(encoding="utf-8"))
+                self.assertTrue(data["complete"])
+                self.assertEqual((data["discovered"], data["units"]), (4, 3))
+                self.assertEqual(data["uncosted_units"], [])
+                self.assertEqual(data["unused_costs"], [])
+                pids = {
+                    name: (evidence / name).read_text()
+                    for name in (
+                        "a-setup",
+                        "a-first",
+                        "a-second",
+                        "b-setup",
+                        "b-first",
+                        "c-setup",
+                        "c-first",
+                    )
+                }
+                self.assertEqual(pids["a-setup"], pids["a-first"])
+                self.assertEqual(pids["a-setup"], pids["a-second"])
+                self.assertEqual(pids["b-setup"], pids["b-first"])
+                self.assertEqual(pids["c-setup"], pids["c-first"])
+                # Hook discovery executes the original suite once in the parent.
+                self.assertEqual(len(data["workers"]), 1)
+                self.assertEqual(pids["a-first"], pids["b-first"])
+                self.assertEqual(pids["a-first"], pids["c-first"])
+            for mode in ("1", "2"):
+                evidence = root / f"evidence-nested-{mode}"
+                evidence.mkdir()
+                environment = dict(
+                    os.environ,
+                    SHARD_EVIDENCE_DIR=str(evidence),
+                    SHARD_NESTED_WRAPPER=mode,
+                )
+                result = subprocess.run(
+                    command,
+                    cwd=root,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                data = json.loads(report.read_text(encoding="utf-8"))
+                self.assertEqual(data["units"], 1)
+                self.assertEqual(data["uncosted_units"], ["test_split.py"])
+                self.assertEqual(
+                    (evidence / "wrapped").read_text(),
+                    (evidence / "a-first").read_text(),
+                )
+                self.assertEqual(
+                    (evidence / "a-first").read_text(),
+                    (evidence / "b-first").read_text(),
+                )
+            costs.write_text('{"invalid": NaN}', encoding="utf-8")
+            invalid = subprocess.run(
+                command, cwd=root, capture_output=True, text=True, timeout=30
+            )
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("finite nonnegative weights", invalid.stderr)
+            self.assertNotIn("installed worker", invalid.stdout)
+
+    def test_installed_suite_runner_rejects_unfinished_tests(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        cases = {
+            "missing stop": "        return result\n",
+            "wrong stop": (
+                "        class Other(unittest.TestCase):\n"
+                "            def test_other(self): pass\n"
+                "        result.stopTest(Other('test_other'))\n"
+                "        return result\n"
+            ),
+        }
+        for label, end_of_run in cases.items():
+            with self.subTest(label=label):
+                self._assert_installed_suite_rejects_unfinished(runner, end_of_run)
+
+    def _assert_installed_suite_rejects_unfinished(self, runner, end_of_run):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite = root / "suite"
+            suite.mkdir()
+            (suite / "test_unfinished.py").write_text(
+                "import unittest\n"
+                "class Unfinished(unittest.TestCase):\n"
+                "    def run(self, result):\n"
+                "        result.startTest(self)\n"
+                + end_of_run
+                + "    def test_never_run(self): self.fail('body was not run')\n",
+                encoding="utf-8",
+            )
+            report = root / "report.json"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    str(runner),
+                    "--start-directory",
+                    str(suite),
+                    "--workers",
+                    "1",
+                    "--report",
+                    str(report),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "did not account for its exact test inventory", completed.stderr
+            )
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertFalse(data["complete"])
+            self.assertFalse(data["workers"][0]["execution_complete"])
+
+    def test_installed_suite_runner_accepts_proxy_class_fixture_skip(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite = root / "suite"
+            suite.mkdir()
+            (suite / "test_proxy.py").write_text(
+                "import unittest\n"
+                "class Fixture(unittest.TestCase):\n"
+                "    @classmethod\n"
+                "    def setUpClass(cls): raise unittest.SkipTest('fixture skipped')\n"
+                "class ProxyCase(unittest.TestCase):\n"
+                "    @property\n"
+                "    def __class__(self): return Fixture\n"
+                "    def test_skipped(self): self.fail('unreachable')\n"
+                "def load_tests(loader, tests, pattern):\n"
+                "    return unittest.TestSuite([ProxyCase('test_skipped')])\n",
+                encoding="utf-8",
+            )
+            baseline = subprocess.run(
+                [sys.executable, "-I", "-m", "unittest", "discover", "-s", str(suite)],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+            report = root / "report.json"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    str(runner),
+                    "--start-directory",
+                    str(suite),
+                    "--workers",
+                    "1",
+                    "--report",
+                    str(report),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("fixture skipped", completed.stderr)
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertTrue(data["complete"])
+            self.assertEqual(data["discovered"], 1)
+            self.assertEqual(data["workers"][0]["started"], 0)
+            self.assertEqual(data["workers"][0]["fixture_skipped"], 1)
+
+    def test_installed_suite_runner_rejects_omitted_tests(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            suite = Path(temporary) / "suite"
+            suite.mkdir()
+            (suite / "test_omitted.py").write_text(
+                "import unittest\n"
+                "class Omit(unittest.TestSuite):\n"
+                "    def run(self, result, debug=False): return result\n"
+                "def load_tests(loader, tests, pattern): return Omit(tests)\n"
+                "class Tests(unittest.TestCase):\n"
+                "    def test_never_run(self): pass\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [sys.executable, "-I", str(runner), "--start-directory", str(suite)],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "did not account for its exact test inventory", completed.stderr
+            )
+
+    def test_installed_suite_class_skip_cannot_mask_another_class_omission(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            suite = Path(temporary) / "suite"
+            suite.mkdir()
+            (suite / "test_skip_and_omit.py").write_text(
+                "import unittest\n"
+                "class Skipped(unittest.TestCase):\n"
+                "    @classmethod\n"
+                "    def setUpClass(cls): raise unittest.SkipTest('class skipped')\n"
+                "    def test_skipped(self): pass\n"
+                "class Omitted(unittest.TestCase):\n"
+                "    def test_omitted(self): pass\n"
+                "class Incomplete(unittest.TestSuite):\n"
+                "    def run(self, result, debug=False):\n"
+                "        self._tests[0](result)\n"
+                "        return result\n"
+                "def load_tests(loader, tests, pattern):\n"
+                "    return Incomplete([loader.loadTestsFromTestCase(Skipped), loader.loadTestsFromTestCase(Omitted)])\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [sys.executable, "-I", str(runner), "--start-directory", str(suite)],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("class skipped", completed.stderr)
+            self.assertIn(
+                "did not account for its exact test inventory", completed.stderr
+            )
+
+    def test_installed_suite_runner_rejects_worker_without_report(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            suite = Path(temporary) / "suite"
+            suite.mkdir()
+            report = Path(temporary) / "report.json"
+            (suite / "test_exit.py").write_text(
+                "import os, unittest\n"
+                "class Tests(unittest.TestCase):\n"
+                "    def test_exit(self): os._exit(0)\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    str(runner),
+                    "--start-directory",
+                    str(suite),
+                    "--report",
+                    str(report),
+                ],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("Worker 1:", completed.stderr)
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertFalse(data["complete"])
+            self.assertFalse(data["workers"][0]["execution_complete"])
+
+    def test_installed_suite_runner_rejects_shared_fixture_scope_before_workers(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            suite = Path(temporary) / "suite"
+            suite.mkdir()
+            (suite / "support.py").write_text(
+                "import unittest\nclass Shared(unittest.TestCase):\n    def test_shared(self): pass\n",
+                encoding="utf-8",
+            )
+            for name in ("test_a.py", "test_b.py"):
+                (suite / name).write_text(
+                    "from support import Shared\n", encoding="utf-8"
+                )
+            completed = subprocess.run(
+                [sys.executable, "-I", str(runner), "--start-directory", str(suite)],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "fixture scope spans multiple discovered modules", completed.stderr
+            )
+            self.assertNotIn("installed worker", completed.stdout)
+
+    def test_installed_suite_hook_preserves_repeated_fixture_blocks(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            suite = Path(temporary) / "suite"
+            suite.mkdir()
+            (suite / "test_blocks.py").write_text(
+                "import unittest\n"
+                "class A(unittest.TestCase):\n    def test_a(self): pass\n"
+                "class B(unittest.TestCase):\n    def test_b(self): pass\n"
+                "def load_tests(loader, tests, pattern):\n"
+                "    return unittest.TestSuite([A('test_a'), B('test_b'), A('test_a')])\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [sys.executable, "-I", str(runner), "--start-directory", str(suite)],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("Ran 3 tests", completed.stderr)
 
     def test_downstream_canary_is_operator_gated_and_excluded_from_required_checks(
         self,
