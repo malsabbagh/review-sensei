@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -31,13 +32,38 @@ def observations(text):
 
 
 class ReviewFinalizationDiagnosticsTests(unittest.TestCase):
+    def test_diff_fixtures_preserve_lf_under_crlf_platform_defaults(self):
+        write_text = Path.write_text
+
+        def platform_write(path, data, encoding=None, errors=None, newline=None):
+            if path.name == "review.patch" and newline is None:
+                newline = "\r\n"
+            return write_text(
+                path, data, encoding=encoding, errors=errors, newline=newline
+            )
+
+        with patch.object(Path, "write_text", platform_write):
+            # Prove that this host-independent control really translates LF.
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "review.patch"
+                path.write_text("control\n")
+                self.assertEqual(path.read_bytes(), b"control\r\n")
+            for case in (
+                "test_partial_publishes_and_closes_without_completing_review",
+                "test_unconfirmed_cleanup_does_not_enter_accounting_close",
+            ):
+                with self.subTest(case=case):
+                    getattr(self, case)()
+
     def test_partial_publishes_and_closes_without_completing_review(self):
         with tempfile.TemporaryDirectory() as directory:
             f = EntryFixture(directory)
             patch = f.root / "review.patch"
             patch.write_text(
                 patch.read_text()
-                + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\nindex 0000000..1111111\nBinary files /dev/null and b/image.bin differ\n"
+                + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\nindex 0000000..1111111\nBinary files /dev/null and b/image.bin differ\n",
+                encoding="utf-8",
+                newline="\n",
             )
             self.assertEqual(f.invoke(), 0, f.error)
             record = parse_session_comment(f.comment["body"], identity=IDENTITY)
@@ -81,10 +107,12 @@ class ReviewFinalizationDiagnosticsTests(unittest.TestCase):
             original = patch.read_text()
             patch.write_text(
                 original
-                + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\nindex 0000000..1111111\nBinary files /dev/null and b/image.bin differ\n"
+                + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\nindex 0000000..1111111\nBinary files /dev/null and b/image.bin differ\n",
+                encoding="utf-8",
+                newline="\n",
             )
             self.assertEqual(f.invoke(human=True), 0, f.error)
-            patch.write_text(original)
+            patch.write_text(original, encoding="utf-8", newline="\n")
             f.next_run()
             self.assertEqual(f.invoke(human=True), 1, f.error)
             observed = observations(f.error)
