@@ -2,7 +2,8 @@
 
 Optional branch coverage is collected per worker and combined. Workers execute
 disjoint test IDs, preserve class/module fixtures, and all finish on failure.
-Hook-bearing suites execute the original discovered root once in the controller.
+Reviewed, fixture-disjoint hooks execute their original subtree before workers.
+Other hook-bearing suites retain one original-root execution in the controller.
 This is the checkout lane: coverage traces the editable source packages.
 Installed-wheel suites run directly with unittest and their own import guards.
 """
@@ -14,6 +15,7 @@ import concurrent.futures
 import dis
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -24,6 +26,7 @@ import unittest
 from collections import Counter
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import ModuleType
 
 
 class FixtureDispatchTracker:
@@ -209,12 +212,19 @@ class FixtureDispatchTracker:
 
 
 class HookAwareLoader(unittest.TestLoader):
-    hook_seen = False
+    def __init__(self):
+        super().__init__()
+        self.hook_seen = False
+        self.hooks = []
 
     def loadTestsFromModule(self, module, *args, **kwargs):
-        if getattr(module, "load_tests", None) is not None:
+        hook = getattr(module, "load_tests", None) is not None
+        if hook:
             self.hook_seen = True
-        return super().loadTestsFromModule(module, *args, **kwargs)
+        suite = super().loadTestsFromModule(module, *args, **kwargs)
+        if hook:
+            self.hooks.append((module.__name__, suite))
+        return suite
 
 
 def _unmodified_builtin_suite(suite: unittest.TestSuite) -> bool:
@@ -335,6 +345,126 @@ def partition(
         groups[index].extend(members)
         loads[index] += cost(_name, members)
     return [sorted(group) for group in groups]
+
+
+def execution_plan(suite, loader, identities, groups, controller_modules):
+    """Admit a reviewed, fixture-disjoint hook phase before isolated workers."""
+    names = [name for name, _suite in loader.hooks]
+    requested = set(controller_modules)
+    if len(requested) != len(controller_modules):
+        raise ValueError("controller modules must be distinct")
+    if requested - set(names):
+        raise ValueError("controller module must name a discovered load_tests hook")
+
+    def original(reason):
+        return {
+            "mode": "original-root",
+            "reason": reason,
+            "controller": None,
+            "controller_ids": [],
+            "workers": [(0, identities)],
+        }
+
+    if not loader.hook_seen:
+        return {
+            "mode": "workers",
+            "reason": None,
+            "controller": None,
+            "controller_ids": [],
+            "workers": list(enumerate(groups)),
+        }
+    if not requested or requested != set(names):
+        return original("discovery hook has no reviewed controller opt-in")
+    if len(names) != len(set(names)):
+        return original("hook was invoked more than once during discovery")
+    if len(groups) == 1:
+        return original("one worker preserves original-root execution")
+
+    seen = set()
+
+    def plain_tree(item):
+        if not isinstance(item, unittest.TestSuite):
+            return isinstance(item, unittest.TestCase)
+        if id(item) in seen or not _unmodified_builtin_suite(item):
+            return False
+        seen.add(id(item))
+        return all(plain_tree(child) for child in item)
+
+    if not plain_tree(suite):
+        return original("custom, modified or repeated suite ownership")
+    children = list(suite)
+    targets = {id(child) for _name, child in loader.hooks}
+    if len(targets) != len(names) or not targets <= {id(child) for child in children}:
+        return original("hook output is not a distinct top-level subtree")
+    selected = [child for child in children if id(child) in targets]
+    controller = selected[0] if len(selected) == 1 else unittest.TestSuite(selected)
+    cases = test_cases(suite)
+    if len({id(case) for case in cases}) != len(cases):
+        return original("a test object occurs more than once")
+    if [case.id() for case in cases] != identities:
+        return original("discovery identities changed before execution")
+    owned_cases = test_cases(controller)
+    owned = {id(case) for case in owned_cases}
+    identity = {id(case): name for case, name in zip(cases, identities)}
+
+    scopes = []
+    for case in cases:
+        cls = type(case)
+        if cls.__getattribute__ is not object.__getattribute__ or any(
+            "__class__" in base.__dict__ for base in cls.__mro__ if base is not object
+        ):
+            return original("effective fixture scope is not statically stable")
+        if id(case) not in owned:
+            method = case.id
+            if (
+                cls.id is not unittest.TestCase.id
+                or getattr(method, "__func__", None) is not unittest.TestCase.id
+                or getattr(method, "__self__", None) is not case
+            ):
+                return original("worker identities require original-root execution")
+        module = cls.__module__
+        if not isinstance(module, str) or not module:
+            return original("effective fixture module is not stable")
+        if id(case) not in owned:
+            resolved = sys.modules.get(module)
+            for part in cls.__qualname__.split("."):
+                if not isinstance(resolved, (ModuleType, type)):
+                    resolved = None
+                    break
+                resolved = vars(resolved).get(part)
+            if resolved is not cls:
+                return original("worker class cannot be resolved without factories")
+        scopes.append((id(case) in owned, id(cls), module))
+    classes = {cls for inside, cls, _module in scopes if inside}
+    modules = {module for inside, _cls, module in scopes if inside}
+    if any(
+        not inside and (cls in classes or module in modules)
+        for inside, cls, module in scopes
+    ):
+        return original("controller and workers share a fixture scope")
+    controller_ids = [identity[id(case)] for case in owned_cases]
+    owned_ids = set(controller_ids)
+    workers = [
+        (bucket, [name for name in group if name not in owned_ids])
+        for bucket, group in enumerate(groups)
+    ]
+    workers = [(bucket, members) for bucket, members in workers if members]
+    assigned = controller_ids + [
+        name for _bucket, members in workers for name in members
+    ]
+    if Counter(assigned) != Counter(identities):
+        raise ValueError("controller plan does not preserve the exact inventory")
+    return {
+        "mode": "controller-then-workers",
+        "reason": None,
+        "controller": controller,
+        "controller_ids": controller_ids,
+        "workers": workers,
+    }
+
+
+def inventory_digest(identities):
+    return hashlib.sha256("\n".join(sorted(identities)).encode()).hexdigest()
 
 
 def read_worker_report(path: Path) -> tuple[dict[str, object], str | None]:
@@ -469,6 +599,12 @@ def execute_suite(suite, identities, worker_report, load_errors=False):
 def _main(coverage_owners) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument(
+        "--controller-module",
+        action="append",
+        default=[],
+        help="Reviewed hook module to run once before isolated worker launches",
+    )
     parser.add_argument("--start-directory", type=Path, default=Path("tests"))
     parser.add_argument(
         "--costs", type=Path, help="Measured class seconds; scheduling only"
@@ -519,16 +655,26 @@ def _main(coverage_owners) -> int:
             raise ValueError("class costs must be a JSON object of positive seconds")
         all_identities = test_ids(suite, allow_custom=loader.hook_seen)
         groups = partition(all_identities, args.workers, costs)
+        plan = execution_plan(
+            suite, loader, all_identities, groups, args.controller_module
+        )
     except (ValueError, OSError) as exc:
         print(exc, file=sys.stderr)
         return 1
-    fallback = loader.hook_seen
-    if fallback:
-        groups = [all_identities]
-    elif fallback_coverage is not None:
+    fallback = plan["mode"] == "original-root"
+    controller_suite = plan["controller"]
+    controller_ids = plan["controller_ids"]
+    bucket_ids = [bucket for bucket, _members in plan["workers"]]
+    groups = [members for _bucket, members in plan["workers"]]
+    if plan["mode"] == "workers" and fallback_coverage is not None:
         fallback_coverage.stop()
+    phase_label = (
+        f"controller phase {len(controller_ids)} tests; "
+        if controller_suite is not None
+        else ""
+    )
     print(
-        f"Discovered {suite.countTestCases()} tests; running {len(groups)} disjoint workers",
+        f"Discovered {len(all_identities)} tests; {phase_label}running {len(groups)} disjoint workers",
         flush=True,
     )
     # Use manifests rather than argv test lists: Windows has a 32 KiB command
@@ -564,6 +710,9 @@ def _main(coverage_owners) -> int:
             )
 
         elapsed = [0.0] * len(groups)
+        worker_environment = os.environ.copy()
+        worker_cwd = str(Path.cwd())
+        launch_worker = subprocess.call
 
         def run_worker(index: int) -> int:
             start = time.monotonic()
@@ -595,17 +744,67 @@ def _main(coverage_owners) -> int:
                 (Path(scratch) / f"worker-{index}.stdout").open("wb") as stdout,
                 (Path(scratch) / f"worker-{index}.stderr").open("wb") as stderr,
             ):
-                code = subprocess.call(commands[index], stdout=stdout, stderr=stderr)
+                code = launch_worker(
+                    commands[index],
+                    stdout=stdout,
+                    stderr=stderr,
+                    env=worker_environment,
+                    cwd=worker_cwd,
+                )
             elapsed[index] = time.monotonic() - start
             return code
+
+        controller_code = None
+        controller_elapsed = None
+        if controller_suite is not None:
+            # Hook tests may patch process-global environment/registries. Finish
+            # their original subtree and fixture cleanup before any Popen call.
+            phase_start = time.monotonic()
+            with (
+                (Path(scratch) / "controller.stdout").open(
+                    "w", encoding="utf-8"
+                ) as stdout,
+                (Path(scratch) / "controller.stderr").open(
+                    "w", encoding="utf-8"
+                ) as stderr,
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                controller_code = execute_suite(
+                    controller_suite,
+                    controller_ids,
+                    Path(scratch) / "timing-controller.json",
+                )
+            if fallback_coverage is not None:
+                fallback_coverage.stop()
+                fallback_coverage.save()
+                shutil.copyfile(
+                    Path(coverage_scratch.name) / "coverage",
+                    Path(scratch) / ".coverage.controller",
+                )
+            controller_elapsed = time.monotonic() - phase_start
 
         # Await all workers before replaying separate logs in stable worker
         # order. Keep manifests/logs alive until execution and reporting finish.
         if fallback:
             results = [run_worker(0)]
-        else:
+        elif groups:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(groups)) as pool:
                 results = list(pool.map(run_worker, range(len(groups))))
+        else:
+            results = []
+        if controller_suite is not None:
+            for suffix, stream in (("stdout", sys.stdout), ("stderr", sys.stderr)):
+                print(
+                    f"[checkout controller: {len(controller_ids)} tests, exit {controller_code}]",
+                    file=stream,
+                    flush=True,
+                )
+                with (Path(scratch) / f"controller.{suffix}").open(
+                    encoding="utf-8", errors="replace"
+                ) as output:
+                    shutil.copyfileobj(output, stream)
+                stream.flush()
         for index, code in enumerate(results):
             label = (
                 f"[checkout worker {index + 1}/{len(groups)}: "
@@ -632,14 +831,36 @@ def _main(coverage_owners) -> int:
                 print(f"Worker {index + 1}: {timing_error}", file=sys.stderr)
             workers.append(
                 {
-                    "worker": index,
+                    "worker": bucket_ids[index],
+                    "execution_ordinal": index,
                     "assigned": len(groups[index]),
+                    "inventory_sha256": inventory_digest(groups[index]),
                     "exit": code,
                     "elapsed_seconds": round(elapsed[index], 3),
                     "timing_error": timing_error,
                     **data,
                 }
             )
+        controller = None
+        if controller_suite is not None:
+            data, timing_error = read_worker_report(
+                Path(scratch) / "timing-controller.json"
+            )
+            execution_complete &= (
+                timing_error is None
+                and data["inventory_complete"] is True
+                and data["executed"] + data["fixture_skipped"] == len(controller_ids)
+            )
+            if timing_error:
+                print(f"Controller: {timing_error}", file=sys.stderr)
+            controller = {
+                "assigned": len(controller_ids),
+                "exit": controller_code,
+                "elapsed_seconds": round(controller_elapsed, 3),
+                "inventory_sha256": inventory_digest(controller_ids),
+                "timing_error": timing_error,
+                **data,
+            }
         coverage_error = None
         coverage_ok = None
         if args.coverage:
@@ -650,6 +871,8 @@ def _main(coverage_owners) -> int:
                 Path(scratch) / f".coverage.worker{index}"
                 for index in range(len(groups))
             ]
+            if controller_suite is not None:
+                paths.insert(0, Path(scratch) / ".coverage.controller")
             if not execution_complete or not all(path.is_file() for path in paths):
                 coverage_error = "Missing worker coverage or incomplete execution"
             else:
@@ -672,9 +895,12 @@ def _main(coverage_owners) -> int:
             args.report.write_text(
                 json.dumps(
                     {
-                        "inventory_sha256": hashlib.sha256(
-                            "\n".join(sorted(all_identities)).encode()
-                        ).hexdigest(),
+                        "inventory_sha256": inventory_digest(all_identities),
+                        "mode": plan["mode"],
+                        "fallback_reason": plan["reason"],
+                        "requested_workers": args.workers,
+                        "effective_worker_count": len(workers),
+                        "controller": controller,
                         "discovered": len(all_identities),
                         "complete": complete,
                         "execution_complete": execution_complete,
@@ -688,7 +914,13 @@ def _main(coverage_owners) -> int:
                 + "\n",
                 encoding="utf-8",
             )
-    return 0 if complete and all(code == 0 for code in results) else 1
+    return (
+        0
+        if complete
+        and controller_code in (None, 0)
+        and all(code == 0 for code in results)
+        else 1
+    )
 
 
 def main() -> int:

@@ -426,6 +426,10 @@ class Case(unittest.TestCase):
             self._check_observer_restores_existing_profiler_and_preserves_trace,
             self._check_early_success_exit_cannot_waive_inventory,
             self._check_hook_fallback_keeps_import_and_branch_coverage,
+            self._check_controller_execution_and_boundaries,
+            self._check_controller_conservative_admission,
+            self._check_controller_branch_coverage,
+            self._check_real_controller_cost_fixture_dispatch,
         ):
             with self.subTest(check=check.__name__):
                 check()
