@@ -51,6 +51,40 @@ class CheckoutRunnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 RUNNER.partition(identities, workers)
 
+    def test_coverage_costs_change_checkpoint_assignment(self):
+        loader = unittest.TestLoader()
+        suite = loader.discover(
+            str(ROOT / "tests"),
+            pattern="test_quarantine_checkpoint.py",
+            top_level_dir=str(ROOT / "tests"),
+        )
+        self.assertEqual(loader.errors, [])
+        discovered = sorted(RUNNER.test_ids(suite))
+        names = (
+            "QuarantineCarrierPlanningTests",
+            "QuarantineCheckpointTests",
+            "QuarantineDecisionScopeFenceTests",
+            "QuarantineRolloverTests",
+        )
+        selected = [
+            next(identity for identity in discovered if f".{name}." in identity)
+            for name in names
+        ]
+        fixture = ROOT / "tests/fixtures/checkout-class-seconds-coverage.json"
+        costs = json.loads(fixture.read_text(encoding="utf-8"))
+        keys = [identity.rpartition(".")[0] for identity in selected]
+        for key in keys:
+            self.assertIn(key, costs)
+        checkpoint = next(
+            key for key in keys if key.endswith("QuarantineCheckpointTests")
+        )
+        reduced = {key: value for key, value in costs.items() if key != checkpoint}
+        full = RUNNER.partition(selected, 2, costs)
+        partial = RUNNER.partition(selected, 2, reduced)
+        for groups in (full, partial):
+            self.assertEqual(sorted(sum(groups, [])), sorted(selected))
+        self.assertNotEqual(full, partial)
+
     def run_fixture(self, source, *, manifest=None):
         with tempfile.TemporaryDirectory() as scratch:
             directory = Path(scratch)
@@ -70,6 +104,73 @@ class CheckoutRunnerTests(unittest.TestCase):
             result = subprocess.run(command, capture_output=True, text=True, timeout=60)
             receipts = sorted(path.name for path in directory.glob("receipt-*"))
             return result, receipts
+
+    def test_windows_costs_route_and_schedule_discovered_classes(self):
+        import shlex
+
+        import yaml
+
+        jobs = yaml.safe_load(
+            (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        )["jobs"]
+        windows = next(
+            step
+            for step in jobs["compatibility"]["steps"]
+            if step.get("if") == "runner.os == 'Windows'"
+        )
+        command = shlex.split(windows["run"])
+        fixture_name = command[command.index("--costs") + 1]
+        self.assertEqual(
+            fixture_name, "tests/fixtures/checkout-class-seconds-windows.json"
+        )
+        self.assertEqual(command[command.index("--workers") + 1], "4")
+        self.assertNotIn("--coverage", command)
+        self.assertFalse(windows.get("continue-on-error", False))
+        coverage = next(
+            step
+            for step in jobs["quality"]["steps"]
+            if step.get("name") == "Branch coverage"
+        )
+        coverage_command = next(
+            shlex.split(line)
+            for line in coverage["run"].splitlines()
+            if "scripts/run_checkout_tests.py" in line
+        )
+        self.assertNotEqual(
+            coverage_command[coverage_command.index("--costs") + 1], fixture_name
+        )
+
+        loader = unittest.TestLoader()
+        suite = loader.discover(
+            str(ROOT / "tests"),
+            pattern="test_quarantine_checkpoint.py",
+            top_level_dir=str(ROOT / "tests"),
+        )
+        self.assertEqual(loader.errors, [])
+        discovered = sorted(RUNNER.test_ids(suite))
+        names = (
+            "QuarantineCarrierPlanningTests",
+            "QuarantineCheckpointTests",
+            "QuarantineDecisionScopeFenceTests",
+            "QuarantineRolloverTests",
+        )
+        selected = [
+            next(identity for identity in discovered if f".{name}." in identity)
+            for name in names
+        ]
+        costs = json.loads((ROOT / fixture_name).read_text(encoding="utf-8"))
+        keys = [identity.rpartition(".")[0] for identity in selected]
+        for key in keys:
+            self.assertIn(key, costs)
+        checkpoint = next(
+            key for key in keys if key.endswith("QuarantineCheckpointTests")
+        )
+        reduced = {key: value for key, value in costs.items() if key != checkpoint}
+        full = RUNNER.partition(selected, 2, costs)
+        partial = RUNNER.partition(selected, 2, reduced)
+        for groups in (full, partial):
+            self.assertEqual(sorted(sum(groups, [])), sorted(selected))
+        self.assertNotEqual(full, partial)
 
     def test_real_workers_finish_all_tests_and_preserve_fixtures_on_failure(self):
         source = """import pathlib, unittest
@@ -139,6 +240,165 @@ class CaseB(unittest.TestCase):
         self.assertIn("Discovered 2 tests; running 2 disjoint workers", result.stdout)
         self.assertIn("[checkout worker 1/2: 1 tests, exit 0]", result.stderr)
         self.assertIn("[checkout worker 2/2: 1 tests, exit 0]", result.stderr)
+
+    def test_custom_suite_wrapper_fails_before_any_worker(self):
+        subclass = """import pathlib, unittest
+class GuardedSuite(unittest.TestSuite):
+    def run(self, result, debug=False):
+        raise AssertionError("custom wrapper must not be discarded")
+def load_tests(loader, tests, pattern):
+    return unittest.TestSuite([unittest.TestSuite([GuardedSuite(tests)])])
+class Case(unittest.TestCase):
+    def test_example(self):
+        pathlib.Path(__file__).with_name("receipt-executed").touch()
+"""
+        instance = """import pathlib, unittest
+def load_tests(loader, tests, pattern):
+    inner = unittest.TestSuite([tests])
+    def custom_run(result, debug=False):
+        raise AssertionError("instance wrapper must not be discarded")
+    inner.run = custom_run
+    return unittest.TestSuite([inner])
+class Case(unittest.TestCase):
+    def test_example(self):
+        pathlib.Path(__file__).with_name("receipt-executed").touch()
+"""
+        for source in (subclass, instance):
+            with self.subTest(source=source):
+                result, receipts = self.run_fixture(source)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "custom unittest suite wrappers cannot be sharded safely",
+                    result.stderr,
+                )
+                self.assertEqual(receipts, [])
+
+        # A future interpreter may add an ordinary default field. Compare to
+        # that interpreter's fresh suite while still rejecting modified state.
+        probe = """\
+import importlib.util, sys, unittest
+original = unittest.TestSuite.__init__
+def future_init(self, tests=()):
+    original(self, tests)
+    self.future_default_field = 0
+unittest.TestSuite.__init__ = future_init
+spec = importlib.util.spec_from_file_location('runner_under_test', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+test = unittest.FunctionTestCase(lambda: None)
+suite = unittest.TestSuite([test])
+assert module.test_ids(suite) == [test.id()]
+suite.future_default_field = 1
+try:
+    module.test_ids(suite)
+except ValueError:
+    pass
+else:
+    raise AssertionError('modified future field was accepted')
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", probe, str(SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_macos_route_uses_complete_isolated_runner_with_seed_costs(self):
+        import shlex
+
+        import yaml
+
+        jobs = yaml.safe_load(
+            (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        )["jobs"]
+        compatibility = jobs["compatibility"]
+        self.assertIn(
+            {"os": "macos-latest", "python-version": "3.13"},
+            compatibility["strategy"]["matrix"]["include"],
+        )
+        macos = next(
+            step
+            for step in compatibility["steps"]
+            if step.get("if") == "runner.os == 'macOS'"
+        )
+        command = shlex.split(macos["run"])
+        self.assertIn("scripts/run_checkout_tests.py", command)
+        self.assertEqual(command[command.index("--workers") + 1], "4")
+        fixture_name = command[command.index("--costs") + 1]
+        self.assertEqual(
+            fixture_name, "tests/fixtures/checkout-class-seconds-macos.json"
+        )
+        self.assertIn("--report", command)
+        self.assertNotIn("--coverage", command)
+        self.assertFalse(macos.get("continue-on-error", False))
+        upload = next(
+            step
+            for step in compatibility["steps"]
+            if "upload-artifact@" in step.get("uses", "")
+        )
+        self.assertEqual(upload.get("if"), "always()")
+        self.assertEqual(
+            upload["with"]["path"], "${{ runner.temp }}/checkout-timings.json"
+        )
+
+        loader = unittest.TestLoader()
+        suite = loader.discover(
+            str(ROOT / "tests"),
+            pattern="test_quarantine_checkpoint.py",
+            top_level_dir=str(ROOT / "tests"),
+        )
+        self.assertEqual(loader.errors, [])
+        discovered = sorted(RUNNER.test_ids(suite))
+        names = (
+            "QuarantineCarrierPlanningTests",
+            "QuarantineCheckpointTests",
+            "QuarantineDecisionScopeFenceTests",
+            "QuarantineRolloverTests",
+        )
+        selected = [
+            next(identity for identity in discovered if f".{name}." in identity)
+            for name in names
+        ]
+        costs = json.loads((ROOT / fixture_name).read_text(encoding="utf-8"))
+        keys = [identity.rpartition(".")[0] for identity in selected]
+        for key in keys:
+            self.assertIn(key, costs)
+        checkpoint = next(
+            key for key in keys if key.endswith("QuarantineCheckpointTests")
+        )
+        reduced = {key: value for key, value in costs.items() if key != checkpoint}
+        full = RUNNER.partition(selected, 2, costs)
+        partial = RUNNER.partition(selected, 2, reduced)
+        for groups in (full, partial):
+            self.assertEqual(sorted(sum(groups, [])), sorted(selected))
+        self.assertNotEqual(full, partial)
+
+        # Discover in a fresh process so this check does not import every test
+        # module into the worker executing the checkout-runner tests.
+        code = """\
+import json, pathlib, sys, unittest
+from scripts.run_checkout_tests import test_ids
+root, output = map(pathlib.Path, sys.argv[1:])
+loader = unittest.TestLoader()
+suite = loader.discover(str(root / 'tests'), top_level_dir=str(root / 'tests'))
+if loader.errors:
+    raise SystemExit('\\n'.join(loader.errors))
+classes = sorted({identity.rpartition('.')[0] for identity in test_ids(suite)})
+output.write_text(json.dumps(classes), encoding='utf-8')
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "classes.json"
+            result = subprocess.run(
+                [sys.executable, "-c", code, str(ROOT), str(output)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            classes = set(json.loads(output.read_text(encoding="utf-8")))
+        self.assertFalse(set(costs) - classes, "macOS cost fixture has orphaned keys")
 
     def test_real_workers_report_success_for_the_complete_inventory(self):
         source = """import pathlib, unittest

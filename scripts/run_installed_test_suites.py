@@ -1,10 +1,9 @@
-"""Run installed-wheel test modules in isolated processes without flattening suites.
+"""Run installed tests with exact accounting and isolated import semantics.
 
-The unpacked sdist's dist-safe lane may return custom ``load_tests`` suites.
-Workers rediscover the complete suite and preserve custom wrappers. An opted-in
-plain suite may split only at complete module-fixture boundaries. Ambiguous
-discovery or fixture ownership fails before workers start instead of silently
-omitting tests or suite behavior.
+Hook-bearing suites execute their original discovered root once in the -I
+controller. Hook-free suites may use isolated workers and measured scheduling.
+Fixture skips are recorded from actual unittest dispatch, never inferred from
+all unstarted tests sharing a fixture name.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ import fnmatch
 import hashlib
 import json
 import math
-import re
 import shutil
 import subprocess
 import sys
@@ -23,22 +21,142 @@ import tempfile
 import time
 import unittest
 from collections import Counter
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 
-def describe(item):
+class FixtureDispatchTracker:
+    """Observe default unittest fixture dispatch without changing suite objects.
+
+    Fixture holders do not identify the tests they blocked. The stdlib class
+    setup handler is called for every selected leaf, including leaves blocked
+    by module setup. Observe its return and the actual setup episode instead.
+    """
+
+    def __init__(self, cases, identity):
+        self.identities = {id(case): identity(case) for case in cases}
+        self.skipped = Counter()
+        self.episodes = {}
+        self.entries = {}
+        self.module_dispatch = None
+        self.codes = {
+            unittest.TestSuite._handleModuleFixture.__code__: "Module",
+            unittest.TestSuite._handleClassSetUp.__code__: "Class",
+        }
+
+    def __enter__(self):
+        self.previous = sys.getprofile()
+        self.active = False
+        return self
+
+    def __exit__(self, *exc):
+        if self.active and sys.getprofile() == self.observe:
+            sys.setprofile(self.previous)
+        self.active = False
+
+    def note_skip(self):
+        frame = sys._getframe(1)
+        actual_skip = False
+        while frame is not None:
+            if (
+                frame.f_code
+                is unittest.TestSuite._addClassOrModuleLevelException.__code__
+            ):
+                actual_skip = isinstance(
+                    frame.f_locals.get("exception"), unittest.SkipTest
+                )
+                name = frame.f_locals.get("errorName", "")
+            phase = self.codes.get(frame.f_code)
+            if phase is not None:
+                caller = frame.f_back
+                if (
+                    actual_skip
+                    and name.startswith(f"setUp{phase} (")
+                    and frame.f_locals.get("result") is self.result
+                    and caller is not None
+                    and caller.f_code is unittest.TestSuite.run.__code__
+                    and caller.f_locals.get("test") is frame.f_locals.get("test")
+                ):
+                    self.entries[id(frame)] = True
+                    if not self.active:
+                        self.previous = sys.getprofile()
+                        self.active = True
+                        sys.setprofile(self.observe)
+                return
+            frame = frame.f_back
+
+    def observe(self, frame, event, arg):
+        if self.previous is not None:
+            self.previous(frame, event, arg)
+        phase = self.codes.get(frame.f_code)
+        if phase is None or event not in {"call", "return"}:
+            return
+        result = frame.f_locals.get("result")
+        if result is not getattr(self, "result", None) or result is None:
+            return
+        caller = frame.f_back
+        if (
+            caller is None
+            or caller.f_code is not unittest.TestSuite.run.__code__
+            or caller.f_locals.get("test") is not frame.f_locals.get("test")
+        ):
+            return
+        if event == "call":
+            self.entries[id(frame)] = False
+            return
+        skipped = self.entries.pop(id(frame), False)
+        state = self.episodes.setdefault(id(result), [result, None, None])
+        if phase == "Module":
+            module = frame.f_locals["currentModule"]
+            self.module_dispatch = (result, frame.f_locals["test"], module)
+            if module != frame.f_locals["previousModule"]:
+                state[1] = module if skipped else None
+            return
+        cls = frame.f_locals["currentClass"]
+        previous = frame.f_locals["previousClass"]
+        if cls != previous:
+            state[2] = cls if skipped else None
+        if (
+            getattr(result, "_moduleSetUpFailed", False)
+            and self.module_dispatch is not None
+            and self.module_dispatch[0] is result
+            and self.module_dispatch[1] is frame.f_locals["test"]
+            and state[1] == self.module_dispatch[2]
+        ) or (getattr(cls, "_classSetupFailed", False) and state[2] is cls):
+            key = self.identities.get(id(frame.f_locals["test"]))
+            if key is not None:
+                self.skipped[key] += 1
+        if state[1] is None and state[2] is None:
+            self.active = False
+            sys.setprofile(self.previous)
+
+
+class HookAwareLoader(unittest.TestLoader):
+    hook_seen = False
+
+    def loadTestsFromModule(self, module, *args, **kwargs):
+        if getattr(module, "load_tests", None) is not None:
+            self.hook_seen = True
+        return super().loadTestsFromModule(module, *args, **kwargs)
+
+
+def describe(item, cases=None):
     """Describe suite nesting and each test's identity and fixture scopes."""
     if isinstance(item, unittest.TestSuite):
         return {
             "suite": f"{type(item).__module__}.{type(item).__qualname__}",
-            "children": [describe(child) for child in item],
+            "children": [describe(child, cases) for child in item],
         }
     if not isinstance(item, unittest.TestCase):
         raise ValueError("unsupported non-TestCase leaf in discovered suite")
+    if cases is not None:
+        cases.append(item)
     identity = item.id()
     if not isinstance(identity, str) or not identity:
         raise ValueError("discovery returned an invalid test identity")
-    cls = type(item)
+    # unittest resolves class and module fixtures through test.__class__,
+    # which a proxy TestCase can intentionally expose differently from type().
+    cls = item.__class__
     return {
         "id": identity,
         "class": f"{cls.__module__}.{cls.__qualname__}",
@@ -52,7 +170,7 @@ def leaves(description):
     return [description]
 
 
-def discover(directory: Path, pattern: str):
+def discover(directory: Path, pattern: str, cases=None, original=None):
     """Discover the original suite and bind each top-level child to its file."""
     if not directory.is_dir():
         raise ValueError("test directory does not exist")
@@ -68,16 +186,20 @@ def discover(directory: Path, pattern: str):
         and unittest.loader.VALID_MODULE_NAME.match(path.name)
         and fnmatch.fnmatch(path.name, pattern)
     )
-    loader = unittest.TestLoader()
+    loader = HookAwareLoader()
     suite = loader.discover(
         str(directory), pattern=pattern, top_level_dir=str(directory)
     )
     if loader.errors:
         raise ValueError("test discovery reported an import error")
+    if original is not None:
+        original.extend([suite, loader.hook_seen])
     children = list(suite)
     if len(files) != len(children) or not files:
         raise ValueError("discovered modules cannot be mapped exactly to source files")
-    descriptions = [describe(child) for child in children]
+    descriptions = [describe(child, cases) for child in children]
+    if loader.hook_seen:
+        return files, descriptions, children
     owners = {"class": {}, "module": {}}
     for index, (path, description) in enumerate(zip(files, descriptions)):
         module = sys.modules.get(path.stem)
@@ -213,14 +335,27 @@ def identity(leaf):
     return (leaf["id"], leaf["class"], leaf["module"])
 
 
-def worker(directory: Path, manifest_path: Path, report_path: Path) -> int:
+def worker(
+    directory: Path, manifest_path: Path, report_path: Path, discovered=None
+) -> int:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    files, descriptions, children = discover(directory, manifest["pattern"])
+    cases = []
+    original_suite = None
+    if discovered is None:
+        files, descriptions, children = discover(directory, manifest["pattern"], cases)
+    else:
+        files, descriptions, children, cases, original_suite, prepared_units = (
+            discovered
+        )
     if [path.name for path in files] != manifest["files"] or descriptions != manifest[
         "descriptions"
     ]:
         raise ValueError("worker discovery differs from the original suite")
-    units = build_units(files, descriptions, children, manifest["split_files"])
+    units = (
+        prepared_units
+        if discovered is not None
+        else build_units(files, descriptions, children, manifest["split_files"])
+    )
     if units != manifest["units"]:
         raise ValueError("worker fixture-boundary units differ from discovery")
     indices = manifest["indices"]
@@ -239,7 +374,9 @@ def worker(directory: Path, manifest_path: Path, report_path: Path) -> int:
     for index in indices:
         unit = units[index]
         suite = children[unit["file"]]
-        if unit["children"] is None:
+        if original_suite is not None:
+            pass
+        elif unit["children"] is None:
             selected.append(suite)
         else:
             parts = list(suite)
@@ -249,13 +386,22 @@ def worker(directory: Path, manifest_path: Path, report_path: Path) -> int:
             expected.append(key)
             owner[key] = (files[unit["file"]].name, unit["key"])
 
+    if original_suite is not None:
+        selected = [original_suite]
+
     class TimedResult(unittest.TextTestResult):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
+            tracking.result = getattr(tracking, "result", self)
             self.started = []
+            self.stopped = []
             self.started_at = None
             self.module_seconds = {}
             self.unit_seconds = {}
+
+        def addSkip(self, test, reason):
+            tracking.note_skip()
+            super().addSkip(test, reason)
 
         def startTest(self, test):
             self.started.append(identity(describe(test)))
@@ -264,6 +410,7 @@ def worker(directory: Path, manifest_path: Path, report_path: Path) -> int:
 
         def stopTest(self, test):
             key = identity(describe(test))
+            self.stopped.append(key)
             if self.started_at is not None and key in owner:
                 name, unit = owner[key]
                 elapsed = time.monotonic() - self.started_at
@@ -272,23 +419,23 @@ def worker(directory: Path, manifest_path: Path, report_path: Path) -> int:
             self.started_at = None
             super().stopTest(test)
 
-    result = unittest.TextTestRunner(verbosity=2, resultclass=TimedResult).run(
-        unittest.TestSuite(selected)
-    )
+    with FixtureDispatchTracker(
+        cases, lambda case: identity(describe(case))
+    ) as tracking:
+        result = unittest.TextTestRunner(verbosity=2, resultclass=TimedResult).run(
+            original_suite
+            if original_suite is not None
+            else unittest.TestSuite(selected)
+        )
     expected_counts = Counter(expected)
     started_counts = Counter(result.started)
-    unexpected = started_counts - expected_counts
-    remaining = expected_counts - started_counts
-    fixture_skipped = 0
-    for item, _reason in result.skipped:
-        match = re.fullmatch(r"setUp(Class|Module) \((.+)\)", item.id())
-        if not match:
-            continue
-        scope = 1 if match.group(1) == "Class" else 2
-        for key in list(remaining):
-            if key[scope] == match.group(2):
-                fixture_skipped += remaining.pop(key)
-    execution_complete = not unexpected and not remaining
+    fixture_skipped = sum(tracking.skipped.values())
+    accounted = started_counts + tracking.skipped
+    execution_complete = (
+        accounted == expected_counts
+        and result.testsRun == len(result.started)
+        and Counter(result.stopped) == started_counts
+    )
     report_path.write_text(
         json.dumps(
             {
@@ -328,12 +475,19 @@ def main() -> int:
             if not args.worker_report:
                 raise ValueError("worker report is required")
             return worker(directory, args.worker_manifest, args.worker_report)
-        files, descriptions, children = discover(directory, args.pattern)
+        cases = []
+        original = []
+        files, descriptions, children = discover(
+            directory, args.pattern, cases, original
+        )
         units = build_units(files, descriptions, children, args.split_module)
         costs = (
             json.loads(args.costs.read_text(encoding="utf-8")) if args.costs else None
         )
         groups = partition_units(units, descriptions, args.workers, costs)
+        fallback = original[1]
+        if fallback:
+            groups = [list(range(len(units)))]
     except (ValueError, OSError, ImportError, json.JSONDecodeError) as error:
         print(f"Installed suite discovery failed: {error}", file=sys.stderr)
         return 1
@@ -366,6 +520,25 @@ def main() -> int:
                 ),
                 encoding="utf-8",
             )
+            if fallback:
+                start = time.monotonic()
+                with (
+                    (root / f"worker-{index}.stdout").open(
+                        "w", encoding="utf-8"
+                    ) as stdout,
+                    (root / f"worker-{index}.stderr").open(
+                        "w", encoding="utf-8"
+                    ) as stderr,
+                ):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        code = worker(
+                            directory,
+                            manifest,
+                            report,
+                            (files, descriptions, children, cases, original[0], units),
+                        )
+                elapsed[index] = time.monotonic() - start
+                return code
             worker_directory = root / f"worker-{index}"
             worker_directory.mkdir()
             command = [
@@ -394,8 +567,11 @@ def main() -> int:
             elapsed[index] = time.monotonic() - start
             return code
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(groups)) as pool:
-            results = list(pool.map(run_worker, range(len(groups))))
+        if fallback:
+            results = [run_worker(0)]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(groups)) as pool:
+                results = list(pool.map(run_worker, range(len(groups))))
         reports = []
         for index, code in enumerate(results):
             for suffix, stream in (("stdout", sys.stdout), ("stderr", sys.stderr)):
@@ -510,5 +686,37 @@ def main() -> int:
     return 0 if complete else 1
 
 
+def supervised_main():
+    # Discovery and hooks occur only in the monitored child. A successful
+    # process exit without the final receipt must never waive the test lane.
+    if "--worker-manifest" in sys.argv:
+        return main()
+    marker = "--completion-receipt"
+    if marker in sys.argv:
+        index = sys.argv.index(marker)
+        receipt = Path(sys.argv[index + 1])
+        del sys.argv[index : index + 2]
+        code = main()
+        receipt.write_text(str(code), encoding="utf-8")
+        return code
+    with tempfile.TemporaryDirectory(prefix="unittest-completion-") as temporary:
+        receipt = Path(temporary) / "complete"
+        command = [sys.executable]
+        if sys.flags.isolated:
+            command.append("-I")
+        command.extend(
+            [str(Path(__file__).resolve()), marker, str(receipt), *sys.argv[1:]]
+        )
+        code = subprocess.call(command)
+        try:
+            recorded = receipt.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            recorded = None
+        if recorded != str(code):
+            print("Runner exited without its final completion receipt", file=sys.stderr)
+            return 1
+        return code
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(supervised_main())

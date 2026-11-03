@@ -1411,6 +1411,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("advisory", text)
 
     def test_ci_restores_strict_branch_coverage_and_bounds_workflow_identity(self):
+        import shlex
+
+        import yaml
+
         root = Path(__file__).resolve().parents[1]
         ci_text = (root / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
@@ -1420,6 +1424,35 @@ class ActionPinPolicyTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("--fail-under=80", ci_text)
         self.assertNotIn("--fail-under=75", ci_text)
+        jobs = yaml.safe_load(ci_text)["jobs"]
+        coverage = next(
+            step
+            for step in jobs["quality"]["steps"]
+            if step.get("name") == "Branch coverage"
+        )
+        commands = [shlex.split(line) for line in coverage["run"].splitlines() if line]
+        command = next(c for c in commands if "scripts/run_checkout_tests.py" in c)
+        self.assertIn("--coverage", command)
+        self.assertEqual(command[command.index("--workers") + 1], "4")
+        coverage_costs = command[command.index("--costs") + 1]
+        self.assertEqual(
+            coverage_costs,
+            "tests/fixtures/checkout-class-seconds-coverage.json",
+        )
+        self.assertTrue(any("--fail-under=80" in c for c in commands))
+        self.assertFalse(coverage.get("continue-on-error", False))
+        windows = next(
+            step
+            for step in jobs["compatibility"]["steps"]
+            if step.get("if") == "runner.os == 'Windows'"
+        )
+        windows_command = shlex.split(windows["run"])
+        windows_costs = windows_command[windows_command.index("--costs") + 1]
+        self.assertNotEqual(windows_costs, coverage_costs)
+        self.assertTrue((root / windows_costs).is_file())
+        self.assertNotIn("--coverage", windows_command)
+        self.assertEqual(windows_command[windows_command.index("--workers") + 1], "4")
+        self.assertFalse(windows.get("continue-on-error", False))
         lifecycle = (
             root
             / "packages/python/review-sensei-github/src/review_sensei_github/review_run.py"
@@ -2326,12 +2359,10 @@ class Second(unittest.TestCase):
                 self.assertEqual(pids["a-setup"], pids["a-second"])
                 self.assertEqual(pids["b-setup"], pids["b-first"])
                 self.assertEqual(pids["c-setup"], pids["c-first"])
-                if iteration == 0:
-                    self.assertNotEqual(pids["a-first"], pids["b-first"])
-                    self.assertEqual(pids["b-first"], pids["c-first"])
-                else:
-                    self.assertNotEqual(pids["a-first"], pids["b-first"])
-                    self.assertEqual(pids["a-first"], pids["c-first"])
+                # Hook discovery executes the original suite once in the parent.
+                self.assertEqual(len(data["workers"]), 1)
+                self.assertEqual(pids["a-first"], pids["b-first"])
+                self.assertEqual(pids["a-first"], pids["c-first"])
             for mode in ("1", "2"):
                 evidence = root / f"evidence-nested-{mode}"
                 evidence.mkdir()
@@ -2367,6 +2398,122 @@ class Second(unittest.TestCase):
             self.assertNotEqual(invalid.returncode, 0)
             self.assertIn("finite nonnegative weights", invalid.stderr)
             self.assertNotIn("installed worker", invalid.stdout)
+
+    def test_installed_suite_runner_rejects_unfinished_tests(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        cases = {
+            "missing stop": "        return result\n",
+            "wrong stop": (
+                "        class Other(unittest.TestCase):\n"
+                "            def test_other(self): pass\n"
+                "        result.stopTest(Other('test_other'))\n"
+                "        return result\n"
+            ),
+        }
+        for label, end_of_run in cases.items():
+            with self.subTest(label=label):
+                self._assert_installed_suite_rejects_unfinished(runner, end_of_run)
+
+    def _assert_installed_suite_rejects_unfinished(self, runner, end_of_run):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite = root / "suite"
+            suite.mkdir()
+            (suite / "test_unfinished.py").write_text(
+                "import unittest\n"
+                "class Unfinished(unittest.TestCase):\n"
+                "    def run(self, result):\n"
+                "        result.startTest(self)\n"
+                + end_of_run
+                + "    def test_never_run(self): self.fail('body was not run')\n",
+                encoding="utf-8",
+            )
+            report = root / "report.json"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    str(runner),
+                    "--start-directory",
+                    str(suite),
+                    "--workers",
+                    "1",
+                    "--report",
+                    str(report),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "did not account for its exact test inventory", completed.stderr
+            )
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertFalse(data["complete"])
+            self.assertFalse(data["workers"][0]["execution_complete"])
+
+    def test_installed_suite_runner_accepts_proxy_class_fixture_skip(self):
+        runner = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_installed_test_suites.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            suite = root / "suite"
+            suite.mkdir()
+            (suite / "test_proxy.py").write_text(
+                "import unittest\n"
+                "class Fixture(unittest.TestCase):\n"
+                "    @classmethod\n"
+                "    def setUpClass(cls): raise unittest.SkipTest('fixture skipped')\n"
+                "class ProxyCase(unittest.TestCase):\n"
+                "    @property\n"
+                "    def __class__(self): return Fixture\n"
+                "    def test_skipped(self): self.fail('unreachable')\n"
+                "def load_tests(loader, tests, pattern):\n"
+                "    return unittest.TestSuite([ProxyCase('test_skipped')])\n",
+                encoding="utf-8",
+            )
+            baseline = subprocess.run(
+                [sys.executable, "-I", "-m", "unittest", "discover", "-s", str(suite)],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+            report = root / "report.json"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    str(runner),
+                    "--start-directory",
+                    str(suite),
+                    "--workers",
+                    "1",
+                    "--report",
+                    str(report),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("fixture skipped", completed.stderr)
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertTrue(data["complete"])
+            self.assertEqual(data["discovered"], 1)
+            self.assertEqual(data["workers"][0]["started"], 0)
+            self.assertEqual(data["workers"][0]["fixture_skipped"], 1)
 
     def test_installed_suite_runner_rejects_omitted_tests(self):
         runner = (
@@ -2503,7 +2650,7 @@ class Second(unittest.TestCase):
             )
             self.assertNotIn("installed worker", completed.stdout)
 
-    def test_installed_suite_runner_rejects_repeated_fixture_blocks(self):
+    def test_installed_suite_hook_preserves_repeated_fixture_blocks(self):
         runner = (
             Path(__file__).resolve().parents[1]
             / "scripts"
@@ -2527,9 +2674,8 @@ class Second(unittest.TestCase):
                 text=True,
                 timeout=30,
             )
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("fixture scope occurs in multiple blocks", completed.stderr)
-            self.assertNotIn("installed worker", completed.stdout)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("Ran 3 tests", completed.stderr)
 
     def test_downstream_canary_is_operator_gated_and_excluded_from_required_checks(
         self,
