@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from checkout_accounting_cases import CheckoutAccountingChecks
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/run_checkout_tests.py"
 # Checkout-only: the sdist contract excludes this module from installed lanes.
@@ -18,7 +20,7 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 
 
-class CheckoutRunnerTests(unittest.TestCase):
+class CheckoutRunnerTests(CheckoutAccountingChecks, unittest.TestCase):
     def test_partition_covers_every_identity_once_and_stays_deterministic(self):
         identities = [
             f"module.Case_{index // 10:03d}.test_{index:04d}" for index in range(2700)
@@ -267,10 +269,9 @@ class Case(unittest.TestCase):
             with self.subTest(source=source):
                 result, receipts = self.run_fixture(source)
                 self.assertEqual(result.returncode, 1)
-                self.assertIn(
-                    "custom unittest suite wrappers cannot be sharded safely",
-                    result.stderr,
-                )
+                # Hook suites execute their original root in the controller.
+                # The wrapper's own failure must propagate without a body run.
+                self.assertIn("wrapper must not be discarded", result.stderr)
                 self.assertEqual(receipts, [])
 
         # A future interpreter may add an ordinary default field. Compare to
@@ -412,6 +413,398 @@ class Case(unittest.TestCase):
         result, _ = self.run_fixture(source)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Discovered 2 tests; running 1 disjoint workers", result.stdout)
+        with self.subTest(check="fixture skip accounting"):
+            self._check_fixture_skips_account_only_for_the_matching_inventory()
+        with self.subTest(check="fixture skip coverage"):
+            self._check_fixture_skips_keep_coverage_and_the_accounting_distinct()
+        with self.subTest(check="fixture module identity"):
+            self._check_fixture_skip_uses_case_module_not_discovery_file()
+        with self.subTest(check="unknown fixture scope"):
+            self._check_unknown_fixture_scope_stays_unaccounted()
+        for check in (
+            self._check_original_suite_and_exact_accounting,
+            self._check_observer_restores_existing_profiler_and_preserves_trace,
+            self._check_early_success_exit_cannot_waive_inventory,
+            self._check_hook_fallback_keeps_import_and_branch_coverage,
+            self._check_controller_execution_and_boundaries,
+            self._check_controller_conservative_admission,
+            self._check_controller_branch_coverage,
+            self._check_real_controller_cost_fixture_dispatch,
+        ):
+            with self.subTest(check=check.__name__):
+                check()
+
+    def _check_fixture_skips_account_only_for_the_matching_inventory(self):
+        cases = (
+            (
+                "class",
+                """import unittest
+class Skipped(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('unavailable')
+    def test_a(self): pass
+    def test_b(self): pass
+class Runs(unittest.TestCase):
+    def test_c(self): pass
+""",
+                1,
+                0,
+                1,
+                2,
+            ),
+            (
+                "module",
+                """import unittest
+def setUpModule(): raise unittest.SkipTest('unavailable')
+class First(unittest.TestCase):
+    def test_a(self): pass
+class Second(unittest.TestCase):
+    def test_b(self): pass
+""",
+                2,
+                0,
+                0,
+                2,
+            ),
+            (
+                "two skipped classes",
+                """import unittest
+class First(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('first unavailable')
+    def test_a(self): pass
+    def test_b(self): pass
+class Second(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('second unavailable')
+    def test_c(self): pass
+""",
+                1,
+                0,
+                0,
+                3,
+            ),
+            (
+                "nested skipped class",
+                """import unittest
+class Outer:
+    class Inner(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls): raise unittest.SkipTest('unavailable')
+        def test_a(self): pass
+def load_tests(loader, tests, pattern):
+    return loader.loadTestsFromTestCase(Outer.Inner)
+""",
+                1,
+                0,
+                0,
+                1,
+            ),
+            (
+                "malformed skip holder",
+                """import unittest
+class InvalidHolder:
+    def shortDescription(self): return None
+    def __str__(self): return 'invalid holder'
+class Malformed(unittest.TestCase):
+    def run(self, result):
+        result.addSkip(InvalidHolder(), 'invalid skip holder')
+        return super().run(result)
+    def test_a(self): pass
+""",
+                1,
+                1,
+                1,
+                0,
+            ),
+            (
+                "colliding class names with an omission",
+                """import unittest
+class A(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('unavailable')
+    def id(self): return 'test_example.AliasA.test_a'
+    def test_a(self): pass
+class B(unittest.TestCase):
+    def id(self): return 'test_example.AliasB.test_b'
+    def run(self, result): return result
+    def test_b(self): pass
+A.__qualname__ = B.__qualname__ = 'Same'
+AliasA, AliasB = A, B
+del A, B
+""",
+                1,
+                1,
+                0,
+                1,
+            ),
+            (
+                "colliding class names with one completed",
+                """import unittest
+class A(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('unavailable')
+    def id(self): return 'test_example.AliasA.test_a'
+    def test_a(self): pass
+class B(unittest.TestCase):
+    def id(self): return 'test_example.AliasB.test_b'
+    def test_b(self): pass
+A.__qualname__ = B.__qualname__ = 'Same'
+AliasA, AliasB = A, B
+del A, B
+""",
+                1,
+                0,
+                1,
+                1,
+            ),
+            (
+                "colliding class names both skipped",
+                """import unittest
+class A(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('unavailable')
+    def id(self): return 'test_example.AliasA.test_a'
+    def test_a(self): pass
+class B(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('unavailable')
+    def id(self): return 'test_example.AliasB.test_b'
+    def test_b(self): pass
+A.__qualname__ = B.__qualname__ = 'Same'
+AliasA, AliasB = A, B
+del A, B
+""",
+                1,
+                0,
+                0,
+                2,
+            ),
+            (
+                "proxy fixture class",
+                """import unittest
+class Fixture(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('unavailable')
+class ProxyCase(unittest.TestCase):
+    @property
+    def __class__(self): return Fixture
+    def id(self): return 'test_example.ProxyCase.test_a'
+    def test_a(self): pass
+""",
+                1,
+                0,
+                0,
+                1,
+            ),
+            (
+                "omission",
+                """import unittest
+class Skipped(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('setUpModule (test_example)')
+    def test_a(self): pass
+class Omitted(unittest.TestCase):
+    def run(self, result): return result
+    def test_b(self): pass
+""",
+                1,
+                1,
+                0,
+                1,
+            ),
+            (
+                "duplicate start",
+                """import unittest
+class Duplicate(unittest.TestCase):
+    def run(self, result):
+        result.startTest(self); result.stopTest(self)
+        result.startTest(self); result.stopTest(self)
+        return result
+    def test_a(self): pass
+""",
+                1,
+                1,
+                2,
+                0,
+            ),
+            (
+                "start without stop",
+                """import unittest
+class Unfinished(unittest.TestCase):
+    def run(self, result):
+        result.startTest(self)
+        return result
+    def test_a(self): pass
+""",
+                1,
+                1,
+                1,
+                0,
+            ),
+        )
+        for label, source, workers, expected_exit, executed, skipped in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                (root / "test_example.py").write_text(source, encoding="utf-8")
+                report = root / "report.json"
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--workers",
+                        str(workers),
+                        "--start-directory",
+                        str(root),
+                        "--report",
+                        str(report),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(proc.returncode, expected_exit, proc.stderr)
+                data = json.loads(report.read_text())
+                self.assertEqual(data["execution_complete"], expected_exit == 0)
+                if expected_exit:
+                    self.assertIn(
+                        "did not account for its exact assigned test inventory",
+                        proc.stderr,
+                    )
+                    self.assertFalse(data["workers"][0]["inventory_complete"])
+                    self.assertIsNone(data["workers"][0]["timing_error"])
+                self.assertEqual(
+                    sum(worker["executed"] for worker in data["workers"]), executed
+                )
+                self.assertEqual(
+                    sum(worker["fixture_skipped"] for worker in data["workers"]),
+                    skipped,
+                )
+
+    def _check_fixture_skips_keep_coverage_and_the_accounting_distinct(self):
+        from coverage import CoverageData
+
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            for package in ("review_sensei", "review_sensei_github"):
+                (root / package).mkdir()
+                (root / package / "__init__.py").write_text("value = 1\n")
+            (root / "test_example.py").write_text("""import unittest
+class Skipped(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls): raise unittest.SkipTest('not applicable')
+    def test_a(self): pass
+class Runs(unittest.TestCase):
+    def test_b(self):
+        import review_sensei, review_sensei_github
+        self.assertEqual(review_sensei.value + review_sensei_github.value, 2)
+""")
+            report = root / "report.json"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--workers",
+                    "1",
+                    "--start-directory",
+                    str(root),
+                    "--coverage",
+                    "--report",
+                    str(report),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            data = json.loads(report.read_text())
+            self.assertTrue(data["execution_complete"])
+            self.assertTrue(data["coverage_ok"])
+            self.assertEqual(data["workers"][0]["executed"], 1)
+            self.assertEqual(data["workers"][0]["fixture_skipped"], 1)
+            coverage = CoverageData(basename=str(root / ".coverage"))
+            coverage.read()
+            for package in ("review_sensei", "review_sensei_github"):
+                source = str((root / package / "__init__.py").resolve())
+                self.assertIn(source, coverage.measured_files())
+                self.assertIn(1, coverage.lines(source))
+
+    def _check_unknown_fixture_scope_stays_unaccounted(self):
+        from collections import Counter
+        from types import SimpleNamespace
+
+        remaining = Counter({"unknown.Case.test_case": 1})
+        event = SimpleNamespace(id=lambda: "setUpModule (unknown)")
+        self.assertEqual(
+            RUNNER.count_fixture_skips(remaining, {}, [(event, "skip")]), (0, False)
+        )
+        self.assertEqual(remaining, Counter({"unknown.Case.test_case": 1}))
+        self.assertEqual(
+            RUNNER.count_fixture_skips(remaining, {}, [("invalid", "skip")]),
+            (0, True),
+        )
+        self.assertEqual(remaining, Counter({"unknown.Case.test_case": 1}))
+        remaining = Counter({"m.A.test_1": 1, "m.A.test_2": 1, "m.B.test_3": 1})
+        class_a, class_b = object(), object()
+        scopes = {
+            "m.A.test_1": ("m.A", "m", class_a),
+            "m.A.test_2": ("m.A", "m", class_a),
+            "m.B.test_3": ("m.B", "m", class_b),
+        }
+        first = SimpleNamespace(id=lambda: "setUpClass (m.A)")
+        second = SimpleNamespace(id=lambda: "setUpClass (m.B)")
+        events = [(first, "skip"), (first, "duplicate"), (second, "skip")]
+        self.assertEqual(
+            RUNNER.count_fixture_skips(remaining, scopes, events), (3, False)
+        )
+        self.assertFalse(remaining)
+        remaining = Counter({"m.AliasA.test": 1, "m.AliasB.test": 1})
+        scopes = {
+            "m.AliasA.test": ("m.Same", "m", class_a),
+            "m.AliasB.test": ("m.Same", "m", class_b),
+        }
+        ambiguous = SimpleNamespace(id=lambda: "setUpClass (m.Same)")
+        self.assertEqual(
+            RUNNER.count_fixture_skips(remaining, scopes, [(ambiguous, "skip")]),
+            (0, False),
+        )
+        self.assertEqual(remaining.total(), 2)
+
+    def _check_fixture_skip_uses_case_module_not_discovery_file(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "helper_suite.py").write_text("""import unittest
+def setUpModule(): raise unittest.SkipTest('optional fixture unavailable')
+class ForeignCase(unittest.TestCase):
+    def test_a(self): pass
+""")
+            (root / "test_example.py").write_text("""import helper_suite
+def load_tests(loader, tests, pattern):
+    return loader.loadTestsFromTestCase(helper_suite.ForeignCase)
+""")
+            report = root / "report.json"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--workers",
+                    "1",
+                    "--start-directory",
+                    str(root),
+                    "--report",
+                    str(report),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("setUpModule (helper_suite)", proc.stderr)
+            data = json.loads(report.read_text())
+            self.assertTrue(data["execution_complete"])
+            self.assertEqual(data["workers"][0]["executed"], 0)
+            self.assertEqual(data["workers"][0]["fixture_skipped"], 1)
 
 
 class MeasuredRunnerTests(unittest.TestCase):
@@ -530,7 +923,14 @@ class No(unittest.TestCase):
                     Path(command[command.index("--worker-manifest") + 1]).read_text()
                 )
                 Path(command[command.index("--worker-report") + 1]).write_text(
-                    json.dumps({"executed": len(assigned), "class_seconds": {}})
+                    json.dumps(
+                        {
+                            "executed": len(assigned),
+                            "fixture_skipped": 0,
+                            "inventory_complete": True,
+                            "class_seconds": {},
+                        }
+                    )
                 )
                 Path(command[command.index("--data-file") + 1]).write_bytes(
                     b"corrupt SQLite data"
@@ -580,6 +980,8 @@ class No(unittest.TestCase):
             b'{"executed":true,"class_seconds":{}}',
             b'{"executed":1,"class_seconds":{"Case":NaN}}',
             b'{"executed":1,"class_seconds":{},"exit":0}',
+            b'{"executed":1,"fixture_skipped":true,"inventory_complete":true,"class_seconds":{}}',
+            b'{"executed":1,"fixture_skipped":0,"inventory_complete":"yes","class_seconds":{}}',
         )
         for payload in payloads:
             with (
@@ -716,6 +1118,8 @@ class Second(unittest.TestCase):
                             json.dumps(
                                 {
                                     "executed": 0 if fault == "zero-execution" else 1,
+                                    "fixture_skipped": 0,
+                                    "inventory_complete": fault != "zero-execution",
                                     "class_seconds": {},
                                 }
                             )
@@ -794,7 +1198,7 @@ class BrokenProtocol(unittest.TestCase):
             data = json.loads(report.read_text())
             self.assertFalse(data["execution_complete"])
             self.assertEqual(data["workers"][0]["executed"], 0)
-            self.assertEqual(data["workers"][0]["exit"], 0)
+            self.assertEqual(data["workers"][0]["exit"], 1)
             self.assertIsNone(data["workers"][0]["timing_error"])
 
     def test_invalid_cost_files_fail_before_executing_any_workers(self):
