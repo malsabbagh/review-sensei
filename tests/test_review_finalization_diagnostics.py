@@ -15,7 +15,11 @@ from unittest.mock import patch
 
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
 from review_sensei_github.publication import PublicationResult, ReviewPublisher
-from review_sensei_github.review_finalization_diagnostics import close_review_run
+from review_sensei_github.review_finalization_diagnostics import (
+    CLOSE_NOT_ENTERED_REASONS,
+    close_not_entered,
+    close_review_run,
+)
 from review_sensei_github.session_ledger import parse_session_comment
 from test_api_work_persistence import IDENTITY
 from test_review_run import EntryFixture, _CompletionFixture
@@ -33,6 +37,28 @@ def observations(text):
 
 
 class ReviewFinalizationDiagnosticsTests(unittest.TestCase):
+    def test_close_reason_vocabulary_and_safe_unknown_fallback(self):
+        for reason in (
+            *sorted(CLOSE_NOT_ENTERED_REASONS),
+            "private-token",
+            None,
+            ["private-token"],
+        ):
+            with self.subTest(reason=reason):
+                captured = io.StringIO()
+                with redirect_stderr(captured):
+                    close_not_entered(reason)
+                value = observations(captured.getvalue())[0]
+                expected = (
+                    reason
+                    if type(reason) is str and reason in CLOSE_NOT_ENTERED_REASONS
+                    else "unrecognized_reason"
+                )
+                self.assertEqual(value["reason"], expected)
+                self.assertEqual(value["stage"], "not_entered")
+                self.assertFalse(value["authority"])
+                self.assertNotIn("private-token", captured.getvalue())
+
     def test_observation_interrupt_preserves_original_business_error(self):
         for interruption in (KeyboardInterrupt(), SystemExit(97)):
             with self.subTest(interruption=type(interruption).__name__):
@@ -148,6 +174,12 @@ class ReviewFinalizationDiagnosticsTests(unittest.TestCase):
             record = parse_session_comment(f.comment["body"], identity=IDENTITY)
             self.assertEqual(record.transaction.phase, "publication_succeeded")
             self.assertIsNone(record.api_run_accounting["terminal_transaction"])
+            self.assertEqual(
+                json.loads((f.root / "publication.json").read_text())[
+                    "terminal_reason"
+                ],
+                "terminal_close_unconfirmed",
+            )
             observed = observations(f.error)[-1]
             self.assertEqual(observed["stage"], "raised")
             self.assertGreaterEqual(observed["unknown_mutations"], 1)

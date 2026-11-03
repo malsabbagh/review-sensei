@@ -217,6 +217,9 @@ PATCHes, and a response does not prove its effect. An entry without a closing
 observation cannot establish non-dispatch. These bounded log observations add
 no HTTP work, retain no exception text, and confer no recovery authority.
 They do not repair historical runs whose finalization evidence is absent.
+The module exposes `CLOSE_NOT_ENTERED_REASONS` as its reason vocabulary;
+unexpected values emit the fixed `unrecognized_reason` marker rather than raw
+input or an anonymous null reason. This marker conveys no recovery authority.
 
 The separate `approval-operation-failure` schema 1.0 observation was introduced
 in hosted 0.3.14 for `verify` and finding-disposition re-finalization. It is not

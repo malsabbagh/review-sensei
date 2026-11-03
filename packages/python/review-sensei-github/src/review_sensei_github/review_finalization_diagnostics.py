@@ -6,6 +6,14 @@ import json
 import sys
 from typing import Any
 
+CLOSE_NOT_ENTERED_REASONS = frozenset(
+    {
+        "thread_cleanup_unconfirmed",
+        "publication_finalization_incomplete",
+        "terminal_entry_failed",
+    }
+)
+
 
 def _emit(value: dict[str, object]) -> None:
     try:
@@ -63,19 +71,14 @@ def close_review_run(caller: Any, ledger: Any, identity: Any, transaction: Any) 
         _emit(value)
 
 
-def close_not_entered(reason: str) -> None:
+def close_not_entered(reason: object) -> None:
     _emit(
         {
             "schema_version": "review-finalization-observation-v1",
             "stage": "not_entered",
             "reason": reason
-            if reason
-            in {
-                "thread_cleanup_unconfirmed",
-                "publication_finalization_incomplete",
-                "terminal_entry_failed",
-            }
-            else None,
+            if type(reason) is str and reason in CLOSE_NOT_ENTERED_REASONS
+            else "unrecognized_reason",
             "close_returned": False,
             "mutation_dispatches": None,
             "unknown_mutations": None,
