@@ -913,3 +913,119 @@ class ThreadResolutionRecoveryTests(unittest.TestCase):
                     replacements=((host.comment, host.concern, "body", "right"),),
                 )
                 self.assertEqual(mutations, [] if missing or stale else ["PRRT_old"])
+
+    def test_supersession_uses_lazy_dedicated_cleanup_capability(self):
+        from review_sensei_github.errors import GitHubBrokerClientError
+
+        for scenario in (
+            "matched",
+            "unrelated",
+            "missing",
+            "stale",
+            "resolved",
+            "denied",
+        ):
+            with self.subTest(scenario=scenario):
+                host = ResolutionHost()
+                old = copy.deepcopy(host.root)
+                old["id"] = 30
+                old["body"] = old["body"].replace("head=" + HEAD, "head=" + "c" * 40)
+                original_request = host.request
+                original_respond = host.respond
+                dispatched = []
+                issued = []
+
+                def respond(method, path, body):
+                    if path.endswith("/pulls/comments/30"):
+                        return 200, old
+                    if (
+                        path == "/graphql"
+                        and body["operationName"] == "ResolveReviewThread"
+                    ):
+                        return 200, {
+                            "data": {
+                                "resolveReviewThread": {
+                                    "thread": {"id": "PRRT_old", "isResolved": True}
+                                }
+                            }
+                        }
+                    status, payload = original_respond(method, path, body)
+                    if path == "/graphql":
+                        nodes = payload["data"]["repository"]["pullRequest"][
+                            "reviewThreads"
+                        ]["nodes"]
+                        if scenario == "missing":
+                            nodes.clear()
+                        nodes.append(
+                            {
+                                "id": "PRRT_old",
+                                "isResolved": scenario == "resolved",
+                                "comments": {
+                                    "nodes": [
+                                        {
+                                            "databaseId": 30,
+                                            "body": old["body"],
+                                            "author": {"login": APP},
+                                        }
+                                    ]
+                                },
+                            }
+                        )
+                    return status, payload
+
+                def request(method, path, *, token, body=None, **kwargs):
+                    operation = (
+                        body.get("operationName") if isinstance(body, dict) else None
+                    )
+                    dispatched.append((operation, token))
+                    expected = (
+                        "synthetic-cleanup"
+                        if operation == "ResolveReviewThread"
+                        else "synthetic-review"
+                    )
+                    self.assertEqual(token, expected)
+                    return original_request(
+                        method, path, token=token, body=body, **kwargs
+                    )
+
+                def cleanup_token():
+                    issued.append(True)
+                    if scenario == "denied":
+                        raise GitHubBrokerClientError("cleanup capability denied")
+                    return "synthetic-cleanup"
+
+                host.respond = respond
+                host.request = request
+                if scenario == "stale":
+                    host.pr["base"]["sha"] = "d" * 40
+                publisher = ReviewPublisher(http=host)
+                publisher._thread_cleanup_token_provider = cleanup_token
+                diagnostic = publisher._supersede_replaced_threads(
+                    token="synthetic-review",
+                    threads=(
+                        (
+                            "PRRT_old",
+                            "ab" * 32 if scenario == "unrelated" else host.concern,
+                        ),
+                    ),
+                    confirmed_review_id=5,
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=2,
+                    head_sha=HEAD,
+                    base_sha=BASE,
+                    app_slug=APP,
+                    eligibility=host.eligibility,
+                    replacements=((host.comment, host.concern, "body", "right"),),
+                )
+                self.assertEqual(len(issued), int(scenario in {"matched", "denied"}))
+                mutations = [
+                    entry for entry in dispatched if entry[0] == "ResolveReviewThread"
+                ]
+                self.assertEqual(len(mutations), int(scenario == "matched"))
+                self.assertEqual(
+                    diagnostic,
+                    "thread_resolution_unconfirmed"
+                    if scenario in {"missing", "stale", "denied"}
+                    else None,
+                )

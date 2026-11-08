@@ -1619,12 +1619,36 @@ class GitHubApplication:
                     continuation_digest=continuation_digest,
                     source_guard=source_guard,
                 )
-            if isinstance(reviewer, ReviewPublisher) and ledger is not None:
+            if isinstance(reviewer, ReviewPublisher):
                 reviewer = copy(reviewer)
-                reviewer._defer_thread_cleanup = True
-                reviewer._confirmed_publication_only = (
-                    terminal_cleanup_owner is not None
-                )
+
+                def cleanup_capability() -> str:
+                    # Supersession needs separate authority from publication.
+                    # Keep issuance lazy and on the original caller envelope;
+                    # a failed mint must never fall back to the review token.
+                    if budget is None:
+                        raise GitHubBrokerClientError(
+                            "thread cleanup broker accounting is unavailable"
+                        )
+                    budget.check()
+                    if isinstance(broker, BrokerClient) and (
+                        broker.control is None or broker.control.budget is not budget
+                    ):
+                        raise GitHubBrokerClientError(
+                            "thread cleanup broker accounting is unavailable"
+                        )
+                    cleanup_token = broker.exchange(
+                        exchange_input, capability="thread_resolve"
+                    )
+                    budget.check()
+                    return cleanup_token
+
+                reviewer._thread_cleanup_token_provider = cleanup_capability
+                if ledger is not None:
+                    reviewer._defer_thread_cleanup = True
+                    reviewer._confirmed_publication_only = (
+                        terminal_cleanup_owner is not None
+                    )
             publisher_started = True
             publication = (
                 PublicationResult(
