@@ -4599,6 +4599,7 @@ class ReviewPublisher:
         )
         self.checks = ReviewCheckPublisher(http=http)
         self._defer_thread_cleanup = False
+        self._thread_cleanup_token_provider: Callable[[], str] | None = None
         self._confirmed_publication_only = False
         self._pending_thread_cleanup: Callable[[], str | None] | None = None
         self._confirmed_review_id: int | None = None
@@ -6796,6 +6797,7 @@ class ReviewPublisher:
                     app_slug=app_slug,
                 ),
                 cleanup_budget=getattr(self.http, "publication_budget", None),
+                cleanup_token_provider=self._thread_cleanup_token_provider,
             )
             return resolution.diagnostic
         except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
