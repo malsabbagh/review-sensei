@@ -3449,6 +3449,10 @@ class ReviewApprovalFinalizer:
             raise GitHubPublicationError("review target was not found")
         if status < 200 or status >= 300 or not isinstance(payload, dict):
             raise GitHubPublicationError("approval finalization preflight failed")
+        if type(payload.get("draft")) is not bool:
+            raise GitHubPublicationError(
+                "approval finalization preflight draft was invalid"
+            )
         if payload.get("state") != "open" or payload.get("draft") is True:
             return _FinalizationPreflight(
                 result=PublicationResult(status="skipped_pr_state")
@@ -7199,6 +7203,8 @@ class ReviewPublisher:
             raise GitHubPublicationError("review preflight failed")
         if not isinstance(payload, dict):
             raise GitHubPublicationError("review preflight response was invalid")
+        if type(payload.get("draft")) is not bool:
+            raise GitHubPublicationError("review preflight draft was invalid")
         if payload.get("state") != "open" or payload.get("draft") is True:
             return _PreflightDecision(
                 result=PublicationResult(status="skipped_pr_state")
