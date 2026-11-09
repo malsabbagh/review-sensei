@@ -10,10 +10,12 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Iterator, NoReturn
 
 from .baseline import (
     RECOVERABLE_FALLBACK_REASONS,
@@ -2670,6 +2672,71 @@ def _delegate_moved_command(args_list: list[str]) -> int:
     return int(completed.returncode)
 
 
+_CLI_FAILURE_OBSERVER: ContextVar[Callable[[str, str | None], None] | None] = (
+    ContextVar("cli_failure_observer", default=None)
+)
+
+
+def _exception_kind(error: BaseException) -> str:
+    """Closed diagnostic vocabulary; never inspect exception messages/notes."""
+    return (
+        "interrupted"
+        if isinstance(error, KeyboardInterrupt)
+        else "input_or_protocol"
+        if isinstance(error, ReviewSenseiError)
+        else "os"
+        if isinstance(error, OSError)
+        else "value"
+        if isinstance(error, ValueError)
+        else "system_exit"
+        if isinstance(error, SystemExit)
+        else "unexpected"
+    )
+
+
+@contextmanager
+def _observe_cli_failures(
+    observer: Callable[[str, str | None], None],
+) -> Iterator[None]:
+    """Host-owned observation only; no diagnostic value controls business work."""
+    token = _CLI_FAILURE_OBSERVER.set(observer)
+    try:
+        yield
+    finally:
+        _CLI_FAILURE_OBSERVER.reset(token)
+
+
+def _notify_cli_failure(
+    primary: BaseException, cleanup: BaseException | None = None
+) -> None:
+    try:
+        observer = _CLI_FAILURE_OBSERVER.get()
+        if observer is not None:
+            observer(
+                _exception_kind(primary),
+                None if cleanup is None else _exception_kind(cleanup),
+            )
+    except BaseException:
+        pass  # Diagnostic cancellation/failure must not replace the original.
+
+
+def _note_cleanup_failure(primary: BaseException, cleanup: BaseException) -> None:
+    _notify_cli_failure(primary, cleanup)
+    try:
+        primary.add_note(
+            "analysis reservation cleanup failed: kind=" + _exception_kind(cleanup)
+        )
+    except BaseException:
+        pass
+
+
+def _print_cli_error(*messages: object) -> None:
+    try:
+        print(*messages, file=sys.stderr)
+    except BaseException:
+        pass
+
+
 def _sigterm_as_keyboard_interrupt():
     """Context manager: deliver SIGTERM as KeyboardInterrupt.
 
@@ -2710,7 +2777,7 @@ def main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) -
         with _sigterm_as_keyboard_interrupt():
             return _main(argv, hosted_hooks=hosted_hooks)
     except KeyboardInterrupt:
-        print("review-sensei: cancelled", file=sys.stderr)
+        _print_cli_error("review-sensei: cancelled")
         return 130
 
 
@@ -3097,11 +3164,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                     charge_failed_attempt=charge_failed_attempt
                 )
             except BaseException as cleanup_error:
-                analysis_error.add_note(
-                    "analysis reservation cleanup failed: "
-                    f"{type(cleanup_error).__name__}: "
-                    f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
-                )
+                _note_cleanup_failure(analysis_error, cleanup_error)
 
         analysis_cleanup = cleanup_analysis_error
 
@@ -3872,7 +3935,10 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             and held_reservation is not None
             and policy.mode in OPERATOR_REVIEW_MODES
         ):
-            cleanup_analysis_reservation(charge_failed_attempt=True)
+            if run.error is not None:
+                cleanup_analysis_error(run.error, charge_failed_attempt=True)
+            else:
+                cleanup_analysis_reservation(charge_failed_attempt=True)
         outcome = replace(
             run.outcome,
             base_sha=resolved_base_sha,
@@ -3889,9 +3955,11 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             },
         )
         if run.result is None:
+            if run.error is not None:
+                _notify_cli_failure(run.error)
             emit_host_outcome(outcome, output_path=args.outcome)
             if run.error is not None:
-                print(f"review-sensei: {run.error}", file=sys.stderr)
+                _print_cli_error("review-sensei:", run.error)
             return _review_exit_status(args, outcome)
         result = run.result
         if (
@@ -4149,11 +4217,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                         try:
                             cleanup_analysis_reservation(charge_failed_attempt=True)
                         except BaseException as cleanup_error:
-                            checkpoint_error.add_note(
-                                "analysis reservation cleanup failed: "
-                                f"{type(cleanup_error).__name__}: "
-                                f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
-                            )
+                            _note_cleanup_failure(checkpoint_error, cleanup_error)
                     raise
         elif args.configuration_context_output is not None:
             raise ReviewInputError(
@@ -4203,13 +4267,17 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
     except BaseException as exc:
         if analysis_cleanup is not None:
             analysis_cleanup(exc, not isinstance(exc, (KeyboardInterrupt, SystemExit)))
+        _notify_cli_failure(exc)
         if not isinstance(exc, (OSError, ValueError, ReviewSenseiError)):
             raise
-        broker_reported = _report_broker_failure(exc, args)
+        try:
+            broker_reported = _report_broker_failure(exc, args)
+        except BaseException:
+            broker_reported = False
         if not broker_reported:
-            print(f"review-sensei: {exc}", file=sys.stderr)
+            _print_cli_error("review-sensei:", exc)
         if getattr(args, "exit_semantics", "review") == "operational":
             return 1
         if not broker_reported:
-            print("review-sensei: reason=invalid-input", file=sys.stderr)
+            _print_cli_error("review-sensei: reason=invalid-input")
         return REVIEW_EXIT_INCOMPLETE

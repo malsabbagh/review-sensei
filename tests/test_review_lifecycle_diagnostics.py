@@ -36,6 +36,172 @@ def outcome(test, stderr):
 
 
 class ReviewLifecycleDiagnosticsTests(unittest.TestCase):
+    def test_handled_primary_and_cleanup_errors_keep_separate_closed_classifications(
+        self,
+    ):
+        from review_sensei_github.api_run_requests import ApiRunSessionLedger
+
+        class PrivateCleanupError(OSError):
+            def __str__(self):
+                raise AssertionError("cleanup text must never be inspected")
+
+        for primary, code, kind in (
+            (ReviewInputError("synthetic-primary-private"), 1, "input_or_protocol"),
+            (KeyboardInterrupt(), 130, "interrupted"),
+        ):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                fixture = EntryFixture(directory)
+
+                def fail():
+                    raise primary
+
+                fixture.before_provider = fail
+                with patch.object(
+                    ApiRunSessionLedger,
+                    "claim_analysis_cleanup",
+                    side_effect=PrivateCleanupError(),
+                ):
+                    self.assertEqual(fixture.invoke(), code, fixture.error)
+                value = outcome(self, fixture.error)
+                self.assertEqual(value["primary_exception_kind"], kind)
+                self.assertEqual(value["cleanup_exception_kind"], "os")
+                self.assertEqual(value["exit_code"], code)
+                self.assertNotIn("synthetic-primary-private", json.dumps(value))
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertIsNone(fixture.accounted.accounting.terminal_transaction)
+
+    def test_artifact_policy_distinguishes_disabled_skipped_and_unavailable(self):
+        from review_sensei_github import review_lifecycle_diagnostics as diagnostic
+
+        for mode, kind, configured, policy in (
+            ("none", "review", "none", "disabled"),
+            ("diagnostics", "review", "diagnostics", "eligible"),
+            ("diagnostics", "command", "diagnostics", "skipped"),
+            ("diagnostics", "reply", "diagnostics", "skipped"),
+            ("all", "review", "unavailable", "unavailable"),
+            ("secret-invalid", "review", "unavailable", "unavailable"),
+        ):
+            with (
+                self.subTest(mode=mode, kind=kind),
+                patch.dict(os.environ, {"ARTIFACTS": mode}),
+            ):
+                stream = io.StringIO()
+                with redirect_stderr(stream), diagnostic.lifecycle(kind) as current:
+                    current.returned(0)
+                value = outcome(self, stream.getvalue())
+                self.assertEqual(value["artifacts"], configured)
+                self.assertEqual(value["artifact_policy_state"], policy)
+                self.assertEqual(value["artifact_upload_state"], "unavailable")
+                self.assertNotIn("secret-invalid", json.dumps(value))
+
+    def test_diagnostic_cancellation_cannot_replace_business_result_or_error(self):
+        from review_sensei_github import review_lifecycle_diagnostics as diagnostic
+
+        from review_sensei import cli as core
+
+        for fault in (OSError("private-output"), KeyboardInterrupt(), SystemExit(99)):
+
+            class BrokenSink:
+                def write(self, _):
+                    raise fault
+
+            with (
+                self.subTest(fault=type(fault).__name__),
+                redirect_stderr(BrokenSink()),
+            ):
+                with diagnostic.lifecycle("review") as current:
+                    self.assertEqual(current.returned(17), 17)
+                primary = ReviewInputError("original")
+                with self.assertRaises(ReviewInputError) as raised:
+                    with diagnostic.lifecycle("review"):
+                        raise primary
+                self.assertIs(raised.exception, primary)
+                with patch.object(core, "_main", side_effect=KeyboardInterrupt()):
+                    self.assertEqual(core.main([]), 130)
+
+    def test_artifact_upload_has_independent_workflow_gates(self):
+        from strict_workflow_yaml import load_workflow
+
+        workflow = load_workflow(
+            Path(".github/workflows/review-sensei-run.yml").read_text()
+        )
+        steps = [
+            step
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("name") == "Upload diagnostics artifact"
+        ]
+        self.assertEqual(len(steps), 2)
+        for step in steps:
+            condition = step["if"]
+            for gate in (
+                "!cancelled()",
+                "inputs.operation == 'review'",
+                "needs.bootstrap.outputs.artifacts == 'diagnostics'",
+                "steps.provider-review.outputs.result_ready == 'true'",
+                "steps.provider-review.outputs.checkpoint_workspace_clean == 'true'",
+                "hashFiles('checkpoint-evidence.json') != ''",
+            ):
+                self.assertIn(gate, condition)
+
+    def test_handled_primary_message_sink_cannot_change_original_exit(self):
+        import builtins
+
+        from review_sensei.errors import ReviewFormatError
+
+        original_print = builtins.print
+        faults = []
+
+        def print_with_fault(*args, **kwargs):
+            if any("synthetic-primary-output" in str(arg) for arg in args):
+                faults.append("write")
+                raise KeyboardInterrupt
+            return original_print(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EntryFixture(directory)
+
+            def fail():
+                raise ReviewFormatError("synthetic-primary-output")
+
+            fixture.before_provider = fail
+            with patch("builtins.print", side_effect=print_with_fault):
+                self.assertEqual(fixture.invoke(), 1, fixture.error)
+            self.assertEqual(faults, ["write"])
+            value = outcome(self, fixture.error)
+            self.assertEqual(value["exit_code"], 1)
+            self.assertEqual(value["primary_exception_kind"], "input_or_protocol")
+            # A provider-entered refusal has no abort witness; retain that
+            # independent cleanup refusal instead of treating it as settled.
+            self.assertEqual(value["cleanup_exception_kind"], "input_or_protocol")
+
+    def test_classification_observer_failure_and_fallback_preserve_original(self):
+        from review_sensei_github import review_lifecycle_diagnostics as diagnostic
+
+        from review_sensei import cli as core
+
+        for fault in (OSError("private-observer"), KeyboardInterrupt(), SystemExit(99)):
+
+            def broken(*_):
+                raise fault
+
+            with core._observe_cli_failures(broken):
+                core._notify_cli_failure(
+                    ReviewInputError("private-primary"), OSError("private-cleanup")
+                )
+        stream = io.StringIO()
+        with redirect_stderr(stream), diagnostic.lifecycle("review") as current:
+            core._notify_cli_failure(
+                ReviewInputError("private-primary"), OSError("private-cleanup")
+            )
+            current.scope["overflow"] = "x" * 5000
+            current.returned(1)
+        value = outcome(self, stream.getvalue())
+        self.assertEqual(value["reason"], "diagnostic_size_limit")
+        self.assertEqual(value["primary_exception_kind"], "input_or_protocol")
+        self.assertEqual(value["cleanup_exception_kind"], "os")
+        self.assertNotIn("private", json.dumps(value))
+
     def test_command_failure_after_admission_does_not_blame_old_predecessor(self):
         from test_action_run import CommandEntryFixture
 
