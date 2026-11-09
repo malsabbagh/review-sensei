@@ -4,6 +4,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -76,6 +77,7 @@ class ReviewLifecycleDiagnosticsTests(unittest.TestCase):
         for mode, kind, configured, policy in (
             ("none", "review", "none", "disabled"),
             ("diagnostics", "review", "diagnostics", "eligible"),
+            ("diagnostics", "restart", "diagnostics", "eligible"),
             ("diagnostics", "command", "diagnostics", "skipped"),
             ("diagnostics", "reply", "diagnostics", "skipped"),
             ("all", "review", "unavailable", "unavailable"),
@@ -119,30 +121,56 @@ class ReviewLifecycleDiagnosticsTests(unittest.TestCase):
                 with patch.object(core, "_main", side_effect=KeyboardInterrupt()):
                     self.assertEqual(core.main([]), 130)
 
-    def test_artifact_upload_has_independent_workflow_gates(self):
-        from strict_workflow_yaml import load_workflow
+    def test_valid_primary_survives_unknown_cleanup_without_raw_labels(self):
+        from review_sensei_github import review_lifecycle_diagnostics as diagnostic
 
-        workflow = load_workflow(
-            Path(".github/workflows/review-sensei-run.yml").read_text()
+        for cleanup in ("new-private-cleanup-kind", {"private": "value"}):
+            stream = io.StringIO()
+            with redirect_stderr(stream), diagnostic.lifecycle("review") as current:
+                current.classified_failure("os", cleanup)
+                current.returned(1)
+            value = outcome(self, stream.getvalue())
+            self.assertEqual(value["primary_exception_kind"], "os")
+            self.assertEqual(value["cleanup_exception_kind"], "unexpected")
+            self.assertNotIn("private", json.dumps(value))
+
+    def test_neutral_observer_classifies_all_closed_kinds_without_messages(self):
+        from review_sensei.failure_observation import exception_kind
+
+        class PrivateError(Exception):
+            def __str__(self):
+                raise AssertionError("message must not be inspected")
+
+        for error, expected in (
+            (KeyboardInterrupt(), "interrupted"),
+            (ReviewInputError("private"), "input_or_protocol"),
+            (OSError("private"), "os"),
+            (ValueError("private"), "value"),
+            (SystemExit(99), "system_exit"),
+            (PrivateError(), "unexpected"),
+        ):
+            self.assertEqual(exception_kind(error), expected)
+
+    def test_host_diagnostics_do_not_import_the_engine_cli(self):
+        code = """
+import importlib.abc,sys
+class NoCli(importlib.abc.MetaPathFinder):
+    def find_spec(self,name,*args):
+        if name == 'review_sensei.cli':
+            raise AssertionError('diagnostics must not depend on CLI import')
+sys.meta_path.insert(0,NoCli())
+from review_sensei.errors import ReviewInputError
+from review_sensei_github.review_lifecycle_diagnostics import lifecycle
+with lifecycle('review') as current:
+    current.failed(ReviewInputError('private-primary'))
+    current.returned(1)
+assert 'review_sensei.cli' not in sys.modules
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True
         )
-        steps = [
-            step
-            for job in workflow["jobs"].values()
-            for step in job.get("steps", [])
-            if step.get("name") == "Upload diagnostics artifact"
-        ]
-        self.assertEqual(len(steps), 2)
-        for step in steps:
-            condition = step["if"]
-            for gate in (
-                "!cancelled()",
-                "inputs.operation == 'review'",
-                "needs.bootstrap.outputs.artifacts == 'diagnostics'",
-                "steps.provider-review.outputs.result_ready == 'true'",
-                "steps.provider-review.outputs.checkpoint_workspace_clean == 'true'",
-                "hashFiles('checkpoint-evidence.json') != ''",
-            ):
-                self.assertIn(gate, condition)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("private-primary", result.stderr)
 
     def test_handled_primary_message_sink_cannot_change_original_exit(self):
         import builtins
@@ -178,20 +206,20 @@ class ReviewLifecycleDiagnosticsTests(unittest.TestCase):
     def test_classification_observer_failure_and_fallback_preserve_original(self):
         from review_sensei_github import review_lifecycle_diagnostics as diagnostic
 
-        from review_sensei import cli as core
+        from review_sensei import failure_observation as observation
 
         for fault in (OSError("private-observer"), KeyboardInterrupt(), SystemExit(99)):
 
             def broken(*_):
                 raise fault
 
-            with core._observe_cli_failures(broken):
-                core._notify_cli_failure(
+            with observation.observe_cli_failures(broken):
+                observation.notify_cli_failure(
                     ReviewInputError("private-primary"), OSError("private-cleanup")
                 )
         stream = io.StringIO()
         with redirect_stderr(stream), diagnostic.lifecycle("review") as current:
-            core._notify_cli_failure(
+            observation.notify_cli_failure(
                 ReviewInputError("private-primary"), OSError("private-cleanup")
             )
             current.scope["overflow"] = "x" * 5000

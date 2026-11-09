@@ -10,12 +10,10 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, NoReturn
+from typing import Any, NoReturn
 
 from .baseline import (
     RECOVERABLE_FALLBACK_REASONS,
@@ -43,6 +41,12 @@ from .context import (
 )
 from .diff import analyze_diff
 from .errors import ReviewInputError, ReviewSenseiError
+from .failure_observation import (
+    exception_kind as _exception_kind,
+)
+from .failure_observation import (
+    notify_cli_failure as _notify_cli_failure,
+)
 from .learnings import (
     DEFAULT_LEARNING_DIRECTORY,
     LearningStore,
@@ -2670,54 +2674,6 @@ def _delegate_moved_command(args_list: list[str]) -> int:
         check=False,
     )
     return int(completed.returncode)
-
-
-_CLI_FAILURE_OBSERVER: ContextVar[Callable[[str, str | None], None] | None] = (
-    ContextVar("cli_failure_observer", default=None)
-)
-
-
-def _exception_kind(error: BaseException) -> str:
-    """Closed diagnostic vocabulary; never inspect exception messages/notes."""
-    return (
-        "interrupted"
-        if isinstance(error, KeyboardInterrupt)
-        else "input_or_protocol"
-        if isinstance(error, ReviewSenseiError)
-        else "os"
-        if isinstance(error, OSError)
-        else "value"
-        if isinstance(error, ValueError)
-        else "system_exit"
-        if isinstance(error, SystemExit)
-        else "unexpected"
-    )
-
-
-@contextmanager
-def _observe_cli_failures(
-    observer: Callable[[str, str | None], None],
-) -> Iterator[None]:
-    """Host-owned observation only; no diagnostic value controls business work."""
-    token = _CLI_FAILURE_OBSERVER.set(observer)
-    try:
-        yield
-    finally:
-        _CLI_FAILURE_OBSERVER.reset(token)
-
-
-def _notify_cli_failure(
-    primary: BaseException, cleanup: BaseException | None = None
-) -> None:
-    try:
-        observer = _CLI_FAILURE_OBSERVER.get()
-        if observer is not None:
-            observer(
-                _exception_kind(primary),
-                None if cleanup is None else _exception_kind(cleanup),
-            )
-    except BaseException:
-        pass  # Diagnostic cancellation/failure must not replace the original.
 
 
 def _note_cleanup_failure(primary: BaseException, cleanup: BaseException) -> None:

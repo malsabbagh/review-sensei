@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator, Mapping
 
+from review_sensei.failure_observation import exception_kind, observe_cli_failures
+
 PREFIX = "review-sensei: lifecycle "
 MAX_LINE_BYTES = 4096
 _ACTIVE: ContextVar[LifecycleDiagnostics | None] = ContextVar(
@@ -182,7 +184,6 @@ class LifecycleDiagnostics:
 
     def failed(self, error: BaseException) -> None:
         from review_sensei.broker_diagnostics import BrokerDiagnostic
-        from review_sensei.cli import _exception_kind
 
         if isinstance(error, KeyboardInterrupt):
             # The outer hosted CLI maps this interruption to exit 130.
@@ -199,7 +200,7 @@ class LifecycleDiagnostics:
                 "correlation_id": diagnostic.correlation_id,
             }
 
-        self.exception_kind = _exception_kind(error)
+        self.exception_kind = exception_kind(error)
         if self.primary_exception_kind is None:
             self.primary_exception_kind = self.exception_kind
         self.reason = (
@@ -211,16 +212,10 @@ class LifecycleDiagnostics:
         )
 
     def classified_failure(self, primary: str, cleanup: str | None) -> None:
-        if (
-            primary not in _ERROR_KINDS
-            or cleanup is not None
-            and cleanup not in _ERROR_KINDS
-        ):
-            return
         if self.primary_exception_kind is None:
-            self.primary_exception_kind = primary
+            self.primary_exception_kind = _label(primary, _ERROR_KINDS) or "unexpected"
         if cleanup is not None and self.cleanup_exception_kind is None:
-            self.cleanup_exception_kind = cleanup
+            self.cleanup_exception_kind = _label(cleanup, _ERROR_KINDS) or "unexpected"
 
     def _caller_view(self) -> dict[str, object]:
         caller = self.caller
@@ -323,12 +318,11 @@ class LifecycleDiagnostics:
 
 @contextmanager
 def lifecycle(kind: str) -> Iterator[LifecycleDiagnostics]:
-    from review_sensei.cli import _observe_cli_failures
 
     value = LifecycleDiagnostics(kind)
     token = _ACTIVE.set(value)
     try:
-        with _observe_cli_failures(value.classified_failure):
+        with observe_cli_failures(value.classified_failure):
             yield value
     except BaseException as error:
         try:
