@@ -1,8 +1,9 @@
-"""G33 hosted-route characterization; ordinary base freshness is undecided."""
+"""G33 hosted replies bind prepared and accepted context to base SHA/ref."""
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import tempfile
 import unittest
@@ -22,6 +23,13 @@ except ModuleNotFoundError:
     from tests.test_review_run import EntryFixture
     from tests.test_review_run_rescan import partial_fixture
 
+from review_sensei_github.application import GitHubApplication
+from review_sensei_github.conversation import (
+    ConversationPublisher,
+    PreparedConversation,
+    ReplyResult,
+)
+from review_sensei_github.errors import GitHubConversationError
 from review_sensei_github.human_assessment import HumanAssessmentPublisher
 from review_sensei_github.session_ledger import parse_session_comment
 
@@ -190,11 +198,10 @@ def invoke_human_with_late_change(fixture, change):
 
 class HostedReplyFreshnessCharacterizationTests(unittest.TestCase):
     def test_ordinary_reply_current_boundary_after_context_changes(self):
-        # These base/ref POST outcomes characterize G33, not an adopted policy.
         for change, code, posts, status in (
             ("unchanged", 0, 1, "replied"),
-            ("base-sha", 0, 1, "replied"),
-            ("base-ref", 0, 1, "replied"),
+            ("base-sha", 1, 0, "skipped_stale_base"),
+            ("base-ref", 1, 0, "skipped_stale_base"),
             ("source-edit", 1, 0, "skipped_edited_source"),
             ("head", 1, 0, "skipped_stale_head"),
         ):
@@ -225,6 +232,241 @@ class HostedReplyFreshnessCharacterizationTests(unittest.TestCase):
                 self.assertEqual(
                     fixture.action()["phase"], "terminal" if posts else "pending"
                 )
+
+    def test_base_drift_during_preparation_refuses_before_inference(self):
+        original = ConversationPublisher.prepare_context
+        for change in ("base-sha", "base-ref"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as d:
+                fixture = FreshnessReplyFixture(d)
+                fixture.initialize_freshness()
+                prepared_once = False
+
+                def prepare(publisher, **arguments):
+                    nonlocal prepared_once
+                    result = original(publisher, **arguments)
+                    if isinstance(result, PreparedConversation) and not prepared_once:
+                        prepared_once = True
+                        mutate_after_context(fixture, change)
+                    return result
+
+                with patch.object(ConversationPublisher, "prepare_context", prepare):
+                    self.assertEqual(fixture.invoke_reply(), 1, fixture.error)
+                self.assertEqual(fixture.last_result.status, "skipped_stale_base")
+                self.assertEqual(fixture.provider_calls, 0)
+                self.assertEqual(fixture.reply_posts, 0)
+                self.assertEqual(fixture.action()["phase"], "pending")
+
+    def test_accepted_reply_reentry_binds_original_base_without_reinference(self):
+        # Seed a real accepted result before publication, then re-enter the
+        # public application inside the same authenticated hosted action. The
+        # CLI does not automatically retry/re-enter. A different run already
+        # refuses earlier on its execution binding and is a separate control.
+        original = GitHubApplication.generate_and_publish_reply
+        for change in ("unchanged", "base-sha", "base-ref", "source-edit", "head"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as d:
+                fixture = FreshnessReplyFixture(d)
+                fixture.initialize_freshness()
+
+                def reenter(application, **arguments):
+                    with patch.object(
+                        ConversationPublisher,
+                        "publish_current",
+                        return_value=ReplyResult(status="skipped_pr_state"),
+                    ):
+                        original(application, **arguments)
+                    self.assertEqual(fixture.provider_calls, 1)
+                    self.assertEqual(fixture.reply_posts, 0)
+                    mutate_after_context(fixture, change)
+                    return original(application, **arguments)
+
+                with patch.object(
+                    GitHubApplication, "generate_and_publish_reply", reenter
+                ):
+                    self.assertEqual(
+                        fixture.invoke_reply(),
+                        0 if change == "unchanged" else 1,
+                        fixture.error,
+                    )
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertEqual(fixture.reply_posts, int(change == "unchanged"))
+                if change in {"base-sha", "base-ref"}:
+                    self.assertIn(
+                        "operation entry refused: binding_conflict", fixture.error
+                    )
+                self.assertEqual(
+                    fixture.action()["phase"],
+                    "terminal" if change == "unchanged" else "pending",
+                )
+                self.assertEqual(fixture.accounted.accounting.configuration.limit, 512)
+                self.assertEqual(
+                    len(fixture.accounted.observations), len(fixture.trace)
+                )
+                self.assertFalse(fixture.resolved_threads)
+                self.assertFalse(fixture.reviews)
+
+    def test_legacy_head_only_accepted_reply_is_not_reused_or_reinferred(self):
+        original = GitHubApplication.generate_and_publish_reply
+        through = GitHubApplication._through_operation
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = FreshnessReplyFixture(directory)
+            fixture.initialize_freshness()
+
+            def legacy(application, **arguments):
+                arguments["attestation_digest"] = hashlib.sha256(
+                    f"123:7:{fixture.live_head}".encode()
+                ).hexdigest()
+                return through(application, **arguments)
+
+            def reenter(application, **arguments):
+                with (
+                    patch.object(GitHubApplication, "_through_operation", legacy),
+                    patch.object(
+                        ConversationPublisher,
+                        "publish_current",
+                        return_value=ReplyResult(status="skipped_pr_state"),
+                    ),
+                ):
+                    original(application, **arguments)
+                return original(application, **arguments)
+
+            with patch.object(GitHubApplication, "generate_and_publish_reply", reenter):
+                self.assertEqual(fixture.invoke_reply(), 1, fixture.error)
+            self.assertIn("operation entry refused: binding_conflict", fixture.error)
+            self.assertEqual(fixture.provider_calls, 1)
+            self.assertEqual(fixture.reply_posts, 0)
+            self.assertEqual(fixture.action()["phase"], "pending")
+
+    def test_distinct_run_already_refuses_before_accepted_reply_reentry(self):
+        for change in ("unchanged", "base-sha", "base-ref"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as d:
+                fixture = FreshnessReplyFixture(d)
+                fixture.initialize_freshness()
+                self.assertEqual(fixture.invoke_reply(), 0, fixture.error)
+                fixture.next_run()
+                fixture.live_head = fixture.requested_head = HEAD
+                mutate_after_context(fixture, change)
+                self.assertEqual(fixture.invoke_reply(), 1, fixture.error)
+                self.assertIn(
+                    "operation entry refused: binding_conflict", fixture.error
+                )
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertEqual(fixture.reply_posts, 1)
+
+    def test_malformed_late_base_ref_is_bounded_before_reply_publication(self):
+        for invalid in (None, False, "", "private-value-" * 50):
+            with (
+                self.subTest(type=type(invalid).__name__),
+                tempfile.TemporaryDirectory() as d,
+            ):
+                fixture = FreshnessReplyFixture(d)
+                fixture.initialize_freshness()
+
+                def complete(_request):
+                    fixture.live_base_ref = invalid
+                    return fixture.reply_document
+
+                fixture.provider_callback = complete
+                self.assertEqual(fixture.invoke_reply(), 1, fixture.error)
+                self.assertIn("reply context base was invalid", fixture.error)
+                self.assertNotIn("private-value-", fixture.error)
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertEqual(fixture.reply_posts, 0)
+                self.assertEqual(fixture.action()["phase"], "pending")
+
+    def test_base_drift_after_confirmed_reply_preserves_effect_and_pending_action(self):
+        class LateChange(FreshnessReplyFixture):
+            def external(self, request, timeout):
+                response = super().external(request, timeout)
+                if request.get_method() == "POST" and self.reply_posts:
+                    self.live_base_ref = "release"
+                return response
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = LateChange(directory)
+            fixture.initialize_freshness()
+            self.assertEqual(fixture.invoke_reply(), 1, fixture.error)
+            self.assertEqual(fixture.provider_calls, 1)
+            self.assertEqual(fixture.reply_posts, 1)
+            self.assertIsNone(fixture.last_result.finalization_completion)
+            self.assertEqual(fixture.action()["phase"], "pending")
+            self.assertFalse(fixture.resolved_threads)
+            self.assertFalse(fixture.reviews)
+
+    def test_drift_after_outer_fence_is_rejected_at_final_reply_gate(self):
+        original = ConversationPublisher._publish
+        for change in ("base-sha", "base-ref"):
+            with (
+                self.subTest(change=change),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture = FreshnessReplyFixture(directory)
+                fixture.initialize_freshness()
+
+                def publish(publisher, **arguments):
+                    mutate_after_context(fixture, change)
+                    return original(publisher, **arguments)
+
+                with patch.object(ConversationPublisher, "_publish", publish):
+                    self.assertEqual(fixture.invoke_reply(), 1, fixture.error)
+                self.assertEqual(fixture.last_result.status, "skipped_stale_base")
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertEqual(fixture.reply_posts, 0)
+                self.assertEqual(fixture.action()["phase"], "pending")
+
+    def test_native_receipt_reuse_is_bound_at_final_reply_gate(self):
+        original = ConversationPublisher._publish
+        for change in ("unchanged", "base-sha", "base-ref", "invalid-ref"):
+            with (
+                self.subTest(change=change),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture = FreshnessReplyFixture(directory)
+                fixture.initialize_freshness()
+
+                def publish(publisher, **arguments):
+                    # Create a real owned receipt after the outer report scan,
+                    # then enter the existing-receipt branch with identical
+                    # arguments. No receipt author/body validation is mocked.
+                    first = original(publisher, **arguments)
+                    self.assertEqual(first.status, "replied")
+                    self.assertEqual(fixture.reply_posts, 1)
+                    if change == "invalid-ref":
+                        fixture.live_base_ref = None
+                    else:
+                        mutate_after_context(fixture, change)
+                    try:
+                        reused = original(publisher, **arguments)
+                    except GitHubConversationError as error:
+                        self.assertEqual(change, "invalid-ref")
+                        self.assertEqual(str(error), "reply context base was invalid")
+                        raise
+                    self.assertNotEqual(change, "invalid-ref")
+                    self.assertEqual(
+                        reused.status,
+                        "already_replied"
+                        if change == "unchanged"
+                        else "skipped_stale_base",
+                    )
+                    return reused
+
+                with patch.object(ConversationPublisher, "_publish", publish):
+                    self.assertEqual(
+                        fixture.invoke_reply(),
+                        0 if change == "unchanged" else 1,
+                        fixture.error,
+                    )
+                self.assertEqual(fixture.reply_posts, 1)  # No duplicate POST.
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertEqual(
+                    fixture.action()["phase"],
+                    "terminal" if change == "unchanged" else "pending",
+                )
+                if change in {"base-sha", "base-ref"}:
+                    self.assertEqual(fixture.last_result.status, "skipped_stale_base")
+                elif change == "invalid-ref":
+                    self.assertIn("reply context base was invalid", fixture.error)
+                self.assertFalse(fixture.resolved_threads)
+                self.assertFalse(fixture.reviews)
 
     def test_normal_review_blocks_base_sha_ref_and_head_changes(self):
         for change in ("unchanged", "base-sha", "base-ref", "head"):

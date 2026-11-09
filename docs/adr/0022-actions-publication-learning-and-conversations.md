@@ -153,3 +153,26 @@ The generated setup-v4 caller now follows
 Configure `PUBLIC_WORKFLOW_TAG=v5`. The broker still accepts `v4` during
 migration. Moving `v5` is the public cutoff; package releases remain immutable
 `vX.Y.Z`.
+
+## Amendment - generated reply base freshness
+
+Generated ordinary replies bind their prepared context and accepted-result
+identity to both the base SHA and base ref, alongside the existing repository,
+PR, head and source bindings. A same-head base advance or same-SHA retarget
+withholds the prepared reply. Drift between deferred and complete preparation
+stops before inference; drift observed at a publication fence stops the pending
+write. Existing preflight reads also check that binding before confirming a
+reused reply.
+
+The accepted-result identity has a distinct versioned digest. A conflicting
+base binding or an older head-only result refuses reuse without another model
+call. Existing retained results, costs and unresolved effects remain intact.
+There is no automatic retry, new allowance or historical-state migration.
+Movement after a confirmed reply can leave that visible effect with pending
+action completion; it is not represented as an effect-free refusal.
+
+Human reassessment, thread resolution and approval retain their separate stricter
+evidence and authority gates. This change adds no provider route, capability or
+approval authority. The lower-level API for publishing a caller-supplied static
+reply remains compatible; the generated-reply composition supplies the prepared
+base binding explicitly.

@@ -29,7 +29,7 @@ from review_sensei.models import (
     LearningEntry,
 )
 from review_sensei.presentation import append_response_instructions
-from review_sensei.validation import validate_repository_path
+from review_sensei.validation import utf8_size, validate_repository_path
 
 from .action_completion import (
     ReplyFinalizationCompletion,
@@ -294,6 +294,23 @@ class PreparedConversation:
     source_updated_at: str
     head_sha: str
     root_comment_id: int
+
+
+def _reply_base(base_sha: object, base_ref: object) -> tuple[str, str]:
+    try:
+        valid = (
+            isinstance(base_sha, str)
+            and GIT_SHA_HEX.fullmatch(base_sha) is not None
+            and isinstance(base_ref, str)
+            and bool(base_ref.strip())
+            and utf8_size(base_ref, label="reply base ref") <= 512
+        )
+    except ReviewInputError:
+        valid = False
+    if not valid:
+        raise GitHubConversationError("reply context base was invalid")
+    assert isinstance(base_sha, str) and isinstance(base_ref, str)
+    return base_sha, base_ref
 
 
 @dataclass(frozen=True)
@@ -662,6 +679,7 @@ class ConversationPublisher:
         base_sha = base.get("sha")
         if not isinstance(base_sha, str) or not GIT_SHA_HEX.fullmatch(base_sha):
             raise GitHubConversationError("reply preflight base was invalid")
+        base_sha, base_ref = _reply_base(base_sha, base.get("ref"))
         if assessment_selector is not None and base_sha != assessment_selector.base_sha:
             return ReplyResult(status="skipped_stale_base")
         if defer_evidence or assessment_selector is not None:
@@ -743,7 +761,7 @@ class ConversationPublisher:
                 pull_request_body=_bounded_text(
                     pr.get("body"), MAX_CONTEXT_PR_BODY_BYTES
                 ),
-                base_ref=_bounded_text(base.get("ref"), 512),
+                base_ref=base_ref,
                 base_sha=base_sha,
                 head_ref=_bounded_text(head.get("ref"), 512),
                 diff_context=diff_context,
@@ -1342,6 +1360,8 @@ class ConversationPublisher:
         resolution_base_sha: str | None = None,
         resolution_token: str | None = None,
         _pending_stage: _PendingPageStage | None = None,
+        context_base_sha: str | None = None,
+        context_base_ref: str | None = None,
     ) -> ReplyResult:
         return self._publish(
             token=token,
@@ -1359,6 +1379,8 @@ class ConversationPublisher:
             resolution_base_sha=resolution_base_sha,
             resolution_token=resolution_token,
             _pending_stage=_pending_stage,
+            context_base_sha=context_base_sha,
+            context_base_ref=context_base_ref,
         )
 
     def _publish(
@@ -1380,11 +1402,18 @@ class ConversationPublisher:
         resolution_token: str | None = None,
         complete_report_readback: bool = False,
         _pending_stage: _PendingPageStage | None = None,
+        context_base_sha: str | None = None,
+        context_base_ref: str | None = None,
     ) -> ReplyResult:
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubConversationError("reply head sha is invalid")
         if not isinstance(reply, ConversationReply):
             raise GitHubConversationError("reply is invalid")
+        context_base = (
+            _reply_base(context_base_sha, context_base_ref)
+            if context_base_sha is not None or context_base_ref is not None
+            else None
+        )
         if _pending_stage is not None and (
             not isinstance(_pending_stage, _PendingPageStage)
             or _pending_stage.owner is not self
@@ -1517,6 +1546,19 @@ class ConversationPublisher:
                 expected_body=body if pending_page is not None else None,
             )
         )
+        if existing is not None and context_base is not None:
+            preflight = self.finalizer._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if preflight.result is not None:
+                return ReplyResult(status=preflight.result.status)
+            if _reply_base(preflight.base_sha, preflight.base_ref) != context_base:
+                return ReplyResult(status="skipped_stale_base")
+
         if existing is not None:
             if self._can_record_resolution(
                 reply=reply,
@@ -1586,6 +1628,12 @@ class ConversationPublisher:
             or base_repo.get("full_name") != repository
         ):
             return ReplyResult(status="skipped_fork")
+
+        if (
+            context_base is not None
+            and _reply_base(base.get("sha"), base.get("ref")) != context_base
+        ):
+            return ReplyResult(status="skipped_stale_base")
 
         request_body: dict[str, object] = {"body": body}
         target = (
@@ -2199,6 +2247,13 @@ class ConversationPublisher:
             )
             if preflight.result is not None:
                 return preflight.result.status
+            if (
+                arguments.get("context_base_sha") is not None
+                or arguments.get("context_base_ref") is not None
+            ) and _reply_base(preflight.base_sha, preflight.base_ref) != _reply_base(
+                arguments.get("context_base_sha"), arguments.get("context_base_ref")
+            ):
+                return "skipped_stale_base"
             last_source = source
             return None
 

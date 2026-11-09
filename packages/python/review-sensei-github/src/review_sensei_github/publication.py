@@ -1501,6 +1501,7 @@ class _FinalizationPreflight:
     result: PublicationResult | None = None
     repository_id: int | None = None
     base_sha: str | None = None
+    base_ref: str | None = None
     app_authored: bool = False
 
 
@@ -3495,6 +3496,7 @@ class ReviewApprovalFinalizer:
         return _FinalizationPreflight(
             repository_id=repository_id,
             base_sha=base_sha,
+            base_ref=base.get("ref"),
             app_authored=author["login"] == app_slug,
         )
 
