@@ -78,6 +78,36 @@ class ReviewDecisionBindingTests(unittest.TestCase):
         self.assertEqual(prepared.comments, original.comments)
         self.assertTrue(prepared.comments[0].blocks_approval)
 
+    def test_receipt_construction_owns_nested_input(self):
+        original = self.run_review().result
+        for route in ("constructor", "from_dict"):
+            with self.subTest(route=route):
+                document = copy.deepcopy(original.to_dict())
+                receipt = document["decision_pass"]
+                result = (
+                    replace(original, decision_pass=receipt)
+                    if route == "constructor"
+                    else ReviewResult.from_dict(document)
+                )
+                expected = copy.deepcopy(result.to_dict())
+                digest = result.content_digest()
+                receipt["candidates"][0]["action"] = "delete"
+                receipt["models"][0]["actual_model"] = "mutated-model"
+                self.assertEqual(result.to_dict(), expected)
+                self.assertEqual(result.content_digest(), digest)
+                validate_public_document(result.to_dict(), "review-result")
+
+    def test_receipt_serialization_owns_nested_output(self):
+        result = self.run_review().result
+        expected = copy.deepcopy(result.to_dict())
+        digest = result.content_digest()
+        document = result.to_dict()
+        document["decision_pass"]["candidates"][0]["action"] = "delete"
+        document["decision_pass"]["models"][0]["actual_model"] = "mutated-model"
+        self.assertEqual(result.to_dict(), expected)
+        self.assertEqual(result.content_digest(), digest)
+        validate_public_document(result.to_dict(), "review-result")
+
     def test_registered_extension_uses_same_policy_without_builtin_changes(self):
         settings = DecisionConfiguration(
             enabled=True,

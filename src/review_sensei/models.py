@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
@@ -1449,6 +1450,10 @@ class ReviewResult:
             from .review_decision_receipt import validate_decision_receipt
 
             validate_decision_receipt(self.decision_pass)
+            # Own nested receipt data independently of constructor/deserializer inputs.
+            object.__setattr__(
+                self, "decision_pass", deepcopy(dict(self.decision_pass))
+            )
             if (
                 self.decision_pass["status"] == "incomplete"
                 and self.review_status == "complete"
@@ -1735,7 +1740,7 @@ class ReviewResult:
         # a trusted service aggregate (explicitly complete).
         value["review_status"] = self.review_status
         if self.decision_pass is not None:
-            value["decision_pass"] = dict(self.decision_pass)
+            value["decision_pass"] = deepcopy(dict(self.decision_pass))
         if self.persistence_status is not None:
             value["persistence_status"] = self.persistence_status
         if self.source_context_coverage is not None:

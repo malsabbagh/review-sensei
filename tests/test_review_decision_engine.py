@@ -307,6 +307,50 @@ class ReviewDecisionEngineTests(unittest.TestCase):
         self.assertEqual([c.to_dict() for c in run.result.comments], originals)
         self.assertEqual(run.result.review_status, "partial")
 
+    def test_oversized_extension_output_stops_later_dispatch_and_retains_charges(self):
+        for unknown_first in (False, True):
+            with self.subTest(unknown_first=unknown_first):
+
+                class OversizedDecision(DecisionFixture):
+                    def evaluate(self, request, execution):
+                        if not self.requests:
+                            self.before_response_bytes = (
+                                execution.tracker.response_bytes
+                            )
+                        self.requests.append(request)
+
+                        def send(timeout, maximum):
+                            self.dispatches.append((request.state, timeout, maximum))
+                            if unknown_first and len(self.dispatches) == 1:
+                                raise ProviderError("synthetic unknown response")
+                            return "x" * (maximum + 1)
+
+                        execution.execute(request.state, send)
+                        raise AssertionError("oversized output must not be accepted")
+
+                expected_calls = 2 if unknown_first else 1
+                originals = [
+                    comment(body=f"Distinct concern {i}.")
+                    for i in range(7 if unknown_first else 4)
+                ]
+                decision = OversizedDecision()
+                run = self.service(ReviewFixture(comments=originals), decision).run(
+                    self.request()
+                )
+                self.assertEqual(len(decision.dispatches), expected_calls)
+                receipt = run.result.decision_pass
+                self.assertEqual(receipt["calls"], expected_calls)
+                self.assertEqual(receipt["output_bytes"], 8193)
+                self.assertEqual(receipt["output_reserved"], expected_calls * 8192)
+                self.assertEqual(run.outcome.provider_calls, 1 + expected_calls)
+                self.assertEqual(
+                    run.outcome.response_bytes, decision.before_response_bytes + 8193
+                )
+                self.assertEqual(run.outcome.retry_attempts, 0)
+                self.assertEqual([c.to_dict() for c in run.result.comments], originals)
+                self.assertEqual(receipt["status"], "incomplete")
+                self.assertEqual(run.result.review_status, "partial")
+
     def test_decision_input_bound_refuses_before_dispatch_without_losing_candidate(
         self,
     ):

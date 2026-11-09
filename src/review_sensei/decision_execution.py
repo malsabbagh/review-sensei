@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .budgets import MAX_TOTAL_OUTPUT_BYTES, MAX_TOTAL_PROMPT_BYTES
 from .decision_configuration import DecisionConfiguration
@@ -20,6 +20,7 @@ class DecisionExecution:
     input_bytes: int = 0
     output_bytes: int = 0
     output_reserved: int = 0
+    _output_bound_exceeded: bool = field(default=False, init=False)
     started_ms: int = 0
     total_input_limit: int = MAX_TOTAL_PROMPT_BYTES
     total_output_limit: int = MAX_TOTAL_OUTPUT_BYTES
@@ -38,6 +39,8 @@ class DecisionExecution:
         )
 
     def execute(self, payload: str, send: Callable[[float, int], str]) -> str:
+        if self._output_bound_exceeded:
+            raise ProviderError("decision work budget exhausted")
         size = len(payload.encode("utf-8"))
         response_limit = min(
             8192,
@@ -69,7 +72,12 @@ class DecisionExecution:
         actual = len(raw.encode("utf-8"))
         self.tracker.record_response(raw)
         self.output_bytes += actual
-        if actual > response_limit or self.remaining_seconds() <= 0:
+        if actual > response_limit:
+            # Preserve observed bytes and all prior unknown reservations. A
+            # contract-violating adapter cannot reuse an understated allowance.
+            self._output_bound_exceeded = True
+            raise ProviderError("decision response exceeded its work bound")
+        if self.remaining_seconds() <= 0:
             raise ProviderError("decision response exceeded its work bound")
         self.output_reserved -= response_limit - actual
         return raw

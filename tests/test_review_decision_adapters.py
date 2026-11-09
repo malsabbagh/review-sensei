@@ -99,6 +99,24 @@ class Wire:
 
 
 class ReviewDecisionAdapterTests(unittest.TestCase):
+    def test_positional_execution_limits_keep_their_original_meaning(self):
+        tracker = ResourceBudgetTracker(ResourceBudget.create())
+        execution = DecisionExecution(tracker, settings(), 8, 0, 0, 0, 0, 0, 2, 7)
+        dispatches = []
+
+        def send(timeout, maximum):
+            dispatches.append(maximum)
+            return "1234567"
+
+        with self.assertRaises(ProviderError):
+            execution.execute("abc", send)
+        self.assertEqual(dispatches, [])
+        self.assertEqual(execution.execute("a", send), "1234567")
+        with self.assertRaises(ProviderError):
+            execution.execute("a", send)
+        self.assertEqual(dispatches, [7])
+        self.assertEqual(tracker.provider_calls, 1)
+
     def test_tls_setup_failure_is_bounded_unavailable_work(self):
         configuration = settings("openrouter")
         tracker = ResourceBudgetTracker(ResourceBudget.create())
