@@ -1337,3 +1337,6 @@ Intel qualification inspects collected files and the embedded PyInstaller module
 inventory to reject hosted runtime and cryptography packages, while preserving
 ordinary TLS libraries, trigger-shim compatibility and native parity (ADR 0078).
 A missing or malformed inventory cannot establish the engine boundary.
+
+Opt-in aggregate review triage is described in [review decisions](review-decisions.md)
+and proposed [ADR 0124](adr/0124-review-engine-decision-providers.md).

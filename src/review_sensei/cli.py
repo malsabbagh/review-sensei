@@ -84,6 +84,7 @@ from .provider_config import (
     validate_profile_provider_match,
 )
 from .providers import ProviderSettings, default_registry
+from .providers.decision import default_decision_registry
 from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
 from .providers.openrouter import (
     OpenRouterRoutingPolicy,
@@ -2880,6 +2881,15 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             raise ReviewInputError("--categories-dir requires --stages-dir")
         limits = DEFAULT_REVIEW_LIMITS
         work_configuration = load_configuration(getattr(args, "config", None))
+        if (
+            getattr(args, "profile", None)
+            and get_provider_profile(args.profile).endpoint_scope == "local"
+            and work_configuration.decision.enabled
+            and work_configuration.decision.provider != "ollama"
+        ):
+            raise ReviewInputError(
+                "a local-only review profile cannot enable remote decisions"
+            )
         work_budgets = work_configuration.advanced.review_work
         work_recovery = _work_recovery_from_cli(args, work_configuration)
         resource_budget = _configured_resource_budget(
@@ -3252,6 +3262,10 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             stage_providers=stage_providers,
             work_budgets=work_budgets,
             budget=resource_budget,
+            decision_configuration=work_configuration.decision,
+            decision_provider=default_decision_registry().create(
+                work_configuration.decision, os.environ
+            ),
         )
         context_root = args.context_root or args.learning_root
         context_store = (

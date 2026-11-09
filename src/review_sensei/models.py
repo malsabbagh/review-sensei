@@ -1442,8 +1442,20 @@ class ReviewResult:
     continuation_scope_digest: str | None = None
     review_verdict: ReviewVerdict | None = None
     publication_selection: PublicationSelectionHandoff | None = None
+    decision_pass: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
+        if self.decision_pass is not None:
+            from .review_decision_receipt import validate_decision_receipt
+
+            validate_decision_receipt(self.decision_pass)
+            if (
+                self.decision_pass["status"] == "incomplete"
+                and self.review_status == "complete"
+            ):
+                raise ReviewInputError(
+                    "incomplete decisions cannot authorize a complete review"
+                )
         if (
             self.review_verdict is not None
             and type(self.review_verdict) is not ReviewVerdict
@@ -1699,6 +1711,12 @@ class ReviewResult:
                 "domain": "reviewsensei:review-content:verdict:v1",
                 "review_verdict": self.review_verdict.to_dict(),
             }
+        if self.decision_pass is not None:
+            value = {
+                **value,
+                "domain": "reviewsensei:review-content:decision:v1",
+                "decision_pass": dict(self.decision_pass),
+            }
         return hashlib.sha256(_json_compact(value).encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, object]:
@@ -1716,6 +1734,8 @@ class ReviewResult:
         # can distinguish an omitted legacy status (parsed as incomplete) from
         # a trusted service aggregate (explicitly complete).
         value["review_status"] = self.review_status
+        if self.decision_pass is not None:
+            value["decision_pass"] = dict(self.decision_pass)
         if self.persistence_status is not None:
             value["persistence_status"] = self.persistence_status
         if self.source_context_coverage is not None:
@@ -1983,6 +2003,7 @@ class ReviewResult:
             ),
             review_verdict=verdict,
             publication_selection=selection,
+            decision_pass=cast(Mapping[str, object] | None, value.get("decision_pass")),
         )
 
 

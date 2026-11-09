@@ -17,6 +17,7 @@ configuration hierarchy, no environment interpolation, and no executable YAML.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ from urllib.parse import urlsplit
 
 from .api_work import DEFAULT_API_REQUEST_LIMIT, MAX_API_REQUEST_LIMIT
 from .budgets import MAX_TOTAL_OUTPUT_BYTES, MAX_TOTAL_PROMPT_BYTES, ReviewWorkBudgets
+from .decision_configuration import DecisionConfiguration
 from .errors import ReviewInputError
 from .outcomes import (
     DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS,
@@ -93,6 +95,7 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _OPENAI_DEFAULT_HOSTNAME = "api.openai.com"
 
 ROOT_FIELDS = (
+    "decision",
     "schema",
     "api_request_limit",
     "inference",
@@ -461,6 +464,7 @@ class ProductConfiguration:
     declared: Mapping[str, int]
     api_request_limit: int = DEFAULT_API_REQUEST_LIMIT
     review: ReviewSection = field(default_factory=ReviewSection)
+    decision: DecisionConfiguration = field(default_factory=DecisionConfiguration)
 
     def is_declared(self, field_path: str) -> bool:
         return field_path in self.declared
@@ -1017,6 +1021,7 @@ def _build_configuration(
         declared=dict(lines),
         api_request_limit=api_request_limit,
         review=review,
+        decision=DecisionConfiguration.from_dict(values.get("decision")),
     )
 
 
@@ -2507,6 +2512,7 @@ def render_configuration(
         f" (schema {configuration.schema})",
         f"configuration root: {configuration.root}",
         f"api_request_limit: {configuration.api_request_limit} (caller requests per Actions run)",
+        "decision: " + json.dumps(configuration.decision.to_dict(), sort_keys=True),
         "effective inference:",
     ]
     inference_rows = (

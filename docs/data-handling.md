@@ -170,6 +170,15 @@ provider data egress.
 
 ## OpenAI-compatible adapter
 
+The optional [review decision pass](review-decisions.md) sends bounded original
+candidate descriptions and relevant reviewed diff hunks to its separately selected
+adapter. It is disabled by default. Local mode disables environment proxies and
+uses literal loopback; OpenRouter requires explicit remote permission and an
+independently named credential/upstream. The receipt contains choices, hashes,
+model identities and usage metadata rather than source packets or raw responses.
+Live privacy and model qualification is pending; no activation accompanies the
+source change.
+
 The `openai-compatible` adapter and `fast-triage` profile send the same
 provider-facing review payload to `https://api.openai.com/v1` using a bearer
 token from the caller-supplied `OPENAI_API_KEY` value. The adapter rejects
