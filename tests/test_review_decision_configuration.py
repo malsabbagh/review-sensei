@@ -197,7 +197,7 @@ class ReviewDecisionCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()
         self.diff = Path("review.patch")
-        self.diff.write_text(DIFF, encoding="utf-8")
+        self.diff.write_bytes(DIFF.encode("utf-8"))
         self.config = Path(".reviewsensei.yml")
         self.fixture = Path("response.json")
         self.fixture.write_text(
