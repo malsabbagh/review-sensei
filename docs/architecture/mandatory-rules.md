@@ -302,8 +302,9 @@ policy commit, with `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` as the
 only product overrides. Local, cloud, and OpenRouter runtime jobs expose the
 through `hosted_runner` (ADR 0062), including read-only bootstrap. Local Ollama
 retains its existing label array. Backend, model and policy still
-Before an enabled review reaches either provider, the reusable workflow runs a
-read-only authoritative pull-request preflight. It validates the repository
+This job makes no live PR request and exports only the pull-request number;
+success does not authenticate title, draft state, current base/head or repository
+ownership.
 required fixes remain and stays `COMMENT`. `advisory` publishes `neutral`,
 stays `COMMENT`, and never fails the check. `action_required` covers a
 stand for a review that has not finished. A repository administrator must mark the check
