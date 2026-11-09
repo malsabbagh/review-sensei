@@ -4,7 +4,7 @@
 - Date: 2026-11-09
 - Decision owner/reviewers: ReviewSensei maintainers
 - Issue: [#161](https://github.com/malsabbagh/review-sensei/issues/161)
-- PR: pending qualification
+- PR: [#427](https://github.com/malsabbagh/review-sensei/pull/427)
 - Approver: none; no activation approved
 
 ## Context
@@ -38,8 +38,9 @@ new decision work. No fallback, recursive review, shell execution or model pull.
 Core library/CLI/configuration, explicit wire adapters, result receipt/schema,
 hosted planning, provider-free contracts and qualification plan. No comment-intent
 activation, live model call, release, credential grant, recovery activation or
-historical state mutation. The separately owned hosted recovery reconstruction
-requires its matching configuration-identity companion before hosted write use.
+historical state mutation. Hosted recovery reconstruction binds the same decision
+configuration identity and refuses changed policy without rewriting original
+transactions.
 
 ## Consequences
 
@@ -72,9 +73,9 @@ These tests do not establish live compatibility, cost, latency or model quality.
 
 ## Rollout and rollback
 
-Disabled is the default. Integrate the recovery identity companion and qualify
-matching installed readers before a hosted enabled test. A live smoke requires an
-explicit runtime/model/privacy boundary and call/spend cap. Keep existing receipts
+Disabled is the default. Qualify matching installed readers before a hosted
+enabled test. A live smoke requires an explicit runtime/model/privacy boundary and
+call/spend cap. Keep existing receipts
 and holds when disabling; do not rewrite prior results or reset accounting.
 
 ## Follow-up work

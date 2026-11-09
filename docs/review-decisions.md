@@ -107,9 +107,10 @@ returned as partial with an incomplete decision stage observation.
 
 Decision policy participates in cache, continuation and transaction configuration
 identity. Enabled analysis does not write the ordinary complete-analysis cache.
-The recovery reconstruction companion must be integrated and qualified before
-hosted write/recovery use is considered supported. Historical results are not
-rewritten or granted new reuse authority.
+Recovery reconstruction binds the same decision policy identity in both review
+work modes; changing it cannot reuse an earlier transaction. Matching installed
+readers still require qualification before hosted enablement. Historical results
+are not rewritten or granted new reuse authority.
 
 ## Extension and qualification
 
