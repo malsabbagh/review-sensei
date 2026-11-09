@@ -22,6 +22,8 @@ from review_sensei_github.review_hooks import GitHubReviewHooks
 from test_publication_recovery import APP, BASE, HEAD, IDENTITY, _Broker
 
 import review_sensei.cli as engine_cli
+from review_sensei.convergence import ReviewConvergencePolicy
+from review_sensei.errors import ReviewInputError
 from review_sensei.models import ProviderResponse, ReviewResult
 from review_sensei.service import ReviewService
 from review_sensei.session import LocalSessionLedger
@@ -62,10 +64,21 @@ class _FailedPublication(journey_fixture.JourneyState):
 
 
 class TrustedPublicationRecoveryTests(unittest.TestCase):
-    def original_analysis(self, root, *, head=HEAD, partial=False):
-        (root / ".reviewsensei.yml").write_text(
+    def original_analysis(
+        self, root, *, head=HEAD, partial=False, decision=None, work_mode=None
+    ):
+        configuration_text = (
             "schema: 1\ninference:\n  backend: local-ollama\n"
-            "  model: qwen3.5:4b\ngithub:\n  publication_inventory: complete\n",
+            "  model: qwen3.5:4b\ngithub:\n  publication_inventory: complete\n"
+        )
+        if decision is not None:
+            configuration_text += "decision:\n" + "".join(
+                f"  {key}: {json.dumps(value)}\n" for key, value in decision.items()
+            )
+        if work_mode is not None:
+            configuration_text += f"advanced:\n  review_work:\n    mode: {work_mode}\n"
+        (root / ".reviewsensei.yml").write_text(
+            configuration_text,
             encoding="utf-8",
         )
         (root / "review.patch").write_text(
@@ -135,6 +148,146 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
         ):
             self.assertEqual(engine_cli.main(argv, hosted_hooks=GitHubReviewHooks()), 0)
         return argv
+
+    def reconstruct_contexts(self, root):
+        from review_sensei_github.publication_context_recovery import (
+            reconstruct_publication_contexts,
+        )
+
+        return reconstruct_publication_contexts(
+            source_root=root,
+            diff=(root / "review.patch").read_text(),
+            ledger=LocalSessionLedger(root / "ledger"),
+            identity=IDENTITY,
+            base_sha=BASE,
+            head_sha=HEAD,
+            policy=ReviewConvergencePolicy(),
+        )
+
+    def ledger_bytes(self, root):
+        return {
+            str(p.relative_to(root)): p.read_bytes()
+            for p in (root / "ledger").rglob("*")
+            if p.is_file()
+        }
+
+    def test_enabled_decision_context_reconstructs_original_transaction(self):
+        decision = {"enabled": True, "provider": "ollama", "model": "fixture-decision"}
+        for mode in ("legacy", "unified"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                with patch(
+                    "socket.socket.connect",
+                    side_effect=AssertionError("no live network"),
+                ):
+                    self.original_analysis(root, decision=decision, work_mode=mode)
+                    before = self.ledger_bytes(root)
+                    reconstructed = self.reconstruct_contexts(root)
+                self.assertEqual(
+                    reconstructed.configuration,
+                    json.loads((root / "configuration.json").read_text()),
+                )
+                self.assertEqual(self.ledger_bytes(root), before)
+                result = ReviewResult.from_dict(
+                    json.loads((root / "result.json").read_text())
+                )
+                self.assertEqual(result.decision_pass["status"], "complete")
+                self.assertEqual(result.decision_pass["calls"], 0)
+                self.assertEqual(
+                    result.transaction.configuration_digest,
+                    result.transaction.compute_configuration_digest(
+                        reconstructed.configuration
+                    ),
+                )
+
+    def test_disabled_decision_context_keeps_original_configuration_bytes(self):
+        for mode in ("legacy", "unified"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                with patch(
+                    "socket.socket.connect",
+                    side_effect=AssertionError("no live network"),
+                ):
+                    self.original_analysis(root, work_mode=mode)
+                    original = (root / "configuration.json").read_text()
+                    before = self.ledger_bytes(root)
+                    reconstructed = self.reconstruct_contexts(root)
+                    self.assertEqual(reconstructed.configuration, json.loads(original))
+                    config = root / ".reviewsensei.yml"
+                    config.write_text(
+                        config.read_text() + "decision:\n  enabled: false\n"
+                    )
+                    explicit = self.reconstruct_contexts(root)
+                self.assertEqual(explicit, reconstructed)
+                self.assertEqual((root / "configuration.json").read_text(), original)
+                self.assertEqual(self.ledger_bytes(root), before)
+
+    def test_changed_decision_identity_refuses_without_ledger_mutation(self):
+        decision = {"enabled": True, "provider": "ollama", "model": "fixture-decision"}
+        changes = (
+            {"enabled": False},
+            decision | {"model": "changed-decision"},
+            decision | {"base_url": "http://127.0.0.1:11435/api"},
+            decision | {"max_calls": 1},
+            decision | {"max_input_bytes": 8192},
+            decision | {"max_output_bytes": 4096},
+            decision | {"timeout_ms": 2500},
+            {
+                "enabled": True,
+                "provider": "openrouter",
+                "model": "decision/model",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key_env": "SYNTHETIC_DECISION_KEY",
+                "allow_remote": True,
+                "upstream_provider": "morph",
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch(
+                "socket.socket.connect", side_effect=AssertionError("no live network")
+            ):
+                self.original_analysis(root, decision=decision)
+                before = self.ledger_bytes(root)
+                prefix = (
+                    (root / ".reviewsensei.yml").read_text().split("decision:\n", 1)[0]
+                )
+                for value in changes:
+                    with self.subTest(changed=sorted(value)):
+                        (root / ".reviewsensei.yml").write_text(
+                            prefix
+                            + "decision:\n"
+                            + "".join(
+                                f"  {key}: {json.dumps(item)}\n"
+                                for key, item in value.items()
+                            )
+                        )
+                        with self.assertRaisesRegex(
+                            ReviewInputError, "original committed transaction"
+                        ):
+                            self.reconstruct_contexts(root)
+                        self.assertEqual(self.ledger_bytes(root), before)
+
+    def test_newly_enabled_decision_cannot_reuse_disabled_transaction(self):
+        for mode in ("legacy", "unified"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                with patch(
+                    "socket.socket.connect",
+                    side_effect=AssertionError("no live network"),
+                ):
+                    self.original_analysis(root, work_mode=mode)
+                    before = self.ledger_bytes(root)
+                    configuration = root / ".reviewsensei.yml"
+                    configuration.write_text(
+                        configuration.read_text()
+                        + "decision:\n  enabled: true\n  provider: ollama\n  model: fixture-decision\n"
+                    )
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "original committed transaction"
+                    ):
+                        self.reconstruct_contexts(root)
+                self.assertEqual(self.ledger_bytes(root), before)
 
     def invoke(
         self,
