@@ -617,7 +617,7 @@ jobs:
       pull-requests: read
       issues: read
     steps:
-      - name: Validate live pull-request identity before provider execution
+      - name: Check pull-request routing inputs (live validation runs in lifecycle)
         id: fetch-pr
         env:
           GH_TOKEN: ${{ github.token }}

@@ -901,14 +901,20 @@ missing bindings or changed suffix/endpoint refuse support creation/loading. Old
 reports parse but cannot newly authorize unbound live support; historical targets
 remain eligible. Runtime approval binding remains missing. See ADR 0081.
 
-Before an enabled review reaches either provider, the reusable workflow runs a
-read-only authoritative pull-request preflight. It validates the repository
-numeric id, open/non-draft state, same-repository non-fork head, exact head
-SHA, base ref, and (when supplied) base SHA, then exports the API's canonical
-base SHA and a bounded standard-base64 title. The provider checks out that
-canonical base commit. Reply operations use a no-op preflight and cannot
-select a review step; unavailable GitHub metadata fails closed with an
-explicit error rather than allowing a stale or ambiguous review.
+The reusable workflow's `authoritative-preflight` job checks routing input
+syntax: a positive pull-request number, repository name and positive numeric
+repository ID. Its step is labeled **Check pull-request routing inputs (live
+validation runs in lifecycle)**. The legacy job and step IDs remain unchanged
+for check and output compatibility. This job makes no live PR request and exports
+only the pull-request number; success does not authenticate title, draft state,
+current base/head or repository ownership.
+
+The selected metered lifecycle subsequently authenticates live PR metadata,
+source, policy and Actions writer before business mutation or provider work.
+Review admission requires the exact base/head, matching repository identity,
+open/non-draft state, a same-repository non-fork head and a title within its byte
+bound. A PR can therefore pass routing and still fail lifecycle validation.
+Routing success is not a review or approval eligibility result.
 
 The automatic-review and GitHub-writes caller path defaults to automatic
 approval. Review publication is one exact-head review, and

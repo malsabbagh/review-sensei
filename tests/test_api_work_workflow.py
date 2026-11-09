@@ -11,6 +11,55 @@ from pathlib import Path
 
 class CallerWorkflowTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "Actions runner scripts use Bash")
+    def test_routing_success_does_not_authenticate_live_review_head(self):
+        from test_review_run import EntryFixture, fixture_process_environment
+
+        from tests.test_ci_policy import _job_section, _run_block_containing
+
+        runner = Path(".github/workflows/review-sensei-run.yml").read_text()
+        section = _job_section(runner, "authoritative-preflight")
+        self.assertIn(
+            "- name: Check pull-request routing inputs (live validation runs in lifecycle)",
+            section,
+        )
+        self.assertNotIn("\n    name:", section)  # Preserve the job/check identity.
+        self.assertIn("id: fetch-pr", section)
+        script = _run_block_containing(
+            section, "Live preflight belongs to the selected metered lifecycle."
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "routing-output"
+            result = subprocess.run(
+                ["bash", "-e", "-c", textwrap.dedent(script)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={
+                    **fixture_process_environment(),
+                    "GITHUB_OUTPUT": str(output),
+                    "PULL_REQUEST": "7",
+                    "REPOSITORY": "owner/repo",
+                    "REPOSITORY_ID": "123",
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output.read_text(), "pull_request_number=7\n")
+            lifecycle = Path(directory) / "lifecycle"
+            lifecycle.mkdir()
+            fixture = EntryFixture(lifecycle)
+            fixture.live_head = "d" * 40
+            self.assertEqual(fixture.invoke(), 1)
+            self.assertIn("live reviewed base or head conflicts", fixture.error)
+            self.assertEqual(fixture.provider_calls, 0)
+            self.assertIsNone(fixture.comment)
+            self.assertFalse(
+                any(
+                    method in {"POST", "PATCH", "PUT", "DELETE"}
+                    for _, method, _ in fixture.trace
+                )
+            )
+
+    @unittest.skipIf(os.name == "nt", "Actions runner scripts use Bash")
     def test_command_and_reply_lanes_use_one_policy_bound_process_without_shell_http(
         self,
     ):

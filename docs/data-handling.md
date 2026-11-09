@@ -161,9 +161,12 @@ sensitive data, so enable diagnostic uploads only when that content is suitable
 for GitHub artifact retention and access. With
 `artifacts: none`, no recovery bundle is uploaded and the ledger alone cannot
 reconstruct those bytes. Artifact retention is controlled by the workflow, not
-by ReviewSensei. Fork pull request heads are rejected by the reusable workflow's preflight before any
-provider call; enabling fork-triggered automation would require a separate
-security review of secrets, untrusted head behavior, and provider data egress.
+by ReviewSensei. Fork pull request heads are rejected by the selected metered
+review lifecycle's live PR validation before any provider call. The reusable
+workflow's earlier `authoritative-preflight` job checks routing input syntax only;
+it does not authenticate live PR state. Enabling fork-triggered automation would
+require a separate security review of secrets, untrusted head behavior, and
+provider data egress.
 
 ## OpenAI-compatible adapter
 

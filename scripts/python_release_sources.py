@@ -57,6 +57,8 @@ REGISTRY_ONLY_WORKFLOWS = frozenset(
         # Independently reviewed installer-output and prerequisite-refusal guards;
         # all four ordinary installation lanes retain their exact contract.
         "6e973aeff23cc6df24315b5cae4841dc62cdd0ed0d10fc6da775092c90a273f3",
+        # Routing step display label only; all execution and installer bytes unchanged.
+        "c90e6eaeff347f01be8ad9ac044a3bbb893d17553b7e586b480a46ffa975e91a",
     }
 )
 
