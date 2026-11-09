@@ -20,6 +20,8 @@ providers later.
 
 For source-linked sequence diagrams, limits, lens behavior, and valid
 configuration examples, see [Review pipelines and customization](docs/review-pipelines.md).
+For merge-conflict behavior and the automatic-run boundary, see
+[Reviewing a branch with merge conflicts](docs/review-merge-conflicts.md).
 
 ## What it does
 
