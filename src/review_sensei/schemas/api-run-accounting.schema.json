@@ -168,7 +168,8 @@
     "version": {
       "enum": [
         "caller-requests-v1",
-        "caller-requests-v2"
+        "caller-requests-v2",
+        "caller-requests-v3"
       ]
     },
     "previous_record": {
@@ -489,6 +490,23 @@
                       "type": "object"
                     }
                   }
+                },
+                {
+                  "allOf": [
+                    {
+                      "$ref": "evidence-manifest.schema.json"
+                    },
+                    {
+                      "properties": {
+                        "item_count": {
+                          "const": 1
+                        },
+                        "parts": {
+                          "maxItems": 1
+                        }
+                      }
+                    }
+                  ]
                 }
               ]
             },
@@ -620,6 +638,22 @@
             "items": {
               "$ref": "#/$defs/request"
             }
+          },
+          "action": {
+            "properties": {
+              "result": {
+                "if": {
+                  "type": "object"
+                },
+                "then": {
+                  "properties": {
+                    "encoding": {
+                      "const": "inline-json-v1"
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -637,6 +671,56 @@
           "completed": {
             "items": {
               "$ref": "#/$defs/request-pair"
+            }
+          },
+          "action": {
+            "properties": {
+              "result": {
+                "if": {
+                  "type": "object"
+                },
+                "then": {
+                  "properties": {
+                    "encoding": {
+                      "const": "inline-json-v1"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "version": {
+            "const": "caller-requests-v3"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "completed": {
+            "items": {
+              "$ref": "#/$defs/request-pair"
+            }
+          },
+          "action": {
+            "properties": {
+              "result": {
+                "if": {
+                  "type": "object"
+                },
+                "then": {
+                  "properties": {
+                    "item_count": {
+                      "const": 1
+                    }
+                  }
+                }
+              }
             }
           }
         }

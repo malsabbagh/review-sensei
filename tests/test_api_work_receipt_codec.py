@@ -51,7 +51,7 @@ class CallerReceiptCodecTests(unittest.TestCase):
         document = self.state().to_document()
         mutations = (
             lambda d: d.pop("version"),
-            lambda d: d.update(version="caller-requests-v3"),
+            lambda d: d.update(version="caller-requests-v4"),
             lambda d: d["completed"].append(d["completed"][0]),
             lambda d: d["completed"].append(["uncertain-post", 42]),
             lambda d: d["completed"].__setitem__(0, ["review:0", True]),

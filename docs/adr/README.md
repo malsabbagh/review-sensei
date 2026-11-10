@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0126](0126-prospective-action-result-reader.md) | Proposed | Read prospective one-part action results without enabling writes | User-directed G34 qualification; issue/PR pending | V1/V2 wire stability; explicit bounded current-root reader; no writer or recovery activation |
 | [0123](0123-review-lifecycle-diagnostics.md) | Proposed | Observe hosted lifecycle outcomes without granting completion | #161; follow-up to #403 | Bounded local stderr; no completion, recovery or approval authority |
 | [0121](0121-proposal-only-comment-intent.md) | Proposed | Proposal-only comment intent and typed closed choices | #161 | No provider dispatch, source authority or activation; exact current-head/evidence bindings |
 | [0120](0120-controlled-serialized-restart.md) | Proposed | Admit one isolated code-only restart while retaining historical uncertainty | [#238](https://github.com/malsabbagh/review-sensei/issues/238), PR387 | Empty registry; no deployment, activation or historical settlement |

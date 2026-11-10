@@ -729,6 +729,7 @@ class ApiRunRequestTransport:
         if record.record_sha256 != expected.record_sha256:
             raise ReviewInputError("caller reservation publication is unconfirmed")
         state = ApiRunAccounting.from_document(record.api_run_accounting)
+        state.require_writer_version()
         if (
             state.identity != self.run
             or state.startup != self.plan
@@ -773,6 +774,7 @@ class ApiRunRequestTransport:
             if ledger.evidence_producer() != self._producer:
                 raise ReviewInputError("caller reservation producer changed")
             previous = ApiRunAccounting.from_document(record.api_run_accounting)
+            previous.require_writer_version()
             if previous.identity != self.run or previous.startup != self.plan:
                 raise ReviewInputError("prior caller reservation scope conflicts")
             updated = mutate(record)
@@ -899,6 +901,7 @@ class ApiRunRequestTransport:
                 "new caller run startup was already attempted or conflicts"
             )
         old = ApiRunAccounting.from_document(previous.api_run_accounting)
+        old.require_writer_version()
         if (
             old.identity == self.run
             or old.identity.repository_id != self.run.repository_id
