@@ -1559,6 +1559,8 @@ class ConversationPublisher:
         )
         if status < 200 or status >= 300 or not isinstance(pr, dict):
             raise GitHubConversationError("reply PR preflight failed")
+        if type(pr.get("draft")) is not bool:
+            raise GitHubConversationError("reply PR preflight draft was invalid")
         if pr.get("state") != "open" or pr.get("draft") is True:
             return ReplyResult(status="skipped_pr_state")
         head = pr.get("head")
