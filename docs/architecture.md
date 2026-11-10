@@ -905,9 +905,10 @@ The reusable workflow's `authoritative-preflight` job checks routing input
 syntax: a positive pull-request number, repository name and positive numeric
 repository ID. Its step is labeled **Check pull-request routing inputs (live
 validation runs in lifecycle)**. The legacy job and step IDs remain unchanged
-for check and output compatibility. This job makes no live PR request and exports
-only the pull-request number; success does not authenticate title, draft state,
-current base/head or repository ownership.
+for check and output compatibility.
+This job makes no live PR request and exports only the pull-request number;
+success does not authenticate title, draft state, current base/head or repository
+ownership.
 
 The selected metered lifecycle subsequently authenticates live PR metadata,
 source, policy and Actions writer before business mutation or provider work.

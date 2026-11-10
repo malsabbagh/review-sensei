@@ -220,7 +220,9 @@
         "tests/test_security_gates.py",
         "tests/test_trusted_recovery_workflow.py",
         "tests/test_quarantine_workflow.py",
-        "tests/test_comment_intent.py"
+        "tests/test_comment_intent.py",
+        "tests/g04_merge_support.py",
+        "tests/test_g04_merge_characterization.py"
       ]
     },
     "launcher_qualification": {
