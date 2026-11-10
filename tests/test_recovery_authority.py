@@ -26,6 +26,13 @@ from review_sensei.recovery_authority import (
 )
 
 
+def child_environment():
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
 class Host:
     def __init__(self, directory=None):
         self.token = object()
@@ -434,6 +441,7 @@ class RecoveryAuthorityTests(unittest.TestCase):
         code = """
 import os,sys
 from pathlib import Path
+repository=Path(sys.argv[2]); sys.path[:0]=[str(repository/'tests'),str(repository/'src')]
 from test_recovery_authority import Host, RecoveryAuthorityTests
 from review_sensei.recovery_authority import SqliteAuthorityCandidate
 root=Path(sys.argv[1]); host=Host(root); store=SqliteAuthorityCandidate(root/'authority.sqlite',host)
@@ -442,8 +450,14 @@ host.forward=die
 store.forward(host.token,store.snapshot(host.token),RecoveryAuthorityTests().dispatch())
 """
         result = subprocess.run(
-            [sys.executable, "-c", code, self.tmp.name],
-            env=os.environ.copy(),
+            [
+                sys.executable,
+                "-c",
+                code,
+                self.tmp.name,
+                str(Path(__file__).resolve().parents[1]),
+            ],
+            env=child_environment(),
             capture_output=True,
             timeout=15,
             check=False,
@@ -465,6 +479,7 @@ store.forward(host.token,store.snapshot(host.token),RecoveryAuthorityTests().dis
         code = """
 import json,os,signal,sys
 from pathlib import Path
+repository=Path(sys.argv[2]); sys.path[:0]=[str(repository/'tests'),str(repository/'src')]
 from test_recovery_authority import Host, RecoveryAuthorityTests
 from review_sensei.recovery_authority import SqliteAuthorityCandidate
 root=Path(sys.argv[1]); host=Host(root); store=SqliteAuthorityCandidate(root/'authority.sqlite',host)
@@ -476,8 +491,14 @@ host.forward=effect_then_die
 store.forward(host.token,store.snapshot(host.token),RecoveryAuthorityTests().dispatch())
 """
         result = subprocess.run(
-            [sys.executable, "-c", code, self.tmp.name],
-            env=os.environ.copy(),
+            [
+                sys.executable,
+                "-c",
+                code,
+                self.tmp.name,
+                str(Path(__file__).resolve().parents[1]),
+            ],
+            env=child_environment(),
             capture_output=True,
             timeout=15,
             check=False,
