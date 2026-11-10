@@ -9,6 +9,7 @@ import tempfile
 import unittest
 import zlib
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 from urllib.error import URLError
 from urllib.parse import urlsplit
@@ -597,6 +598,27 @@ class ActionResultReaderTests(unittest.TestCase):
 
 
 class ProspectiveAccountingTests(unittest.TestCase):
+    def test_plain_native_reenroll_refuses_expired_v3_before_patch(self):
+        state = replace(accounting(), version=PROSPECTIVE_VERSION)
+        now = datetime.now(timezone.utc)
+        record = SessionRecord.create(
+            IDENTITY,
+            now=now - timedelta(days=2),
+            expires_at=now - timedelta(days=1),
+        ).evolve(api_run_accounting=state.to_document(), now=now - timedelta(days=2))
+        body = render_session_comment(
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            record=record,
+        )
+        http, calls = make_http(
+            [json_response([{"id": 7, "body": body}]) for _ in range(2)]
+        )
+        ledger = GitHubIssueCommentSessionLedger(http, token="synthetic")
+        with self.assertRaisesRegex(ReviewInputError, "reader-only"):
+            ledger.reenroll(IDENTITY, now=now)
+        self.assertEqual([method for method, _, _ in calls], ["GET", "GET"])
+
     def test_plain_native_replace_refuses_v3_before_mutation_or_write(self):
         state = replace(accounting(), version=PROSPECTIVE_VERSION)
         record = SessionRecord.create(IDENTITY).evolve(

@@ -2390,6 +2390,10 @@ class GitHubIssueCommentSessionLedger:
                 raise ReviewInputError(
                     "prepaid activation current authority is unavailable"
                 )
+            if before.api_run_accounting is not None:
+                ApiRunAccounting.from_document(
+                    before.api_run_accounting
+                ).require_writer_version()
             reserved = None
             if initial_slot is not None:
                 if (
@@ -2664,6 +2668,10 @@ class GitHubIssueCommentSessionLedger:
             raise ReviewInputError(
                 "only an expired or witness-only session can be re-enrolled"
             )
+        if record.api_run_accounting is not None:
+            ApiRunAccounting.from_document(
+                record.api_run_accounting
+            ).require_writer_version()
         if record.quarantine_lineage is not None:
             raise ReviewInputError(
                 "quarantine lineage requires retained authority and cannot be re-enrolled"

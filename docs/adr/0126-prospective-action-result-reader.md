@@ -23,8 +23,9 @@ and liabilities remain intact. Within-run version changes remain forbidden.
 V3 `ApiRunAccounting` reserve, dispatch, confirmation and owner-claim methods
 refuse as reader-only. The native transport rejects V3 activation and rollover
 from a V3 source; its default new-run construction remains V2. The plain native
-ledger also refuses V3 source roots before replacement callbacks and V3 outgoing
-roots before serialization for a POST or PATCH. General
+ledger also refuses V3 source roots before replacement callbacks, prepaid-tail
+preparation or expired-root re-enrollment, and V3 outgoing roots before
+serialization for a POST or PATCH. General
 `SessionRecord` value constructors can still describe prospective documents,
 including different-run rollover values. Those values supply no writer authority
 and do not constitute a supported V3 runtime or custom-ledger writer.
