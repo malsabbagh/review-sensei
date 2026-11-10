@@ -438,7 +438,7 @@ class ProviderDeadlineContractTests(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 1.5)
             self.assert_pending(run, "legacy", "deadline_exceeded")
 
-    def cli_process(self, endpoint, root, *, timeout_seconds="10"):
+    def cli_process(self, endpoint, root, *, timeout_seconds="10", bootstrap_prefix=""):
         (root / "input.patch").write_text(DIFF, encoding="utf-8", newline="\n")
         (root / "config.yml").write_text(
             "schema: 1\nadvanced:\n  review_work:\n    mode: unified\n  resources:\n    review_deadline_seconds: 1\n",
@@ -446,7 +446,7 @@ class ProviderDeadlineContractTests(unittest.TestCase):
         )
         # Select exactly the package whose import the caller's lane verified.
         # Isolated Python ignores host PYTHONPATH and user site packages.
-        bootstrap = (
+        bootstrap = bootstrap_prefix + (
             "import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); "
             "runpy.run_module('review_sensei',run_name='__main__')"
         )
@@ -505,6 +505,44 @@ class ProviderDeadlineContractTests(unittest.TestCase):
             outcome = json.loads((root / "outcome.json").read_text())
             self.assertEqual(outcome["status"], "partial")
             self.assertIn("partial_coverage", outcome["diagnostic"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX signal delivery")
+    def test_fresh_cli_cancels_cleanly_at_response_initialization_boundaries(self):
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            for initialized in (False, True):
+                # Deliver a real signal at the otherwise nondeterministic
+                # HTTPResponse construction window, in the fresh CLI only.
+                initialize = "    original(self, *args, **kwargs)\n"
+                bootstrap_prefix = (
+                    "import http.client,os,signal\n"
+                    "original=http.client.HTTPResponse.__init__\n"
+                    "def interrupt(self,*args,**kwargs):\n"
+                    + (initialize if initialized else "")
+                    + f"    os.kill(os.getpid(), {int(signum)})\n"
+                    + ("" if initialized else initialize)
+                    + "http.client.HTTPResponse.__init__=interrupt\n"
+                )
+                with (
+                    self.subTest(signal=signum, initialized=initialized),
+                    tempfile.TemporaryDirectory() as directory,
+                    self.blocked_transport() as (endpoint, entered),
+                ):
+                    process = self.cli_process(
+                        endpoint,
+                        Path(directory),
+                        bootstrap_prefix=bootstrap_prefix,
+                    )
+                    self.addCleanup(
+                        lambda p=process: p.kill() if p.poll() is None else None
+                    )
+                    stdout, stderr = process.communicate(timeout=3)
+                    self.assertTrue(
+                        entered.wait(3), "CLI never entered synthetic provider"
+                    )
+                    self.assertEqual(process.returncode, 130, stderr.decode())
+                    self.assertEqual(stdout, b"")
+                    self.assertIn(b"cancelled", stderr)
+                    self.assertNotIn(b"Traceback", stderr)
 
     @unittest.skipUnless(os.name == "posix", "POSIX signal delivery")
     def test_fresh_cli_interrupt_and_termination_exit_cleanly(self):
