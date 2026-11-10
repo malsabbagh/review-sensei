@@ -20,8 +20,12 @@ Recognize `caller-requests-v3` as a prospective readable value. Keep
 `ACCOUNTING_VERSION` at V2. Select receipt encoding independently: V1 retains
 dictionary receipts; V2 and V3 use pairs. Pending receipts, identities, deadlines
 and liabilities remain intact. Within-run version changes remain forbidden.
-V3 reserve, dispatch, confirmation, owner-claim, activation and rollover paths
-refuse as reader-only.
+V3 `ApiRunAccounting` reserve, dispatch, confirmation and owner-claim methods
+refuse as reader-only. The native transport rejects V3 activation and rollover
+from a V3 source; its default new-run construction remains V2. General
+`SessionRecord` value constructors can still describe prospective documents,
+including different-run rollover values. Those values supply no writer authority
+and do not constitute a supported V3 runtime or custom-ledger writer.
 
 `read_current_action_result` is an explicit, unconnected read interface. It loads
 the current owned root through the native ledger rather than accepting an

@@ -19,8 +19,8 @@ DEFAULT_API_REQUEST_LIMIT = 512
 MAX_API_REQUEST_LIMIT = (1 << 53) - 1
 ACCOUNTING_VERSION = "caller-requests-v2"
 LEGACY_ACCOUNTING_VERSION = "caller-requests-v1"
-# Prospective read support only. Initial accounting still selects V2, and no
-# transition or runtime writer may claim this version in this reader slice.
+# Prospective read support only. Initial accounting still selects V2. The value
+# transitions below and the native transport reject this reader-only version.
 PARTITIONED_ACTION_ACCOUNTING_VERSION = "caller-requests-v3"
 _PAIR_RECEIPT_VERSIONS = frozenset(
     {"caller-requests-v2", PARTITIONED_ACTION_ACCOUNTING_VERSION}
