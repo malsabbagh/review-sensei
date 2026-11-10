@@ -53,14 +53,68 @@ def _lookup(value: object) -> tuple[tuple[str, str | int], ...]:
     return tuple(sorted(value.items()))
 
 
+_PR_OUTCOMES = {"http", "malformed", "oversized", "timeout", "transport", "unknown"}
+_PR_CAPABILITIES = {
+    "review_publish",
+    "thread_resolve",
+    "check_publish",
+    "review_session",
+    "review_status",
+    "review_actions",
+    "inline_reply",
+    "issue_reply",
+    "learning_write",
+}
+_PR_FIELDS = {"outcome", "upstream_status", "requested_capability", "worker_version"}
+
+
+def _pull_request_lookup(value: object) -> tuple[tuple[str, str | int], ...]:
+    if (
+        not isinstance(value, dict)
+        or value.keys() - _PR_FIELDS
+        or "outcome" not in value
+    ):
+        return ()
+    outcome = value["outcome"]
+    if not isinstance(outcome, str) or outcome not in _PR_OUTCOMES:
+        return ()
+    if "upstream_status" in value and (
+        type(value["upstream_status"]) is not int
+        or not 100 <= value["upstream_status"] <= 599
+    ):
+        return ()
+    if "requested_capability" in value and (
+        not isinstance(value["requested_capability"], str)
+        or value["requested_capability"] not in _PR_CAPABILITIES
+    ):
+        return ()
+    if "worker_version" in value and (
+        not isinstance(value["worker_version"], str)
+        or re.fullmatch(
+            r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}",
+            value["worker_version"],
+        )
+        is None
+    ):
+        return ()
+    return tuple(sorted(value.items()))
+
+
 @dataclass(frozen=True)
 class BrokerDiagnostic:
     code: str
     correlation_id: str | None = None
     upstream_status: int | None = None
     lookup: tuple[tuple[str, str | int], ...] = ()
+    pull_request_lookup: tuple[tuple[str, str | int], ...] = ()
 
     def __post_init__(self) -> None:
+        if (
+            self.pull_request_lookup
+            and _pull_request_lookup(dict(self.pull_request_lookup))
+            != self.pull_request_lookup
+        ):
+            raise ValueError("invalid broker PR lookup metadata")
         if self.lookup and _lookup(dict(self.lookup)) != self.lookup:
             raise ValueError("invalid broker lookup metadata")
         if not isinstance(self.code, str) or self.code not in _CATALOG:
@@ -102,6 +156,9 @@ class BrokerDiagnostic:
         if self.upstream_status is not None:
             values["upstream_status"] = str(self.upstream_status)
         values.update({"lookup_" + key: str(value) for key, value in self.lookup})
+        values.update(
+            {"pr_lookup_" + key: str(value) for key, value in self.pull_request_lookup}
+        )
         return {f"broker.{key}": value for key, value in values.items()}
 
     def message(self) -> str:
@@ -169,6 +226,7 @@ def parse_broker_diagnostic(error: Any) -> BrokerDiagnostic:
             value.get("correlation_id", correlation),
             value.get("upstream_status"),
             _lookup(body.get("lookup")),
+            _pull_request_lookup(body.get("pull_request_lookup")),
         )
     except Exception:  # Includes interrupted/truncated reads; never render the error.
         return fallback
@@ -202,9 +260,27 @@ def outcome_broker_diagnostic(
         for key, value in metadata.items()
         if key.startswith("broker.")
     }
-    if values.keys() - {"code", "stage", "action", "correlation_id", "upstream_status"}:
+    pr_fields = {"pr_lookup_" + key for key in _PR_FIELDS}
+    if (
+        values.keys()
+        - {"code", "stage", "action", "correlation_id", "upstream_status"}
+        - pr_fields
+    ):
         return None
     try:
+        pr_lookup: dict[str, str | int] = {
+            key.removeprefix("pr_lookup_"): value
+            for key, value in values.items()
+            if key in pr_fields
+        }
+        pr_status = pr_lookup.get("upstream_status")
+        if pr_status is not None:
+            if (
+                not isinstance(pr_status, str)
+                or re.fullmatch(r"[1-5][0-9]{2}", pr_status) is None
+            ):
+                return None
+            pr_lookup["upstream_status"] = int(pr_status)
         status = values.get("upstream_status")
         if status is not None and re.fullmatch(r"[1-5][0-9]{2}", status) is None:
             return None
@@ -212,6 +288,7 @@ def outcome_broker_diagnostic(
             values["code"],
             values.get("correlation_id"),
             int(status) if status else None,
+            pull_request_lookup=_pull_request_lookup(pr_lookup),
         )
         if values != {
             key.removeprefix("broker."): value

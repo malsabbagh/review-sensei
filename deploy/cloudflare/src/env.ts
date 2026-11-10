@@ -3,6 +3,9 @@ export interface WorkerExecution {
 }
 
 export interface WorkerEnv {
+  /** Optional platform version-metadata binding, never a source ref or caller value.
+   * Not configured by this patch; absent means deployed version is unavailable. */
+  CF_VERSION_METADATA?: { id: string };
   GITHUB_APP_ID: string;
   GITHUB_APP_PRIVATE_KEY: string;
   GITHUB_APP_WEBHOOK_SECRET: string;
