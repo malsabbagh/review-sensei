@@ -9,9 +9,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import (
-    HTTPHandler,
     HTTPRedirectHandler,
-    HTTPSHandler,
     Request,
     build_opener,
     urlopen,
@@ -24,6 +22,8 @@ from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
 from .transport import (
     MAX_TRANSPORT_TIMEOUT_SECONDS,
+    CancellationSafeHTTPHandler,
+    CancellationSafeHTTPSHandler,
     bounded_transport_timeout,
     parse_retry_after_seconds,
     read_bounded_body,
@@ -163,9 +163,9 @@ class OllamaProvider:
         if opener is urlopen:
             handlers: list[Any] = [_NoRedirect()]
             if self._ssl_context is not None:
-                handlers.append(HTTPSHandler(context=self._ssl_context))
+                handlers.append(CancellationSafeHTTPSHandler(context=self._ssl_context))
             else:
-                handlers.append(HTTPHandler())
+                handlers.append(CancellationSafeHTTPHandler())
             self._safe_opener = build_opener(*handlers)
 
     def _call_custom_opener(self, http_request: Request, *, timeout: float) -> Any:

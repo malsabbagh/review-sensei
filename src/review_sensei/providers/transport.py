@@ -10,7 +10,7 @@ from threading import TIMEOUT_MAX
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPSHandler, Request
+from urllib.request import HTTPHandler, HTTPSHandler, Request
 
 from ..errors import ProviderError
 
@@ -114,7 +114,40 @@ def read_bounded_body(response: Any, maximum: int, *, label: str) -> bytearray:
     return body
 
 
-class DestinationBoundHTTPSHandler(HTTPSHandler):
+class _CancellationSafeHTTPResponse(http.client.HTTPResponse):
+    # A signal can interrupt __init__ before sock.makefile() assigns fp.
+    # IOBase finalization still calls close()/flush(), which expect fp to exist.
+    # A class default also covers interruption before __init__ starts; normal
+    # initialization and cleanup continue to own the instance's file object.
+    # typeshed omits the None state that HTTPResponse itself uses after close.
+    fp = None  # type: ignore[assignment]
+
+
+class _CancellationSafeHTTPConnection(http.client.HTTPConnection):
+    response_class = _CancellationSafeHTTPResponse
+
+
+class _CancellationSafeHTTPSConnection(http.client.HTTPSConnection):
+    response_class = _CancellationSafeHTTPResponse
+
+
+class CancellationSafeHTTPHandler(HTTPHandler):
+    def http_open(self, req: Request) -> http.client.HTTPResponse:
+        return self.do_open(_CancellationSafeHTTPConnection, req)
+
+
+class CancellationSafeHTTPSHandler(HTTPSHandler):
+    def __init__(self, context: ssl.SSLContext) -> None:
+        super().__init__(context=context)
+        self._tls_context = context
+
+    def https_open(self, req: Request) -> http.client.HTTPResponse:
+        return self.do_open(
+            _CancellationSafeHTTPSConnection, req, context=self._tls_context
+        )
+
+
+class DestinationBoundHTTPSHandler(CancellationSafeHTTPSHandler):
     """Keep direct and proxied HTTPS requests bound to an admitted destination.
 
     urllib owns proxy discovery and CONNECT. Its standard HTTPSConnection parses
