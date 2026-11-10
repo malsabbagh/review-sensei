@@ -20,6 +20,21 @@ Where the existing broker exception supplies a validated closed diagnostic,
 `broker` preserves its code, stage, upstream status and correlation ID without
 copying the response body or lookup details.
 
+The optional `check_proof_hook_failures` array records supplementary check-proof
+hook exceptions with at most three deduplicated tokens in fixed order:
+`dispatch`, `response`, `publication`. It contains no exception object, message,
+URL, account identifier or request/response data. The same closed field survives
+the existing bounded fallback. An empty array means no failure was recorded, not
+that a hook ran or succeeded; null means its local state was unavailable.
+Outside an active lifecycle no state is kept. Nested lifecycles are independent.
+
+The tokens observe existing exception handlers. They are not evidence of a
+request, a rejected check, publication or terminal accounting, and no business
+path consumes them. Reporting adds no requests or events, cannot issue proof,
+and cannot replace the original operation if the recorder fails. Primary
+cancellation still propagates; a broken output sink may leave no diagnostic.
+This prospective field cannot reconstruct earlier missing diagnostics.
+
 Keep the following fields separate when investigating an incident:
 
 - `scope.requested` records bounded IDs and hashes from entry arguments.

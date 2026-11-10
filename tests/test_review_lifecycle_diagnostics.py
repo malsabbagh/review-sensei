@@ -861,5 +861,319 @@ class DiagnosticOutputBoundaryTests(unittest.TestCase):
         self.assertTrue(all(v["publication"] is None for v in values))
 
 
+class CheckProofHookDiagnosticsTests(unittest.TestCase):
+    def test_hook_failure_stages_are_closed_bounded_and_context_local(self):
+        from review_sensei_github import review_lifecycle_diagnostics as diagnostic
+
+        secret = "SENTINEL_PRIVATE_PROOF_TOKEN_https://private.invalid/account-999"
+        stream = io.StringIO()
+        with redirect_stderr(stream), diagnostic.lifecycle("review"):
+            for _ in range(100):
+                for stage in (
+                    "publication",
+                    "response",
+                    "dispatch",
+                    secret,
+                    secret * 1000,
+                    None,
+                    {},
+                    object(),
+                ):
+                    diagnostic.check_proof_hook_failed(stage)
+        value = outcome(self, stream.getvalue())
+        self.assertEqual(
+            value["check_proof_hook_failures"], ["dispatch", "response", "publication"]
+        )
+        self.assertNotIn(secret, stream.getvalue())
+        diagnostic.check_proof_hook_failed("dispatch")
+        later = io.StringIO()
+        with redirect_stderr(later), diagnostic.lifecycle("command"):
+            pass
+        self.assertEqual(
+            outcome(self, later.getvalue())["check_proof_hook_failures"], []
+        )
+
+    def test_original_hook_errors_only_add_stage_without_finishing_accounting(self):
+        from urllib.error import HTTPError
+        from urllib.parse import urlsplit
+
+        from review_sensei_github import check_accounting
+
+        secret = "SENTINEL_PRIVATE_PROOF_TOKEN_https://private.invalid/account-999"
+        for hook, stage in (
+            ("_dispatch", "dispatch"),
+            ("_response", "response"),
+            ("confirm_denied_publication", "publication"),
+        ):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                fixture = EntryFixture(directory)
+                external = fixture.external
+
+                def denied(request, timeout):
+                    payload = json.loads(request.data) if request.data else {}
+                    if payload.get("capability") == "check_publish":
+                        fixture.trace.append(
+                            (
+                                fixture.attempt,
+                                request.method,
+                                urlsplit(request.full_url).path,
+                            )
+                        )
+                        raise HTTPError(
+                            request.full_url, 403, "synthetic", {}, io.BytesIO(b"{}")
+                        )
+                    return external(request, timeout)
+
+                fixture.external = denied
+                with patch.object(
+                    check_accounting, hook, side_effect=RuntimeError(secret)
+                ):
+                    self.assertEqual(fixture.invoke(), 1, fixture.error)
+                value = outcome(self, fixture.error)
+                self.assertEqual(value["check_proof_hook_failures"], [stage])
+                self.assertEqual(
+                    value["publication"]["publication_status"], "published"
+                )
+                self.assertFalse(value["publication"]["accounting_terminal"])
+                self.assertEqual(value["reason"], "publication_finalization_incomplete")
+                self.assertNotIn(secret, fixture.error)
+                record = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                self.assertEqual(record.transaction.phase, "publication_succeeded")
+                self.assertIsNone(record.api_run_accounting["terminal_transaction"])
+                self.assertEqual(
+                    len(fixture.accounted.observations), len(fixture.trace)
+                )
+                self.assertEqual(fixture.provider_calls, 1)
+
+    def test_broken_stage_reporter_never_replaces_the_original_operation(self):
+        from urllib.error import HTTPError
+        from urllib.parse import urlsplit
+
+        from review_sensei_github import check_accounting
+        from review_sensei_github import review_lifecycle_diagnostics as diagnostic
+
+        for hook in ("_dispatch", "_response", "confirm_denied_publication"):
+            with self.subTest(hook=hook), tempfile.TemporaryDirectory() as directory:
+                fixture = EntryFixture(directory)
+                external = fixture.external
+
+                def denied(request, timeout):
+                    payload = json.loads(request.data) if request.data else {}
+                    if payload.get("capability") == "check_publish":
+                        fixture.trace.append(
+                            (
+                                fixture.attempt,
+                                request.method,
+                                urlsplit(request.full_url).path,
+                            )
+                        )
+                        raise HTTPError(
+                            request.full_url, 403, "synthetic", {}, io.BytesIO(b"{}")
+                        )
+                    return external(request, timeout)
+
+                fixture.external = denied
+                with (
+                    patch.object(
+                        check_accounting,
+                        hook,
+                        side_effect=RuntimeError("private-hook-detail"),
+                    ),
+                    patch.object(
+                        diagnostic,
+                        "check_proof_hook_failed",
+                        side_effect=SystemExit("private-reporter-detail"),
+                    ),
+                ):
+                    self.assertEqual(fixture.invoke(), 1, fixture.error)
+                value = outcome(self, fixture.error)
+                self.assertEqual(value["check_proof_hook_failures"], [])
+                self.assertEqual(
+                    value["publication"]["publication_status"], "published"
+                )
+                self.assertFalse(value["publication"]["accounting_terminal"])
+                self.assertNotIn("private-hook-detail", fixture.error)
+                self.assertNotIn("private-reporter-detail", fixture.error)
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertIsNone(fixture.accounted.accounting.terminal_transaction)
+
+    def test_primary_cancellation_is_not_swallowed_or_reclassified_as_hook_failure(
+        self,
+    ):
+        from review_sensei_github import check_accounting
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EntryFixture(directory)
+            with patch.object(
+                check_accounting,
+                "_dispatch",
+                side_effect=KeyboardInterrupt("private-cancellation-detail"),
+            ):
+                self.assertEqual(fixture.invoke(), 130, fixture.error)
+            value = outcome(self, fixture.error)
+            self.assertEqual(value["exception_kind"], "interrupted")
+            self.assertEqual(value["check_proof_hook_failures"], [])
+            self.assertNotIn("private-cancellation-detail", fixture.error)
+            self.assertEqual(fixture.provider_calls, 0)
+            self.assertEqual(fixture.trace, [])
+            self.assertEqual(fixture.accounted.observations[0]["outcome"], "unknown")
+
+    def test_nested_contexts_fallback_and_broken_output_preserve_closed_stages(self):
+        from review_sensei_github import review_lifecycle_diagnostics as diagnostic
+
+        stream = io.StringIO()
+        with redirect_stderr(stream), diagnostic.lifecycle("review") as outer:
+            diagnostic.check_proof_hook_failed("dispatch")
+            with diagnostic.lifecycle("command"):
+                diagnostic.check_proof_hook_failed("publication")
+            diagnostic.check_proof_hook_failed("response")
+            outer.scope["synthetic-oversized"] = "x" * 5000
+        values = [
+            json.loads(line[len(PREFIX) :]) for line in stream.getvalue().splitlines()
+        ]
+        self.assertEqual(values[0]["check_proof_hook_failures"], ["publication"])
+        self.assertEqual(
+            values[1]["check_proof_hook_failures"], ["dispatch", "response"]
+        )
+        self.assertEqual(values[1]["reason"], "diagnostic_size_limit")
+        self.assertLessEqual(len(stream.getvalue().splitlines()[1].encode()) + 1, 4096)
+
+        class BrokenOutput:
+            def write(self, _value):
+                raise BrokenPipeError("private-output-detail")
+
+        original = KeyboardInterrupt("private-original-detail")
+        with (
+            redirect_stderr(BrokenOutput()),
+            self.assertRaises(KeyboardInterrupt) as caught,
+        ):
+            with diagnostic.lifecycle("review"):
+                diagnostic.check_proof_hook_failed("dispatch")
+                raise original
+        self.assertIs(caught.exception, original)
+        with redirect_stderr(BrokenOutput()), diagnostic.lifecycle("review") as current:
+            diagnostic.check_proof_hook_failed("response")
+            self.assertEqual(current.returned(37), 37)
+
+    def test_stage_recorder_failure_and_malformed_state_have_no_opaque_output(self):
+        from unittest.mock import Mock
+
+        from review_sensei_github import review_lifecycle_diagnostics as diagnostic
+
+        with patch.object(
+            diagnostic,
+            "_ACTIVE",
+            Mock(get=Mock(side_effect=SystemExit("private-context-detail"))),
+        ):
+            diagnostic.check_proof_hook_failed("dispatch")
+        stream = io.StringIO()
+        with redirect_stderr(stream), diagnostic.lifecycle("review") as current:
+            current._check_proof_failure_mask = "SENTINEL_PRIVATE_STATE"
+        self.assertIsNone(outcome(self, stream.getvalue())["check_proof_hook_failures"])
+        self.assertNotIn("SENTINEL_PRIVATE_STATE", stream.getvalue())
+
+    def test_recorded_tokens_cannot_close_an_unknown_mutation_or_add_requests(self):
+        from urllib.parse import urlsplit
+
+        from review_sensei_github import review_lifecycle_diagnostics as diagnostic
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EntryFixture(directory)
+            external = fixture.external
+            lost = False
+
+            def unknown(request, timeout):
+                nonlocal lost
+                path = urlsplit(request.full_url).path
+                if (
+                    request.method == "POST"
+                    and path.endswith("/check-runs")
+                    and not lost
+                ):
+                    lost = True
+                    fixture.trace.append((fixture.attempt, request.method, path))
+                    raise TimeoutError("private-unknown-effect")
+                return external(request, timeout)
+
+            def before_publication():
+                for stage in ("dispatch", "response", "publication"):
+                    diagnostic.check_proof_hook_failed(stage)
+                try:
+                    fixture.http.request(
+                        "POST",
+                        "/repos/owner/repo/check-runs",
+                        token="synthetic",
+                        body={"head_sha": "b" * 40},
+                    )
+                except Exception:
+                    pass
+
+            fixture.external = unknown
+            fixture.before_publication = before_publication
+            self.assertEqual(fixture.invoke(), 1, fixture.error)
+            value = outcome(self, fixture.error)
+            self.assertEqual(
+                value["check_proof_hook_failures"],
+                ["dispatch", "response", "publication"],
+            )
+            self.assertEqual(value["reason"], "terminal_close_unconfirmed")
+            self.assertFalse(value["publication"]["accounting_terminal"])
+            self.assertIsNone(fixture.accounted.accounting.terminal_transaction)
+            unknowns = [
+                o
+                for o in fixture.accounted.observations
+                if o["outcome"] == "unknown" and o.get("mutation")
+            ]
+            self.assertEqual(len(unknowns), 1)
+            self.assertNotIn(
+                unknowns[0]["request_id"], fixture.accounted._reconciled_mutations
+            )
+            self.assertEqual(len(fixture.accounted.observations), len(fixture.trace))
+            self.assertEqual(fixture.accounted.accounting.configuration.limit, 512)
+            self.assertEqual(fixture.provider_calls, 1)
+
+    def test_missing_or_unreadable_stage_state_does_not_break_fallback_or_cancellation(
+        self,
+    ):
+        from review_sensei_github import review_lifecycle_diagnostics as diagnostic
+
+        stream = io.StringIO()
+        with redirect_stderr(stream), diagnostic.lifecycle("review") as current:
+            del current._check_proof_failure_mask
+            current.scope["oversized"] = "x" * 5000
+            self.assertEqual(current.returned(37), 37)
+        value = outcome(self, stream.getvalue())
+        self.assertEqual(value["reason"], "diagnostic_size_limit")
+        self.assertEqual(value["exit_code"], 37)
+        self.assertIsNone(value["check_proof_hook_failures"])
+
+        stream = io.StringIO()
+        original = KeyboardInterrupt("private-primary-cancellation")
+        with redirect_stderr(stream), self.assertRaises(KeyboardInterrupt) as caught:
+            with diagnostic.lifecycle("review") as current:
+                del current._check_proof_failure_mask
+                current.scope["oversized"] = "x" * 5000
+                raise original
+        self.assertIs(caught.exception, original)
+        value = outcome(self, stream.getvalue())
+        self.assertEqual(value["exit_code"], 130)
+        self.assertIsNone(value["check_proof_hook_failures"])
+        self.assertNotIn("private-primary-cancellation", stream.getvalue())
+
+        def unreadable(_self):
+            raise SystemExit("private-unreadable-state")
+
+        current = diagnostic.LifecycleDiagnostics("review")
+        with patch.object(
+            diagnostic.LifecycleDiagnostics,
+            "_check_proof_failure_mask",
+            property(unreadable),
+            create=True,
+        ):
+            self.assertIsNone(current._check_proof_failures())
+
+
 if __name__ == "__main__":
     unittest.main()

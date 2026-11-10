@@ -19,6 +19,7 @@ from review_sensei.failure_observation import exception_kind, observe_cli_failur
 
 PREFIX = "review-sensei: lifecycle "
 MAX_LINE_BYTES = 4096
+_CHECK_PROOF_STAGES = ("dispatch", "response", "publication")
 _ACTIVE: ContextVar[LifecycleDiagnostics | None] = ContextVar(
     "review_lifecycle_diagnostics", default=None
 )
@@ -157,6 +158,7 @@ class LifecycleDiagnostics:
         self.primary_exception_kind: str | None = None
         self.cleanup_exception_kind: str | None = None
         self.broker: dict[str, object] | None = None
+        self._check_proof_failure_mask = 0
 
     def returned(self, code: int) -> int:
         self.exit_code = _number(code)
@@ -244,6 +246,19 @@ class LifecycleDiagnostics:
             "counts_are_complete_historical_effect_proof": False,
         }
 
+    def _check_proof_failures(self) -> list[str] | None:
+        try:
+            mask = getattr(self, "_check_proof_failure_mask", None)
+        except BaseException:
+            return None
+        if type(mask) is not int or not 0 <= mask < 1 << len(_CHECK_PROOF_STAGES):
+            return None
+        return [
+            stage
+            for index, stage in enumerate(_CHECK_PROOF_STAGES)
+            if mask & (1 << index)
+        ]
+
     def _minimal(self, reason: str) -> str:
         return PREFIX + json.dumps(
             {
@@ -260,6 +275,7 @@ class LifecycleDiagnostics:
                     self.cleanup_exception_kind, _ERROR_KINDS
                 ),
                 "authority": False,
+                "check_proof_hook_failures": self._check_proof_failures(),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -303,6 +319,7 @@ class LifecycleDiagnostics:
                 "artifact_upload_state": "unavailable",
                 "recovery_classification": "not_evaluated",
                 "authority": False,
+                "check_proof_hook_failures": self._check_proof_failures(),
             }
             line = PREFIX + json.dumps(value, sort_keys=True, separators=(",", ":"))
         except BaseException:
@@ -338,6 +355,19 @@ def lifecycle(kind: str) -> Iterator[LifecycleDiagnostics]:
                 pass
         finally:
             _ACTIVE.reset(token)
+
+
+def check_proof_hook_failed(stage: object) -> None:
+    """Record a closed stage only; no error object or authority is accepted."""
+    try:
+        if type(stage) is not str or stage not in _CHECK_PROOF_STAGES:
+            return
+        current = _ACTIVE.get()
+        if current is not None:
+            current._check_proof_failure_mask |= 1 << _CHECK_PROOF_STAGES.index(stage)
+    except BaseException:
+        # Supplementary recording cannot replace the original operation.
+        pass
 
 
 def phase(value: str) -> None:

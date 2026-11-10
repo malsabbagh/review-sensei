@@ -1868,7 +1868,12 @@ class GitHubApplication:
                     head_sha=head_sha,
                 )
             except Exception:
-                pass
+                try:
+                    from .review_lifecycle_diagnostics import check_proof_hook_failed
+
+                    check_proof_hook_failed("publication")
+                except BaseException:
+                    pass
         return completed
 
     def _publish_human_file_request(
