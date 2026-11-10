@@ -257,6 +257,8 @@ def _capture(
 def broker_check_call(broker: Any, context: _SourceContext | None = None):
     from .api_run_requests import ApiRunRequestTransport
 
+    if type(context) is not _SourceContext or _lookup(_CONTEXTS, context) is None:
+        return _capture(None, "capability", "POST", "", None, None)
     owner = getattr(getattr(broker, "opener", None), "__self__", None)
     caller = (
         owner
@@ -280,6 +282,8 @@ def broker_check_call(broker: Any, context: _SourceContext | None = None):
 def native_check_call(
     http, operation, method, path, *, repository, head_sha, body=None, context=None
 ):
+    if type(context) is not _SourceContext or _lookup(_CONTEXTS, context) is None:
+        return _capture(None, operation, method, "", None, None)
     from .caller_operation import caller_for_http
     from .publication_recovery import _publication_transport
 
