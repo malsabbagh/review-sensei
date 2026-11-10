@@ -19,6 +19,12 @@ DEFAULT_API_REQUEST_LIMIT = 512
 MAX_API_REQUEST_LIMIT = (1 << 53) - 1
 ACCOUNTING_VERSION = "caller-requests-v2"
 LEGACY_ACCOUNTING_VERSION = "caller-requests-v1"
+# Prospective read support only. Initial accounting still selects V2, and no
+# transition or runtime writer may claim this version in this reader slice.
+PARTITIONED_ACTION_ACCOUNTING_VERSION = "caller-requests-v3"
+_PAIR_RECEIPT_VERSIONS = frozenset(
+    {"caller-requests-v2", PARTITIONED_ACTION_ACCOUNTING_VERSION}
+)
 _HEX40 = re.compile(r"[a-f0-9]{40}")
 _HEX64 = re.compile(r"[a-f0-9]{64}")
 _NAME = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
@@ -208,7 +214,7 @@ class ApiRunAccounting:
 
     def __post_init__(self) -> None:
         if (
-            self.version not in {LEGACY_ACCOUNTING_VERSION, ACCOUNTING_VERSION}
+            self.version not in {LEGACY_ACCOUNTING_VERSION, *_PAIR_RECEIPT_VERSIONS}
             or not isinstance(self.identity, ApiRunIdentity)
             or not isinstance(self.configuration, FrozenApiConfiguration)
             or not isinstance(self.owner, ApiExecutionOwner)
@@ -340,7 +346,12 @@ class ApiRunAccounting:
 
     def _validate_action(self) -> None:
         """Closed values only; the native adapter authenticates source and result."""
-        from .bounded_evidence import canonical_bytes, read_inline_evidence
+        from .bounded_evidence import (
+            INLINE_ENCODING,
+            canonical_bytes,
+            read_inline_evidence,
+            validate_manifest,
+        )
 
         action = self.action
         if (
@@ -438,7 +449,22 @@ class ApiRunAccounting:
                 manifest.get("binding"), dict
             ):
                 raise ReviewInputError("caller action retained result is malformed")
-            read_inline_evidence(manifest, expected_binding=manifest["binding"])
+            if (
+                self.version == PARTITIONED_ACTION_ACCOUNTING_VERSION
+                and manifest.get("encoding") != INLINE_ENCODING
+            ):
+                validated = validate_manifest(manifest)
+                if validated["item_count"] != 1 or len(manifest["parts"]) != 1:
+                    raise ReviewInputError(
+                        "caller action result requires one part and item"
+                    )
+            else:
+                read_inline_evidence(manifest, expected_binding=manifest["binding"])
+                if (
+                    self.version == PARTITIONED_ACTION_ACCOUNTING_VERSION
+                    and manifest["item_count"] != 1
+                ):
+                    raise ReviewInputError("caller action result requires one item")
         # Copy values so a caller retaining a mutable mapping cannot change an
         # admitted source while the accounting object is reused for dispatch.
         object.__setattr__(self, "action", json.loads(canonical_bytes(action)))
@@ -468,6 +494,7 @@ class ApiRunAccounting:
         This is a value transition only. Calling it cannot authorize HTTP. The
         owning adapter must first dispatch its write/readback using old capacity.
         """
+        self.require_writer_version()
         if not _natural(requests, positive=True):
             raise ReviewInputError("caller reservation must contain requests")
         return replace(
@@ -477,6 +504,7 @@ class ApiRunAccounting:
 
     def dispatch(self, block_id: str, request: PendingApiRequest) -> ApiRunAccounting:
         """Move one already durable slot to pending before physical dispatch."""
+        self.require_writer_version()
         if not isinstance(request, PendingApiRequest):
             raise ReviewInputError("pending caller request is invalid")
         if any(request.request_id == p.request_id for p in self.completed) or any(
@@ -506,6 +534,7 @@ class ApiRunAccounting:
 
     def confirm(self, request: PendingApiRequest) -> ApiRunAccounting:
         """A known response changes category; it never creates capacity."""
+        self.require_writer_version()
         if not isinstance(request, PendingApiRequest):
             raise ReviewInputError("caller response request binding is invalid")
         found = sum(p == request for b in self.blocks for p in b.pending)
@@ -527,6 +556,7 @@ class ApiRunAccounting:
         owner cessation and confirmed checkpoint ownership before this transition.
         A same-slot restart is always unsupported, including after a crash.
         """
+        self.require_writer_version()
         if not isinstance(owner, ApiExecutionOwner):
             raise ReviewInputError("unsupported API accounting execution owner")
         key = (owner.job, owner.run_attempt)
@@ -541,6 +571,11 @@ class ApiRunAccounting:
         if owner.generation != self.owner.generation + 1:
             raise ReviewInputError("caller accounting owner generation conflicts")
         return replace(self, owner=owner, startup_used=(*self.startup_used, key))
+
+    def require_writer_version(self) -> None:
+        """Reader support supplies no V3 dispatch, transition or rollover path."""
+        if self.version == PARTITIONED_ACTION_ACCOUNTING_VERSION:
+            raise ReviewInputError("caller-requests-v3 is reader-only")
 
     def require_binding(
         self, identity: ApiRunIdentity, configuration: FrozenApiConfiguration
@@ -559,7 +594,7 @@ class ApiRunAccounting:
         representation, including when a successor finishes their work.
         """
         document = cast(dict[str, object], json.loads(json.dumps(asdict(self))))
-        if self.version == ACCOUNTING_VERSION:
+        if self.version in _PAIR_RECEIPT_VERSIONS:
             document["completed"] = [
                 [request.request_id, request.deadline_unix_ms]
                 for request in self.completed
@@ -674,7 +709,7 @@ class ApiRunAccounting:
             blocks=tuple(block(b) for b in document["blocks"]),
             completed=tuple(
                 PendingApiRequest(request_id=p[0], deadline_unix_ms=p[1])
-                if document["version"] == ACCOUNTING_VERSION
+                if document["version"] in _PAIR_RECEIPT_VERSIONS
                 else PendingApiRequest(**p)
                 for p in document["completed"]
             ),

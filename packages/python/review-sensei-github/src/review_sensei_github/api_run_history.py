@@ -9,21 +9,30 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass, field
 from typing import Any, Mapping, cast
 
-from review_sensei.api_work import ApiRunAccounting
+from review_sensei.api_work import (
+    PARTITIONED_ACTION_ACCOUNTING_VERSION,
+    ApiRunAccounting,
+)
 from review_sensei.bounded_evidence import (
+    ENCODING,
+    INLINE_ENCODING,
     MAX_MANIFEST_BYTES,
     MAX_PART_BYTES,
+    MAX_PART_READS,
     MAX_PARTITION_DECODED_BYTES,
     MAX_STORED_PART_BYTES,
     MAX_STORED_PARTS,
+    EvidenceReadBudget,
     canonical_bytes,
     decode_evidence,
     evidence_manifest,
     partition_evidence,
     read_inline_evidence,
     read_partitioned_evidence,
+    validate_manifest,
 )
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionIdentity, SessionLoadResult, SessionRecord
@@ -33,6 +42,111 @@ from .http import MAX_PAGINATION_PAGES
 from .session_ledger import GitHubIssueCommentSessionLedger
 
 RETAINED_CONFIRMATION_TAIL = 4 + 3 * MAX_PAGINATION_PAGES
+
+
+@dataclass(frozen=True)
+class ActionResultReadContext:
+    """A downward-only read bound sharing the caller's original budget.
+
+    This neither follows ancestor references nor supplies recovery authority.
+    max_depth counts attempted roots, including failed root loads. Keep one
+    context for a bounded sequence; it supplies no new HTTP allowance or reset.
+    """
+
+    identity: SessionIdentity
+    budget: EvidenceReadBudget
+    max_depth: int = field(default=1, kw_only=True)
+    _seen: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    _attempts: int = field(default=0, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.identity, SessionIdentity)
+            or not isinstance(self.budget, EvidenceReadBudget)
+            or type(self.max_depth) is not int
+            or not 1 <= self.max_depth <= MAX_PART_READS
+        ):
+            raise ReviewInputError("caller action result read context is invalid")
+
+    def _check(self, ledger, identity: SessionIdentity) -> None:
+        if identity != self.identity or ledger.evidence_budget is not self.budget:
+            raise ReviewInputError("caller action result read scope changed")
+        self.budget.check()
+        if self._attempts >= self.max_depth:
+            raise ReviewInputError("caller action result read depth exhausted")
+        object.__setattr__(self, "_attempts", self._attempts + 1)
+
+    def _enter(self, record: SessionRecord) -> None:
+        if record.record_sha256 in self._seen:
+            raise ReviewInputError("caller action result read cycle")
+        self._seen.add(record.record_sha256)
+
+
+def read_current_action_result(
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    *,
+    context: ActionResultReadContext,
+) -> dict[str, Any]:
+    """Read data from the current owned root, never infer settled ancestry.
+
+    This explicit reader is not wired into runtime or recovery dispatch. Root
+    loading and all part reads keep the ledger's existing caller budget.
+    """
+    if not isinstance(ledger, GitHubIssueCommentSessionLedger) or not isinstance(
+        context, ActionResultReadContext
+    ):
+        raise ReviewInputError("caller action result requires a native reader")
+    context._check(ledger, identity)
+    loaded = ledger.load(identity)
+    if loaded.status != "ok" or loaded.record is None:
+        raise ReviewInputError("caller action result current root is unavailable")
+    context._enter(loaded.record)
+    record = loaded.record
+    state = ApiRunAccounting.from_document(record.api_run_accounting)
+    if state.version != PARTITIONED_ACTION_ACCOUNTING_VERSION:
+        return read_action_result(ledger, identity, record)
+    action = state.action
+    if record.identity() != identity or action is None or action["phase"] != "terminal":
+        raise ReviewInputError("caller action has no terminal retained result")
+    binding = action_result_binding(identity, state, ledger.evidence_producer())
+    manifest = action["result"]
+    if manifest.get("encoding") == INLINE_ENCODING:
+        value = decode_action_result_carrier(
+            read_inline_evidence(manifest, expected_binding=binding)
+        )
+    else:
+        validated = validate_manifest(manifest)
+        if validated["item_count"] != 1 or len(manifest["parts"]) != 1:
+            raise ReviewInputError("caller action result requires one part and item")
+
+        def bounded_part(storage_id):
+            # The native reader authenticates Bot/PR ownership. Keep the old
+            # inner encoded-payload ceiling before the generic codec inflates.
+            loaded_part = ledger._read_part(identity, storage_id)
+            document = loaded_part.document
+            data = document.get("data") if isinstance(document, dict) else None
+            if not isinstance(data, str) or len(data) > MAX_MANIFEST_BYTES:
+                raise ReviewInputError("caller action result encoded limit exceeded")
+            payload = {
+                "encoding": ENCODING,
+                "decoded_bytes": manifest["decoded_bytes"],
+                "sha256": manifest["sha256"],
+                "data": data,
+            }
+            if len(canonical_bytes(payload)) > MAX_MANIFEST_BYTES:
+                raise ReviewInputError("caller action result encoded limit exceeded")
+            return loaded_part
+
+        value = _validate_action_result_envelope(
+            read_partitioned_evidence(
+                manifest,
+                reader=bounded_part,
+                expected_binding=binding,
+                budget=context.budget,
+            )
+        )
+    return _match_action_result(value, binding, action)
 
 
 def action_result_binding(
@@ -73,6 +187,10 @@ def decode_action_result_carrier(value: object) -> dict[str, Any]:
         max_encoded_bytes=MAX_MANIFEST_BYTES,
         max_decoded_bytes=MAX_PARTITION_DECODED_BYTES,
     )
+    return _validate_action_result_envelope(document)
+
+
+def _validate_action_result_envelope(document: object) -> dict[str, Any]:
     if (
         not isinstance(document, dict)
         or set(document) != {"schema_version", "intent_sha256", "outcome", "result"}
@@ -89,6 +207,10 @@ def decode_action_result_carrier(value: object) -> dict[str, Any]:
 def read_action_result(ledger, identity, record) -> dict[str, Any]:
     """Authenticate an exact retained action outcome from a native root."""
     state = ApiRunAccounting.from_document(record.api_run_accounting)
+    if state.version == PARTITIONED_ACTION_ACCOUNTING_VERSION:
+        raise ReviewInputError(
+            "caller-requests-v3 requires the explicit read-only reader"
+        )
     action = state.action
     if record.identity() != identity or action is None or action["phase"] != "terminal":
         raise ReviewInputError("caller action has no terminal retained result")
@@ -96,6 +218,10 @@ def read_action_result(ledger, identity, record) -> dict[str, Any]:
     value = decode_action_result_carrier(
         read_inline_evidence(action["result"], expected_binding=binding)
     )
+    return _match_action_result(value, binding, action)
+
+
+def _match_action_result(value, binding, action) -> dict[str, Any]:
     if (
         not isinstance(value, dict)
         or set(value) != {"schema_version", "intent_sha256", "outcome", "result"}
