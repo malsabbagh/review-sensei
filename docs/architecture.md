@@ -49,6 +49,11 @@ Quarantine registry: append-only, empty; workflow disabled until reviewed exact 
 
 One caller HTTP allowance: root `api_request_limit` (default 512). Only v3 purpose/source/repo/PR/head/run/attempt/job/workflow authority enables work. Successors prove cessation; uncertain/abandoned capacity stays charged. Archive predecessors unchanged: terminal or confirmed historical v2 receipt. Settle holds explicitly. Only exact results/proven pre-entry aborts close actions; unknown work stays pending. Historical readers require exact review/archive evidence, fresh authority and no writes. Finite operation/page limits can refuse with caller capacity unused.
 
+The unconnected [observed ancestry reader](adr/0127-observed-action-result-ancestry.md)
+authenticates each linked archive and returned action result under the original
+read allowance. Its bounded immutable output supplies no settlement, latest-root,
+writer or recovery authority.
+
 `review_run` and `action_run` own one lifecycle process across startup, review,
 command/reply, publication and cleanup. `api_run_requests` charges immediately
 before physical dispatch and persists owner-bound intent. `api_run_plan` allocates
