@@ -441,6 +441,246 @@ class CommandEntryFixture(EntryFixture):
             self.stdout, self.error = output.getvalue(), errors.getvalue()
 
 
+class PublishedPartialCommandAdmissionTests(unittest.TestCase):
+    """Synthetic command sources never complete an unclosed predecessor."""
+
+    def setUp(self):
+        for target in ("socket.create_connection", "socket.socket.connect"):
+            guard = patch(target, side_effect=AssertionError("unexpected network"))
+            guard.start()
+            self.addCleanup(guard.stop)
+
+    def partial_review(self, directory, *, closed):
+        from review_sensei_github.publication import parse_finding_index
+
+        f = CommandEntryFixture(directory, limit=512)
+        patch_file = f.root / "review.patch"
+        patch_file.write_text(
+            patch_file.read_text(encoding="utf-8")
+            + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\n"
+            "index 0000000..1111111\nBinary files /dev/null and b/image.bin differ\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        # Model one known pre-dispatch close refusal, not historical proof of
+        # non-dispatch or a reconstruction of any deployed failure's cause.
+        with ExitStack() as stack:
+            if not closed:
+                stack.enter_context(
+                    patch.object(
+                        ApiRunRequestTransport,
+                        "finish_review_run",
+                        side_effect=ReviewInputError("synthetic close refusal"),
+                    )
+                )
+            self.assertEqual(f.invoke(human=True), 0 if closed else 1, f.error)
+        result = json.loads((f.root / "review.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["review_status"], "partial")
+        record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+        accounting = ApiRunAccounting.from_document(record.api_run_accounting)
+        self.assertEqual(record.transaction.phase, "publication_succeeded")
+        self.assertIsNone(record.reservation_id)
+        self.assertIsNone(accounting.action)
+        self.assertFalse(any(block.pending for block in accounting.blocks))
+        self.assertEqual(
+            accounting.terminal_transaction,
+            record.transaction.transaction_id if closed else None,
+        )
+        self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+        index = parse_finding_index(
+            f.reviews[-1]["body"], repository_id=123, pull_request=7, head_sha=HEAD
+        )
+        self.assertIsNotNone(index)
+        self.assertEqual(len(index.entries), 1)
+        return f, index.entries[0].instance
+
+    def test_unclosed_partial_refuses_distinct_sources_and_later_head_without_effects(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            f, instance = self.partial_review(directory, closed=False)
+            saved_root = copy.deepcopy(f.comment)
+            saved_parts = copy.deepcopy(f.extra_comments)
+            saved_reviews, saved_inline = copy.deepcopy((f.reviews, f.inline))
+            provider_calls = f.provider_calls
+            original = parse_session_comment(saved_root["body"], identity=IDENTITY)
+            self.assertEqual(original.failed_attempts, 1)
+            self.assertEqual(original.failed_attempts_head_sha, HEAD)
+            sources = (
+                (
+                    201,
+                    "@reviewsensei override RS-"
+                    + instance[:6].upper()
+                    + " acceptable risk",
+                    HEAD,
+                ),
+                (
+                    202,
+                    "@reviewsensei dismiss "
+                    + instance
+                    + " --reason Independently assessed synthetic concern.",
+                    HEAD,
+                ),
+                (
+                    203,
+                    "@reviewsensei override RS-"
+                    + instance[:6].upper()
+                    + " acceptable risk",
+                    "d" * 40,
+                ),
+            )
+            observed_sources = []
+            for source_id, body, head in sources:
+                with self.subTest(source=source_id, head=head):
+                    f.SOURCE_ID = source_id
+                    f.requested_head = f.live_head = head
+                    f.select_command(body, new_run=True)
+                    self.assertEqual(f.invoke_command(), 1, f.error)
+                    self.assertIsNone(f.exception)
+                    self.assertIn("previous caller run is not terminal", f.error)
+                    self.assertIn(original.record_sha256, f.error)
+                    self.assertIn("phase=publication_succeeded", f.error)
+                    self.assertEqual(f.comment, saved_root)
+                    self.assertEqual(f.extra_comments, saved_parts)
+                    self.assertEqual(
+                        (f.reviews, f.inline), (saved_reviews, saved_inline)
+                    )
+                    self.assertEqual(f.provider_calls, provider_calls)
+                    self.assertEqual((f.business_writes, f.closure_writes), (0, 0))
+                    self.assertFalse(f.stdout)
+                    self.assertFalse(
+                        any(
+                            method in {"POST", "PATCH", "PUT", "DELETE"}
+                            and (path.startswith("/repos/") or path == "/graphql")
+                            for _, method, path in f.trace
+                        )
+                    )
+                    current = parse_session_comment(
+                        f.comment["body"], identity=IDENTITY
+                    )
+                    self.assertEqual(current, original)
+                    self.assertEqual(current.dispositions, ())
+                    self.assertEqual(current.failed_attempts, original.failed_attempts)
+                    self.assertEqual(
+                        current.failed_attempts_head_sha,
+                        original.failed_attempts_head_sha,
+                    )
+                    self.assertTrue(f.broker_requests)
+                    observed_sources.append(
+                        f.broker_requests[-1]["session_attestation"]["source"]
+                    )
+                    self.assertEqual(observed_sources[-1], f._source_scope())
+                    self.assertIsNone(current.api_run_accounting["action"])
+            self.assertEqual([s["id"] for s in observed_sources], [201, 202, 203])
+            self.assertNotEqual(
+                observed_sources[0]["body_sha256"], observed_sources[1]["body_sha256"]
+            )
+
+    def test_partial_with_matching_review_terminal_admits_its_own_disposition(self):
+        from review_sensei_github.api_run_history import read_action_result
+
+        with tempfile.TemporaryDirectory() as directory:
+            f, instance = self.partial_review(directory, closed=True)
+            provider_calls = f.provider_calls
+            f.SOURCE_ID = 201
+            f.select_command(
+                "@reviewsensei override RS-"
+                + instance[:6].upper()
+                + " acceptable risk",
+                new_run=True,
+            )
+            self.assertEqual(f.invoke_command(), 0, f.error)
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            state = ApiRunAccounting.from_document(record.api_run_accounting)
+            self.assertIsNone(state.terminal_transaction)
+            self.assertEqual(state.action["phase"], "terminal")
+            self.assertEqual(
+                state.action["outcome"], {"kind": "applied", "reason": None}
+            )
+            self.assertEqual(state.action["intent"]["source"], f._source_scope())
+            self.assertEqual(len(record.dispositions), 1)
+            self.assertEqual(record.dispositions[0]["fingerprint"], instance)
+            self.assertEqual(record.dispositions[0]["head_sha"], HEAD)
+            retained = read_action_result(f.selected.ledger, IDENTITY, record)
+            self.assertEqual(retained["outcome"], state.action["outcome"])
+            self.assertEqual(f.provider_calls, provider_calls)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+
+    def test_terminal_action_requires_authenticated_result_before_next_source(self):
+        from review_sensei_github.api_run_history import read_action_result
+
+        for corrupt in (False, True):
+            with (
+                self.subTest(corrupt=corrupt),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f, _instance = self.partial_review(directory, closed=True)
+                f.SOURCE_ID = 201
+                f.select_command("@reviewsensei review pause", new_run=True)
+                self.assertEqual(f.invoke_command(), 0, f.error)
+                if corrupt:
+
+                    def change_binding(record):
+                        value = copy.deepcopy(record.api_run_accounting)
+                        value["action"]["result"]["binding"]["head_sha"] = "f" * 40
+                        # Deliberately corrupt external bytes. The ordinary
+                        # successor API correctly forbids this replacement.
+                        document = record.to_dict()
+                        document["api_run_accounting"] = value
+                        document["transaction"] = record.transaction
+                        document.pop("schema_version")
+                        document.pop("record_sha256")
+                        return type(record)._construct(**document)
+
+                    f.rewrite_record(mutate=change_binding)
+                previous = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertIsNone(previous.api_run_accounting["terminal_transaction"])
+                self.assertEqual(
+                    previous.api_run_accounting["action"]["phase"], "terminal"
+                )
+                self.assertEqual(
+                    previous.api_run_accounting["action"]["outcome"],
+                    {"kind": "applied", "reason": None},
+                )
+                saved_root = copy.deepcopy(f.comment)
+                saved_parts = copy.deepcopy(f.extra_comments)
+                provider_calls = f.provider_calls
+                f.SOURCE_ID = 202
+                f.select_command("@reviewsensei review status", new_run=True)
+                with patch(
+                    "review_sensei_github.api_run_history.read_action_result",
+                    wraps=read_action_result,
+                ) as authenticate:
+                    self.assertEqual(f.invoke_command(), 1 if corrupt else 0, f.error)
+                self.assertTrue(
+                    any(
+                        call.args[2].record_sha256 == previous.record_sha256
+                        for call in authenticate.call_args_list
+                    )
+                )
+                self.assertEqual(f.provider_calls, provider_calls)
+                if corrupt:
+                    self.assertIn("inline evidence binding does not match", f.error)
+                    self.assertEqual(f.comment, saved_root)
+                    self.assertEqual(f.extra_comments, saved_parts)
+                else:
+                    current = parse_session_comment(
+                        f.comment["body"], identity=IDENTITY
+                    )
+                    intent = current.api_run_accounting["action"]["intent"]
+                    self.assertEqual(intent["source"], f._source_scope())
+                    self.assertNotEqual(
+                        intent["source"],
+                        previous.api_run_accounting["action"]["intent"]["source"],
+                    )
+                    self.assertEqual(
+                        current.api_run_accounting["action"]["phase"], "terminal"
+                    )
+                    self.assertIsNone(
+                        current.api_run_accounting["terminal_transaction"]
+                    )
+
+
 class HistoricalCommandFixture(CommandEntryFixture, _CompletionFixture):
     """Combine external command HTTP with actual historical review metadata."""
 
