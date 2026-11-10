@@ -102,7 +102,13 @@ def read_current_action_result(
     if loaded.status != "ok" or loaded.record is None:
         raise ReviewInputError("caller action result current root is unavailable")
     context._enter(loaded.record)
-    record = loaded.record
+    return _read_bound_action_result(
+        ledger, identity, loaded.record, budget=context.budget
+    )
+
+
+def _read_bound_action_result(ledger, identity, record, *, budget):
+    """Decode bytes after native-root or archive authentication, never select authority."""
     state = ApiRunAccounting.from_document(record.api_run_accounting)
     if state.version != PARTITIONED_ACTION_ACCOUNTING_VERSION:
         return read_action_result(ledger, identity, record)
@@ -143,10 +149,110 @@ def read_current_action_result(
                 manifest,
                 reader=bounded_part,
                 expected_binding=binding,
-                budget=context.budget,
+                budget=budget,
             )
         )
     return _match_action_result(value, binding, action)
+
+
+@dataclass(frozen=True)
+class ArchivedActionResultObservation:
+    """Canonical immutable data, with no settlement or original-source authority."""
+
+    root_document: bytes
+    result_document: bytes | None
+
+
+@dataclass(frozen=True)
+class ActionResultAncestryObservation:
+    """One observed native anchor and its authenticated newest-to-oldest path.
+
+    This is neither a latest-checkpoint assertion nor an execution capability.
+    The anchor's action result is not returned or relied upon by this walk.
+    """
+
+    anchor_document: bytes
+    ancestors: tuple[ArchivedActionResultObservation, ...]
+
+
+def read_ancestor_action_results(
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    *,
+    context: ActionResultReadContext,
+    target_run_id: int,
+    max_decoded_bytes: int = MAX_PARTITION_DECODED_BYTES,
+) -> ActionResultAncestryObservation:
+    """Follow only references rooted in a native observation, returning no authority.
+
+    Every attempted root shares the supplied context's depth and original budget.
+    Fixed metadata deadlines and caller per-request deadlines retain their own
+    semantics; no aggregate caller traversal deadline is created. No replacement
+    allowance, reservation or final-fence dispatch is
+    issued. Failure returns no prefix and never refunds reads. An actionless
+    archived root has an explicit absent result; a pending action, orphan part
+    or unavailable terminal result cannot stand in for authenticated result data.
+
+    The output is anchored to the root initially observed, even if the live root
+    subsequently advances. Original source/configuration claims are preserved,
+    not upgraded into source-text authentication, writer exclusion or settlement.
+    """
+    if (
+        not isinstance(ledger, GitHubIssueCommentSessionLedger)
+        or not isinstance(context, ActionResultReadContext)
+        or type(target_run_id) is not int
+        or not 1 <= target_run_id <= (1 << 53) - 1
+        or type(max_decoded_bytes) is not int
+        or not 1 <= max_decoded_bytes <= MAX_PARTITION_DECODED_BYTES
+    ):
+        raise ReviewInputError("caller ancestor result read context is invalid")
+    context._check(ledger, identity)
+    loaded = ledger.load(identity)
+    if loaded.status != "ok" or loaded.record is None:
+        raise ReviewInputError("caller ancestor result anchor is unavailable")
+    record = loaded.record
+    if record.identity() != identity:
+        raise ReviewInputError("caller ancestor result anchor scope changed")
+    context._enter(record)
+    state = ApiRunAccounting.from_document(record.api_run_accounting)
+    if state.identity.run_id == target_run_id:
+        raise ReviewInputError("caller ancestor target is the current run")
+    seen_runs = {state.identity.run_id}
+    anchor = canonical_bytes(record.to_dict())
+    size = len(anchor)
+    if size > max_decoded_bytes:
+        raise ReviewInputError("caller ancestor result aggregate limit exceeded")
+    ancestors = []
+    while state.identity.run_id != target_run_id:
+        reference = state.previous_record
+        if reference is None:
+            raise ReviewInputError("caller ancestor result target is unavailable")
+        context._check(ledger, identity)
+        record = read_previous_run(ledger, identity, reference)
+        context._enter(record)
+        state = ApiRunAccounting.from_document(record.api_run_accounting)
+        if state.identity.run_id in seen_runs:
+            raise ReviewInputError("caller ancestor result run cycle")
+        seen_runs.add(state.identity.run_id)
+        root = canonical_bytes(record.to_dict())
+        size += len(root)
+        if size > max_decoded_bytes:
+            raise ReviewInputError("caller ancestor result aggregate limit exceeded")
+        result = None
+        if state.action is not None:
+            result = canonical_bytes(
+                _read_bound_action_result(
+                    ledger, identity, record, budget=context.budget
+                )
+            )
+            size += len(result)
+            if size > max_decoded_bytes:
+                raise ReviewInputError(
+                    "caller ancestor result aggregate limit exceeded"
+                )
+        context.budget.check()
+        ancestors.append(ArchivedActionResultObservation(root, result))
+    return ActionResultAncestryObservation(anchor, tuple(ancestors))
 
 
 def action_result_binding(
