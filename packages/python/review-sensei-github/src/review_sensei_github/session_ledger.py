@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping, Sequence, cast
 from urllib.parse import quote
 
+from review_sensei.api_work import ApiRunAccounting
 from review_sensei.bounded_evidence import (
     INLINE_ENCODING,
     MAX_MANIFEST_BYTES,
@@ -1660,6 +1661,10 @@ class GitHubIssueCommentSessionLedger:
     def _render_comment(
         self, *, repository_id: int, pull_request: int, record: SessionRecord
     ) -> str:
+        if record.api_run_accounting is not None:
+            ApiRunAccounting.from_document(
+                record.api_run_accounting
+            ).require_writer_version()
         accepted = self._accepted_consumed_grant
         if accepted is not None and accepted in self._observed_consumed_grants:
             raise ReviewInputError("session grant was already used")
@@ -2013,6 +2018,10 @@ class GitHubIssueCommentSessionLedger:
         ):
             raise ReviewInputError("session generation conflict")
         record = latest_record
+        if record.api_run_accounting is not None:
+            ApiRunAccounting.from_document(
+                record.api_run_accounting
+            ).require_writer_version()
         _history_legacy_write_guard(self, record)
         self._mutation_active = True
         try:

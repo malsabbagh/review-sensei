@@ -9,17 +9,21 @@ import tempfile
 import unittest
 import zlib
 from dataclasses import replace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import URLError
 from urllib.parse import urlsplit
 
 import test_api_work_actions as native_actions
+from fake_github_http import make_http
 from review_sensei_github import api_run_history
 from review_sensei_github.errors import (
     GitHubHTTPTransientError,
     GitHubPublicationTransientError,
 )
-from review_sensei_github.session_ledger import render_session_comment
+from review_sensei_github.session_ledger import (
+    GitHubIssueCommentSessionLedger,
+    render_session_comment,
+)
 from test_api_work_persistence import IDENTITY, json_response
 
 from review_sensei.api_work import (
@@ -593,6 +597,37 @@ class ActionResultReaderTests(unittest.TestCase):
 
 
 class ProspectiveAccountingTests(unittest.TestCase):
+    def test_plain_native_replace_refuses_v3_before_mutation_or_write(self):
+        state = replace(accounting(), version=PROSPECTIVE_VERSION)
+        record = SessionRecord.create(IDENTITY).evolve(
+            api_run_accounting=state.to_document()
+        )
+        body = render_session_comment(
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            record=record,
+        )
+        http, calls = make_http(
+            [json_response([{"id": 7, "body": body}]) for _ in range(2)]
+        )
+        ledger = GitHubIssueCommentSessionLedger(http, token="synthetic")
+        mutate = Mock(side_effect=lambda current: current.evolve(operator_paused=True))
+        with self.assertRaisesRegex(ReviewInputError, "reader-only"):
+            ledger.replace(IDENTITY, mutate)
+        mutate.assert_not_called()
+        self.assertEqual([method for method, _, _ in calls], ["GET", "GET"])
+
+    def test_plain_native_initialization_refuses_outgoing_v3_before_post(self):
+        state = replace(accounting(), version=PROSPECTIVE_VERSION)
+        http, calls = make_http([json_response([])])
+        ledger = GitHubIssueCommentSessionLedger(http, token="synthetic")
+        with self.assertRaisesRegex(ReviewInputError, "reader-only"):
+            ledger.initialize_with_mutation(
+                IDENTITY,
+                lambda record: record.evolve(api_run_accounting=state.to_document()),
+            )
+        self.assertEqual([method for method, _, _ in calls], ["GET"])
+
     def test_v1_v2_wire_and_writer_default_stay_exact_while_v3_is_read_only(self):
         self.assertEqual(ACCOUNTING_VERSION, "caller-requests-v2")
         state = accounting().reserve("work", 3)
