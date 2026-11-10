@@ -7,7 +7,7 @@ from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, TypedDict, cast
 
 from review_sensei.baseline import ReviewBaseline
 from review_sensei.bounded_evidence import EvidenceReadBudget
@@ -93,6 +93,11 @@ from .publication import (
     ReviewPublisher,
     prepare_publication_review,
 )
+
+
+class _ConversationBaseBinding(TypedDict, total=False):
+    context_base_sha: str | None
+    context_base_ref: str | None
 
 
 @dataclass(frozen=True)
@@ -3553,6 +3558,14 @@ class GitHubApplication:
         )
         if not isinstance(prepared, PreparedConversation):
             return prepared
+        context_binding: _ConversationBaseBinding = (
+            {
+                "context_base_sha": prepared.context.base_sha,
+                "context_base_ref": prepared.context.base_ref,
+            }
+            if isinstance(replier, ConversationPublisher)
+            else {}
+        )
         source_body = (
             prepared.context.messages[-1].body if prepared.context.messages else ""
         )
@@ -3586,6 +3599,7 @@ class GitHubApplication:
                 app_slug=app_slug,
                 root_comment_id=prepared.root_comment_id,
                 source_kind=prepared.source_kind,
+                **context_binding,
             )
         capability_token = broker.exchange(
             oidc_token or broker.request_oidc_token(),
@@ -3631,6 +3645,11 @@ class GitHubApplication:
             )
             if not isinstance(full_context, PreparedConversation):
                 return full_context
+            if (
+                full_context.context.base_sha,
+                full_context.context.base_ref,
+            ) != (prepared.context.base_sha, prepared.context.base_ref):
+                return ReplyResult(status="skipped_stale_base")
             prepared = full_context
         # A large evidence operation prioritizes durable reply/decision work
         # within the same allowance over a transient processing indicator.
@@ -3944,7 +3963,18 @@ class GitHubApplication:
                     f"reply:{repository_id}:{pull_request}:{prepared.source_comment_id}"
                 ),
                 attestation_digest=sha256(
-                    f"{repository_id}:{pull_request}:{prepared.head_sha}".encode()
+                    json.dumps(
+                        {
+                            "kind": "reply-context-v2",
+                            "repository_id": repository_id,
+                            "pull_request": pull_request,
+                            "head_sha": prepared.head_sha,
+                            "base_sha": prepared.context.base_sha,
+                            "base_ref": prepared.context.base_ref,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
                 ).hexdigest(),
                 repository=repository,
                 oidc_token=oidc_token,
@@ -3980,6 +4010,7 @@ class GitHubApplication:
                     app_slug=app_slug,
                     root_comment_id=prepared.root_comment_id,
                     source_kind=prepared.source_kind,
+                    **context_binding,
                 )
             try:
                 resolution_token = broker.exchange(
@@ -4002,6 +4033,7 @@ class GitHubApplication:
                 resolution_token=resolution_token,
                 resolution_evidence=resolution_evidence,
                 resolution_base_sha=prepared.context.base_sha,
+                **context_binding,
             )
         finally:
             if reaction is not None:
