@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0130](0130-known-check-rejection-accounting.md) | Proposed | Close fresh publication accounting after a confirmed check rejection | User-directed lifecycle qualification; PR pending | Original dispatch/negative response, unchanged caller guards, failed gate and exit 1; no historical recovery |
 | [0129](0129-bounded-pull-request-lookup-diagnostics.md) | Proposed | Preserve closed PR lookup failure evidence | User-directed broker diagnosis | Additive observations only; no retry, deployment identity fabrication or recovery authority |
 | [0127](0127-observed-action-result-ancestry.md) | Proposed | Authenticate bounded observed action-result ancestry | User-directed recovery qualification; issue/PR pending | Native anchor, original archive/result bindings and shared budget; no settlement, writer or recovery activation |
 | [0126](0126-prospective-action-result-reader.md) | Proposed | Read prospective one-part action results without enabling writes | User-directed G34 qualification; issue/PR pending | V1/V2 wire stability; explicit bounded current-root reader; no writer or recovery activation |

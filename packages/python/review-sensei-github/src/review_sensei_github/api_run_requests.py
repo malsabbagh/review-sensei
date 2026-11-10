@@ -642,6 +642,13 @@ class ApiRunRequestTransport:
         }
         observation["mutation"] = is_mutation
         self.observations.append(observation)
+        try:
+            from .check_accounting import _dispatch
+
+            _dispatch(self, request, observation)
+        except Exception:
+            # Missing supplementary evidence refuses accounting completion.
+            pass
         if observation["mutation"]:
             if self._checkpoint is not None and request.get_method() == "PATCH":
                 self._checkpoint_write_request_id = request_id
@@ -676,6 +683,12 @@ class ApiRunRequestTransport:
                 raise EvidenceBudgetExhausted(
                     "caller response exceeded its original request deadline"
                 )
+            try:
+                from .check_accounting import _response
+
+                _response(self, observation, observed_status)
+            except Exception:
+                pass
 
         # The debit/intent above happens before the physical opener. Exceptions
         # preserve the charge; read/parse/status failures never refund it.

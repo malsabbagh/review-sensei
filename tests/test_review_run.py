@@ -433,6 +433,11 @@ class EntryFixture(LifecycleFixture):
                         {
                             "summary": fixture.provider_summary or "Complete review.",
                             "comments": comments,
+                            **(
+                                {"fully_reviewed": fixture.provider_fully_reviewed}
+                                if hasattr(fixture, "provider_fully_reviewed")
+                                else {}
+                            ),
                         }
                     ),
                     provider=self.name,
@@ -3279,3 +3284,556 @@ os._exit(92)
                         f.accounted.accounting.previous_record,
                     )
                     self.assertEqual(archived.to_dict(), record.to_dict())
+
+
+class CheckAccountingEntryTests(unittest.TestCase):
+    @staticmethod
+    def changed_result(source):
+        changed = replace(
+            source, summary="Different valid analysis result", transaction=None
+        )
+        return replace(
+            changed,
+            transaction=replace(
+                source.transaction, result_sha256=changed.content_digest()
+            ),
+        )
+
+    def test_known_capability_denial_closes_accounting_but_keeps_gate_failure(self):
+        import io
+        import json
+        from urllib.error import HTTPError
+        from urllib.parse import urlsplit
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            external = f.external
+
+            def denied_check(request, timeout):
+                body = json.loads(request.data) if request.data else {}
+                if body.get("capability") == "check_publish":
+                    f.trace.append(
+                        (
+                            f.attempt,
+                            request.get_method(),
+                            urlsplit(request.full_url).path,
+                        )
+                    )
+                    raise HTTPError(
+                        request.full_url, 403, "synthetic denied", {}, io.BytesIO(b"{}")
+                    )
+                return external(request, timeout)
+
+            f.external = denied_check
+            self.assertEqual(f.invoke(), 1, f.error)
+            output = json.loads((f.root / "publication.json").read_text())
+            self.assertEqual(output["diagnostic"], "check_access_denied")
+            self.assertTrue(output["accounting_terminal"])
+            self.assertIsNone(output["terminal_reason"])
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(record.transaction.phase, "publication_succeeded")
+            self.assertEqual(
+                record.api_run_accounting["terminal_transaction"],
+                record.transaction.transaction_id,
+            )
+            self.assertEqual(f.check_runs, [])
+            self.assertEqual(f.provider_calls, 1)
+            self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
+
+    def test_known_native_denials_close_accounting_without_passing_check(self):
+        import json
+        from urllib.parse import urlsplit
+
+        from fake_github_http import json_response
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        for operation in ("lookup", "create", "update"):
+            with (
+                self.subTest(operation=operation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = EntryFixture(directory)
+                external = f.external
+
+                def deny_native(request, timeout):
+                    path = urlsplit(request.full_url).path
+                    selected = (
+                        operation == "lookup"
+                        and request.method == "GET"
+                        and path.endswith("/check-runs")
+                        or operation == "create"
+                        and request.method == "POST"
+                        and path.endswith("/check-runs")
+                        or operation == "update"
+                        and request.method == "PATCH"
+                        and "/check-runs/" in path
+                    )
+                    if selected:
+                        f.trace.append((f.attempt, request.method, path))
+                        return json_response({}, 403)
+                    return external(request, timeout)
+
+                f.external = deny_native
+                self.assertEqual(f.invoke(), 1, f.error)
+                output = json.loads((f.root / "publication.json").read_text())
+                self.assertEqual(output["diagnostic"], "check_access_denied")
+                self.assertTrue(output["accounting_terminal"])
+                self.assertEqual(
+                    output["check_failure"],
+                    {
+                        "code": "check_access_denied",
+                        "operation": operation,
+                        "status": 403,
+                    },
+                )
+                record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertEqual(
+                    record.api_run_accounting["terminal_transaction"],
+                    record.transaction.transaction_id,
+                )
+                self.assertFalse(
+                    any(c.get("conclusion") == "success" for c in f.check_runs)
+                )
+                self.assertEqual(f.provider_calls, 1)
+
+    def test_unknown_check_responses_preserve_publication_and_open_accounting(self):
+        import json
+        from urllib.parse import urlsplit
+
+        from fake_github_http import json_response
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        for fault in (
+            "lost-capability",
+            "lost-create",
+            "stored-lost-create",
+            "ambiguous-create",
+        ):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = EntryFixture(directory)
+                external = f.external
+                fired = False
+
+                def unknown(request, timeout):
+                    nonlocal fired
+                    path = urlsplit(request.full_url).path
+                    body = json.loads(request.data) if request.data else {}
+                    selected = (
+                        body.get("capability") == "check_publish"
+                        if fault == "lost-capability"
+                        else request.method == "POST" and path.endswith("/check-runs")
+                    )
+                    if selected and not fired:
+                        fired = True
+                        if fault == "stored-lost-create":
+                            external(request, timeout)
+                        else:
+                            f.trace.append((f.attempt, request.method, path))
+                        if fault == "ambiguous-create":
+                            return json_response({}, 503)
+                        raise TimeoutError("synthetic unknown check response")
+                    return external(request, timeout)
+
+                f.external = unknown
+                self.assertEqual(f.invoke(), 1, f.error)
+                output = json.loads((f.root / "publication.json").read_text())
+                self.assertFalse(output["accounting_terminal"])
+                record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertEqual(record.transaction.phase, "publication_succeeded")
+                self.assertIsNone(record.api_run_accounting["terminal_transaction"])
+                self.assertTrue(
+                    any(
+                        o.get("mutation")
+                        and (o["outcome"] == "unknown" or o.get("uncertain_effect"))
+                        for o in f.accounted.observations
+                    )
+                )
+                self.assertEqual(f.provider_calls, 1)
+
+    def test_lost_check_then_definite_denial_cannot_settle_the_lost_effect(self):
+        import json
+        from urllib.parse import urlsplit
+
+        from fake_github_http import json_response
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            external = f.external
+            attempts = 0
+
+            def check_write(request, timeout):
+                nonlocal attempts
+                path = urlsplit(request.full_url).path
+                if request.method == "POST" and path.endswith("/check-runs"):
+                    f.trace.append((f.attempt, request.method, path))
+                    attempts += 1
+                    if attempts == 1:
+                        raise TimeoutError("synthetic original mutation unknown")
+                    return json_response({}, 403)
+                return external(request, timeout)
+
+            f.external = check_write
+
+            def earlier_unknown():
+                try:
+                    f.http.request(
+                        "POST",
+                        "/repos/owner/repo/check-runs",
+                        token="synthetic",
+                        body={"head_sha": HEAD},
+                    )
+                except Exception:
+                    pass
+
+            f.before_publication = earlier_unknown
+            self.assertEqual(f.invoke(), 1, f.error)
+            output = json.loads((f.root / "publication.json").read_text())
+            self.assertEqual(output["check_failure"]["status"], 403)
+            self.assertFalse(output["accounting_terminal"])
+            self.assertEqual(output["terminal_reason"], "terminal_close_unconfirmed")
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(record.api_run_accounting["terminal_transaction"])
+            lost = [
+                o
+                for o in f.accounted.observations
+                if o["outcome"] == "unknown" and o.get("mutation")
+            ]
+            self.assertEqual(len(lost), 1)
+            self.assertNotIn(lost[0]["request_id"], f.accounted._reconciled_mutations)
+            self.assertEqual(attempts, 2)
+
+    def test_partial_publication_denial_keeps_coverage_and_required_decision(self):
+        import io
+        import json
+        from urllib.error import HTTPError
+        from urllib.parse import urlsplit
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            f.provider_fully_reviewed = False
+            external = f.external
+
+            def denied(request, timeout):
+                body = json.loads(request.data) if request.data else {}
+                if body.get("capability") == "check_publish":
+                    f.trace.append(
+                        (f.attempt, request.method, urlsplit(request.full_url).path)
+                    )
+                    raise HTTPError(
+                        request.full_url, 403, "synthetic", {}, io.BytesIO(b"{}")
+                    )
+                return external(request, timeout)
+
+            f.external = denied
+            self.assertEqual(f.invoke(human=True), 1, f.error)
+            output = json.loads((f.root / "publication.json").read_text())
+            self.assertTrue(output["accounting_terminal"])
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(
+                record.api_run_accounting["terminal_transaction"],
+                record.transaction.transaction_id,
+            )
+            self.assertEqual(record.dispositions, ())
+            self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+            bodies = "\n".join(r.get("body", "") for r in f.reviews)
+            self.assertIn("partial", bodies.lower())
+            self.assertIn("RS-", bodies)
+            from review_sensei_github.publication import parse_finding_index
+
+            index = parse_finding_index(
+                f.reviews[-1]["body"], repository_id=123, pull_request=7, head_sha=HEAD
+            )
+            self.assertEqual(len(index.entries), 1)
+            self.assertTrue(index.entries[0].needs_human)
+            self.assertFalse(index.entries[0].blocking)
+
+    def test_terminal_write_failure_does_not_claim_accounting_completion(self):
+        import io
+        import json
+        from urllib.error import HTTPError
+        from urllib.parse import urlsplit
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            external = f.external
+            terminal_attempts = 0
+
+            def failed_close(request, timeout):
+                nonlocal terminal_attempts
+                path = urlsplit(request.full_url).path
+                body = json.loads(request.data) if request.data else {}
+                if body.get("capability") == "check_publish":
+                    f.trace.append((f.attempt, request.method, path))
+                    raise HTTPError(
+                        request.full_url, 403, "synthetic", {}, io.BytesIO(b"{}")
+                    )
+                if request.method == "PATCH" and "/issues/comments/" in path:
+                    candidate = parse_session_comment(body["body"], identity=IDENTITY)
+                    if (
+                        candidate is not None
+                        and candidate.api_run_accounting["terminal_transaction"]
+                        is not None
+                    ):
+                        f.trace.append((f.attempt, request.method, path))
+                        terminal_attempts += 1
+                        raise TimeoutError("synthetic terminal write unknown")
+                return external(request, timeout)
+
+            f.external = failed_close
+            self.assertEqual(f.invoke(), 1, f.error)
+            output = json.loads((f.root / "publication.json").read_text())
+            self.assertFalse(output["accounting_terminal"])
+            self.assertEqual(output["terminal_reason"], "terminal_close_unconfirmed")
+            self.assertEqual(terminal_attempts, 1)
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(record.api_run_accounting["terminal_transaction"])
+            self.assertEqual(f.provider_calls, 1)
+
+    def test_successful_publication_keeps_success_and_original_allocation(self):
+        import json
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            self.assertEqual(f.invoke(), 0, f.error)
+            output = json.loads((f.root / "publication.json").read_text())
+            self.assertTrue(output["accounting_terminal"])
+            self.assertNotIn("check_failure", output)
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(
+                record.api_run_accounting["terminal_transaction"],
+                record.transaction.transaction_id,
+            )
+            self.assertEqual(f.accounted.accounting.configuration.limit, 512)
+
+    def test_denial_proof_refuses_reconstructed_or_cross_source_inputs(self):
+        import copy
+        import io
+        import json
+        from unittest.mock import patch
+        from urllib.error import HTTPError
+        from urllib.parse import urlsplit
+
+        from review_sensei_github import check_accounting as evidence
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        faults = (
+            "source-clone",
+            "changed-result",
+            "failure-clone",
+            "cleanup-clone",
+            "missing-cleanup",
+            "wrong-review",
+        )
+        for fault in faults:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = EntryFixture(directory)
+                external = f.external
+                issuer = evidence.confirm_denied_publication
+                calls = []
+
+                def denied(request, timeout):
+                    body = json.loads(request.data) if request.data else {}
+                    if body.get("capability") == "check_publish":
+                        f.trace.append(
+                            (f.attempt, request.method, urlsplit(request.full_url).path)
+                        )
+                        raise HTTPError(
+                            request.full_url, 403, "synthetic", {}, io.BytesIO(b"{}")
+                        )
+                    return external(request, timeout)
+
+                def altered(publication, **kwargs):
+                    if fault == "source-clone":
+                        kwargs["source_result"] = replace(kwargs["source_result"])
+                    elif fault == "changed-result":
+                        result = kwargs["source_result"]
+                        kwargs["source_result"] = self.changed_result(result)
+                    elif fault == "failure-clone":
+                        kwargs["failure"] = copy.copy(kwargs["failure"])
+                    elif fault == "cleanup-clone":
+                        kwargs["cleanup"] = replace(kwargs["cleanup"])
+                    elif fault == "missing-cleanup":
+                        kwargs["cleanup"] = None
+                    elif fault == "wrong-review":
+                        kwargs["review_id"] += 1
+                    issuer(publication, **kwargs)
+                    calls.append(fault)
+
+                f.external = denied
+                with patch.object(evidence, "confirm_denied_publication", altered):
+                    self.assertEqual(f.invoke(), 1, f.error)
+                self.assertEqual(calls, [fault])
+                output = json.loads((f.root / "publication.json").read_text())
+                self.assertFalse(output["accounting_terminal"])
+                self.assertNotIn("check_failure", output)
+                record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertIsNone(record.api_run_accounting["terminal_transaction"])
+                self.assertEqual(f.provider_calls, 1)
+
+    def test_issued_denial_proof_is_not_portable_or_authority_for_changed_context(self):
+        import copy
+        import io
+        import json
+        from unittest.mock import patch
+        from urllib.error import HTTPError
+        from urllib.parse import urlsplit
+
+        from review_sensei_github import check_accounting as evidence
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            external = f.external
+            issuer = evidence.confirm_denied_publication
+            verified = []
+
+            def denied(request, timeout):
+                body = json.loads(request.data) if request.data else {}
+                if body.get("capability") == "check_publish":
+                    f.trace.append(
+                        (f.attempt, request.method, urlsplit(request.full_url).path)
+                    )
+                    raise HTTPError(
+                        request.full_url,
+                        401,
+                        "SENTINEL_PRIVATE_CHECK_RESPONSE",
+                        {},
+                        io.BytesIO(b"SENTINEL_PRIVATE_CHECK_RESPONSE"),
+                    )
+                return external(request, timeout)
+
+            def verify(publication, **kwargs):
+                issuer(publication, **kwargs)
+                caller = f.accounted
+                source = kwargs["source_result"]
+                details = evidence.denied_accounting_details
+                self.assertEqual(
+                    details(publication, caller, IDENTITY, source)["status"], 401
+                )
+                self.assertIsNone(
+                    details(replace(publication), caller, IDENTITY, source)
+                )
+                self.assertIsNone(
+                    details(
+                        replace(publication, diagnostic=None), caller, IDENTITY, source
+                    )
+                )
+                self.assertIsNone(
+                    details(
+                        publication,
+                        caller,
+                        replace(IDENTITY, repository_id=999),
+                        source,
+                    )
+                )
+                changed = self.changed_result(source)
+                self.assertIsNone(details(publication, caller, IDENTITY, changed))
+                capture = evidence._failure_capture(kwargs["failure"])
+                self.assertTrue(capture.valid())
+                self.assertIsNone(capture.broker)
+                self.assertNotIn("SENTINEL_PRIVATE_CHECK_RESPONSE", repr(capture))
+                self.assertFalse(copy.copy(capture).valid())
+                original = capture.operation
+                capture.operation = "update"
+                self.assertIsNone(details(publication, caller, IDENTITY, source))
+                capture.operation = original
+                self.assertIsNotNone(details(publication, caller, IDENTITY, source))
+                verified.append(True)
+
+            f.external = denied
+
+            def checked(publication, **kwargs):
+                try:
+                    verify(publication, **kwargs)
+                except Exception as error:
+                    verified.append(type(error).__name__ + ": " + str(error))
+                    raise
+
+            with patch.object(evidence, "confirm_denied_publication", checked):
+                self.assertEqual(f.invoke(), 1, f.error)
+            self.assertEqual(verified, [True], f.error)
+            output = json.loads((f.root / "publication.json").read_text())
+            self.assertTrue(output["accounting_terminal"])
+            self.assertEqual(output["check_failure"]["status"], 401)
+            self.assertNotIn(
+                "SENTINEL_PRIVATE_CHECK_RESPONSE", json.dumps(output) + f.error
+            )
+
+    def test_late_denial_cannot_supply_a_confirmed_response_receipt(self):
+        import json
+        from urllib.parse import urlsplit
+
+        from fake_github_http import json_response
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            external = f.external
+            faults = []
+
+            def expired(request, timeout):
+                body = json.loads(request.data) if request.data else {}
+                if body.get("capability") == "check_publish":
+                    f.trace.append(
+                        (f.attempt, request.method, urlsplit(request.full_url).path)
+                    )
+                    deadline = f.accounted.observations[-1]["deadline_unix_ms"]
+                    f.accounted._clock = lambda: deadline / 1000 + 1
+                    faults.append(True)
+                    return json_response({}, 403)
+                return external(request, timeout)
+
+            f.external = expired
+            self.assertEqual(f.invoke(), 1, f.error)
+            self.assertEqual(faults, [True])
+            self.assertIsNone(f.accounted.accounting.terminal_transaction)
+            self.assertTrue(
+                any(o["outcome"] == "expired" for o in f.accounted.observations)
+            )
+            output = f.root / "publication.json"
+            if output.exists():
+                self.assertFalse(json.loads(output.read_text())["accounting_terminal"])
+
+    def test_known_denial_with_unconfirmed_cleanup_still_holds(self):
+        import io
+        import json
+        from unittest.mock import patch
+        from urllib.error import HTTPError
+        from urllib.parse import urlsplit
+
+        from review_sensei_github.publication import ReviewPublisher
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+            external = f.external
+
+            def denied(request, timeout):
+                body = json.loads(request.data) if request.data else {}
+                if body.get("capability") == "check_publish":
+                    f.trace.append(
+                        (f.attempt, request.method, urlsplit(request.full_url).path)
+                    )
+                    raise HTTPError(
+                        request.full_url, 403, "synthetic", {}, io.BytesIO(b"{}")
+                    )
+                return external(request, timeout)
+
+            f.external = denied
+            with patch.object(
+                ReviewPublisher,
+                "_finish_thread_cleanup",
+                lambda _, value: replace(value, thread_resolution="unconfirmed"),
+            ):
+                self.assertEqual(f.invoke(human=True), 1, f.error)
+            output = json.loads((f.root / "publication.json").read_text())
+            self.assertEqual(output["terminal_reason"], "thread_cleanup_unconfirmed")
+            self.assertFalse(output["accounting_terminal"])
+            self.assertNotIn("check_failure", output)
+            self.assertIsNone(f.accounted.accounting.terminal_transaction)

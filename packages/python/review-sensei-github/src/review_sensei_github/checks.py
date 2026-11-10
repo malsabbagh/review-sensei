@@ -15,7 +15,7 @@ all obligations are satisfied.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 
 from review_sensei.configuration import REVIEW_POLICIES
 from review_sensei.errors import ReviewInputError
@@ -24,6 +24,7 @@ from review_sensei.review_verdict import ReviewVerdict
 from review_sensei.validation import validate_bounded_text
 
 from .approval import has_blocking_findings, has_human_adjudication_findings
+from .check_accounting import native_check_call
 from .check_diagnostics import (
     CheckFailure,
     CheckOperationError,
@@ -334,6 +335,7 @@ class ReviewCheckPublisher:
 
     def __init__(self, *, http: GitHubHttp) -> None:
         self.http = http
+        self._accounting_context: Any = None
 
     def start(
         self,
@@ -472,6 +474,7 @@ class ReviewCheckPublisher:
                 token=token,
                 repository=repository,
                 check_run_id=existing,
+                head_sha=head_sha,
                 status=status,
                 title=title,
                 summary=summary,
@@ -522,16 +525,27 @@ class ReviewCheckPublisher:
         )
         if scope is not None:
             path += "&filter=all"
-        try:
-            status, payload = self.http.request("GET", path, token=token)
-        except GitHubHTTPTransientError:
-            raise CheckOperationTransientError(
-                check_failure("lookup", transient=True)
-            ) from None
-        except GitHubHTTPError:
-            raise CheckOperationError(check_failure("lookup")) from None
+        with native_check_call(
+            self.http,
+            "lookup",
+            "GET",
+            path,
+            repository=repository,
+            head_sha=head_sha,
+            context=getattr(self, "_accounting_context", None),
+        ) as capture:
+            try:
+                status, payload = self.http.request("GET", path, token=token)
+            except GitHubHTTPTransientError:
+                raise CheckOperationTransientError(
+                    check_failure("lookup", transient=True)
+                ) from None
+            except GitHubHTTPError:
+                raise CheckOperationError(check_failure("lookup")) from None
         if type(status) is not int or status < 200 or status >= 300:
-            raise CheckOperationError(check_failure("lookup", status=status))
+            raise CheckOperationError(
+                capture.bind(check_failure("lookup", status=status))
+            )
         if not isinstance(payload, Mapping):
             raise CheckOperationError(check_failure("lookup", status=status))
         runs = payload.get("check_runs")
@@ -599,14 +613,23 @@ class ReviewCheckPublisher:
         }
         if conclusion is not None:
             body["conclusion"] = conclusion
-        status_code, payload = self._request(
-            "POST", self._repository_path(repository, "/check-runs"), token, body
-        )
+        path = self._repository_path(repository, "/check-runs")
+        with native_check_call(
+            self.http,
+            "create",
+            "POST",
+            path,
+            repository=repository,
+            head_sha=head_sha,
+            body=body,
+            context=getattr(self, "_accounting_context", None),
+        ) as capture:
+            status_code, payload = self._request("POST", path, token, body)
         if status_code == 403:
             return CheckPublicationResult(
                 status="check_permission_denied",
                 diagnostic="check_access_denied",
-                failure=check_failure("create", status=status_code),
+                failure=capture.bind(check_failure("create", status=status_code)),
             )
         if status_code == 201 and isinstance(payload, Mapping):
             check_run_id = payload.get("id")
@@ -614,7 +637,9 @@ class ReviewCheckPublisher:
                 return CheckPublicationResult(
                     status="created", check_run_id=check_run_id
                 )
-        raise CheckOperationError(check_failure("create", status=status_code))
+        raise CheckOperationError(
+            capture.bind(check_failure("create", status=status_code))
+        )
 
     def _update(
         self,
@@ -622,6 +647,7 @@ class ReviewCheckPublisher:
         token: str,
         repository: str,
         check_run_id: int,
+        head_sha: str | None = None,
         status: str,
         title: str,
         summary: str,
@@ -633,23 +659,31 @@ class ReviewCheckPublisher:
         }
         if conclusion is not None:
             body["conclusion"] = conclusion
-        status_code, payload = self._request(
+        path = self._repository_path(repository, f"/check-runs/{check_run_id}")
+        with native_check_call(
+            self.http,
+            "update",
             "PATCH",
-            self._repository_path(repository, f"/check-runs/{check_run_id}"),
-            token,
-            body,
-        )
+            path,
+            repository=repository,
+            head_sha=head_sha,
+            body=body,
+            context=getattr(self, "_accounting_context", None),
+        ) as capture:
+            status_code, payload = self._request("PATCH", path, token, body)
         if status_code == 403:
             return CheckPublicationResult(
                 status="check_permission_denied",
                 diagnostic="check_access_denied",
-                failure=check_failure("update", status=status_code),
+                failure=capture.bind(check_failure("update", status=status_code)),
             )
         if status_code == 200 and isinstance(payload, Mapping):
             updated_id = payload.get("id")
             if isinstance(updated_id, int) and not isinstance(updated_id, bool):
                 return CheckPublicationResult(status="updated", check_run_id=updated_id)
-        raise CheckOperationError(check_failure("update", status=status_code))
+        raise CheckOperationError(
+            capture.bind(check_failure("update", status=status_code))
+        )
 
     def _request(
         self,
