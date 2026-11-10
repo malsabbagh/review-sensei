@@ -54,7 +54,7 @@ remain separate operator qualification; workflow/source identity is insufficient
 Only the existing PR-head reader, broker error serialization and caller diagnostic
 parsing/rendering change. Other readers and authorization paths retain their
 existing behavior. Pre-response failures without a known typed outcome retain their original error
-and unknown evidence; no status or failure stage is invented. The additive envelope is bounded independently of arbitrary
+and emit no supplementary envelope; no status or failure stage is invented. The additive envelope is bounded independently of arbitrary
 upstream metadata. Old callers preserve the original reason but omit new facts.
 No immutable Worker identity can be reported unless the operator separately
 configures the genuine platform binding; this patch leaves configuration unchanged.
