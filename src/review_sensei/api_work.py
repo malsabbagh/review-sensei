@@ -41,6 +41,12 @@ ACTION_NOOP_REASONS = frozenset(
         "no_change",
     }
 )
+UNSTARTED_CANCELLATION_REASONS = frozenset(
+    {
+        "source_edited",
+        "source_deleted",
+    }
+)
 
 
 def _natural(value: object, *, positive: bool = False) -> bool:
@@ -426,24 +432,40 @@ class ApiRunAccounting:
                     "pending action cannot carry a completion result"
                 )
         else:
-            if not action["execution_started"]:
-                raise ReviewInputError("terminal action has no execution entry")
             outcome = action["outcome"]
-            if (
-                not isinstance(outcome, Mapping)
-                or set(outcome) != {"kind", "reason"}
-                or not isinstance(outcome["kind"], str)
-                or outcome["kind"]
-                not in {"applied", "already_applied", "explicit_noop"}
-                or outcome["kind"] == "explicit_noop"
-                and (
+            is_unstarted_cancel = (
+                isinstance(outcome, Mapping)
+                and set(outcome) == {"kind", "reason"}
+                and outcome.get("kind") == "canceled_unstarted"
+            )
+            if is_unstarted_cancel:
+                if action["execution_started"]:
+                    raise ReviewInputError(
+                        "started action cannot be canceled as unstarted"
+                    )
+                if (
                     not isinstance(outcome["reason"], str)
-                    or outcome["reason"] not in ACTION_NOOP_REASONS
-                )
-                or outcome["kind"] != "explicit_noop"
-                and outcome["reason"] is not None
-            ):
-                raise ReviewInputError("caller action outcome is invalid")
+                    or outcome["reason"] not in UNSTARTED_CANCELLATION_REASONS
+                ):
+                    raise ReviewInputError("caller action outcome is invalid")
+            else:
+                if not action["execution_started"]:
+                    raise ReviewInputError("terminal action has no execution entry")
+                if (
+                    not isinstance(outcome, Mapping)
+                    or set(outcome) != {"kind", "reason"}
+                    or not isinstance(outcome["kind"], str)
+                    or outcome["kind"]
+                    not in {"applied", "already_applied", "explicit_noop"}
+                    or outcome["kind"] == "explicit_noop"
+                    and (
+                        not isinstance(outcome["reason"], str)
+                        or outcome["reason"] not in ACTION_NOOP_REASONS
+                    )
+                    or outcome["kind"] != "explicit_noop"
+                    and outcome["reason"] is not None
+                ):
+                    raise ReviewInputError("caller action outcome is invalid")
             manifest = action["result"]
             if not isinstance(manifest, dict) or not isinstance(
                 manifest.get("binding"), dict

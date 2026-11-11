@@ -9,13 +9,28 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from review_sensei.api_work import ApiExecutionOwner, ApiRunIdentity
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionIdentity
 
 from .reservation_recovery import ActionsReservationEvidence, _stamp
+
+BUSINESS_WRITER_JOBS: Final[tuple[str, ...]] = ("hosted", "local", "command")
+_TERMINAL_JOB_CONCLUSIONS: Final[frozenset[str]] = frozenset(
+    {
+        "success",
+        "failure",
+        "cancelled",
+        "timed_out",
+        "action_required",
+        "neutral",
+        "skipped",
+        "startup_failure",
+        "stale",
+    }
+)
 
 
 def claim_review_startup(
@@ -58,7 +73,7 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
     """
 
     def __init__(self, http, *, token: str, command_run_id: str, job: str = "hosted"):
-        if job not in {"hosted", "local", "command"}:
+        if job not in BUSINESS_WRITER_JOBS:
             raise ReviewInputError("review owner job is unsupported")
         super().__init__(http, token=token, command_run_id=command_run_id)
         self.job = job
@@ -120,9 +135,7 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             j
             for j in jobs
             if j.get("status") == "in_progress"
-            and any(
-                _writer_name(j.get("name"), n) for n in ("hosted", "local", "command")
-            )
+            and any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
         ]
         if (
             len(matching) != 1
@@ -325,23 +338,35 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         matching = [j for j in jobs if _writer_name(j.get("name"), predecessor.job)]
         if len(matching) != 1:
             raise ReviewInputError("API predecessor job is missing or ambiguous")
+        # On the GitHub Actions REST API, conditional sibling writer jobs whose
+        # `if:` guard evaluated to false report `status == "completed"` with
+        # `conclusion == "skipped"`. Any writer job with `status != "completed"`
+        # (for example `queued`, `in_progress`, `waiting`, `pending`, or
+        # `requested`) or without a terminal conclusion has not ceased.
+        incomplete_writers = [
+            j
+            for j in jobs
+            if any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
+            and (
+                j.get("status") != "completed"
+                or not isinstance(j.get("conclusion"), str)
+                or j["conclusion"] not in _TERMINAL_JOB_CONCLUSIONS
+            )
+        ]
+        if incomplete_writers:
+            details = ", ".join(
+                f"{j.get('name', '<unnamed>')}={j.get('status', '<unknown>')}/{j.get('conclusion')}"
+                for j in incomplete_writers
+            )
+            raise ReviewInputError(
+                f"API predecessor has not ceased (incomplete writer jobs: {details})"
+            )
         job = matching[0]
         conclusion = job.get("conclusion")
         if (
             job.get("status") != "completed"
             or not isinstance(conclusion, str)
-            or conclusion
-            not in {
-                "success",
-                "failure",
-                "cancelled",
-                "timed_out",
-                "action_required",
-                "neutral",
-                "skipped",
-                "startup_failure",
-                "stale",
-            }
+            or conclusion not in _TERMINAL_JOB_CONCLUSIONS
         ):
             raise ReviewInputError("API predecessor has not ceased")
         stamp = job.get("completed_at")
