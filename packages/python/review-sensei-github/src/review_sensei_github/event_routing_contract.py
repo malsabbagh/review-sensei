@@ -1,9 +1,10 @@
-"""Explicit GitHub event routing decision table, convergence, and guards (G01, G13).
+"""Explicit GitHub event routing, convergence, queue, thread, and review contracts (G01, G07, G13, G26, G28).
 
-Separates caller workflow subscriptions from runtime admission guards and models
-per-source identity plus current-state target convergence so missed, delayed,
-out-of-order, or Actions-concurrency-replaced runs converge deterministically
-without duplicate model inference or silent disappearance of accepted commands.
+Separates caller workflow subscriptions from runtime admission guards, models
+current-state convergence and Actions queue replacement, enforces the
+``merge_group`` unsupported boundary, qualifies bounded ``@reviewsensei verify``
+thread reconciliation, and proves native human ``pull_request_review``
+independence from ReviewSensei ledger accounting and snapshot certification.
 """
 
 from __future__ import annotations
@@ -20,8 +21,8 @@ from .approval import (
     approval_withheld_diagnostic,
     evaluate_approval_facts,
 )
-from .checks import REVIEW_CHECK_NAME
-from .thread_resolution import ThreadResolutionResult
+from .checks import REVIEW_CHECK_NAME, review_check_outcome
+from .thread_resolution import ThreadResolutionResult, resolution_records
 from .trigger import (
     TriggerResolution,
     comment_mentions_sensei,
@@ -2882,6 +2883,167 @@ def reconcile_manual_thread_convergence(
     )
 
 
+RECOVERY_COMMANDS_UNBLOCKED_BY_HUMAN_REVIEW: tuple[str, ...] = (
+    "@reviewsensei verify",
+    "@reviewsensei rescan",
+    "@reviewsensei review remaining",
+    "workflow_dispatch",
+)
+
+
+@dataclass(frozen=True)
+class HumanReviewIndependenceOutcome:
+    """Proof that native human ``pull_request_review`` events are orthogonal to ReviewSensei."""
+
+    outcome_code: str
+    branch_protection_owner: str
+    review_action: str
+    human_review_state: str
+    routing: EventRoutingDecision
+    ledger_generation_before: int
+    ledger_generation_after: int
+    ledger_mutated: bool
+    requires_model_inference: bool
+    accepted_resolution_records_from_review: int
+    sensei_approved: bool
+    sensei_check_conclusion: str
+    stale_snapshot_unlocked: bool
+    actor_can_invoke_sensei_commands: bool
+    preserved_open_finding_ids: tuple[str, ...]
+    recovery_commands_available: tuple[str, ...]
+
+
+def evaluate_human_pr_review_independence(
+    review_payload: Mapping[str, Any] | bytes | bytearray | str | object,
+    *,
+    live_target: LivePullRequestTarget,
+    app_slug: str,
+    eligibility: ReviewApprovalEligibility,
+    reviewed_base_sha: str,
+    policy_mode: str = "auto-approve",
+    ledger_generation: int = 1,
+    open_finding_ids: tuple[str, ...] = (),
+    has_open_sensei_threads: bool = False,
+    current_actor_association: str | None = None,
+    delivery_id: str | None = None,
+) -> HumanReviewIndependenceOutcome:
+    """Evaluate a human ``pull_request_review`` event under G28 independence rules.
+
+    Leaves human review gates strictly to GitHub branch protection and proves:
+    - zero mutation to ReviewSensei ledger generation or open finding obligations;
+    - zero authority from forged markers inside human review bodies;
+    - zero substitution for ReviewSensei coverage/completion or stale snapshots;
+    - zero blocking of ReviewSensei's own recovery commands (``verify``,
+      ``rescan``, ``review remaining``, ``workflow_dispatch``), while enforcing
+      live maintainer association when an actor loses repository privilege.
+    """
+
+    if not isinstance(app_slug, str) or not app_slug.strip():
+        raise ValueError("app_slug must be a non-empty string")
+    if not isinstance(reviewed_base_sha, str) or not _GIT_SHA_FULL.fullmatch(
+        reviewed_base_sha
+    ):
+        raise ValueError("reviewed_base_sha must be a 40-hex SHA")
+    if (
+        isinstance(ledger_generation, bool)
+        or not isinstance(ledger_generation, int)
+        or ledger_generation < 0
+    ):
+        raise ValueError("ledger_generation must be a non-negative integer")
+
+    normalized_review_status = (
+        eligibility.facts.review_status
+        if eligibility.facts.review_status
+        in {"complete", "partial", "incomplete", "summary-only"}
+        else "incomplete"
+    )
+    retained = RetainedSnapshotState(
+        reviewed_base_sha=reviewed_base_sha,
+        reviewed_base_ref=live_target.base_ref,
+        reviewed_head_sha=eligibility.head_sha,
+        review_status=normalized_review_status,
+        open_finding_ids=open_finding_ids,
+    )
+    parsed = _coerce_payload_mapping(review_payload)
+    routing = evaluate_github_event(
+        "pull_request_review",
+        review_payload if parsed is not None else {},
+        delivery_id=delivery_id,
+        live_pull_request=live_target.to_pull_mapping(),
+        retained_state=retained,
+    )
+    review_map = _as_mapping(parsed.get("review")) if parsed is not None else {}
+    raw_state = _opt_str(review_map.get("state"))
+    human_state = (
+        raw_state.strip().lower() if raw_state and raw_state.strip() else "unknown"
+    )
+    reviewer_map = _as_mapping(review_map.get("user"))
+    reviewer_login = _opt_str(reviewer_map.get("login")) or ""
+    reviewer_type = _opt_str(reviewer_map.get("type")) or "User"
+
+    if reviewer_login.casefold() == app_slug.strip().casefold():
+        raise ValueError(
+            "evaluate_human_pr_review_independence requires a non-App review author"
+        )
+
+    # Even if a human review body embeds a forged resolution marker,
+    # resolution_records ignores every review not authored by app_slug.
+    accepted_records = resolution_records([dict(review_map)], app_slug.strip())
+
+    snapshot_matches_live = (
+        eligibility.head_sha == live_target.head_sha
+        and reviewed_base_sha == live_target.base_sha
+    )
+    if snapshot_matches_live:
+        approval_decision = eligibility.evaluate(
+            app_authored=eligibility.facts.app_authored,
+            has_open_review_threads=has_open_sensei_threads,
+        )
+        sensei_approved = approval_decision.approved
+        check_outcome = review_check_outcome(
+            policy=policy_mode,
+            review_status=normalized_review_status,
+            required_fixes=(
+                eligibility.facts.has_blocking_findings or has_open_sensei_threads
+            ),
+            required_decisions=eligibility.facts.has_human_adjudication_findings,
+            review_verdict=eligibility.facts.review_verdict,
+        )
+        sensei_conclusion = check_outcome.conclusion
+    else:
+        sensei_approved = False
+        sensei_conclusion = "failure" if policy_mode != "advisory" else "neutral"
+
+    effective_association = (
+        current_actor_association
+        if current_actor_association is not None
+        else routing.source_identity.author_association
+    )
+    actor_can_command = (
+        reviewer_type == "User"
+        and effective_association in ALLOWED_COMMENT_ASSOCIATIONS
+    )
+
+    return HumanReviewIndependenceOutcome(
+        outcome_code="human_review_independent_noop",
+        branch_protection_owner="github_branch_protection",
+        review_action=routing.action,
+        human_review_state=human_state,
+        routing=routing,
+        ledger_generation_before=ledger_generation,
+        ledger_generation_after=ledger_generation,
+        ledger_mutated=False,
+        requires_model_inference=False,
+        accepted_resolution_records_from_review=len(accepted_records),
+        sensei_approved=sensei_approved,
+        sensei_check_conclusion=sensei_conclusion,
+        stale_snapshot_unlocked=False,
+        actor_can_invoke_sensei_commands=actor_can_command,
+        preserved_open_finding_ids=open_finding_ids,
+        recovery_commands_available=RECOVERY_COMMANDS_UNBLOCKED_BY_HUMAN_REVIEW,
+    )
+
+
 __all__ = [
     "ALLOWED_COMMENT_ASSOCIATIONS",
     "AcceptedOperationRecord",
@@ -2894,6 +3056,7 @@ __all__ = [
     "EVENT_DECISION_TABLE",
     "EventDecisionRule",
     "EventRoutingDecision",
+    "HumanReviewIndependenceOutcome",
     "LivePullRequestTarget",
     "MERGE_QUEUE_REF_PREFIXES",
     "ManualThreadConvergenceOutcome",
@@ -2902,6 +3065,7 @@ __all__ = [
     "MergeQueueEvictionOutcome",
     "OPERATION_LIFECYCLE_PHASES",
     "QueuedRunCandidate",
+    "RECOVERY_COMMANDS_UNBLOCKED_BY_HUMAN_REVIEW",
     "REQUIRED_EVENT_FAMILIES",
     "ReplacedQueueNotice",
     "RetainedSnapshotState",
@@ -2910,6 +3074,7 @@ __all__ = [
     "SourceEventIdentity",
     "decision_rule_for",
     "evaluate_github_event",
+    "evaluate_human_pr_review_independence",
     "inspect_caller_subscription_contract",
     "is_merge_queue_ref",
     "reconcile_event_convergence",
