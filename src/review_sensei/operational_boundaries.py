@@ -12,6 +12,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from .concurrency import ReviewConcurrencyPlan
 from .context import PromptContextOverflow
 from .coverage import COVERAGE_OUTCOMES, COVERAGE_REASONS, CoverageManifest
 from .diff import DiffAnalysis, DiffFileRecord, DiffHunk
@@ -1510,6 +1511,347 @@ def classify_policy_commit_drift(
     )
 
 
+WORKFLOW_PROVIDER_GROUP_PREFIX = "reviewsensei-provider-review"
+QUOTA_OWNERSHIP_SCOPES = frozenset(
+    {
+        "per_pr_workflow_serialization",
+        "provider_and_installation_account_boundary",
+    }
+)
+THROTTLE_STAGES = frozenset(
+    {
+        "broker_admission_before_work",
+        "provider_inference",
+        "post_retention_publication",
+    }
+)
+THROTTLE_RECOVERY_MODES = frozenset(
+    {
+        "fresh_bootstrap_retry",
+        "partial_or_fresh_rescan_after_cooldown",
+        "retained_publication_replay_zero_inference",
+    }
+)
+
+
+@dataclass(frozen=True)
+class CrossPrConcurrencyComparison:
+    """G25 per-PR serialization vs cross-PR/cross-repository quota ownership."""
+
+    workflow_group_a: str
+    workflow_group_b: str
+    provider_key_a: str
+    provider_key_b: str
+    same_pr_serialized: bool
+    cancel_in_progress: bool
+    global_cross_repo_lock: bool
+    shares_credentials_across_runs: bool
+    quota_ownership_scope: str
+    diagnostic: str
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.workflow_group_a, 512, label="workflow_group_a", allow_empty=False
+        )
+        validate_bounded_text(
+            self.workflow_group_b, 512, label="workflow_group_b", allow_empty=False
+        )
+        validate_bounded_text(
+            self.provider_key_a, 512, label="provider_key_a", allow_empty=False
+        )
+        validate_bounded_text(
+            self.provider_key_b, 512, label="provider_key_b", allow_empty=False
+        )
+        for flag_name, flag_val in (
+            ("same_pr_serialized", self.same_pr_serialized),
+            ("cancel_in_progress", self.cancel_in_progress),
+            ("global_cross_repo_lock", self.global_cross_repo_lock),
+            ("shares_credentials_across_runs", self.shares_credentials_across_runs),
+        ):
+            if not isinstance(flag_val, bool):
+                raise ReviewInputError(f"{flag_name} must be a boolean")
+        if self.cancel_in_progress:
+            raise ReviewInputError(
+                "provider/metered per-PR workflow groups must set cancel_in_progress=False"
+            )
+        if self.global_cross_repo_lock:
+            raise ReviewInputError(
+                "persistent global cross-repository lock services are outside the architecture"
+            )
+        if self.shares_credentials_across_runs:
+            raise ReviewInputError(
+                "cross-PR or cross-run credential sharing is forbidden"
+            )
+        if self.quota_ownership_scope not in QUOTA_OWNERSHIP_SCOPES:
+            raise ReviewInputError("quota_ownership_scope is unsupported")
+        if self.same_pr_serialized != (
+            self.workflow_group_a == self.workflow_group_b
+            and self.provider_key_a == self.provider_key_b
+        ):
+            raise ReviewInputError(
+                "same_pr_serialized must match exact per-PR group equality"
+            )
+        validate_bounded_text(
+            self.diagnostic,
+            2048,
+            label="cross-PR concurrency diagnostic",
+            allow_empty=False,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "workflow_group_a": self.workflow_group_a,
+            "workflow_group_b": self.workflow_group_b,
+            "provider_key_a": self.provider_key_a,
+            "provider_key_b": self.provider_key_b,
+            "same_pr_serialized": self.same_pr_serialized,
+            "cancel_in_progress": self.cancel_in_progress,
+            "global_cross_repo_lock": self.global_cross_repo_lock,
+            "shares_credentials_across_runs": self.shares_credentials_across_runs,
+            "quota_ownership_scope": self.quota_ownership_scope,
+            "diagnostic": self.diagnostic,
+        }
+
+
+def plan_cross_pr_concurrency(
+    *,
+    repository_a: str,
+    pull_request_a: int,
+    purpose_a: str,
+    repository_b: str,
+    pull_request_b: int,
+    purpose_b: str,
+    provider_name: str = "ollama",
+) -> CrossPrConcurrencyComparison:
+    """Compare Actions per-PR serialization and core provider keys across two runs."""
+
+    if purpose_a not in HOSTED_ENTRY_PURPOSES or purpose_b not in HOSTED_ENTRY_PURPOSES:
+        raise ReviewInputError("purpose must be review, command, or reply")
+    plan_a = ReviewConcurrencyPlan.for_pull_request(
+        repository_a, pull_request_a, provider_name=provider_name
+    )
+    plan_b = ReviewConcurrencyPlan.for_pull_request(
+        repository_b, pull_request_b, provider_name=provider_name
+    )
+    assert plan_a.provider is not None and plan_b.provider is not None
+    wf_a = f"{WORKFLOW_PROVIDER_GROUP_PREFIX}-{repository_a.strip()}-{pull_request_a}"
+    wf_b = f"{WORKFLOW_PROVIDER_GROUP_PREFIX}-{repository_b.strip()}-{pull_request_b}"
+    same_pr = wf_a == wf_b and plan_a.provider.key == plan_b.provider.key
+    scope = (
+        "per_pr_workflow_serialization"
+        if same_pr
+        else "provider_and_installation_account_boundary"
+    )
+    detail = (
+        f"Same pull request ({repository_a}#{pull_request_a}) serializes {purpose_a} "
+        f"and {purpose_b} in group {wf_a} with cancel-in-progress=false."
+        if same_pr
+        else (
+            f"Distinct pull requests ({repository_a}#{pull_request_a} vs "
+            f"{repository_b}#{pull_request_b}) execute in independent per-PR groups "
+            "without a global cross-repo lock; rate limits and runner concurrency are "
+            "owned by the configured provider/account and GitHub installation boundaries."
+        )
+    )
+    return CrossPrConcurrencyComparison(
+        workflow_group_a=wf_a,
+        workflow_group_b=wf_b,
+        provider_key_a=plan_a.provider.key,
+        provider_key_b=plan_b.provider.key,
+        same_pr_serialized=same_pr,
+        cancel_in_progress=False,
+        global_cross_repo_lock=False,
+        shares_credentials_across_runs=False,
+        quota_ownership_scope=scope,
+        diagnostic=detail,
+    )
+
+
+@dataclass(frozen=True)
+class QuotaThrottleRecoveryPlan:
+    """G25 fail-closed HTTP 429/503 classification and retained-phase recovery."""
+
+    status_code: int
+    stage: str
+    recovery_mode: str
+    result_durably_retained: bool
+    reservation_cleaned_or_bounded: bool
+    completed_inference_replayed_without_spend: bool
+    duplicates_dispatch: bool
+    expands_resource_budget: bool
+    shares_credentials_across_prs: bool
+    disguises_starvation_as_success: bool
+    recovery_instruction: str
+    diagnostic: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.status_code, bool) or self.status_code not in {429, 503}:
+            raise ReviewInputError("throttle status_code must be HTTP 429 or 503")
+        if self.stage not in THROTTLE_STAGES:
+            raise ReviewInputError("throttle stage is unsupported")
+        if self.recovery_mode not in THROTTLE_RECOVERY_MODES:
+            raise ReviewInputError("throttle recovery_mode is unsupported")
+        for flag_name, flag_val in (
+            ("result_durably_retained", self.result_durably_retained),
+            ("reservation_cleaned_or_bounded", self.reservation_cleaned_or_bounded),
+            (
+                "completed_inference_replayed_without_spend",
+                self.completed_inference_replayed_without_spend,
+            ),
+            ("duplicates_dispatch", self.duplicates_dispatch),
+            ("expands_resource_budget", self.expands_resource_budget),
+            ("shares_credentials_across_prs", self.shares_credentials_across_prs),
+            (
+                "disguises_starvation_as_success",
+                self.disguises_starvation_as_success,
+            ),
+        ):
+            if not isinstance(flag_val, bool):
+                raise ReviewInputError(f"{flag_name} must be a boolean")
+        if (
+            self.duplicates_dispatch
+            or self.expands_resource_budget
+            or self.shares_credentials_across_prs
+            or self.disguises_starvation_as_success
+        ):
+            raise ReviewInputError(
+                "throttled runs must never duplicate dispatches, expand budgets, "
+                "share credentials, or disguise starvation as success"
+            )
+        if (
+            self.completed_inference_replayed_without_spend
+            and not self.result_durably_retained
+        ):
+            raise ReviewInputError(
+                "zero-inference publication replay requires a durably retained result"
+            )
+        validate_bounded_text(
+            self.recovery_instruction,
+            1024,
+            label="throttle recovery_instruction",
+            allow_empty=False,
+        )
+        validate_bounded_text(
+            self.diagnostic,
+            2048,
+            label="throttle recovery diagnostic",
+            allow_empty=False,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status_code": self.status_code,
+            "stage": self.stage,
+            "recovery_mode": self.recovery_mode,
+            "result_durably_retained": self.result_durably_retained,
+            "reservation_cleaned_or_bounded": self.reservation_cleaned_or_bounded,
+            "completed_inference_replayed_without_spend": (
+                self.completed_inference_replayed_without_spend
+            ),
+            "duplicates_dispatch": self.duplicates_dispatch,
+            "expands_resource_budget": self.expands_resource_budget,
+            "shares_credentials_across_prs": self.shares_credentials_across_prs,
+            "disguises_starvation_as_success": self.disguises_starvation_as_success,
+            "recovery_instruction": self.recovery_instruction,
+            "diagnostic": self.diagnostic,
+        }
+
+
+def classify_quota_throttle_recovery(
+    *,
+    status_code: int,
+    stage: str,
+    result_durably_retained: bool,
+    reservation_cleaned_or_bounded: bool = True,
+) -> QuotaThrottleRecoveryPlan:
+    """Classify HTTP 429/503 throttling and deterministic recovery without extra spend."""
+
+    if isinstance(status_code, bool) or status_code not in {429, 503}:
+        raise ReviewInputError("throttle status_code must be HTTP 429 or 503")
+    if stage not in THROTTLE_STAGES:
+        raise ReviewInputError("throttle stage is unsupported")
+    if not isinstance(result_durably_retained, bool) or not isinstance(
+        reservation_cleaned_or_bounded, bool
+    ):
+        raise ReviewInputError("retention and reservation flags must be booleans")
+
+    if stage == "post_retention_publication":
+        if not result_durably_retained:
+            raise ReviewInputError(
+                "post_retention_publication requires result_durably_retained=True"
+            )
+        return QuotaThrottleRecoveryPlan(
+            status_code=status_code,
+            stage=stage,
+            recovery_mode="retained_publication_replay_zero_inference",
+            result_durably_retained=True,
+            reservation_cleaned_or_bounded=reservation_cleaned_or_bounded,
+            completed_inference_replayed_without_spend=True,
+            duplicates_dispatch=False,
+            expands_resource_budget=False,
+            shares_credentials_across_prs=False,
+            disguises_starvation_as_success=False,
+            recovery_instruction=(
+                "Re-run the throttled workflow attempt or replay publication after "
+                "rate-limit cooldown; retained analysis publishes without re-running "
+                "paid inference."
+            ),
+            diagnostic=(
+                f"HTTP {status_code} occurred during post-retention publication; "
+                "run exits non-zero with retained analysis intact and replays "
+                "publication deterministically with zero duplicate inference."
+            ),
+        )
+
+    if stage == "broker_admission_before_work":
+        if result_durably_retained:
+            raise ReviewInputError(
+                "broker_admission_before_work cannot claim a newly retained result"
+            )
+        return QuotaThrottleRecoveryPlan(
+            status_code=status_code,
+            stage=stage,
+            recovery_mode="fresh_bootstrap_retry",
+            result_durably_retained=False,
+            reservation_cleaned_or_bounded=reservation_cleaned_or_bounded,
+            completed_inference_replayed_without_spend=False,
+            duplicates_dispatch=False,
+            expands_resource_budget=False,
+            shares_credentials_across_prs=False,
+            disguises_starvation_as_success=False,
+            recovery_instruction=(
+                "Wait for account/broker rate-limit cooldown and re-trigger a fresh "
+                "workflow run; zero provider calls or session mutations occurred."
+            ),
+            diagnostic=(
+                f"HTTP {status_code} refused admission before session enrollment or "
+                "provider spend (retry_count=0); prior session state is untouched."
+            ),
+        )
+
+    return QuotaThrottleRecoveryPlan(
+        status_code=status_code,
+        stage=stage,
+        recovery_mode="partial_or_fresh_rescan_after_cooldown",
+        result_durably_retained=result_durably_retained,
+        reservation_cleaned_or_bounded=reservation_cleaned_or_bounded,
+        completed_inference_replayed_without_spend=False,
+        duplicates_dispatch=False,
+        expands_resource_budget=False,
+        shares_credentials_across_prs=False,
+        disguises_starvation_as_success=False,
+        recovery_instruction=(
+            "Wait for provider account rate-limit cooldown, then run "
+            "@reviewsensei review remaining (if a partial checkpoint was retained) "
+            "or @reviewsensei rescan."
+        ),
+        diagnostic=(
+            f"HTTP {status_code} throttled provider inference under shared account "
+            "quota; run fails closed without disguising throttling as completion."
+        ),
+    )
+
+
 __all__ = [
     "DIRECT_CORE_MAX_TITLE_BYTES",
     "HOSTED_BOOTSTRAP_MAX_TITLE_BYTES",
@@ -1517,21 +1859,29 @@ __all__ = [
     "INDIVISIBLE_UNIT_KINDS",
     "PERMITTED_RECOVERY_ROUTES",
     "POLICY_DRIFT_KINDS",
+    "QUOTA_OWNERSHIP_SCOPES",
     "RECOVERY_COMMAND_TEMPLATES",
+    "THROTTLE_RECOVERY_MODES",
+    "THROTTLE_STAGES",
     "TITLE_ENTRY_SURFACES",
     "TITLE_FRESHNESS_OUTCOMES",
     "TITLE_LIFECYCLE_PHASES",
+    "WORKFLOW_PROVIDER_GROUP_PREFIX",
+    "CrossPrConcurrencyComparison",
     "IndivisibleWorkReport",
     "IndivisibleWorkUnit",
     "PolicyDriftClassification",
+    "QuotaThrottleRecoveryPlan",
     "TitleAttributionRecord",
     "TitleByteLimitEvaluation",
     "TitleFreshnessDecision",
     "classify_change_coverage",
     "classify_mandatory_prompt_overflow",
     "classify_policy_commit_drift",
+    "classify_quota_throttle_recovery",
     "classify_work_plan_unprocessed",
     "evaluate_title_byte_limit",
     "evaluate_title_freshness",
+    "plan_cross_pr_concurrency",
     "verify_published_title_attribution",
 ]
