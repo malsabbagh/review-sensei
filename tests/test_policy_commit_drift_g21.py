@@ -77,6 +77,15 @@ def _checkout_fresh_policy(repo_root: Any, policy_commit: str) -> None:
     )
 
 
+def _disable_crlf_conversion(repo_root: Any) -> None:
+    """Prevent Windows autocrlf from making the working copy look dirty."""
+    subprocess.run(
+        ["git", "-C", str(repo_root), "config", "core.autocrlf", "false"],
+        check=True,
+        capture_output=True,
+    )
+
+
 class _RefOverrideFixture(EntryFixture):
     def __init__(self, directory: str, *, ref_payload: Mapping[str, object]) -> None:
         super().__init__(directory)
@@ -96,6 +105,7 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = EntryFixture(directory)
+            _disable_crlf_conversion(fixture.root)
             frozen_p = fixture.policy
             original_config = fixture.config_bytes
 
@@ -166,6 +176,7 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = EntryFixture(directory)
+            _disable_crlf_conversion(fixture.root)
             frozen_p = fixture.policy
             old_bytes = fixture.config_bytes
             new_bytes = old_bytes + b"\n# policy comment update\n"
@@ -303,6 +314,7 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
         # 1. Settled session + maintainer command drift & recovery:
         with tempfile.TemporaryDirectory() as directory:
             cmd_fixture = CommandEntryFixture(directory)
+            _disable_crlf_conversion(cmd_fixture.root)
             self.assertEqual(cmd_fixture.invoke(), 0, cmd_fixture.error)
             settled_snapshot = cmd_fixture.comment["body"]
             settled_record = parse_session_comment(settled_snapshot, identity=IDENTITY)
@@ -343,6 +355,7 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
         # 2. Partial review with 20 retained dispositions survives P != P_live and recovers via rescan on P':
         with tempfile.TemporaryDirectory() as directory:
             part_fixture, _source = partial_fixture(directory)
+            _disable_crlf_conversion(part_fixture.root)
             retained_snapshot = part_fixture.comment["body"]
             stale_p = part_fixture.policy
             live_p = _advance_remote_default_branch(
