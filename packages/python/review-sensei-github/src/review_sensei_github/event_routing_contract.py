@@ -11,10 +11,17 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
+from .approval import (
+    AutoApprovalDecision,
+    ReviewApprovalEligibility,
+    approval_withheld_diagnostic,
+    evaluate_approval_facts,
+)
 from .checks import REVIEW_CHECK_NAME
+from .thread_resolution import ThreadResolutionResult
 from .trigger import (
     TriggerResolution,
     comment_mentions_sensei,
@@ -2637,6 +2644,244 @@ def reconcile_merge_queue_eviction(
     )
 
 
+@dataclass(frozen=True)
+class ManualThreadFindingState:
+    """Authoritative finding obligation paired with observed native thread state."""
+
+    finding_id: str
+    instance_fingerprint: str
+    blocking: bool
+    needs_human: bool
+    disposition_proven: bool
+    thread_id: str | None
+    thread_base_sha: str | None
+    thread_head_sha: str | None
+    native_thread_resolved: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.finding_id, str) or not self.finding_id.strip():
+            raise ValueError("finding_id must be non-empty")
+        if (
+            not isinstance(self.instance_fingerprint, str)
+            or re.fullmatch(r"[a-f0-9]{64}", self.instance_fingerprint) is None
+        ):
+            raise ValueError("instance_fingerprint must be a 64-hex SHA-256 digest")
+
+
+@dataclass(frozen=True)
+class ManualThreadConvergenceOutcome:
+    """Bounded ``@reviewsensei verify`` outcome for G26 thread reconciliation."""
+
+    status: str
+    outcome_code: str
+    approved: bool
+    approval_decision: AutoApprovalDecision
+    withheld_diagnostic: str | None
+    requires_model_inference: bool
+    finite_api_reads_charged: int
+    threads_observed_already_resolved: tuple[str, ...]
+    threads_reconciled_by_mutation: tuple[str, ...]
+    unconfirmed_instances: tuple[str, ...]
+    preserved_open_finding_ids: tuple[str, ...]
+    recovery_command: str | None
+
+
+def reconcile_manual_thread_convergence(
+    *,
+    live_target: LivePullRequestTarget,
+    eligibility: ReviewApprovalEligibility,
+    reviewed_base_sha: str,
+    findings: Sequence[ManualThreadFindingState],
+    thread_resolution_result: ThreadResolutionResult | None = None,
+    finite_api_reads_charged: int = 1,
+    app_authored: bool = False,
+) -> ManualThreadConvergenceOutcome:
+    """Evaluate bounded ``@reviewsensei verify`` convergence over native threads.
+
+    Enforces G26 invariants:
+    - Clicking GitHub's native "Resolve conversation" never clears an unfixed or
+      unoverridden ReviewSensei finding obligation and never manufactures native
+      approval.
+    - Explicit ``@reviewsensei verify`` runs with zero model inference, charges
+      finite GitHub API reads/mutations normally, idempotently observes already-
+      resolved decided threads, resolves reopened decided threads under exact
+      ``(base_sha, head_sha)`` authority, refuses stale/changed snapshots, and
+      converges cleanly to approval once legitimate fixes or overrides exist.
+    """
+
+    if not isinstance(reviewed_base_sha, str) or not _GIT_SHA_FULL.fullmatch(
+        reviewed_base_sha
+    ):
+        raise ValueError("reviewed_base_sha must be a 40-hex SHA")
+    if (
+        isinstance(finite_api_reads_charged, bool)
+        or not isinstance(finite_api_reads_charged, int)
+        or finite_api_reads_charged < 0
+    ):
+        raise ValueError("finite_api_reads_charged must be a non-negative integer")
+
+    open_obligations = tuple(
+        item.finding_id
+        for item in findings
+        if (item.blocking or item.needs_human) and not item.disposition_proven
+    )
+
+    if (
+        live_target.head_sha != eligibility.head_sha
+        or live_target.base_sha != reviewed_base_sha
+    ):
+        decision = evaluate_approval_facts(
+            replace(
+                eligibility.facts,
+                app_authored=app_authored,
+                has_open_review_threads=None,
+            )
+        )
+        return ManualThreadConvergenceOutcome(
+            status="held_head_or_base_changed",
+            outcome_code="verify_head_or_base_changed",
+            approved=False,
+            approval_decision=decision,
+            withheld_diagnostic=approval_withheld_diagnostic(decision),
+            requires_model_inference=False,
+            finite_api_reads_charged=finite_api_reads_charged,
+            threads_observed_already_resolved=(),
+            threads_reconciled_by_mutation=(),
+            unconfirmed_instances=(),
+            preserved_open_finding_ids=open_obligations,
+            recovery_command="workflow_dispatch",
+        )
+
+    stale_or_missing: list[str] = []
+    for item in findings:
+        if (
+            item.thread_id is None
+            or not item.thread_id.strip()
+            or item.thread_base_sha != live_target.base_sha
+            or item.thread_head_sha != live_target.head_sha
+        ):
+            stale_or_missing.append(item.instance_fingerprint)
+
+    resolver_unconfirmed = (
+        thread_resolution_result.unconfirmed
+        if thread_resolution_result is not None
+        else ()
+    )
+    unconfirmed = tuple(dict.fromkeys((*stale_or_missing, *resolver_unconfirmed)))
+    if unconfirmed:
+        decision = evaluate_approval_facts(
+            replace(
+                eligibility.facts,
+                app_authored=app_authored,
+                has_blocking_findings=any(
+                    item.blocking and not item.disposition_proven for item in findings
+                ),
+                has_human_adjudication_findings=any(
+                    item.needs_human and not item.disposition_proven
+                    for item in findings
+                ),
+                has_open_review_threads=None,
+            )
+        )
+        return ManualThreadConvergenceOutcome(
+            status="held_stale_or_unconfirmed_thread_mapping",
+            outcome_code="stale_or_unconfirmed_thread_mapping",
+            approved=False,
+            approval_decision=decision,
+            withheld_diagnostic=approval_withheld_diagnostic(decision),
+            requires_model_inference=False,
+            finite_api_reads_charged=finite_api_reads_charged,
+            threads_observed_already_resolved=(),
+            threads_reconciled_by_mutation=(),
+            unconfirmed_instances=unconfirmed,
+            preserved_open_finding_ids=open_obligations,
+            recovery_command="@reviewsensei verify",
+        )
+
+    resolved_by_resolver = set(
+        thread_resolution_result.resolved
+        if thread_resolution_result is not None
+        else ()
+    )
+    observed_already_resolved: list[str] = []
+    reconciled_by_mutation: list[str] = []
+    any_blocking_thread_still_open = False
+
+    for item in findings:
+        is_now_resolved = item.native_thread_resolved or (
+            item.disposition_proven
+            and item.instance_fingerprint in resolved_by_resolver
+        )
+        if item.disposition_proven:
+            if item.native_thread_resolved:
+                observed_already_resolved.append(item.instance_fingerprint)
+            elif item.instance_fingerprint in resolved_by_resolver:
+                reconciled_by_mutation.append(item.instance_fingerprint)
+        if (item.blocking or item.needs_human) and not is_now_resolved:
+            any_blocking_thread_still_open = True
+
+    durable_blocking_open = any(
+        item.blocking and not item.disposition_proven for item in findings
+    )
+    durable_human_open = any(
+        item.needs_human and not item.disposition_proven for item in findings
+    )
+
+    updated_facts = replace(
+        eligibility.facts,
+        app_authored=app_authored,
+        has_blocking_findings=durable_blocking_open,
+        has_human_adjudication_findings=durable_human_open,
+        has_open_review_threads=any_blocking_thread_still_open,
+    )
+    decision = evaluate_approval_facts(updated_facts)
+    if decision.approved:
+        return ManualThreadConvergenceOutcome(
+            status="converged_approved",
+            outcome_code="verify_converged_to_approval",
+            approved=True,
+            approval_decision=decision,
+            withheld_diagnostic=None,
+            requires_model_inference=False,
+            finite_api_reads_charged=finite_api_reads_charged,
+            threads_observed_already_resolved=tuple(observed_already_resolved),
+            threads_reconciled_by_mutation=tuple(reconciled_by_mutation),
+            unconfirmed_instances=(),
+            preserved_open_finding_ids=(),
+            recovery_command=None,
+        )
+
+    manually_resolved_unfixed = any(
+        (item.blocking or item.needs_human)
+        and not item.disposition_proven
+        and item.native_thread_resolved
+        for item in findings
+    )
+    code = (
+        "manual_thread_resolve_withheld_unfixed_obligation"
+        if manually_resolved_unfixed
+        else "reopened_decided_thread_requires_verify_resolution"
+        if not durable_blocking_open
+        and not durable_human_open
+        and any_blocking_thread_still_open
+        else "verify_withheld_open_obligations"
+    )
+    return ManualThreadConvergenceOutcome(
+        status="withheld",
+        outcome_code=code,
+        approved=False,
+        approval_decision=decision,
+        withheld_diagnostic=approval_withheld_diagnostic(decision),
+        requires_model_inference=False,
+        finite_api_reads_charged=finite_api_reads_charged,
+        threads_observed_already_resolved=tuple(observed_already_resolved),
+        threads_reconciled_by_mutation=tuple(reconciled_by_mutation),
+        unconfirmed_instances=(),
+        preserved_open_finding_ids=open_obligations,
+        recovery_command="@reviewsensei verify",
+    )
+
+
 __all__ = [
     "ALLOWED_COMMENT_ASSOCIATIONS",
     "AcceptedOperationRecord",
@@ -2651,6 +2896,8 @@ __all__ = [
     "EventRoutingDecision",
     "LivePullRequestTarget",
     "MERGE_QUEUE_REF_PREFIXES",
+    "ManualThreadConvergenceOutcome",
+    "ManualThreadFindingState",
     "MergeGroupRejectionOutcome",
     "MergeQueueEvictionOutcome",
     "OPERATION_LIFECYCLE_PHASES",
@@ -2666,6 +2913,7 @@ __all__ = [
     "inspect_caller_subscription_contract",
     "is_merge_queue_ref",
     "reconcile_event_convergence",
+    "reconcile_manual_thread_convergence",
     "reconcile_merge_queue_eviction",
     "reject_merge_group_event",
     "simulate_actions_concurrency_queue",
