@@ -330,21 +330,38 @@ publication, corrupt receipt or unverified security requirement.
 
 Historical incidents and interrupted workflows must be classified from retained
 session, accounting, and native GitHub witnesses before any replay or restart is
-selected ([ADR 0133](adr/0133-historical-review-recovery-and-nonterminal-boundaries.md)):
+selected ([ADR 0133](adr/0133-historical-review-recovery-and-nonterminal-boundaries.md)).
+Offline classifiers, recovery descriptors, formatter comparisons, and
+attempt-evidence packets (`AttemptEvidencePacket`, `NoTransactionAttemptPacket`,
+`PendingReassessmentAttemptPacket`, and `PublicationOverflowAttemptPacket`)
+always carry `authority=False`: they are read-only evidence bindings, never live
+settlement receipts, and they never reset ledgers, reenroll sessions, or rerun
+merged pull requests. Note that running `verify` on a live pull request can still
+mutate checks, review threads, or native approval even without model inference,
+so historical incidents remain unsettled in live history until authenticated
+native receipts are recorded:
 
-- **Historical recovery matrix (`recovery_route_advisor`, G03):** Every session
-  record and completion witness resolves to a closed state code and bounded
-  route (`ordinary_rollover`, `automatic_historical_completion`,
+- **Historical recovery matrix and attempt-evidence packets (`recovery_route_advisor`, `historical_completion`, G03):**
+  Every session record and completion witness resolves to a closed state code,
+  an immutable `AttemptEvidencePacket` (`authority=False`), and a bounded route
+  (`ordinary_rollover`, `automatic_historical_completion`,
   `same_run_attempt2_retained_replay`, `pre_entry_abort_rollover`,
   `pending_reassessment_continuation`, `targeted_human_disposition`,
   `quarantine_published_tail_isolation`, `quarantine_prepublication_isolation`,
-  or `controlled_serialized_restart`). Missing or unconfirmed completion
-  witnesses (`CompletionState.UNKNOWN` or `UNCONFIRMED`) fail closed and withhold
-  terminal authority until live native review, check, and thread state are
-  reconciled. Route descriptors carry `authority=False` and never waive ledger
-  or token gates.
+  or `controlled_serialized_restart`). Valid terminal command actions whose
+  `terminal_transaction` review marker is null remain terminal (`settled_terminal`),
+  so a null review terminal marker alone is never treated as a universal failure
+  rule. Conversely, ReviewSensei `#443` run `43074015855` generation `11`
+  (`transaction.phase == "publication_succeeded"` with null `terminal_transaction`,
+  null `terminal_action`, null `analysis_abort` cleanup, and missing close
+  diagnostics) is held as `nonterminal_publication_succeeded_unclosed` with
+  `inferred_cause="unknown"` and explicit missing proofs rather than inventing a
+  diagnosis from absent logs.
 - **Pre-entry abort vs provider-entered holds (`pre_entry_abort_recovery`, G29):**
-  A `phase=no-transaction` abort qualifies as `qualified_pre_entry_abort`
+  `NoTransactionAttemptPacket` binds original entry, reservation, caller
+  dispatch, owner cessation, executor provenance, and abort/cleanup evidence for
+  `SiteVault #142` and `SiteVault #153` shapes without resetting or reenrolling
+  sessions. A `phase=no-transaction` abort qualifies as `qualified_pre_entry_abort`
   (`pre_entry_abort_rollover`) only when an authenticated `analysis_abort`
   receipt, ceased owner, confirmed reservation release, clean caller dispatch
   (`uncertain == 0`), zero provider entry, and absence of late native effects
@@ -355,26 +372,36 @@ selected ([ADR 0133](adr/0133-historical-review-recovery-and-nonterminal-boundar
   retaining its full non-startup caller liability upper bound into
   `controlled-restart-registry-v1`.
 - **Zero-decision human reassessment vs failed finalizer (`pending_reassessment_recovery`, G30):**
-  A maintainer explanation with zero cleared findings (`zero_decisions_recorded=True`)
+  `PendingReassessmentAttemptPacket` (`authority=False`, `offline_only=True`,
+  `zero_decision_is_completion_witness=False`) binds original pending-work
+  identity, pending reason, immutable accepted-result digests, and exact source
+  revision while keeping merged historical pull requests such as ReviewSensei
+  `#408` strictly offline (zero live reruns and zero repeated inference). A
+  maintainer explanation with zero cleared findings (`zero_decisions_recorded=True`)
   persists durable `pending_reply_pages` receipts bound to the exact comment ID,
   actor, body digest, and head SHA. Recovery distinguishes
   `unfinished_zero_decision_assessment` (`finalizer_entered=False`) from
   `failed_finalizer_after_reassessment` (`finalizer_entered=True`, including
-  after `override`/`accept-risk` pending-set reductions, recoverable via `verify`
-  without repeating model inference). Duplicate receipt replay, changed head/base,
-  and repeated zero-delta explanations reaching `NO_PROGRESS_ZERO_DECISION_LIMIT`
-  fail closed.
+  after `override`/`accept-risk` pending-set reductions, where unmerged same-head
+  continuation can resume finalization with zero new funding and zero repeated
+  inference). Duplicate receipt replay, changed head/base, and repeated
+  zero-delta explanations reaching `NO_PROGRESS_ZERO_DECISION_LIMIT` fail closed.
 - **Nonterminal publication overflow and response-loss controls (`publication_overflow_recovery`, G31):**
-  Prepublication body-limit overflows (such as TaskAlong `#41` under non-`c7`
-  executors) keep the retained `ReviewResult` and `ReviewConvergencePolicy`
-  digests immutable, preserve the `65,536`-byte review-body ceiling and `512`-call
-  caller allowance without enlargement, require `archive_excerpt_fits_ceiling`,
-  and never auto-enroll non-`c7` executors into `body-limit-prepublication-v1`.
-  Same-head replay compacts only the non-authoritative narrative via
-  `ConfirmedNarrativeArchive` while preserving every finding index entry, prose
-  explanation, and eligibility marker. Confirmed failure-before-write
+  `PublicationOverflowAttemptPacket` (`authority=False`,
+  `formatter_fit_is_not_settlement=True`) binds exact original candidate/hold
+  selection, publisher context, narrative-archive and installed provenance, and
+  cessation proof for TaskAlong `#41` (`be1` executor) shapes. Prepublication
+  body-limit overflows keep the retained `ReviewResult` and
+  `ReviewConvergencePolicy` digests immutable, preserve the `65,536`-byte
+  review-body ceiling, `512`-call caller allowance, `64`/`60` evidence-read
+  ceilings, and `32`-part result ceiling without enlargement, require
+  `archive_excerpt_fits_ceiling`, and never auto-enroll non-`c7` executors into
+  `body-limit-prepublication-v1`. Demonstrating offline that a
+  `ConfirmedNarrativeArchive` excerpt fits `65,536` bytes does not supply a
+  historical live settlement receipt. Confirmed failure-before-write
   (`confirmed_failure_before_write=True`) remains strictly separated from
-  lost-response states (`response_loss_unobserved_remote_hold` and
+  unceased-owner holds (`predecessor_owner_active_hold`) and lost-response states
+  (`response_loss_unobserved_remote_hold` and
   `response_loss_echo_observed_reconcilable`), which route to
   `reconcile_observed_exact_review` or `reconcile_observed_review_hold` and
   refuse blind restart whenever an exact App review echo already exists.

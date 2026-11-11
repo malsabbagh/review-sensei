@@ -79,8 +79,12 @@ from .quarantine_published_tail import BODY_CALLER_BLOB, EXECUTOR
 
 _HEX40 = re.compile(r"[a-f0-9]{40}")
 _HEX64 = re.compile(r"[a-f0-9]{64}")
+_VERSION_TOKEN_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,63}")
 
 PUBLICATION_OVERFLOW_CLASSIFIER_ID = "nonterminal-publication-overflow-v1"
+PUBLICATION_OVERFLOW_PACKET_SCHEMA = "publication-overflow-attempt-evidence-v1"
+TASKALONG_41_CASE_ID = "taskalong-41-prepublication-overflow"
+TASKALONG_41_PULL_REQUEST = 41
 
 OVERFLOW_FAILURE_STATES: frozenset[str] = frozenset(
     {
@@ -1161,3 +1165,515 @@ def build_overflow_recovery_descriptor(
             "enlarged byte or API allowances."
         ),
     )
+
+
+def _require_hex_token(val: Any, pattern: re.Pattern[str], label: str) -> None:
+    if not isinstance(val, str) or pattern.fullmatch(val) is None:
+        raise ReviewInputError(f"invalid {label}")
+
+
+@dataclass(frozen=True)
+class PublicationOverflowAttemptPacket:
+    """Offline attempt-evidence packet for G31 (`TaskAlong #41`) (`authority=False`).
+
+    Binds exact original selection/classification, publisher context and
+    preserved ceilings, archive/installed provenance, cessation proof,
+    formatter comparison, failure-boundary separation, and explicit
+    non-settlement proof (`formatter_fit_is_not_settlement=True`).
+    """
+
+    case_id: str
+    repository: str
+    repository_id: int
+    pull_request: int
+    session_generation: int
+    record_sha256: str
+    run_id: int
+    run_attempt: int
+    owner_job: str
+    owner_generation: int
+    transaction_id: str
+    transaction_phase: str
+    raw_candidate_count: int
+    candidate_blocking_count: int
+    human_hold_count: int
+    retained_review_status: str
+    result_content_digest: str
+    result_digest: str
+    policy_digest: str
+    base_sha: str
+    head_sha: str
+    current_base_sha: str
+    current_head_sha: str
+    diff_sha256: str | None
+    configuration_digest: str
+    evidence_digest: str
+    caller_allowance_limit: int
+    review_body_byte_ceiling: int
+    evidence_read_ceiling: int
+    ordinary_read_limit: int
+    result_part_ceiling: int
+    nonstartup_caller_liability: int
+    total_caller_liability: int
+    executor_sha: str
+    caller_blob: str
+    installed_core_version: str
+    installed_hosted_version: str
+    is_c7_body_limit_qualified: bool
+    narrative_archive_content_digest: str | None
+    narrative_archive_payload_digest: str | None
+    narrative_archive_summary_digest: str | None
+    narrative_archive_carrier_ids: tuple[int, ...]
+    owner_ceased: bool
+    cessation_job_id: int | None
+    cessation_conclusion: str | None
+    cessation_completed_at: str | None
+    failure_boundary: str
+    state_code: str
+    confirmed_failure_before_write: bool
+    remote_effect_uncertain: bool
+    observed_review_id: int | None
+    formatter_comparison: FormatterComparisonReport | None
+    historical_settlement_receipt_supplied: bool
+    diagnostics_available: bool
+    missing_proofs: tuple[str, ...]
+    qualification: NonterminalPublicationQualification
+    formatter_fit_is_not_settlement: bool = True
+    authority: bool = False
+    schema_version: str = PUBLICATION_OVERFLOW_PACKET_SCHEMA
+
+    def __post_init__(self) -> None:
+        if (
+            self.authority is not False
+            or self.formatter_fit_is_not_settlement is not True
+            or self.schema_version != PUBLICATION_OVERFLOW_PACKET_SCHEMA
+        ):
+            raise ReviewInputError(
+                "publication overflow attempt packet is strictly advisory "
+                "(authority=False, formatter_fit_is_not_settlement=True)"
+            )
+        if not isinstance(self.qualification, NonterminalPublicationQualification):
+            raise ReviewInputError(
+                "publication overflow packet requires NonterminalPublicationQualification"
+            )
+        if self.formatter_comparison is not None and not isinstance(
+            self.formatter_comparison, FormatterComparisonReport
+        ):
+            raise ReviewInputError(
+                "formatter_comparison must be None or FormatterComparisonReport"
+            )
+        if not isinstance(self.case_id, str) or not self.case_id.strip():
+            raise ReviewInputError("publication overflow case_id must be non-empty")
+        SessionIdentity(
+            repository=self.repository,
+            pull_request=self.pull_request,
+            repository_id=self.repository_id,
+        )
+        if (
+            self.review_body_byte_ceiling != MAX_PUBLISHED_REVIEW_BODY_BYTES
+            or self.evidence_read_ceiling != MAX_PART_READS
+            or self.ordinary_read_limit != ORDINARY_EVIDENCE_READ_LIMIT
+            or self.result_part_ceiling != MAX_RESULT_PARTS
+        ):
+            raise ReviewInputError(
+                "publication overflow packet preserves all byte, read, and part ceilings unchanged"
+            )
+        if (
+            self.failure_boundary not in FAILURE_BOUNDARIES
+            or self.state_code not in OVERFLOW_FAILURE_STATES
+        ):
+            raise ReviewInputError(
+                "unsupported failure_boundary or state_code in overflow packet"
+            )
+        for label, digest in (
+            ("record_sha256", self.record_sha256),
+            ("result_content_digest", self.result_content_digest),
+            ("result_digest", self.result_digest),
+            ("policy_digest", self.policy_digest),
+            ("configuration_digest", self.configuration_digest),
+            ("evidence_digest", self.evidence_digest),
+        ):
+            _require_hex_token(digest, _HEX64, label)
+        for label, opt_digest in (
+            ("diff_sha256", self.diff_sha256),
+            ("narrative_archive_content_digest", self.narrative_archive_content_digest),
+            ("narrative_archive_payload_digest", self.narrative_archive_payload_digest),
+            ("narrative_archive_summary_digest", self.narrative_archive_summary_digest),
+        ):
+            if opt_digest is not None:
+                _require_hex_token(opt_digest, _HEX64, label)
+        for label, sha in (
+            ("base_sha", self.base_sha),
+            ("head_sha", self.head_sha),
+            ("current_base_sha", self.current_base_sha),
+            ("current_head_sha", self.current_head_sha),
+        ):
+            _require_hex_token(sha, _HEX40, label)
+        for label, prov_sha in (
+            ("executor_sha", self.executor_sha),
+            ("caller_blob", self.caller_blob),
+        ):
+            if prov_sha != "unknown":
+                _require_hex_token(prov_sha, _HEX40, label)
+        for label, ver in (
+            ("installed_core_version", self.installed_core_version),
+            ("installed_hosted_version", self.installed_hosted_version),
+        ):
+            if ver != "unknown" and _VERSION_TOKEN_RE.fullmatch(ver) is None:
+                raise ReviewInputError(f"invalid {label}")
+        if (
+            not self.owner_ceased
+            and "predecessor_owner_cessation" not in self.missing_proofs
+        ):
+            raise ReviewInputError(
+                "unceased predecessor owner must record predecessor_owner_cessation"
+            )
+        if (
+            not self.historical_settlement_receipt_supplied
+            and "historical_live_settlement_receipt" not in self.missing_proofs
+        ):
+            raise ReviewInputError(
+                "unsettled publication overflow packet must record historical_live_settlement_receipt"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "authority": False,
+            "formatter_fit_is_not_settlement": True,
+            "case_id": self.case_id,
+            "selection_and_classification": {
+                "repository": self.repository,
+                "repository_id": self.repository_id,
+                "pull_request": self.pull_request,
+                "session_generation": self.session_generation,
+                "record_sha256": self.record_sha256,
+                "run_id": self.run_id,
+                "run_attempt": self.run_attempt,
+                "owner_job": self.owner_job,
+                "owner_generation": self.owner_generation,
+                "transaction_id": self.transaction_id,
+                "transaction_phase": self.transaction_phase,
+                "raw_candidate_count": self.raw_candidate_count,
+                "candidate_blocking_count": self.candidate_blocking_count,
+                "human_hold_count": self.human_hold_count,
+                "retained_review_status": self.retained_review_status,
+                "result_content_digest": self.result_content_digest,
+                "result_digest": self.result_digest,
+                "policy_digest": self.policy_digest,
+            },
+            "publisher_context_and_limits": {
+                "base_sha": self.base_sha,
+                "head_sha": self.head_sha,
+                "current_base_sha": self.current_base_sha,
+                "current_head_sha": self.current_head_sha,
+                "diff_sha256": self.diff_sha256,
+                "configuration_digest": self.configuration_digest,
+                "evidence_digest": self.evidence_digest,
+                "caller_allowance_limit": self.caller_allowance_limit,
+                "review_body_byte_ceiling": self.review_body_byte_ceiling,
+                "evidence_read_ceiling": self.evidence_read_ceiling,
+                "ordinary_read_limit": self.ordinary_read_limit,
+                "result_part_ceiling": self.result_part_ceiling,
+                "nonstartup_caller_liability": self.nonstartup_caller_liability,
+                "total_caller_liability": self.total_caller_liability,
+            },
+            "archive_and_installed_provenance": {
+                "executor_sha": self.executor_sha,
+                "caller_blob": self.caller_blob,
+                "installed_core_version": self.installed_core_version,
+                "installed_hosted_version": self.installed_hosted_version,
+                "is_c7_body_limit_qualified": self.is_c7_body_limit_qualified,
+                "narrative_archive_content_digest": (
+                    self.narrative_archive_content_digest
+                ),
+                "narrative_archive_payload_digest": (
+                    self.narrative_archive_payload_digest
+                ),
+                "narrative_archive_summary_digest": (
+                    self.narrative_archive_summary_digest
+                ),
+                "narrative_archive_carrier_ids": list(
+                    self.narrative_archive_carrier_ids
+                ),
+            },
+            "cessation_proof": {
+                "owner_ceased": self.owner_ceased,
+                "cessation_job_id": self.cessation_job_id,
+                "cessation_conclusion": self.cessation_conclusion,
+                "cessation_completed_at": self.cessation_completed_at,
+            },
+            "boundary_separation": {
+                "failure_boundary": self.failure_boundary,
+                "state_code": self.state_code,
+                "confirmed_failure_before_write": self.confirmed_failure_before_write,
+                "remote_effect_uncertain": self.remote_effect_uncertain,
+                "observed_review_id": self.observed_review_id,
+            },
+            "formatter_comparison": (
+                self.formatter_comparison.to_dict()
+                if self.formatter_comparison is not None
+                else None
+            ),
+            "settlement": {
+                "historical_settlement_receipt_supplied": (
+                    self.historical_settlement_receipt_supplied
+                ),
+                "diagnostics_available": self.diagnostics_available,
+            },
+            "missing_proofs": list(self.missing_proofs),
+            "qualification": self.qualification.to_dict(),
+        }
+
+
+def build_publication_overflow_attempt_packet(
+    *,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    result: ReviewResult,
+    policy: ReviewConvergencePolicy,
+    current_base_sha: str,
+    current_head_sha: str,
+    live_reviews: Sequence[Any],
+    app_slug: str,
+    owner_ceased: bool,
+    case_id: str | None = None,
+    diff: str | None = None,
+    narrative_archive: ConfirmedNarrativeArchive | None = None,
+    formatter_comparison: FormatterComparisonReport | None = None,
+    executor_sha: str | None = None,
+    caller_blob: str | None = None,
+    installed_core_version: str = "unknown",
+    installed_hosted_version: str = "unknown",
+    cessation_job_id: int | None = None,
+    cessation_conclusion: str | None = None,
+    cessation_completed_at: str | None = None,
+    retained_context_available: bool = True,
+    historical_settlement_receipt_supplied: bool = False,
+    diagnostics_available: bool = False,
+) -> PublicationOverflowAttemptPacket:
+    """Build an immutable offline `PublicationOverflowAttemptPacket` (`authority=False`).
+
+    Captures `TaskAlong #41` and historical nonterminal publication attempts
+    without mutating retained results, policies, or allowances, separating
+    pre-write overflow, uncertain response loss, observed review echoes, and
+    unceased owners while recording explicit missing settlement proofs.
+    """
+    if not isinstance(identity, SessionIdentity) or identity.repository_id is None:
+        raise ReviewInputError(
+            "publication overflow packet requires a repository_id-bound SessionIdentity"
+        )
+    if not isinstance(record, SessionRecord) or record.transaction is None:
+        raise ReviewInputError(
+            "publication overflow packet requires a SessionRecord with transaction"
+        )
+    if (
+        record.repository != identity.repository
+        or record.pull_request != identity.pull_request
+        or (
+            record.repository_id is not None
+            and record.repository_id != identity.repository_id
+        )
+    ):
+        raise ReviewInputError("record identity conflicts with SessionIdentity")
+    if (
+        narrative_archive is not None
+        and type(narrative_archive) is not ConfirmedNarrativeArchive
+    ):
+        raise ReviewInputError(
+            "narrative_archive must be None or ConfirmedNarrativeArchive"
+        )
+
+    tx = record.transaction
+    resolved_comparison = formatter_comparison
+    if resolved_comparison is None and diff is not None:
+        resolved_comparison = compare_publication_formatter_outputs(
+            identity=identity,
+            base_sha=tx.base_sha,
+            head_sha=tx.head_sha,
+            result=result,
+            diff=diff,
+            policy=policy,
+            narrative_archive=narrative_archive,
+        )
+
+    qualification = qualify_nonterminal_publication_failure(
+        identity=identity,
+        record=record,
+        result=result,
+        policy=policy,
+        current_base_sha=current_base_sha,
+        current_head_sha=current_head_sha,
+        live_reviews=live_reviews,
+        app_slug=app_slug,
+        owner_ceased=owner_ceased,
+        formatter_comparison=resolved_comparison,
+        executor_sha=executor_sha,
+        caller_blob=caller_blob,
+        retained_context_available=retained_context_available,
+    )
+
+    old = ApiRunAccounting.from_document(record.api_run_accounting)  # type: ignore[arg-type]
+    nonstartup = (
+        old.prior_nonstartup_liability
+        + old.confirmed
+        + old.uncertain
+        + old.reserved_undispatched
+    )
+    total = old.startup.liability + nonstartup
+
+    eligibility = approval_eligibility_from_result(
+        result,
+        head_sha=tx.head_sha,
+        base_sha=tx.base_sha,
+        enabled=True,
+        app_authored=False,
+        check_published=False,
+    )
+    human_hold_count = (
+        len(eligibility.human_review.pending)
+        if eligibility.human_review is not None
+        else 0
+    )
+    candidate_blocking_count = sum(1 for item in result.comments if item.blocking)
+
+    resolved_exec = executor_sha if executor_sha is not None else "unknown"
+    resolved_blob = caller_blob if caller_blob is not None else "unknown"
+    resolved_diff_sha = (
+        resolved_comparison.diff_sha256
+        if resolved_comparison is not None
+        else (
+            hashlib.sha256(diff.encode("utf-8")).hexdigest()
+            if diff is not None
+            else None
+        )
+    )
+
+    resolved_case_id = case_id
+    if resolved_case_id is None:
+        if (
+            identity.pull_request == TASKALONG_41_PULL_REQUEST
+            and "taskalong" in identity.repository.casefold()
+        ):
+            resolved_case_id = TASKALONG_41_CASE_ID
+        else:
+            resolved_case_id = (
+                f"{identity.repository}#{identity.pull_request}"
+                f":gen-{record.generation}:run-{old.identity.run_id}"
+            )
+
+    missing: list[str] = []
+    if not owner_ceased:
+        missing.append("predecessor_owner_cessation")
+    elif cessation_job_id is None:
+        missing.append("cessation_job_receipt")
+
+    if qualification.failure_boundary == "before_write":
+        missing.extend(
+            ("published_native_github_review", "terminal_transaction_settlement")
+        )
+    elif qualification.failure_boundary == "response_loss_uncertain":
+        missing.extend(
+            ("remote_review_dispatch_outcome", "terminal_transaction_settlement")
+        )
+    elif qualification.failure_boundary == "response_loss_committed_echo":
+        missing.append("reconciled_observed_review_settlement")
+    else:
+        missing.append("remote_review_dispatch_outcome")
+
+    if resolved_exec == "unknown" or resolved_blob == "unknown":
+        missing.append("installed_executor_or_caller_provenance")
+    if narrative_archive is None:
+        missing.append("confirmed_narrative_archive_receipt")
+    if not diagnostics_available:
+        missing.append("missing_close_diagnostics")
+    if not historical_settlement_receipt_supplied:
+        missing.append("historical_live_settlement_receipt")
+
+    return PublicationOverflowAttemptPacket(
+        case_id=resolved_case_id,
+        repository=identity.repository,
+        repository_id=identity.repository_id,
+        pull_request=identity.pull_request,
+        session_generation=record.generation,
+        record_sha256=record.record_sha256,
+        run_id=old.identity.run_id,
+        run_attempt=old.owner.run_attempt,
+        owner_job=old.owner.job,
+        owner_generation=old.owner.generation,
+        transaction_id=tx.transaction_id,
+        transaction_phase=tx.phase,
+        raw_candidate_count=len(result.comments),
+        candidate_blocking_count=candidate_blocking_count,
+        human_hold_count=human_hold_count,
+        retained_review_status=result.review_status,
+        result_content_digest=qualification.result_content_digest,
+        result_digest=review_result_digest(result),
+        policy_digest=qualification.policy_digest,
+        base_sha=tx.base_sha,
+        head_sha=tx.head_sha,
+        current_base_sha=current_base_sha,
+        current_head_sha=current_head_sha,
+        diff_sha256=resolved_diff_sha,
+        configuration_digest=tx.configuration_digest,
+        evidence_digest=tx.evidence_digest,
+        caller_allowance_limit=qualification.caller_allowance_limit,
+        review_body_byte_ceiling=qualification.review_body_byte_ceiling,
+        evidence_read_ceiling=qualification.evidence_read_ceiling,
+        ordinary_read_limit=qualification.ordinary_read_limit,
+        result_part_ceiling=qualification.result_part_ceiling,
+        nonstartup_caller_liability=nonstartup,
+        total_caller_liability=total,
+        executor_sha=resolved_exec,
+        caller_blob=resolved_blob,
+        installed_core_version=installed_core_version,
+        installed_hosted_version=installed_hosted_version,
+        is_c7_body_limit_qualified=qualification.is_c7_body_limit_qualified,
+        narrative_archive_content_digest=(
+            narrative_archive.content_digest if narrative_archive is not None else None
+        ),
+        narrative_archive_payload_digest=(
+            narrative_archive.payload_digest if narrative_archive is not None else None
+        ),
+        narrative_archive_summary_digest=(
+            narrative_archive.summary_digest if narrative_archive is not None else None
+        ),
+        narrative_archive_carrier_ids=(
+            narrative_archive.carrier_ids if narrative_archive is not None else ()
+        ),
+        owner_ceased=bool(owner_ceased),
+        cessation_job_id=cessation_job_id,
+        cessation_conclusion=cessation_conclusion,
+        cessation_completed_at=cessation_completed_at,
+        failure_boundary=qualification.failure_boundary,
+        state_code=qualification.state_code,
+        confirmed_failure_before_write=qualification.confirmed_failure_before_write,
+        remote_effect_uncertain=qualification.remote_effect_uncertain,
+        observed_review_id=qualification.observed_review_id,
+        formatter_comparison=resolved_comparison,
+        historical_settlement_receipt_supplied=bool(
+            historical_settlement_receipt_supplied
+        ),
+        diagnostics_available=bool(diagnostics_available),
+        missing_proofs=tuple(dict.fromkeys(missing)),
+        qualification=qualification,
+    )
+
+
+__all__ = [
+    "FAILURE_BOUNDARIES",
+    "OVERFLOW_FAILURE_STATES",
+    "OVERFLOW_RECOVERY_ROUTES",
+    "PUBLICATION_OVERFLOW_CLASSIFIER_ID",
+    "PUBLICATION_OVERFLOW_PACKET_SCHEMA",
+    "TASKALONG_41_CASE_ID",
+    "TASKALONG_41_PULL_REQUEST",
+    "FormatterComparisonReport",
+    "NonterminalPublicationQualification",
+    "PublicationOverflowAttemptPacket",
+    "PublicationOverflowRecoveryDescriptor",
+    "build_overflow_recovery_descriptor",
+    "build_publication_overflow_attempt_packet",
+    "compare_publication_formatter_outputs",
+    "qualify_nonterminal_publication_failure",
+]
