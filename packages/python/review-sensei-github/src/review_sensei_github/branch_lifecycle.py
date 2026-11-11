@@ -1,24 +1,32 @@
-"""Pull-request reopen, branch deletion/recreation, and live write gating (G05).
+"""Pull-request branch, ancestry, and active-work state lifecycle (G05, G06, G23).
 
-This module formalizes the stateful GitHub pull-request lifecycle contract
-around close/reopen transitions and deleted/recreated head branches:
+This module formalizes the stateful GitHub pull-request lifecycle contracts
+across three tightly coupled operational boundaries:
 
-1. Session and obligation identity is bound strictly to
+1. **Close/reopen and deleted/recreated head branches (G05):**
+   Session and obligation identity is bound strictly to
    ``(repository_id, pull_request)`` via ``SessionIdentity``, never to the
    mutable ``head.ref`` branch name. Reopening the same numeric pull request
    preserves prior obligations, convergence history, and head-scoped failed
-   attempts, whereas opening a different numeric pull request on a recreated
-   branch starts an isolated session without cross-PR leakage.
-2. Pre-effect live pull-request gates block newly admitted review/approval
-   writes while ``state != "open"``, ``draft is True``, or ``head.repo`` is
-   absent/mismatched, while never claiming atomic revocation of requests that
-   were already dispatched before a concurrent transition (the G02 boundary).
-3. Same-SHA reopen or same-SHA branch recreation mints zero fresh
-   ``failed_attempts`` allowance and reuses already-published or retained
-   snapshot state without duplicate model inference.
-4. Reopening or recreating a branch at a different ``head_sha`` or ``base_sha``
-   invalidates prior snapshot-bound approvals while preserving unresolved
-   baseline obligations for verification/rebinding on the new snapshot.
+   attempts; same-SHA reopen mints zero fresh ``failed_attempts`` allowance;
+   and opening a different numeric pull request on a recreated branch starts an
+   isolated session without cross-PR leakage.
+2. **Force-push ancestry, base-SHA drift, and base-ref retargeting (G06):**
+   Separates ``same_sha_base_ref_retarget`` (where ``base_ref`` changes while
+   ``base_sha`` stays identical, preserving ``ReviewContextCacheKey``
+   compatibility while gating in-flight writes as ``skipped_stale_base``) from
+   ``base_sha`` drift invalidation (``rebase-or-base-change``), and ensures
+   force-push reverts to previously approved SHAs preserve newer session
+   obligations rather than reusing superseded approvals.
+3. **Draft and close transitions during active work (G23):**
+   Qualifies ``draft=True`` and ``state="closed"`` transitions across all five
+   execution phases (``before_inference``, ``during_provider_work``,
+   ``after_accepted_result``, ``before_final_preflight``, and
+   ``after_dispatch``), preserving incurred provider/API costs without
+   automatic refund, blocking newly authorized stale writes, refusing to claim
+   revocation of already-dispatched requests, holding terminal accounting on
+   lost/uncertain mutation responses, and recovering without duplicate model
+   inference where retained or published artifacts remain valid.
 """
 
 from __future__ import annotations
@@ -826,4 +834,242 @@ def classify_source_identity_transition(
         reuses_superseded_approval_without_verification=False,
         revokes_post_dispatch_effects=False,
         recovery_mode="incremental_verify",
+    )
+
+
+ActiveWorkTransitionPhase = Literal[
+    "before_inference",
+    "during_provider_work",
+    "after_accepted_result",
+    "before_final_preflight",
+    "after_dispatch",
+]
+
+ActiveTransitionKind = Literal[
+    "converted_to_draft",
+    "closed",
+]
+
+DispatchEffectState = Literal[
+    "not_dispatched",
+    "confirmed_review_before_approval",
+    "lost_response_stored",
+    "lost_response_unconfirmed",
+]
+
+ActiveWorkRecoveryRoute = Literal[
+    "fresh_run_when_ready_or_reopened",
+    "controlled_restart_when_ready_or_reopened",
+    "same_run_retained_replay_zero_inference",
+    "reuse_published_review_and_reevaluate_approval_zero_inference",
+    "hold_uncertain_effect_until_reconciled",
+]
+
+_ACTIVE_WORK_PHASES: frozenset[str] = frozenset(
+    {
+        "before_inference",
+        "during_provider_work",
+        "after_accepted_result",
+        "before_final_preflight",
+        "after_dispatch",
+    }
+)
+_ACTIVE_TRANSITION_KINDS: frozenset[str] = frozenset({"converted_to_draft", "closed"})
+_AFTER_DISPATCH_EFFECT_STATES: frozenset[str] = frozenset(
+    {
+        "confirmed_review_before_approval",
+        "lost_response_stored",
+        "lost_response_unconfirmed",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ActiveWorkTransitionDecision:
+    """Cost, effect, terminal-accounting, and recovery contract for G23 timing."""
+
+    phase: ActiveWorkTransitionPhase
+    transition_kind: ActiveTransitionKind
+    dispatch_effect_state: DispatchEffectState
+    provider_cost_incurred: bool
+    caller_dispatches_retained_without_refund: bool
+    newly_authorized_writes_blocked: bool
+    already_dispatched_effects_revoked: bool
+    uncertain_dispatch_effect_preserved: bool
+    publication_skip_status: str | None
+    expected_transaction_phase: str | None
+    accounting_terminal: bool
+    terminal_reason: str | None
+    duplicate_inference_on_recovery: bool
+    recovery_route: ActiveWorkRecoveryRoute
+
+
+def classify_active_work_state_transition(
+    *,
+    phase: ActiveWorkTransitionPhase,
+    transition_kind: ActiveTransitionKind,
+    dispatch_effect_state: DispatchEffectState = "not_dispatched",
+) -> ActiveWorkTransitionDecision:
+    """Classify draft/close transition timing across all five active-work phases."""
+
+    if not isinstance(phase, str) or phase not in _ACTIVE_WORK_PHASES:
+        raise GitHubPublicationError("active work transition phase is invalid")
+    if (
+        not isinstance(transition_kind, str)
+        or transition_kind not in _ACTIVE_TRANSITION_KINDS
+    ):
+        raise GitHubPublicationError("active work transition kind is invalid")
+    if not isinstance(dispatch_effect_state, str):
+        raise GitHubPublicationError("dispatch effect state is invalid")
+
+    if phase != "after_dispatch":
+        if dispatch_effect_state != "not_dispatched":
+            raise GitHubPublicationError(
+                "pre-dispatch phases require dispatch_effect_state='not_dispatched'"
+            )
+    elif dispatch_effect_state not in _AFTER_DISPATCH_EFFECT_STATES:
+        raise GitHubPublicationError(
+            "after_dispatch requires an explicit post-dispatch effect state"
+        )
+
+    if phase == "before_inference":
+        return ActiveWorkTransitionDecision(
+            phase=phase,
+            transition_kind=transition_kind,
+            dispatch_effect_state=dispatch_effect_state,
+            provider_cost_incurred=False,
+            caller_dispatches_retained_without_refund=True,
+            newly_authorized_writes_blocked=True,
+            already_dispatched_effects_revoked=False,
+            uncertain_dispatch_effect_preserved=False,
+            publication_skip_status="skipped_pr_state",
+            expected_transaction_phase=None,
+            accounting_terminal=False,
+            terminal_reason=None,
+            duplicate_inference_on_recovery=False,
+            recovery_route="fresh_run_when_ready_or_reopened",
+        )
+
+    if phase == "during_provider_work":
+        if transition_kind == "closed":
+            return ActiveWorkTransitionDecision(
+                phase=phase,
+                transition_kind=transition_kind,
+                dispatch_effect_state=dispatch_effect_state,
+                provider_cost_incurred=True,
+                caller_dispatches_retained_without_refund=True,
+                newly_authorized_writes_blocked=True,
+                already_dispatched_effects_revoked=False,
+                uncertain_dispatch_effect_preserved=False,
+                publication_skip_status=None,
+                expected_transaction_phase=None,
+                accounting_terminal=False,
+                terminal_reason=None,
+                duplicate_inference_on_recovery=False,
+                recovery_route="controlled_restart_when_ready_or_reopened",
+            )
+        return ActiveWorkTransitionDecision(
+            phase=phase,
+            transition_kind=transition_kind,
+            dispatch_effect_state=dispatch_effect_state,
+            provider_cost_incurred=True,
+            caller_dispatches_retained_without_refund=True,
+            newly_authorized_writes_blocked=True,
+            already_dispatched_effects_revoked=False,
+            uncertain_dispatch_effect_preserved=False,
+            publication_skip_status="skipped_pr_state",
+            expected_transaction_phase="publication_failed",
+            accounting_terminal=False,
+            terminal_reason="publication_finalization_incomplete",
+            duplicate_inference_on_recovery=False,
+            recovery_route="controlled_restart_when_ready_or_reopened",
+        )
+
+    if phase == "after_accepted_result":
+        return ActiveWorkTransitionDecision(
+            phase=phase,
+            transition_kind=transition_kind,
+            dispatch_effect_state=dispatch_effect_state,
+            provider_cost_incurred=True,
+            caller_dispatches_retained_without_refund=True,
+            newly_authorized_writes_blocked=True,
+            already_dispatched_effects_revoked=False,
+            uncertain_dispatch_effect_preserved=False,
+            publication_skip_status="skipped_pr_state",
+            expected_transaction_phase="publication_failed",
+            accounting_terminal=False,
+            terminal_reason="publication_finalization_incomplete",
+            duplicate_inference_on_recovery=False,
+            recovery_route="controlled_restart_when_ready_or_reopened",
+        )
+
+    if phase == "before_final_preflight":
+        return ActiveWorkTransitionDecision(
+            phase=phase,
+            transition_kind=transition_kind,
+            dispatch_effect_state=dispatch_effect_state,
+            provider_cost_incurred=True,
+            caller_dispatches_retained_without_refund=True,
+            newly_authorized_writes_blocked=True,
+            already_dispatched_effects_revoked=False,
+            uncertain_dispatch_effect_preserved=False,
+            publication_skip_status="skipped_pr_state",
+            expected_transaction_phase="publication_failed",
+            accounting_terminal=False,
+            terminal_reason="publication_finalization_incomplete",
+            duplicate_inference_on_recovery=False,
+            recovery_route="same_run_retained_replay_zero_inference",
+        )
+
+    if dispatch_effect_state == "confirmed_review_before_approval":
+        return ActiveWorkTransitionDecision(
+            phase=phase,
+            transition_kind=transition_kind,
+            dispatch_effect_state=dispatch_effect_state,
+            provider_cost_incurred=True,
+            caller_dispatches_retained_without_refund=True,
+            newly_authorized_writes_blocked=True,
+            already_dispatched_effects_revoked=False,
+            uncertain_dispatch_effect_preserved=False,
+            publication_skip_status="skipped_pr_state",
+            expected_transaction_phase="publication_succeeded",
+            accounting_terminal=True,
+            terminal_reason=None,
+            duplicate_inference_on_recovery=False,
+            recovery_route="reuse_published_review_and_reevaluate_approval_zero_inference",
+        )
+
+    if dispatch_effect_state == "lost_response_stored":
+        return ActiveWorkTransitionDecision(
+            phase=phase,
+            transition_kind=transition_kind,
+            dispatch_effect_state=dispatch_effect_state,
+            provider_cost_incurred=True,
+            caller_dispatches_retained_without_refund=True,
+            newly_authorized_writes_blocked=True,
+            already_dispatched_effects_revoked=False,
+            uncertain_dispatch_effect_preserved=True,
+            publication_skip_status="skipped_pr_state",
+            expected_transaction_phase="publication_succeeded",
+            accounting_terminal=False,
+            terminal_reason="terminal_close_unconfirmed",
+            duplicate_inference_on_recovery=False,
+            recovery_route="hold_uncertain_effect_until_reconciled",
+        )
+
+    return ActiveWorkTransitionDecision(
+        phase=phase,
+        transition_kind=transition_kind,
+        dispatch_effect_state=dispatch_effect_state,
+        provider_cost_incurred=True,
+        caller_dispatches_retained_without_refund=True,
+        newly_authorized_writes_blocked=True,
+        already_dispatched_effects_revoked=False,
+        uncertain_dispatch_effect_preserved=True,
+        publication_skip_status=None,
+        expected_transaction_phase="publication_failed",
+        accounting_terminal=False,
+        terminal_reason=None,
+        duplicate_inference_on_recovery=False,
+        recovery_route="hold_uncertain_effect_until_reconciled",
     )
