@@ -6,10 +6,13 @@ provider; every expected identity is recomputed before retained bytes are read.
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from review_sensei.api_work import ACCOUNTING_VERSION
 from review_sensei.baseline import ReviewBaseline, baseline_complete_document
 from review_sensei.cli import (
     _CANONICAL_BACKEND_ADAPTERS,
@@ -35,8 +38,16 @@ from review_sensei.models import (
     transaction_stage_identity,
 )
 from review_sensei.outcomes import ResourceBudget
+from review_sensei.provenance_manifest import prescribe_recovery
 from review_sensei.providers.openrouter import OpenRouterRoutingPolicy
 from review_sensei.providers.registry import ProviderSettings
+from review_sensei.recovery_context import (
+    OriginalRecoveryContextBundle,
+    RecoveryContextDecision,
+    build_bundle_from_context_documents,
+    classify_recovery_input_origins,
+    price_recovery_context_admission,
+)
 from review_sensei.service import DEFAULT_STAGES, review_work_policy_digest
 from review_sensei.session import (
     SessionIdentity,
@@ -274,3 +285,173 @@ def reconstruct_publication_contexts(
             "current_key": dict(key.__dict__),
         },
     )
+
+
+def bundle_from_reconstructed_contexts(
+    reconstructed: ReconstructedPublicationContexts,
+    *,
+    source_root: Path,
+    diff: str,
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    base_ref: str,
+    policy_commit: str,
+    placement_mode: str = "complete",
+    producer: str = "local-cli",
+    run_id: int = 1,
+    attempt: int = 1,
+    runtime_only_flags: Mapping[str, bool] | None = None,
+) -> OriginalRecoveryContextBundle:
+    """Convert reconstructed publication contexts into a sanitized G17 recovery bundle."""
+
+    if not source_root.is_dir() or not (source_root / ".reviewsensei.yml").is_file():
+        raise ReviewInputError("original trusted context source is unavailable")
+    configuration = load_configuration(source_root / ".reviewsensei.yml")
+    loaded = ledger.load(identity)
+    if loaded.status not in {"ok", "migrated"} or loaded.record is None:
+        raise ReviewInputError("original context ledger is unavailable")
+    record = loaded.record
+    if record.transaction is None:
+        raise ReviewInputError("original context transaction is unavailable")
+    if reconstructed.admission_context is None:
+        raise ReviewInputError("reconstructed admission_context is unavailable")
+
+    accounting_version = ACCOUNTING_VERSION
+    if isinstance(record.api_run_accounting, Mapping):
+        raw_version = record.api_run_accounting.get("schema_version")
+        if isinstance(raw_version, str):
+            accounting_version = raw_version
+
+    reconstructible, runtime_only_fields = classify_recovery_input_origins(
+        **(dict(runtime_only_flags) if runtime_only_flags is not None else {})
+    )
+    diff_sha256 = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+    return build_bundle_from_context_documents(
+        transaction=record.transaction,
+        configuration_context=reconstructed.configuration,
+        admission_context=reconstructed.admission_context,
+        decision_policy_digest=configuration.decision.digest(),
+        diff_sha256=diff_sha256,
+        policy_commit=policy_commit,
+        base_ref=base_ref,
+        repository_id=identity.repository_id,
+        placement_mode=placement_mode,
+        accounting_version=accounting_version,
+        producer=producer,
+        run_id=run_id,
+        attempt=attempt,
+        reconstructible_from_defaults=reconstructible,
+        runtime_only_fields=runtime_only_fields,
+    )
+
+
+def reconstruct_or_prescribe_publication_contexts(
+    *,
+    source_root: Path,
+    diff: str,
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    base_ref: str,
+    base_sha: str,
+    head_sha: str,
+    policy_commit: str,
+    policy: ReviewConvergencePolicy,
+    placement_mode: str = "complete",
+    producer: str = "local-cli",
+    current_run_id: int = 1,
+    attempt: int = 1,
+    ancestor_record_sha256s: Sequence[str] = (),
+    ancestor_run_ids: Sequence[int] = (),
+    current_root_bytes: int = 4_096,
+    intermediate_root_bytes: int = 4_096,
+    result_part_count: int = 1,
+    total_decoded_bytes: int = 16_384,
+    original_api_limit: int = 512,
+    already_consumed_requests: int = 0,
+    unknown_usage_requests: int = 0,
+    active_reserved_requests: int = 0,
+    ledger_expired: bool = False,
+) -> tuple[ReconstructedPublicationContexts | None, RecoveryContextDecision]:
+    """Reconstruct and price original recovery context or return a bounded recovery prescription."""
+
+    try:
+        reconstructed = reconstruct_publication_contexts(
+            source_root=source_root,
+            diff=diff,
+            ledger=ledger,
+            identity=identity,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            policy=policy,
+        )
+        bundle = bundle_from_reconstructed_contexts(
+            reconstructed,
+            source_root=source_root,
+            diff=diff,
+            ledger=ledger,
+            identity=identity,
+            base_ref=base_ref,
+            policy_commit=policy_commit,
+            placement_mode=placement_mode,
+            producer=producer,
+            run_id=current_run_id,
+            attempt=attempt,
+        )
+    except ReviewInputError as exc:
+        message = str(exc)
+        if "unsupported_v3_writer" in message:
+            code = "unsupported_v3_writer"
+            prescription = prescribe_recovery("unsupported_legacy_state")
+        elif "observation_only_not_authority" in message:
+            code = "observation_only_not_authority"
+            prescription = prescribe_recovery(
+                "missing_evidence", ledger_expired=ledger_expired
+            )
+        elif "prior baseline" in message:
+            code = "overwritten_baseline_or_context"
+            prescription = prescribe_recovery(
+                "missing_evidence", ledger_expired=ledger_expired
+            )
+        elif "original committed transaction" in message or "does not match" in message:
+            code = "snapshot_or_transaction_mismatch"
+            prescription = prescribe_recovery("provenance_mismatch")
+        elif "unavailable" in message:
+            code = "absent_context"
+            prescription = prescribe_recovery(
+                "missing_evidence", ledger_expired=ledger_expired
+            )
+        else:
+            code = "truncated_or_corrupt_context"
+            prescription = prescribe_recovery(
+                "missing_evidence", ledger_expired=ledger_expired
+            )
+        return (
+            None,
+            RecoveryContextDecision(
+                admitted=False,
+                bundle=None,
+                refusal_code=code,
+                missing_or_invalid=(message,),
+                pricing=None,
+                recovery=prescription,
+                authority=False,
+            ),
+        )
+
+    decision = price_recovery_context_admission(
+        bundle,
+        current_run_id=current_run_id,
+        ancestor_record_sha256s=ancestor_record_sha256s,
+        ancestor_run_ids=ancestor_run_ids,
+        current_root_bytes=current_root_bytes,
+        intermediate_root_bytes=intermediate_root_bytes,
+        result_part_count=result_part_count,
+        total_decoded_bytes=total_decoded_bytes,
+        original_api_limit=original_api_limit,
+        already_consumed_requests=already_consumed_requests,
+        unknown_usage_requests=unknown_usage_requests,
+        active_reserved_requests=active_reserved_requests,
+    )
+    if not decision.admitted:
+        return (None, decision)
+    return (reconstructed, decision)

@@ -148,3 +148,14 @@ def validate_decision_receipt(value: object) -> None:
             raise ReviewInputError("decision model metadata is invalid")
     if len(canonical(dict(value)).encode("utf-8")) > 65_536:
         raise ReviewInputError("decision receipt exceeds its byte bound")
+
+
+def canonical_decision_receipt(value: Mapping[str, object]) -> dict[str, object]:
+    """Return an owned deep copy with canonical sorted JSON key ordering."""
+
+    import json
+
+    validate_decision_receipt(value)
+    loaded = json.loads(canonical(dict(value)))
+    assert isinstance(loaded, dict)
+    return loaded
