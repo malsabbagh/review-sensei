@@ -32,7 +32,8 @@ provider or GitHub installation quotas:
    and `head_sha` `H`) and compares `P` against the live default-branch ref `P_live`
    before admission.
 5. **Cross-PR and cross-repository quota ownership (`G25`):** GitHub Actions
-   serializes runs per pull request (`reviewsensei-provider-review-<repo>-<pr>`,
+   serializes runs per pull request
+   (`reviewsensei-provider-review-<owner>/<repo>-<pr_number>`,
    `cancel-in-progress: false`), while concurrent runs on distinct pull requests or
    repositories contend at the configured provider/account and GitHub App
    installation rate-limit boundaries without a global cross-repository lock service.
@@ -51,7 +52,12 @@ recovery path.
    `operational_boundaries` with exact path, hunk coordinates, observed byte count,
    configured limit, and permitted recovery routes:
    - `@reviewsensei accept-coverage-uncertainty --reason "<justification>"` for
-     authorized coverage-uncertainty disposition on the bound head/policy digest;
+     authorized coverage-uncertainty disposition on the bound head, policy digest,
+     and exact `incomplete_coverage` token set (authorized strictly via
+     `authorized_maintainer` + `authorized_override`: a human non-bot actor with
+     GitHub `maintain` or `admin` collaborator permission—or `OWNER`/`MEMBER`
+     association when permission is unloaded—plus `github.writes: true`; ordinary
+     `write` access, bots, the App itself, and casual commenters are rejected);
    - human file review confirmation (`human_file_review`); or
    - splitting the oversized change into smaller reviewable hunks/commits.
    Reserve `@reviewsensei review remaining` strictly for fitting units deferred by
@@ -69,10 +75,14 @@ recovery path.
      (zero duplicate paid inference on title-only edits) and never invalidate a
      settled approval solely from a title edit, while verifying attribution against
      the title actually evaluated.
-   - During `@reviewsensei review remaining` partial continuation, bind the normalized
-     title in `_continuation_scope_digest`; refuse mixed-title continuation fail-closed
-     and recover deterministically via explicit `@reviewsensei rescan` against the
-     updated title.
+   - During `@reviewsensei review remaining` partial continuation, bind the exact
+     `ReviewRequest.title` field in `ReviewService._continuation_scope_digest` (the
+     sole owner computing canonical JSON SHA-256 via `evidence_digest` over
+     `ReviewRequest`, where `validate_bounded_text` preserves UTF-8 codepoints
+     verbatim without whitespace collapsing, case folding, or Unicode NFC/NFKC
+     normalization, and hosted bootstrap omits empty `""` as `None`); refuse
+     mixed-title continuation fail-closed and recover deterministically via explicit
+     `@reviewsensei rescan` against the updated title.
 
 3. **Intentional two-tier UTF-8 title byte boundary (`G20`):**
    Preserve and qualify the three entry surfaces using exact UTF-8 byte lengths
@@ -96,11 +106,14 @@ recovery path.
    or `B != B_live` while `P == P_live`) remains admitted. Refusal mutates zero
    ledger state, spends zero provider budget, preserves prior settled/pending session
    records, never rebinds prior accounting to `P_live`, and recovers cleanly on the
-   next run pinned to `P_live`.
+   next run pinned to `P_live` (for manual `workflow_dispatch`, operators must select
+   the default branch's current ref/commit `P_live` rather than re-dispatching a stale
+   SHA).
 
 5. **Per-PR serialization and account-owned cross-PR quotas (`G25`):**
-   Preserve per-PR serialization (`reviewsensei-provider-review-<repo>-<pr>` with
-   `cancel-in-progress: false` and `ReviewConcurrencyPlan.for_pull_request`) without
+   Preserve per-PR serialization (`reviewsensei-provider-review-<owner>/<repo>-<pr_number>`
+   in GitHub Actions with `cancel-in-progress: false`, paired with collision-free
+   length-prefixed internal keys in `ReviewConcurrencyPlan.for_pull_request`) without
    adding a persistent global cross-repository lock service. Cross-PR and
    cross-repository concurrency and rate limits remain owned by the configured
    provider account, broker admission gate, and GitHub App installation quotas:

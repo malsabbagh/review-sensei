@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from urllib.error import HTTPError
@@ -192,8 +193,18 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
         thread = threading.Thread(target=blocked_waiter)
         thread.start()
         self.assertTrue(waiter_entered.wait(timeout=1.0))
-        while gate_pr7.snapshot().waiters == 0 and thread.is_alive():
+        wait_deadline = time.monotonic() + 2.0
+        while (
+            gate_pr7.snapshot().waiters == 0
+            and thread.is_alive()
+            and time.monotonic() < wait_deadline
+        ):
             threading.Event().wait(0.005)
+        self.assertEqual(
+            gate_pr7.snapshot().waiters,
+            1,
+            "queued waiter failed to register within bounded deadline",
+        )
 
         # Third caller on the same PR exceeds bounded waiter capacity and fails closed.
         with self.assertRaises(AdmissionRejected):
@@ -323,10 +334,17 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
         # Recovery wave: once rate-limit window clears, throttled runs succeed cleanly.
         throttled_runs.clear()
         for spec in workloads[1:3]:
+            repo_name, _repo_id, pr_num, expected_run_id, _purpose = spec
             run_id, recovered = execute_one(spec)
+            self.assertEqual(run_id, expected_run_id)
             self.assertNotIsInstance(recovered, Exception)
             assert not isinstance(recovered, Exception)
-            self.assertIn(f"_{run_id}", recovered.token)
+            assert recovered.attestation is not None
+            assert recovered.reservation_owner is not None
+            self.assertEqual(recovered.attestation["run_id"], run_id)
+            self.assertEqual(recovered.attestation["repository"], repo_name)
+            self.assertEqual(recovered.attestation["pull_request"], pr_num)
+            self.assertEqual(recovered.reservation_owner["run_id"], run_id)
             self.assertEqual(dispatches_by_run[run_id], 2)
 
     def test_hosted_bootstrap_throttle_leaves_zero_ledger_state_and_recovers(

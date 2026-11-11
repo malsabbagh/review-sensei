@@ -44,12 +44,14 @@ INDIVISIBLE_UNIT_KINDS = frozenset(
     }
 )
 
-PERMITTED_RECOVERY_ROUTES = frozenset(
+# Units whose individual diff/prompt payload fits within a single-call budget
+# and were only deferred by per-run call ceilings or transient chunk failures.
+# All other INDIVISIBLE_UNIT_KINDS are structurally indivisible/unsupported on
+# the current snapshot and must set indivisible=True without review_remaining.
+DEFERRED_FITTING_UNIT_KINDS = frozenset(
     {
-        "accept_coverage_uncertainty",
-        "human_file_review",
-        "split_oversized_change",
-        "review_remaining",
+        "budget_exhausted",
+        "partial_chunk_failure",
     }
 )
 
@@ -64,6 +66,8 @@ RECOVERY_COMMAND_TEMPLATES = {
     "review_remaining": "@reviewsensei review remaining",
 }
 
+PERMITTED_RECOVERY_ROUTES = frozenset(RECOVERY_COMMAND_TEMPLATES)
+
 
 def _positive_int(value: object, *, label: str, allow_zero: bool = False) -> int:
     minimum = 0 if allow_zero else 1
@@ -75,7 +79,15 @@ def _positive_int(value: object, *, label: str, allow_zero: bool = False) -> int
 
 @dataclass(frozen=True)
 class IndivisibleWorkUnit:
-    """One unsupported, excluded, or deferred work unit and its bounded recovery."""
+    """One unsupported, excluded, or deferred work unit and its bounded recovery.
+
+    ``indivisible=True`` marks structural overflow, non-text, policy-excluded,
+    or incomplete-enumeration units that cannot be resolved by retrying on the
+    same snapshot. ``indivisible=False`` is reserved strictly for fitting units
+    deferred by per-run call budgets (``budget_exhausted``) or transient chunk
+    failures (``partial_chunk_failure``), where ``@reviewsensei review remaining``
+    can make bounded forward progress.
+    """
 
     unit_kind: str
     path: str | None
@@ -113,6 +125,14 @@ class IndivisibleWorkUnit:
             raise ReviewInputError("indivisible coverage_reason is unsupported")
         if not isinstance(self.indivisible, bool):
             raise ReviewInputError("indivisible flag must be a boolean")
+        if self.unit_kind in DEFERRED_FITTING_UNIT_KINDS and self.indivisible:
+            raise ReviewInputError(
+                f"{self.unit_kind} represents a fitting deferred unit and must set indivisible=False"
+            )
+        if self.unit_kind not in DEFERRED_FITTING_UNIT_KINDS and not self.indivisible:
+            raise ReviewInputError(
+                f"{self.unit_kind} is structurally non-retryable and must set indivisible=True"
+            )
         if (
             not isinstance(self.permitted_routes, tuple)
             or not self.permitted_routes
@@ -207,7 +227,7 @@ class IndivisibleWorkReport:
         routes: list[str] = []
         for unit in self.units:
             for route in unit.permitted_routes:
-                template = RECOVERY_COMMAND_TEMPLATES[route]
+                template = RECOVERY_COMMAND_TEMPLATES.get(route, route)
                 if template not in routes:
                     routes.append(template)
         joined_units = "; ".join(fragments)
@@ -257,6 +277,8 @@ def _unit_for_reason(
     unit_bytes: int | None,
     limit_bytes: int | None,
 ) -> IndivisibleWorkUnit:
+    if reason is not None and reason not in COVERAGE_REASONS:
+        raise ReviewInputError("indivisible coverage_reason is unsupported")
     target = f"{path} hunk #{hunk_index}" if hunk_index is not None else path
     if reason == "too-large-hunk":
         size_note = (
@@ -381,19 +403,53 @@ def _unit_for_reason(
                 "split the PR or run @reviewsensei accept-coverage-uncertainty --reason <reason>"
             ),
         )
+    if reason == "chunk-preflight-failed":
+        return IndivisibleWorkUnit(
+            unit_kind="mandatory_prompt_overflow",
+            path=path,
+            hunk_index=hunk_index,
+            unit_bytes=unit_bytes,
+            limit_bytes=limit_bytes,
+            coverage_outcome=outcome,
+            coverage_reason=reason,
+            indivisible=True,
+            permitted_routes=("split_oversized_change", "accept_coverage_uncertainty"),
+            diagnostic=(
+                f"{target} failed rendered chunk preflight admission without truncating "
+                "mandatory context; split the change or run "
+                "@reviewsensei accept-coverage-uncertainty --reason <reason>"
+            ),
+        )
+    if reason == "chunk-failed" or (reason is None and outcome == "partially-reviewed"):
+        return IndivisibleWorkUnit(
+            unit_kind="partial_chunk_failure",
+            path=path,
+            hunk_index=hunk_index,
+            unit_bytes=unit_bytes,
+            limit_bytes=limit_bytes,
+            coverage_outcome=outcome,
+            coverage_reason=reason,
+            indivisible=False,
+            permitted_routes=("review_remaining", "accept_coverage_uncertainty"),
+            diagnostic=(
+                f"{target} remained {outcome} ({reason or 'unreviewed'}); "
+                "run @reviewsensei review remaining or @reviewsensei accept-coverage-uncertainty --reason <reason>"
+            ),
+        )
     return IndivisibleWorkUnit(
-        unit_kind="partial_chunk_failure",
+        unit_kind="incomplete_enumeration",
         path=path,
         hunk_index=hunk_index,
         unit_bytes=unit_bytes,
         limit_bytes=limit_bytes,
         coverage_outcome=outcome,
         coverage_reason=reason,
-        indivisible=False,
-        permitted_routes=("review_remaining", "accept_coverage_uncertainty"),
+        indivisible=True,
+        permitted_routes=("accept_coverage_uncertainty", "human_file_review"),
         diagnostic=(
-            f"{target} remained {outcome} ({reason or 'unreviewed'}); "
-            "run @reviewsensei review remaining or @reviewsensei accept-coverage-uncertainty --reason <reason>"
+            f"{target} remained {outcome} ({reason or 'unclassified'}) and is not "
+            "eligible for automatic retry; confirm via human_file_review or "
+            "@reviewsensei accept-coverage-uncertainty --reason <reason>"
         ),
     )
 
@@ -421,6 +477,7 @@ def classify_change_coverage(
 
     units: list[IndivisibleWorkUnit] = []
     hunk_reported_paths: set[str] = set()
+    reported_record_ids: set[int] = set()
 
     for hcov in coverage.hunks:
         if hcov.outcome == "reviewed":
@@ -441,6 +498,11 @@ def classify_change_coverage(
             )
         )
         hunk_reported_paths.add(hcov.path)
+        if record is not None:
+            # Mark all rename/alias paths of this DiffFileRecord so file-level
+            # iteration does not emit a duplicate unit or double-count bytes.
+            hunk_reported_paths.update(record.coverage_paths)
+            reported_record_ids.add(id(record))
 
     reviewed_paths: list[str] = []
     for fcov in coverage.files:
@@ -450,6 +512,15 @@ def classify_change_coverage(
         if fcov.path in hunk_reported_paths:
             continue
         record = records_by_path.get(fcov.path)
+        if record is not None:
+            if id(record) in reported_record_ids:
+                continue
+            reported_record_ids.add(id(record))
+        canonical_path = (
+            record.canonical_path
+            if record is not None and record.canonical_path is not None
+            else fcov.path
+        )
         file_bytes = (
             utf8_size(record.text, label="file diff")
             if record is not None and not record.binary
@@ -457,7 +528,7 @@ def classify_change_coverage(
         )
         units.append(
             _unit_for_reason(
-                path=fcov.path,
+                path=canonical_path,
                 hunk_index=None,
                 outcome=fcov.outcome,
                 reason=fcov.reason,
@@ -602,7 +673,31 @@ def classify_work_plan_unprocessed(
     classified: list[IndivisibleWorkUnit] = []
 
     for identity, reason in work_plan.unprocessed:
-        req = by_id[identity]
+        req = by_id.get(identity)
+        if req is None:
+            classified.append(
+                IndivisibleWorkUnit(
+                    unit_kind="incomplete_enumeration",
+                    path=None,
+                    hunk_index=None,
+                    unit_bytes=None,
+                    limit_bytes=max_diff_bytes,
+                    coverage_outcome="unsupported",
+                    coverage_reason="incomplete-enumeration",
+                    indivisible=True,
+                    permitted_routes=(
+                        "split_oversized_change",
+                        "accept_coverage_uncertainty",
+                    ),
+                    diagnostic=(
+                        f"Unprocessed requirement {identity} ({reason}) is absent from "
+                        "work_plan.requirements; refusing silently incomplete coverage. "
+                        "Split the change or run "
+                        "@reviewsensei accept-coverage-uncertainty --reason <reason>"
+                    ),
+                )
+            )
+            continue
         matched_records = [records[eid] for eid in req.evidence_ids if eid in records]
         primary_path = matched_records[0].path if matched_records else None
         primary_hunk = req.hunk_indexes[0] if req.hunk_indexes else None
@@ -1332,7 +1427,27 @@ class PolicyDriftClassification:
             raise ReviewInputError(
                 "policy_distinct_from_reviewed_base does not match P != B"
             )
-        if not self.admitted:
+        if self.admitted:
+            if self.drift_kind != "admitted":
+                raise ReviewInputError(
+                    "admitted policy classification requires drift_kind='admitted'"
+                )
+            if self.live_policy_commit != self.frozen_policy_commit:
+                raise ReviewInputError(
+                    "admitted policy classification requires live_policy_commit == frozen_policy_commit"
+                )
+            if (
+                self.recovery_policy_commit is not None
+                or self.recovery_instruction is not None
+            ):
+                raise ReviewInputError(
+                    "admitted policy classification must not expose recovery fields"
+                )
+        else:
+            if self.drift_kind == "admitted":
+                raise ReviewInputError(
+                    "refused policy classification cannot use drift_kind='admitted'"
+                )
             if not (
                 self.refuses_before_enrollment
                 and self.zero_ledger_mutation
@@ -1344,6 +1459,18 @@ class PolicyDriftClassification:
             if not self.recovery_instruction:
                 raise ReviewInputError(
                     "refused policy drift requires an explicit recovery_instruction"
+                )
+            if self.drift_kind == "malformed_policy_ref":
+                if (
+                    self.live_policy_commit is not None
+                    or self.recovery_policy_commit is not None
+                ):
+                    raise ReviewInputError(
+                        "malformed_policy_ref cannot expose live or recovery policy commits"
+                    )
+            elif self.recovery_policy_commit != self.live_policy_commit:
+                raise ReviewInputError(
+                    "refused policy drift recovery_policy_commit must match live_policy_commit"
                 )
         validate_bounded_text(
             self.diagnostic,
@@ -1853,6 +1980,7 @@ def classify_quota_throttle_recovery(
 
 
 __all__ = [
+    "DEFERRED_FITTING_UNIT_KINDS",
     "DIRECT_CORE_MAX_TITLE_BYTES",
     "HOSTED_BOOTSTRAP_MAX_TITLE_BYTES",
     "HOSTED_ENTRY_PURPOSES",

@@ -51,10 +51,23 @@ class _LiveTitleMixin:
     def external(self, request: Any, timeout: Any) -> Any:
         response = super().external(request, timeout)  # type: ignore[misc]
         if request.full_url.endswith("/pulls/7"):
-            pull = json.loads(response.read(524288))
+            raw = (
+                bytes(response.body)
+                if hasattr(response, "body")
+                else bytes(response.read())
+            )
+            pull = dict(json.loads(raw.decode("utf-8")))
             pull["title"] = self.live_title
-            return json_response(pull)
+            return json_response(pull, status=getattr(response, "status", 200))
         return response
+
+
+def _reset_hosted_run(fixture: Any, *, live_title: object) -> None:
+    """Atomically advance run_id, clear transport state, and bind live_title."""
+    fixture.live_title = live_title
+    fixture.run_id += 1
+    fixture.trace.clear()
+    fixture.transports.clear()
 
 
 class _TitleReviewFixture(_LiveTitleMixin, EntryFixture):
@@ -169,22 +182,26 @@ class TitleByteLimitsG20Tests(unittest.TestCase):
                 self.assertEqual(core_eval.admitted, expected_admitted)
                 self.assertEqual(core_eval.utf8_bytes, expected_bytes)
                 self.assertEqual(core_eval.limit_bytes, 4096)
+                core_limits = ReviewLimits(max_title_bytes=DIRECT_CORE_MAX_TITLE_BYTES)
+                common_req_kwargs: dict[str, Any] = {
+                    "diff": diff,
+                    "repository": "owner/repo",
+                    "pull_request_number": 7,
+                    "title": sample,
+                    "base_sha": BASE,
+                    "head_sha": HEAD,
+                    "limits": core_limits,
+                }
                 if expected_admitted:
-                    req = ReviewRequest(
-                        diff=diff,
-                        repository="owner/repo",
-                        pull_request_number=7,
-                        title=sample,
-                        base_sha=BASE,
-                        head_sha=HEAD,
-                    )
+                    req = ReviewRequest(**common_req_kwargs)
                     self.assertEqual(req.title, sample)
                 else:
                     calls_before = len(provider.requests)
                     with self.assertRaisesRegex(
-                        ReviewInputError, "title exceeds the configured size limit"
+                        ReviewInputError,
+                        "review title exceeds the configured size limit",
                     ):
-                        ReviewRequest(diff=diff, title=sample)
+                        ReviewRequest(**common_req_kwargs)
                     self.assertEqual(len(provider.requests), calls_before)
 
         # Direct core recovery once shortened from 4,097 bytes to 4,096 bytes:
@@ -224,20 +241,14 @@ class TitleByteLimitsG20Tests(unittest.TestCase):
             )
 
             # Non-string title in upstream payload also refuses before enrollment:
-            fixture.run_id += 1
-            fixture.trace.clear()
-            fixture.transports.clear()
-            fixture.live_title = 99999
+            _reset_hosted_run(fixture, live_title=99999)
             self.assertEqual(fixture.invoke(), 1)
             self.assertEqual(fixture.provider_calls, 0)
             self.assertIsNone(fixture.comment)
 
             # Immediate clean recovery once PR title is shortened to <= 256 UTF-8 bytes:
-            fixture.run_id += 1
-            fixture.trace.clear()
-            fixture.transports.clear()
             exact_256 = "🧪" * 64
-            fixture.live_title = exact_256
+            _reset_hosted_run(fixture, live_title=exact_256)
             self.assertEqual(fixture.invoke(), 0, fixture.error)
             self.assertEqual(fixture.selected.title, exact_256)
             self.assertEqual(fixture.provider_calls, 1)
@@ -306,10 +317,7 @@ class TitleByteLimitsG20Tests(unittest.TestCase):
             self.assertIsNone(fixture.comment)
 
             # Shorten PR title to exact 256 UTF-8 bytes -> reply runs and settles cleanly:
-            fixture.run_id += 1
-            fixture.trace.clear()
-            fixture.transports.clear()
-            fixture.live_title = "é" * 128
+            _reset_hosted_run(fixture, live_title="é" * 128)
             self.assertEqual(len(str(fixture.live_title).encode("utf-8")), 256)
 
             self.assertEqual(fixture.invoke_reply(), 0, fixture.error)

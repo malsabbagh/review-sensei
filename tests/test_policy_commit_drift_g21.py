@@ -24,6 +24,23 @@ from review_sensei.operational_boundaries import (
 )
 
 
+def _disable_crlf_conversion(repo_root: Any) -> None:
+    """Prevent Windows autocrlf from making the working copy look dirty."""
+    subprocess.run(
+        ["git", "-C", str(repo_root), "config", "core.autocrlf", "false"],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _checked_out_head(repo_root: Any) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        text=True,
+        stderr=subprocess.PIPE,
+    ).strip()
+
+
 def _advance_remote_default_branch(
     repo_root: Any,
     *,
@@ -32,7 +49,14 @@ def _advance_remote_default_branch(
     content: bytes,
     message: str,
 ) -> str:
-    """Advance remote main to P' while keeping the runner's frozen checkout at P."""
+    """Advance remote main to P' while keeping the runner's frozen checkout at P.
+
+    ``review_run.bootstrap`` authenticates both the local Git checkout in
+    ``repo_root`` (``git rev-parse HEAD`` and ``git show <P>:.reviewsensei.yml``)
+    and the remote HTTP ``/git/ref/heads/main`` endpoint. Creating ``P'`` in the
+    fixture repository and detaching back to ``P`` exercises both boundaries.
+    """
+    _disable_crlf_conversion(repo_root)
     target = repo_root / filename
     target.write_bytes(content)
     subprocess.run(
@@ -56,13 +80,18 @@ def _advance_remote_default_branch(
         check=True,
         capture_output=True,
     )
-    live_sha = subprocess.check_output(
-        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
-        text=True,
-        stderr=subprocess.PIPE,
-    ).strip()
+    live_sha = _checked_out_head(repo_root)
     subprocess.run(
-        ["git", "-C", str(repo_root), "checkout", "--quiet", "--detach", frozen_commit],
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "checkout",
+            "--force",
+            "--quiet",
+            "--detach",
+            frozen_commit,
+        ],
         check=True,
         capture_output=True,
     )
@@ -70,17 +99,18 @@ def _advance_remote_default_branch(
 
 
 def _checkout_fresh_policy(repo_root: Any, policy_commit: str) -> None:
+    _disable_crlf_conversion(repo_root)
     subprocess.run(
-        ["git", "-C", str(repo_root), "checkout", "--quiet", "--detach", policy_commit],
-        check=True,
-        capture_output=True,
-    )
-
-
-def _disable_crlf_conversion(repo_root: Any) -> None:
-    """Prevent Windows autocrlf from making the working copy look dirty."""
-    subprocess.run(
-        ["git", "-C", str(repo_root), "config", "core.autocrlf", "false"],
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "checkout",
+            "--force",
+            "--quiet",
+            "--detach",
+            policy_commit,
+        ],
         check=True,
         capture_output=True,
     )
@@ -118,6 +148,8 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
                 message="docs: unrelated advance",
             )
             self.assertNotEqual(frozen_p, live_p)
+            self.assertEqual(_checked_out_head(fixture.root), frozen_p)
+            self.assertFalse((fixture.root / "README.md").exists())
 
             drift = classify_policy_commit_drift(
                 frozen_policy_commit=frozen_p,
@@ -164,6 +196,7 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
             fixture.trace.clear()
             fixture.transports.clear()
             _checkout_fresh_policy(fixture.root, live_p)
+            self.assertEqual(_checked_out_head(fixture.root), live_p)
             fixture.policy = live_p
             self.assertEqual(fixture.invoke(), 0, fixture.error)
             self.assertEqual(fixture.provider_calls, 1)
@@ -226,6 +259,7 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
             fixture.trace.clear()
             fixture.transports.clear()
             _checkout_fresh_policy(fixture.root, live_p)
+            self.assertEqual(_checked_out_head(fixture.root), live_p)
             fixture.policy = live_p
             self.assertEqual(fixture.invoke(), 0, fixture.error)
             self.assertEqual(fixture.provider_calls, 1)
@@ -266,6 +300,18 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
                 self.subTest(payload=payload),
                 tempfile.TemporaryDirectory() as directory,
             ):
+                drift = classify_policy_commit_drift(
+                    frozen_policy_commit=valid_p,
+                    default_ref_object=payload.get("object"),
+                    reviewed_base_sha=BASE,
+                    reviewed_head_sha=HEAD,
+                )
+                self.assertFalse(drift.admitted)
+                self.assertEqual(drift.drift_kind, "malformed_policy_ref")
+                self.assertIsNone(drift.live_policy_commit)
+                self.assertIsNone(drift.recovery_policy_commit)
+                self.assertTrue(drift.refuses_before_enrollment)
+
                 fixture = _RefOverrideFixture(directory, ref_payload=payload)
                 self.assertEqual(fixture.invoke(), 1)
                 self.assertIn(
@@ -273,12 +319,33 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
                 )
                 diag = outcome(self, fixture.error)
                 self.assertEqual(diag["step"], "default_policy_ref")
+                observed_policy = diag["scope"]["observed_policy"]
+                obj = payload.get("object")
+                if isinstance(obj, dict) and obj.get("type") == "commit":
+                    self.assertIsNotNone(observed_policy)
+                    self.assertIsNone(observed_policy["policy_content_sha256"])
+                else:
+                    self.assertIsNone(observed_policy)
+                self.assertTrue(
+                    any(
+                        path == "/repos/owner/repo/git/ref/heads/main"
+                        for _, _, path in fixture.trace
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        "/contents/.reviewsensei.yml" in path
+                        or "/api/github/token" in path
+                        for _, _, path in fixture.trace
+                    )
+                )
                 self.assertEqual(fixture.provider_calls, 0)
                 self.assertIsNone(fixture.comment)
 
     def test_policy_commit_p_is_independent_of_reviewed_base_b_and_head_h(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = EntryFixture(directory)
+            _disable_crlf_conversion(fixture.root)
             # P == P_live while P != B and P != H: admitted cleanly!
             self.assertNotEqual(fixture.policy, BASE)
             self.assertNotEqual(fixture.policy, HEAD)
@@ -300,12 +367,11 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
             self.assertIn("live reviewed base or head conflicts", fixture.error)
             diag = outcome(self, fixture.error)
             self.assertEqual(diag["step"], "live_pr")
+            traced_paths = [path for _, _, path in fixture.trace]
             self.assertTrue(
-                any(
-                    "/contents/.reviewsensei.yml" in path
-                    for _, _, path in fixture.trace
-                )
+                any("/contents/.reviewsensei.yml" in path for path in traced_paths)
             )
+            self.assertTrue(any(path.endswith("/pulls/7") for path in traced_paths))
             self.assertEqual(fixture.provider_calls, 0)
 
     def test_prior_settled_and_pending_session_records_survive_drift_and_recover(
@@ -368,13 +434,23 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
             request(part_fixture, 21, "rescan")
             part_fixture.policy = stale_p
             part_fixture.policy_ref = live_p
+            part_fixture.trace.clear()
             calls_before = part_fixture.provider_calls
             self.assertEqual(part_fixture.invoke(), 1)
             self.assertIn(
                 "trusted policy commit changed before admission", part_fixture.error
             )
+            part_diag = outcome(self, part_fixture.error)
+            self.assertEqual(part_diag["step"], "default_policy_ref")
             self.assertEqual(part_fixture.provider_calls, calls_before)
             self.assertEqual(part_fixture.comment["body"], retained_snapshot)
+            self.assertFalse(
+                any(
+                    (method in {"POST", "PATCH"} and "/issues/" in path)
+                    or "/api/github/token" in path
+                    for _, method, path in part_fixture.trace
+                )
+            )
 
             # Re-dispatch rescan pinned to live_p -> preserves all 20 dispositions and completes!
             part_fixture.provider_comments = []
@@ -406,23 +482,110 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
                 frozen_policy_bytes="not-bytes",  # type: ignore[arg-type]
             )
         with self.assertRaises(ReviewInputError):
-            PolicyDriftClassification(
-                drift_kind="policy_content_changed",
-                admitted=False,
+            classify_policy_commit_drift(
                 frozen_policy_commit="1" * 40,
-                live_policy_commit="2" * 40,
+                default_ref_object={"type": "commit", "sha": "1" * 40},
                 reviewed_base_sha=BASE,
                 reviewed_head_sha=HEAD,
-                policy_distinct_from_reviewed_base=True,
-                policy_content_identical=False,
-                refuses_before_enrollment=True,
-                zero_ledger_mutation=True,
-                zero_provider_spend=True,
-                rebinds_prior_accounting=True,
-                recovery_policy_commit="2" * 40,
-                recovery_instruction="re-run",
-                diagnostic="forbidden rebind",
+                live_policy_bytes="not-bytes",  # type: ignore[arg-type]
             )
+
+        # Asymmetric policy byte availability (frozen set / live omitted, or vice versa)
+        # refuses with policy_content_identical=None rather than claiming identity.
+        for frozen_b, live_b in ((b"schema: 1\n", None), (None, b"schema: 1\n")):
+            with self.subTest(frozen_b=frozen_b, live_b=live_b):
+                asym = classify_policy_commit_drift(
+                    frozen_policy_commit="1" * 40,
+                    default_ref_object={"type": "commit", "sha": "2" * 40},
+                    reviewed_base_sha=BASE,
+                    reviewed_head_sha=HEAD,
+                    frozen_policy_bytes=frozen_b,
+                    live_policy_bytes=live_b,
+                )
+                self.assertFalse(asym.admitted)
+                self.assertEqual(asym.drift_kind, "policy_content_changed")
+                self.assertIsNone(asym.policy_content_identical)
+                self.assertEqual(asym.recovery_policy_commit, "2" * 40)
+
+        for bad_cls_kwargs in (
+            # rebinds_prior_accounting=True is always forbidden
+            {
+                "drift_kind": "policy_content_changed",
+                "admitted": False,
+                "frozen_policy_commit": "1" * 40,
+                "live_policy_commit": "2" * 40,
+                "reviewed_base_sha": BASE,
+                "reviewed_head_sha": HEAD,
+                "policy_distinct_from_reviewed_base": True,
+                "policy_content_identical": False,
+                "refuses_before_enrollment": True,
+                "zero_ledger_mutation": True,
+                "zero_provider_spend": True,
+                "rebinds_prior_accounting": True,
+                "recovery_policy_commit": "2" * 40,
+                "recovery_instruction": "re-run",
+                "diagnostic": "forbidden rebind",
+            },
+            # admitted=True carrying recovery_policy_commit
+            {
+                "drift_kind": "admitted",
+                "admitted": True,
+                "frozen_policy_commit": "1" * 40,
+                "live_policy_commit": "1" * 40,
+                "reviewed_base_sha": BASE,
+                "reviewed_head_sha": HEAD,
+                "policy_distinct_from_reviewed_base": True,
+                "policy_content_identical": True,
+                "refuses_before_enrollment": False,
+                "zero_ledger_mutation": False,
+                "zero_provider_spend": False,
+                "rebinds_prior_accounting": False,
+                "recovery_policy_commit": "1" * 40,
+                "recovery_instruction": None,
+                "diagnostic": "admitted must not expose recovery_policy_commit",
+            },
+            # refused drift with recovery_policy_commit != live_policy_commit
+            {
+                "drift_kind": "policy_content_changed",
+                "admitted": False,
+                "frozen_policy_commit": "1" * 40,
+                "live_policy_commit": "2" * 40,
+                "reviewed_base_sha": BASE,
+                "reviewed_head_sha": HEAD,
+                "policy_distinct_from_reviewed_base": True,
+                "policy_content_identical": False,
+                "refuses_before_enrollment": True,
+                "zero_ledger_mutation": True,
+                "zero_provider_spend": True,
+                "rebinds_prior_accounting": False,
+                "recovery_policy_commit": "3" * 40,
+                "recovery_instruction": "re-run",
+                "diagnostic": "mismatched recovery_policy_commit",
+            },
+            # refused drift missing recovery_instruction
+            {
+                "drift_kind": "policy_content_changed",
+                "admitted": False,
+                "frozen_policy_commit": "1" * 40,
+                "live_policy_commit": "2" * 40,
+                "reviewed_base_sha": BASE,
+                "reviewed_head_sha": HEAD,
+                "policy_distinct_from_reviewed_base": True,
+                "policy_content_identical": False,
+                "refuses_before_enrollment": True,
+                "zero_ledger_mutation": True,
+                "zero_provider_spend": True,
+                "rebinds_prior_accounting": False,
+                "recovery_policy_commit": "2" * 40,
+                "recovery_instruction": None,
+                "diagnostic": "missing recovery_instruction",
+            },
+        ):
+            with (
+                self.subTest(diagnostic=bad_cls_kwargs["diagnostic"]),
+                self.assertRaises(ReviewInputError),
+            ):
+                PolicyDriftClassification(**bad_cls_kwargs)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

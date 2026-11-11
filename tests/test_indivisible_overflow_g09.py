@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import unittest
@@ -14,7 +15,7 @@ from review_sensei_github.checks import review_check_outcome
 from review_sensei.budgets import LEGACY_ASSESSMENT_PROMPT_BYTES, ReviewWorkBudgets
 from review_sensei.context import PromptContextOverflow, admit_prompt_context
 from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
-from review_sensei.diff import DiffFileRecord, analyze_diff
+from review_sensei.diff import analyze_diff
 from review_sensei.disposition import (
     apply_session_command,
     incomplete_coverage_from_result,
@@ -35,6 +36,9 @@ from review_sensei.models import (
     ReviewRequest,
 )
 from review_sensei.operational_boundaries import (
+    DEFERRED_FITTING_UNIT_KINDS,
+    PERMITTED_RECOVERY_ROUTES,
+    RECOVERY_COMMAND_TEMPLATES,
     IndivisibleWorkReport,
     IndivisibleWorkUnit,
     classify_change_coverage,
@@ -43,11 +47,9 @@ from review_sensei.operational_boundaries import (
 )
 from review_sensei.outcomes import ResourceBudget
 from review_sensei.planning import (
-    LargeChangePlan,
     TotalWorkBudget,
     WorkBatch,
     WorkRequirement,
-    _classify_file,
     plan_change,
     plan_work,
 )
@@ -161,62 +163,37 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
         )
 
     def test_oversized_hunkless_file_is_classified_with_exact_bytes(self) -> None:
-        base_diff = (
-            "diff --git a/src/ok.py b/src/ok.py\n"
-            "--- a/src/ok.py\n"
-            "+++ b/src/ok.py\n"
-            "@@ -1 +1,2 @@\n"
-            " keep\n"
-            "+ok\n"
+        long_path = "src/deep/nested/module_with_oversized_hunkless_mode_header.py"
+        hunkless_diff = (
+            f"diff --git a/{long_path} b/{long_path}\n"
+            "old mode 100644\n"
+            "new mode 100755\n"
         )
-        analysis = analyze_diff(base_diff)
-        hunkless_text = "--- a/src/meta.dat\n+++ b/src/meta.dat\n" + ("m" * 300) + "\n"
-        record = DiffFileRecord(
-            old_path="src/meta.dat",
-            new_path="src/meta.dat",
-            text=hunkless_text,
-            header="--- a/src/meta.dat\n+++ b/src/meta.dat\n",
-            added_lines=frozenset(),
-            deleted_lines=frozenset(),
-            hunks=(),
-            binary=False,
-        )
-        limits = ReviewLimits(max_diff_bytes=120)
-        outcome, reason = _classify_file(record, analysis=analysis, limits=limits)
-        self.assertEqual((outcome, reason), ("unsupported", "too-large-file"))
-
-        combined_analysis = replace(
-            analysis,
-            changed_paths=("src/meta.dat",),
-            file_records=(record,),
-            hunk_records=(),
-        )
-        coverage = CoverageManifest(
-            files=(
-                FileCoverage(
-                    path="src/meta.dat",
-                    outcome="unsupported",
-                    reason="too-large-file",
-                ),
-            ),
-            enumerated_paths=("src/meta.dat",),
+        limits = ReviewLimits(max_diff_bytes=80)
+        plan = plan_change(
+            hunkless_diff,
             limits=limits,
-        )
-        plan = LargeChangePlan(
-            analysis=combined_analysis,
-            coverage=coverage,
-            chunks=(),
+            orchestrate=True,
             work_budget=TotalWorkBudget(max_chunks=32),
-            orchestrated=True,
         )
+        self.assertEqual(plan.chunks, ())
+        record = (plan.analysis.file_records or ())[0]
+        self.assertEqual(record.hunks, ())
+        self.assertEqual(
+            [(fcov.path, fcov.outcome, fcov.reason) for fcov in plan.coverage.files],
+            [(long_path, "unsupported", "too-large-file")],
+        )
+
         report = classify_change_coverage(plan)
         self.assertEqual(len(report.units), 1)
         unit = report.units[0]
         self.assertEqual(unit.unit_kind, "oversized_hunkless_file")
-        self.assertEqual(unit.path, "src/meta.dat")
+        self.assertEqual(unit.path, long_path)
         self.assertIsNone(unit.hunk_index)
-        self.assertEqual(unit.unit_bytes, len(hunkless_text.encode("utf-8")))
-        self.assertEqual(unit.limit_bytes, 120)
+        self.assertEqual(unit.unit_bytes, len(record.text.encode("utf-8")))
+        assert unit.unit_bytes is not None
+        self.assertGreater(unit.unit_bytes, 80)
+        self.assertEqual(unit.limit_bytes, 80)
         self.assertTrue(unit.indivisible)
         self.assertNotIn("review_remaining", unit.permitted_routes)
 
@@ -232,7 +209,7 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
             "+change\n"
         )
         pinned = _doc("docs/architecture/mandatory-rules.md", "MUST " + ("r" * 52_000))
-        optional = _doc("docs/guide.md", "Note " + ("g" * 4_000))
+        optional = _doc("docs/guide.md", "Note " + ("g" * 52_000))
         lens = ReviewLensContext(
             "architecture",
             documents=(pinned, optional),
@@ -313,10 +290,19 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
         self.assertEqual(
             unit.mandatory_documents, ("docs/architecture/mandatory-rules.md",)
         )
+        self.assertNotIn("docs/guide.md", unit.mandatory_documents)
         self.assertEqual(unit.unit_bytes, len(pinned.content.encode("utf-8")))
         self.assertEqual(unit.limit_bytes, LEGACY_ASSESSMENT_PROMPT_BYTES)
+        self.assertEqual(unit.coverage_reason, "chunk-preflight-failed")
+        self.assertTrue(unit.indivisible)
+        self.assertNotIn("review_remaining", unit.permitted_routes)
+        self.assertEqual(
+            request.lens_contexts[0].documents[0].content,
+            pinned.content,
+        )
         self.assertTrue(report.incomplete_coverage_tokens)
-        self.assertIn("never truncated", unit.diagnostic)
+        self.assertIn("docs/architecture/mandatory-rules.md", unit.diagnostic)
+        self.assertIn(str(LEGACY_ASSESSMENT_PROMPT_BYTES), unit.diagnostic)
 
     def test_binary_generated_lockfile_rename_and_deletion_classifications(
         self,
@@ -366,6 +352,30 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
         )
         self.assertEqual(by_path["dist/app.min.js"].unit_kind, "generated_file")
         self.assertEqual(by_path["Cargo.lock"].unit_kind, "unsupported_lockfile")
+
+        # Renamed file with an oversized hunk emits a single unit without alias double-counting.
+        renamed_oversized = (
+            "diff --git a/src/old_big.py b/src/new_big.py\n"
+            "similarity index 50%\n"
+            "rename from src/old_big.py\n"
+            "rename to src/new_big.py\n"
+            "--- a/src/old_big.py\n"
+            "+++ b/src/new_big.py\n"
+            "@@ -1 +1,2 @@\n"
+            " base = 1\n"
+            "+" + ("x" * 600) + "\n"
+        )
+        renamed_plan = plan_change(
+            renamed_oversized,
+            limits=ReviewLimits(max_diff_bytes=160),
+            orchestrate=True,
+        )
+        renamed_report = classify_change_coverage(renamed_plan)
+        self.assertEqual(len(renamed_report.units), 1)
+        self.assertEqual(renamed_report.units[0].unit_kind, "oversized_hunk")
+        self.assertEqual(renamed_report.units[0].path, "src/new_big.py")
+        assert renamed_report.units[0].unit_bytes is not None
+        self.assertGreater(renamed_report.units[0].unit_bytes, 160)
 
         # Deleted-side comment anchors remain valid on LEFT.
         deletion_only = (
@@ -468,6 +478,30 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
             replace(budget_plan, coverage=failed_cov)
         )
         self.assertEqual(failed_report.units[0].unit_kind, "partial_chunk_failure")
+        self.assertFalse(failed_report.units[0].indivisible)
+
+        # Non-transient coverage reasons fail closed with indivisible=True and never offer review_remaining.
+        non_retryable_cov = CoverageManifest(
+            files=(
+                FileCoverage(
+                    path="src/a.py",
+                    outcome="unsupported",
+                    reason="no-review-stage",
+                ),
+                FileCoverage(
+                    path="src/b.py",
+                    outcome="unsupported",
+                    reason="chunk-preflight-failed",
+                ),
+            ),
+            enumerated_paths=("src/a.py", "src/b.py"),
+        )
+        non_retryable_report = classify_change_coverage(
+            replace(budget_plan, coverage=non_retryable_cov)
+        )
+        for non_retry_unit in non_retryable_report.units:
+            self.assertTrue(non_retry_unit.indivisible)
+            self.assertNotIn("review_remaining", non_retry_unit.permitted_routes)
 
         snapshot = EvidenceSnapshot()
         analysis = analyze_diff(two_files)
@@ -550,8 +584,32 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
         )
         self.assertEqual(wunits3[0].unit_kind, "mandatory_prompt_overflow")
 
+        # Stale/synthetic unprocessed identity absent from work_plan.requirements fails closed without KeyError.
+        orphan_plan = copy.copy(wplan3)
+        object.__setattr__(
+            orphan_plan,
+            "unprocessed",
+            (*wplan3.unprocessed, ("req-orphan", "provider-call-budget")),
+        )
+        orphan_units = classify_work_plan_unprocessed(
+            orphan_plan, max_diff_bytes=4096, max_prompt_bytes=49152
+        )
+        self.assertEqual(len(orphan_units), 2)
+        self.assertEqual(orphan_units[1].unit_kind, "incomplete_enumeration")
+        self.assertTrue(orphan_units[1].indivisible)
+        self.assertIn("req-orphan", orphan_units[1].diagnostic)
+
     def test_report_and_unit_validation_guards_fail_closed(self) -> None:
-        with self.assertRaises(ReviewInputError):
+        self.assertEqual(
+            PERMITTED_RECOVERY_ROUTES, frozenset(RECOVERY_COMMAND_TEMPLATES)
+        )
+        self.assertEqual(
+            DEFERRED_FITTING_UNIT_KINDS,
+            frozenset({"budget_exhausted", "partial_chunk_failure"}),
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "never suggest review_remaining retries"
+        ):
             IndivisibleWorkUnit(
                 unit_kind="oversized_hunk",
                 path="src/huge.py",
@@ -563,6 +621,32 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
                 indivisible=True,
                 permitted_routes=("review_remaining",),
                 diagnostic="invalid retry suggestion on indivisible unit",
+            )
+        with self.assertRaisesRegex(ReviewInputError, "must set indivisible=False"):
+            IndivisibleWorkUnit(
+                unit_kind="budget_exhausted",
+                path="src/huge.py",
+                hunk_index=1,
+                unit_bytes=50,
+                limit_bytes=100,
+                coverage_outcome="budget-exhausted",
+                coverage_reason="provider-call-budget",
+                indivisible=True,
+                permitted_routes=("accept_coverage_uncertainty",),
+                diagnostic="budget exhausted flipped to indivisible",
+            )
+        with self.assertRaisesRegex(ReviewInputError, "must set indivisible=True"):
+            IndivisibleWorkUnit(
+                unit_kind="oversized_hunk",
+                path="src/huge.py",
+                hunk_index=1,
+                unit_bytes=500,
+                limit_bytes=100,
+                coverage_outcome="unsupported",
+                coverage_reason="too-large-hunk",
+                indivisible=False,
+                permitted_routes=("accept_coverage_uncertainty",),
+                diagnostic="oversized hunk flipped to non-indivisible",
             )
         valid_unit = IndivisibleWorkUnit(
             unit_kind="oversized_hunk",
@@ -576,36 +660,55 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
             permitted_routes=("accept_coverage_uncertainty",),
             diagnostic="valid unit",
         )
-        for bad_kwargs in (
-            {"truncated_mandatory_context": True},
-            {"unbounded_retry_suggested": True},
-            {"fully_reviewed": True},
-            {"approval_state": "invalid"},
-        ):
+        base_report_kwargs: dict[str, object] = {
+            "fully_reviewed": False,
+            "enumeration_complete": True,
+            "approval_state": "partial",
+            "truncated_mandatory_context": False,
+            "unbounded_retry_suggested": False,
+            "units": (valid_unit,),
+        }
+        isolated_cases: tuple[tuple[str, dict[str, object], str], ...] = (
+            (
+                "truncated_mandatory_context",
+                {"truncated_mandatory_context": True},
+                "mandatory context truncation is forbidden",
+            ),
+            (
+                "unbounded_retry_suggested",
+                {"unbounded_retry_suggested": True},
+                "unbounded retry suggestions are forbidden",
+            ),
+            (
+                "fully_reviewed_with_units",
+                {"fully_reviewed": True},
+                "fully_reviewed cannot be true",
+            ),
+            (
+                "fully_reviewed_incomplete_enumeration",
+                {
+                    "fully_reviewed": True,
+                    "enumeration_complete": False,
+                    "approval_state": "reviewed",
+                    "units": (),
+                },
+                "fully_reviewed cannot be true",
+            ),
+            (
+                "approval_state",
+                {"approval_state": "invalid"},
+                "approval_state is unsupported",
+            ),
+        )
+        for label, overrides, expected_message in isolated_cases:
+            self.assertTrue(set(overrides).issubset(base_report_kwargs))
+            merged = {**base_report_kwargs, **overrides}
             with (
-                self.subTest(bad_kwargs=bad_kwargs),
-                self.assertRaises(ReviewInputError),
+                self.subTest(case=label),
+                self.assertRaisesRegex(ReviewInputError, expected_message),
             ):
-                IndivisibleWorkReport(
-                    fully_reviewed=bad_kwargs.get("fully_reviewed", False),  # type: ignore[arg-type]
-                    enumeration_complete=True,
-                    approval_state=bad_kwargs.get("approval_state", "partial"),  # type: ignore[arg-type]
-                    truncated_mandatory_context=bad_kwargs.get(
-                        "truncated_mandatory_context", False
-                    ),  # type: ignore[arg-type]
-                    unbounded_retry_suggested=bad_kwargs.get(
-                        "unbounded_retry_suggested", False
-                    ),  # type: ignore[arg-type]
-                    units=(valid_unit,),
-                )
-        serialized = IndivisibleWorkReport(
-            fully_reviewed=False,
-            enumeration_complete=True,
-            approval_state="partial",
-            truncated_mandatory_context=False,
-            unbounded_retry_suggested=False,
-            units=(valid_unit,),
-        ).to_dict()
+                IndivisibleWorkReport(**merged)  # type: ignore[arg-type]
+        serialized = IndivisibleWorkReport(**base_report_kwargs).to_dict()  # type: ignore[arg-type]
         self.assertFalse(serialized["fully_reviewed"])
         self.assertEqual(len(serialized["units"]), 1)  # type: ignore[arg-type]
 
@@ -615,7 +718,8 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
         head_1 = "1" * 40
         base_sha = "0" * 40
         policy_digest = "a" * 64
-        giant_added = "+" + ("z" * 450)
+        max_diff_bytes = 180
+        giant_added = "+" + ("z" * (max_diff_bytes * 4))
         mixed_diff = (
             "diff --git a/src/safe.py b/src/safe.py\n"
             "--- a/src/safe.py\n"
@@ -630,7 +734,7 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
             " table = []\n"
             f"{giant_added}\n"
         )
-        limits = ReviewLimits(max_diff_bytes=180, max_diff_files=1)
+        limits = ReviewLimits(max_diff_bytes=max_diff_bytes, max_diff_files=1)
         provider = _RecordingProvider()
         service = ReviewService(
             provider,
@@ -662,6 +766,11 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
         self.assertEqual(report_1.reviewed_paths, ("src/safe.py",))
         self.assertEqual(len(report_1.units), 1)
         self.assertEqual(report_1.units[0].path, "src/huge.py")
+        assert (
+            report_1.units[0].unit_bytes is not None
+            and report_1.units[0].limit_bytes is not None
+        )
+        self.assertGreater(report_1.units[0].unit_bytes, report_1.units[0].limit_bytes)
 
         # Blind `review remaining` makes zero extra provider calls and flags no progress.
         cont_run = service.run(req_1, prior_partial=result_1)

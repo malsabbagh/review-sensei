@@ -9,11 +9,11 @@ deterministic recovery steps for each boundary.
 
 | Gap | Boundary | Enforced Limit / Invariant | Pre-Work / Ledger Guarantee | Deterministic Recovery Action |
 |---|---|---|---|---|
-| `G09` | Oversized indivisible work | Single hunk, hunkless file, or mandatory stage prompt exceeds configured diff/prompt byte budget | Zero silent truncation; zero automatic budget expansion; explicit partial coverage | Run `@reviewsensei accept-coverage-uncertainty --reason "<why>"`, record human file review, or split the oversized change |
-| `G19` | Pull request title freshness | Title excluded from incremental cache key (`context.py`), bound in partial-continuation scope (`service.py`) | Post-publication title edits cost zero duplicate inference and keep settled approvals; mid-partial edits fail closed | Run `@reviewsensei rescan` if the title changed while `@reviewsensei review remaining` was pending |
+| `G09` | Oversized indivisible work | Single hunk, hunkless file, or mandatory stage prompt exceeds configured diff/prompt byte budget | Zero silent truncation; zero automatic budget expansion; explicit partial coverage | Maintainer/admin (`maintain`/`admin` permission or `OWNER`/`MEMBER` association, `github.writes: true`) runs `@reviewsensei accept-coverage-uncertainty --reason "<why>"`, records human file review, or splits the oversized change |
+| `G19` | Pull request title freshness | Title excluded from incremental cache key (`context.py`), bound verbatim in partial-continuation scope (`ReviewService._continuation_scope_digest`) | Post-publication title edits cost zero duplicate inference and keep settled approvals; mid-partial edits fail closed | Run `@reviewsensei rescan` if the title changed while `@reviewsensei review remaining` was pending |
 | `G20` | Pull request title UTF-8 byte budget | `routing_preflight`: unvalidated; `hosted_bootstrap` (`review`/`command`/`reply`): `256` UTF-8 bytes; `direct_core`: `4,096` UTF-8 bytes | Hosted `> 256` UTF-8 bytes refuses before enrollment, ledger write, or provider call | Shorten the pull request title to `<= 256` UTF-8 bytes (or `<= 4,096` UTF-8 bytes in direct local CLI mode) and re-trigger |
-| `G21` | Default-branch policy commit drift | Frozen default-branch policy commit `P` must equal live default-branch commit `P_live` before admission (independent of reviewed `base_sha` `B` and `head_sha` `H`) | Refuses before session enrollment or provider spend; prior session records remain untouched | Re-dispatch or trigger the next pull request / maintainer command event against the current default-branch commit `P_live` |
-| `G25` | Cross-PR & cross-repo quota ownership | Per-PR serialization (`reviewsensei-provider-review-<repo>-<pr>`, `cancel-in-progress: false`); provider/account and installation own aggregate rate limits | Zero cross-PR credential sharing; `retry_count=0` (no duplicate dispatches); retained analysis preserved on HTTP `429`/`503` | Wait for rate-limit cooldown and re-run; post-retention publication throttling replays publication with zero duplicate inference |
+| `G21` | Default-branch policy commit drift | Frozen default-branch policy commit `P` must equal live default-branch commit `P_live` before admission (independent of reviewed `base_sha` `B` and `head_sha` `H`) | Refuses before session enrollment or provider spend; prior session records remain untouched | Trigger a fresh event or `workflow_dispatch` targeting the default branch's current ref/commit `P_live` (never a stale SHA) |
+| `G25` | Cross-PR & cross-repo quota ownership | Per-PR serialization (`reviewsensei-provider-review-<owner>/<repo>-<pr_number>`, `cancel-in-progress: false`); provider/account and installation own aggregate rate limits | Zero cross-PR credential sharing; `retry_count=0` (no duplicate dispatches); retained analysis preserved on HTTP `429`/`503` | Wait for rate-limit cooldown and re-run; post-retention publication throttling replays publication with zero duplicate inference |
 
 ---
 
@@ -48,8 +48,14 @@ Choose one of the following bounded actions:
    refactors into smaller reviewable commits or hunks below the configured byte
    budget, then push a new head commit.
 2. **Record authorized coverage-uncertainty disposition:** When an authorized
-   maintainer has inspected the oversized file/hunk out-of-band on the exact head SHA
-   and policy digest:
+   maintainer has inspected the oversized file/hunk out-of-band on the exact head SHA,
+   policy digest, and enumerated `incomplete_coverage` token set. Authorization is
+   enforced fail-closed by `authorized_maintainer` + `authorized_override`
+   (`review_sensei.disposition`): the commenter must be a human non-bot collaborator
+   with GitHub `maintain` or `admin` permission (or `OWNER` / `MEMBER` association
+   when permission is unloaded), and repository policy must enable
+   `github.writes: true` (ordinary `write` access alone, bots, the App itself, and
+   casual commenters are rejected):
    ```text
    @reviewsensei accept-coverage-uncertainty --reason "Reviewed oversized migration hunk manually"
    ```
@@ -79,8 +85,12 @@ Choose one of the following bounded actions:
    - Published attribution helpers verify whether an earlier review evaluated an
      earlier title (`verify_published_title_attribution`).
 5. **Edited during partial continuation (`during_partial_continuation`):**
-   - `_continuation_scope_digest` in `ReviewService` binds the normalized pull request
-     title into the partial checkpoint scope.
+   - `ReviewService._continuation_scope_digest` (`src/review_sensei/service.py`) is the
+     sole source of truth computing the canonical JSON SHA-256 (`evidence_digest`) over
+     `ReviewRequest` (including `ReviewRequest.title`). `validate_bounded_text`
+     validates UTF-8 byte bounds verbatim without whitespace collapsing, case folding,
+     or Unicode NFC/NFKC normalization (hosted bootstrap omits an empty `""` title as
+     `None` and binds any non-empty title byte-for-byte).
    - If the pull request title changes before `@reviewsensei review remaining`,
      continuation fails closed (`continuation scope does not match`) rather than
      merging chunks reviewed under two different titles.
@@ -149,10 +159,13 @@ ref object is not a valid 40-hex commit SHA.
 
 ### Recovery runbook
 
-- Trigger a fresh workflow dispatch, pull request event, or `@reviewsensei rescan`
-  comment so checkout and admission bind to the current default-branch commit
-  `P_live`. Do not retry a stale workflow job pinned to an outdated default-branch
-  checkout.
+- Trigger a fresh pull request event, `@reviewsensei rescan` comment, or manual
+  `workflow_dispatch` targeting the default branch's current ref/commit `P_live` so
+  checkout and admission bind to `P_live`.
+- When using `workflow_dispatch`, explicitly select the default branch head ref (never
+  re-run or dispatch against the failed run's stale commit SHA) and verify the workflow
+  run's checked-out `ref` / `--policy-commit` input shows `P_live` before treating the
+  run as recovered.
 
 ---
 
@@ -161,9 +174,12 @@ ref object is not a valid 40-hex commit SHA.
 ### Concurrency and rate-limit ownership model
 
 - **Same pull request (`per_pr_workflow_serialization`):** GitHub Actions serializes
-  `review`, `command`, and `reply` provider jobs per pull request in group
-  `reviewsensei-provider-review-<owner>/<repo>-<pr_number>` with
-  `cancel-in-progress: false`, matching `ReviewConcurrencyPlan.for_pull_request`.
+  `review`, `command`, and `reply` provider jobs per pull request in flat workflow
+  group `reviewsensei-provider-review-<owner>/<repo>-<pr_number>` (`${{ github.repository }}`
+  = `<owner>/<repo>`) with `cancel-in-progress: false` (matched by
+  `plan_cross_pr_concurrency`), while core `ReviewConcurrencyPlan.for_pull_request`
+  derives collision-free length-prefixed internal `workflow.key` and `provider.key`
+  identifiers (`provider.cancel_in_progress=False`).
 - **Across pull requests and repositories
   (`provider_and_installation_account_boundary`):** Distinct pull requests execute in
   independent concurrency groups without a global cross-repository lock service.

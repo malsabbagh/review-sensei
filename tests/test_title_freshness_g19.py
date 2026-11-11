@@ -26,15 +26,18 @@ from test_api_work_persistence import BASE, HEAD, IDENTITY
 from test_review_run import EntryFixture, fixture_process_environment
 from test_review_run_rescan import partial_fixture, request
 
+from review_sensei.baseline import baseline_from_review, plan_verification_scope
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.context import (
-    IncrementalReviewPlan,
     ReviewContextCache,
     build_review_context_cache_key,
 )
+from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ProviderRequest, ProviderResponse, ReviewRequest
 from review_sensei.operational_boundaries import (
+    TITLE_FRESHNESS_OUTCOMES,
+    TITLE_LIFECYCLE_PHASES,
     TitleAttributionRecord,
     TitleFreshnessDecision,
     evaluate_title_freshness,
@@ -76,9 +79,14 @@ class _TitledEntryFixture(EntryFixture):
     def external(self, req: Any, timeout: Any) -> Any:
         response = super().external(req, timeout)
         if req.full_url.endswith("/pulls/7"):
-            pull = json.loads(response.read(524288))
+            raw = (
+                bytes(response.body)
+                if hasattr(response, "body")
+                else bytes(response.read())
+            )
+            pull = dict(json.loads(raw.decode("utf-8")))
             pull["title"] = self.live_title
-            return json_response(pull)
+            return json_response(pull, status=getattr(response, "status", 200))
         return response
 
     def invoke_with_optional_title(self) -> int:
@@ -313,10 +321,13 @@ class TitleFreshnessG19Tests(unittest.TestCase):
 
             f_inf.before_provider = mutate_during_inference
             self.assertEqual(f_inf.invoke_with_optional_title(), 0, f_inf.error)
+            self.assertEqual(f_inf.live_title, "Edited mid-inference")
             self.assertEqual(f_inf.selected.title, "Captured at admission")
             self.assertEqual(f_inf.provider_calls, 1)
-            self.assertIn("Captured at admission", f_inf.captured_prompts[0])
-            self.assertNotIn("Edited mid-inference", f_inf.captured_prompts[0])
+            self.assertEqual(len(f_inf.captured_prompts), 1)
+            for prompt in f_inf.captured_prompts:
+                self.assertIn("Captured at admission", prompt)
+                self.assertNotIn("Edited mid-inference", prompt)
 
         # Timing 3 in hosted fixture: live PR title mutates right before publication.
         with tempfile.TemporaryDirectory() as directory:
@@ -327,30 +338,48 @@ class TitleFreshnessG19Tests(unittest.TestCase):
 
             f_pub.before_publication = mutate_before_publication
             self.assertEqual(f_pub.invoke_with_optional_title(), 0, f_pub.error)
+            self.assertEqual(f_pub.live_title, "Edited right before publication")
+            self.assertEqual(f_pub.selected.title, "Captured at admission")
+            self.assertEqual(f_pub.provider_calls, 1)
+            self.assertEqual(len(f_pub.captured_prompts), 1)
+            self.assertIn("Captured at admission", f_pub.captured_prompts[0])
+            self.assertNotIn(
+                "Edited right before publication", f_pub.captured_prompts[0]
+            )
+            review_artifact = (f_pub.root / "review.json").read_text(encoding="utf-8")
+            self.assertNotIn("Edited right before publication", review_artifact)
+            self.assertNotIn("Edited right before publication", f_pub.comment["body"])
+            for published_review in f_pub.reviews:
+                self.assertNotIn(
+                    "Edited right before publication",
+                    str(published_review.get("body", "")),
+                )
             record = parse_session_comment(f_pub.comment["body"], identity=IDENTITY)
             assert record is not None and record.transaction is not None
             self.assertEqual(record.transaction.phase, "publication_succeeded")
 
-        attribution = verify_published_title_attribution(
-            evaluated_title="Captured at admission",
-            live_title="Edited right before publication",
-            base_sha=BASE,
-            head_sha=HEAD,
-        )
-        self.assertFalse(attribution.evaluates_live_title)
-        self.assertFalse(attribution.invalidates_settled_approval)
-        self.assertIn(
-            "later PR title edits were not analyzed", attribution.attribution_note
-        )
+            attribution = verify_published_title_attribution(
+                evaluated_title=f_pub.selected.title,
+                live_title=str(f_pub.live_title),
+                base_sha=f_pub.selected.base_sha,
+                head_sha=f_pub.selected.head_sha,
+            )
+            self.assertEqual(attribution.evaluated_title, "Captured at admission")
+            self.assertEqual(attribution.live_title, "Edited right before publication")
+            self.assertFalse(attribution.evaluates_live_title)
+            self.assertFalse(attribution.invalidates_settled_approval)
+            self.assertIn(
+                "later PR title edits were not analyzed", attribution.attribution_note
+            )
 
-        same_attr = verify_published_title_attribution(
-            evaluated_title="Captured at admission",
-            live_title="Captured at admission",
-            base_sha=BASE,
-            head_sha=HEAD,
-        )
-        self.assertTrue(same_attr.evaluates_live_title)
-        self.assertFalse(same_attr.to_dict()["invalidates_settled_approval"])
+            same_attr = verify_published_title_attribution(
+                evaluated_title=f_pub.selected.title,
+                live_title=f_pub.selected.title,
+                base_sha=f_pub.selected.base_sha,
+                head_sha=f_pub.selected.head_sha,
+            )
+            self.assertTrue(same_attr.evaluates_live_title)
+            self.assertFalse(same_attr.to_dict()["invalidates_settled_approval"])
 
     def test_timing_4_edit_after_publication_preserves_cache_and_settled_approval(
         self,
@@ -400,6 +429,18 @@ class TitleFreshnessG19Tests(unittest.TestCase):
             ).approved
         )
 
+        policy = ReviewConvergencePolicy()
+        initial_service_key = service.context_cache_key(req_initial)
+        assert initial_service_key is not None
+        cached_initial = cache.get(initial_service_key)
+        self.assertIsNotNone(cached_initial)
+        settled_baseline = baseline_from_review(
+            run_initial.result,
+            cache_key=initial_service_key,
+            policy=policy,
+        )
+        self.assertTrue(settled_baseline.complete)
+
         # Cosmetic title edit + duplicate title-edit deliveries after publication:
         for edited_title in (
             "Cosmetic title v2",
@@ -421,11 +462,13 @@ class TitleFreshnessG19Tests(unittest.TestCase):
             )
             assert key_initial is not None and key_edited is not None
             self.assertEqual(key_initial.digest(), key_edited.digest())
-            self.assertIsNotNone(cache.get(key_edited))
-            self.assertEqual(
-                service.context_cache_key(req_initial),
-                service.context_cache_key(req_edited),
-            )
+            service_key_edited = service.context_cache_key(req_edited)
+            assert service_key_edited is not None
+            self.assertEqual(initial_service_key, service_key_edited)
+            cached_entry = cache.get(service_key_edited)
+            self.assertIsNotNone(cached_entry)
+            self.assertEqual(cached_entry, cached_initial)
+            self.assertEqual(len(provider.requests), 1)
 
             decision = evaluate_title_freshness(
                 phase="after_publication",
@@ -436,15 +479,29 @@ class TitleFreshnessG19Tests(unittest.TestCase):
             self.assertFalse(decision.requires_paid_reinference)
             self.assertFalse(decision.invalidates_settled_approval)
 
-            # Incremental pass on a successor head after title edit reuses baseline with 0 calls!
+            # Incremental scope on a successor head derived via public
+            # baseline_from_review + plan_verification_scope stays compatible
+            # across title edits and skips provider calls when changed_paths is empty.
             req_next_head = replace(req_edited, head_sha="e" * 40)
-            incremental = IncrementalReviewPlan(
-                previous_key=key_initial,
-                reviewed_paths=(),
-                context_complete=True,
-                generation=1,
+            next_head_key = service.context_cache_key(req_next_head)
+            assert next_head_key is not None
+            next_scope = plan_verification_scope(
+                policy=policy,
+                baseline=settled_baseline,
+                current_key=next_head_key,
+                changed_paths=(),
             )
-            inc_run = service.run(req_next_head, incremental=incremental)
+            self.assertEqual(next_scope.status, "verify")
+            self.assertEqual(next_scope.coverage_mode, "incremental")
+            self.assertIsNone(next_scope.invalidation_reason)
+            assert next_scope.incremental is not None
+            inc_run = service.run(
+                req_next_head,
+                incremental=replace(
+                    next_scope.incremental,
+                    reviewed_paths=next_scope.changed_paths,
+                ),
+            )
             self.assertEqual(len(provider.requests), 1)
             assert inc_run.result is not None
             self.assertEqual(inc_run.result.coverage_mode, "incremental")
@@ -549,29 +606,117 @@ class TitleFreshnessG19Tests(unittest.TestCase):
         # Also prove full hosted `rescan` recovery on EntryFixture after PR title rename!
         with tempfile.TemporaryDirectory() as directory:
             hosted, _source = partial_fixture(directory)
+            prior_record = parse_session_comment(
+                hosted.comment["body"], identity=IDENTITY
+            )
+            assert prior_record is not None and prior_record.transaction is not None
+            prior_tx_id = prior_record.transaction.transaction_id
+            calls_before_rescan = hosted.provider_calls
             hosted.provider_comments = []
             original_ext = hosted.external
 
             def renamed_external(req_obj: Any, timeout: Any) -> Any:
                 resp = original_ext(req_obj, timeout)
                 if req_obj.full_url.endswith("/pulls/7"):
-                    pull = json.loads(resp.read(524288))
+                    raw = (
+                        bytes(resp.body)
+                        if hasattr(resp, "body")
+                        else bytes(resp.read())
+                    )
+                    pull = dict(json.loads(raw.decode("utf-8")))
                     pull["title"] = "Renamed PR title for hosted rescan"
-                    return json_response(pull)
+                    return json_response(pull, status=getattr(resp, "status", 200))
                 return resp
 
             hosted.external = renamed_external  # type: ignore[method-assign]
+            hosted.trace.clear()
             request(hosted, 15, "rescan")
             self.assertEqual(hosted.invoke(), 0, hosted.error)
+            self.assertGreater(hosted.provider_calls, calls_before_rescan)
+            self.assertTrue(
+                any(path.endswith("/pulls/7") for _, _, path in hosted.trace)
+            )
             settled = parse_session_comment(hosted.comment["body"], identity=IDENTITY)
             assert settled is not None and settled.transaction is not None
             self.assertEqual(settled.transaction.phase, "publication_succeeded")
+            self.assertNotEqual(settled.transaction.transaction_id, prior_tx_id)
             self.assertEqual(
                 hosted.selected.title, "Renamed PR title for hosted rescan"
             )
             self.assertEqual(len(settled.dispositions), 20)
 
     def test_title_freshness_validation_guards_fail_closed(self) -> None:
+        observed_phases: set[str] = set()
+        observed_outcomes: set[str] = set()
+        for kwargs, expected_outcome, expected_admitted in (
+            (
+                {"phase": "before_admission", "live_title": "Live v1"},
+                "adopt_live_title",
+                True,
+            ),
+            (
+                {
+                    "phase": "before_admission",
+                    "live_title": "Live v1",
+                    "explicit_cli_title": "Stale CLI",
+                },
+                "refuse_conflicting_cli_title",
+                False,
+            ),
+            (
+                {
+                    "phase": "during_inference",
+                    "captured_title": "Cap",
+                    "live_title": "Edited",
+                },
+                "preserve_captured_snapshot_title",
+                True,
+            ),
+            (
+                {
+                    "phase": "before_publication",
+                    "captured_title": "Cap",
+                    "live_title": "Edited",
+                },
+                "preserve_captured_snapshot_title",
+                True,
+            ),
+            (
+                {
+                    "phase": "after_publication",
+                    "captured_title": "Cap",
+                    "live_title": "Edited",
+                },
+                "retain_incremental_baseline_without_reinference",
+                True,
+            ),
+            (
+                {
+                    "phase": "during_partial_continuation",
+                    "captured_title": "Cap",
+                    "live_title": "Cap",
+                },
+                "preserve_captured_snapshot_title",
+                True,
+            ),
+            (
+                {
+                    "phase": "during_partial_continuation",
+                    "captured_title": "Cap",
+                    "live_title": "Edited",
+                },
+                "refuse_mixed_title_partial_continuation",
+                False,
+            ),
+        ):
+            decision = evaluate_title_freshness(**kwargs)  # type: ignore[arg-type]
+            observed_phases.add(decision.phase)
+            observed_outcomes.add(decision.outcome)
+            self.assertEqual(decision.outcome, expected_outcome)
+            self.assertEqual(decision.admitted, expected_admitted)
+            self.assertEqual(decision.admitted, decision.effective_title is not None)
+        self.assertEqual(observed_phases, TITLE_LIFECYCLE_PHASES)
+        self.assertEqual(observed_outcomes, TITLE_FRESHNESS_OUTCOMES)
         with self.assertRaises(ReviewInputError):
             evaluate_title_freshness(phase="invalid_phase", live_title="ok")
         with self.assertRaises(ReviewInputError):
