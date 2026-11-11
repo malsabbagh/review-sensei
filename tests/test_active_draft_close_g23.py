@@ -16,13 +16,23 @@ try:
     from fake_github_http import json_response
     from test_controlled_restart import registration as restart_registration
     from test_controlled_restart_journeys import RestartJourney
-    from test_reopen_branch_lifecycle_g05 import IDENTITY, LifecycleEntryFixture
+    from test_reopen_branch_lifecycle_g05 import (
+        IDENTITY,
+        SAMPLE_DIFF,
+        LifecycleEntryFixture,
+        _sample_pr_payload,
+    )
     from test_reply_freshness_g33 import FreshnessReplyFixture
 except ModuleNotFoundError:
     from tests.fake_github_http import json_response
     from tests.test_controlled_restart import registration as restart_registration
     from tests.test_controlled_restart_journeys import RestartJourney
-    from tests.test_reopen_branch_lifecycle_g05 import IDENTITY, LifecycleEntryFixture
+    from tests.test_reopen_branch_lifecycle_g05 import (
+        IDENTITY,
+        SAMPLE_DIFF,
+        LifecycleEntryFixture,
+        _sample_pr_payload,
+    )
     from tests.test_reply_freshness_g33 import FreshnessReplyFixture
 
 from review_sensei_github.application import GitHubApplication
@@ -32,8 +42,12 @@ from review_sensei_github.branch_lifecycle import (
 )
 from review_sensei_github.conversation import ConversationPublisher
 from review_sensei_github.errors import GitHubPublicationError
+from review_sensei_github.http import GitHubHttp
 from review_sensei_github.publication import ReviewApprovalFinalizer, ReviewPublisher
 from review_sensei_github.session_ledger import parse_session_comment
+
+from review_sensei.api_work import ApiRunAccounting
+from review_sensei.models import ReviewResult
 
 
 class StateReplyFixture(FreshnessReplyFixture):
@@ -705,6 +719,220 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
                         self.assertIsNone(
                             record_u.api_run_accounting.get("terminal_transaction")
                         )
+
+    def test_strict_draft_boolean_validation_g24_across_all_active_work_entry_and_preflight_routes(
+        self,
+    ) -> None:
+        """G23/G24 exact-scope: non-boolean/missing `draft` fails closed without truthiness coercion."""
+
+        malformed_drafts: tuple[tuple[str, object, bool], ...] = (
+            ("none", None, False),
+            ("int_zero", 0, False),
+            ("int_one", 1, False),
+            ("str_false", "false", False),
+            ("str_true", "true", False),
+            ("missing_key", False, True),
+        )
+
+        # 1. Direct publisher & approval-finalizer preflights reject every malformed `draft`.
+        for label, bad_val, delete_key in malformed_drafts:
+            with self.subTest(route="publisher_and_finalizer", case=label):
+                payload = _sample_pr_payload(draft=bad_val)
+                if delete_key:
+                    del payload["draft"]
+
+                http = GitHubHttp(
+                    api_url="https://api.github.test",
+                    opener=lambda _req, timeout=None, p=payload: json_response(p),
+                )
+                with self.assertRaisesRegex(
+                    GitHubPublicationError, "review preflight draft was invalid"
+                ):
+                    ReviewPublisher(http=http).publish(
+                        token="installation-token",
+                        repository="owner/repo",
+                        repository_id=123,
+                        pull_request=7,
+                        head_sha="a" * 40,
+                        base_branch="main",
+                        base_sha="b" * 40,
+                        diff=SAMPLE_DIFF,
+                        result=ReviewResult(
+                            summary="Clean result.",
+                            comments=(),
+                            provider="ollama",
+                            review_status="complete",
+                        ),
+                        app_slug="reviewsensei[bot]",
+                    )
+                with self.assertRaisesRegex(
+                    GitHubPublicationError,
+                    "approval finalization preflight draft was invalid",
+                ):
+                    ReviewApprovalFinalizer(http=http)._preflight(
+                        token="installation-token",
+                        repository="owner/repo",
+                        pull_request=7,
+                        head_sha="a" * 40,
+                        app_slug="reviewsensei[bot]",
+                    )
+
+        # 2. Live ReviewRun bootstrap (`before_inference`) and ConversationPublisher reply
+        # routes fail closed on malformed `draft` without invoking the provider or posting writes.
+        for bad_val in (0, "false", None):
+            with (
+                self.subTest(route="review_run_bootstrap", draft=bad_val),
+                tempfile.TemporaryDirectory() as tmp_r,
+            ):
+                fx = LifecycleEntryFixture(Path(tmp_r))
+                fx.pr_draft = bad_val
+                code, out = fx.run_and_read(human=False)
+                self.assertEqual(code, 1)
+                self.assertIsNone(out)
+                self.assertEqual(fx.provider_calls, 0)
+                self.assertEqual(fx.review_posts, [])
+
+            with (
+                self.subTest(route="reply_post_inference_preflight", draft=bad_val),
+                tempfile.TemporaryDirectory() as tmp_c,
+            ):
+                reply_fx = StateReplyFixture(Path(tmp_c))
+                reply_fx.initialize_freshness()
+                orig_pub = ConversationPublisher._publish
+
+                def corrupt_draft_before_reply(publisher, **kwargs):
+                    reply_fx.live_draft = bad_val
+                    return orig_pub(publisher, **kwargs)
+
+                with patch.object(
+                    ConversationPublisher, "_publish", corrupt_draft_before_reply
+                ):
+                    code_reply = reply_fx.invoke_reply()
+                self.assertEqual(code_reply, 1)
+                self.assertEqual(reply_fx.reply_posts, 0)
+                self.assertIsNone(reply_fx.last_result)
+                self.assertEqual(reply_fx.action()["phase"], "pending")
+
+    def test_caller_request_cost_and_unknown_effect_conservation_across_active_work_transitions(
+        self,
+    ) -> None:
+        """G23 exact-scope: ApiRunAccounting conservation, non-refund, and retained work."""
+
+        def assert_conserved(accounting: ApiRunAccounting) -> None:
+            self.assertGreaterEqual(accounting.remaining, 0)
+            self.assertEqual(
+                accounting.startup.liability
+                + accounting.prior_nonstartup_liability
+                + accounting.confirmed
+                + accounting.uncertain
+                + accounting.reserved_undispatched
+                + accounting.remaining,
+                accounting.configuration.limit,
+            )
+
+        # 1. `before_final_preflight` -> `attempt=2` retained replay:
+        # Attempt 1 incurs 1 provider call and N_1 confirmed caller HTTP requests;
+        # Attempt 2 reuses the exact retained `result_sha256` with 0 new provider calls,
+        # never refunds N_1 (`confirmed_2 > confirmed_1`), and settles terminally.
+        with tempfile.TemporaryDirectory() as tmp:
+            fx = LifecycleEntryFixture(Path(tmp))
+            orig_preflight = ReviewPublisher._preflight_pr
+            transitioned = False
+
+            def draft_on_final_preflight(publisher, **kwargs):
+                nonlocal transitioned
+                if not transitioned and any(
+                    "default-human-inventory" in str(item.get("body", ""))
+                    for item in fx.extra_comments.values()
+                ):
+                    transitioned = True
+                    fx.pr_draft = True
+                return orig_preflight(publisher, **kwargs)
+
+            with patch.object(
+                ReviewPublisher, "_preflight_pr", draft_on_final_preflight
+            ):
+                code_1, out_1 = fx.run_and_read(human=False)
+            self.assertEqual(code_1, 1)
+            assert out_1 is not None
+            self.assertEqual(out_1["status"], "skipped_pr_state")
+            self.assertEqual(fx.provider_calls, 1)
+
+            assert fx.comment is not None
+            rec_1 = parse_session_comment(fx.comment["body"], identity=IDENTITY)
+            assert rec_1 is not None and rec_1.transaction is not None
+            assert isinstance(rec_1.api_run_accounting, dict)
+            acc_1 = ApiRunAccounting.from_document(rec_1.api_run_accounting)
+            assert_conserved(acc_1)
+            self.assertGreater(acc_1.confirmed, 0)
+            self.assertEqual(acc_1.uncertain, 0)
+            self.assertIsNone(acc_1.terminal_transaction)
+            retained_digest_1 = rec_1.transaction.result_sha256
+            self.assertIsNotNone(retained_digest_1)
+
+            # Ready for review -> attempt=2 replays accepted work without refunding attempt=1 cost.
+            fx.pr_draft = False
+            fx.attempt = 2
+            fx.trace.clear()
+            fx.transports.clear()
+            fx.worker_observations.clear()
+            code_2, out_2 = fx.run_and_read(human=False)
+            self.assertEqual(code_2, 0, fx.error)
+            assert out_2 is not None
+            self.assertTrue(out_2["accounting_terminal"])
+            self.assertEqual(fx.provider_calls, 1)
+
+            rec_2 = parse_session_comment(fx.comment["body"], identity=IDENTITY)
+            assert rec_2 is not None and rec_2.transaction is not None
+            assert isinstance(rec_2.api_run_accounting, dict)
+            acc_2 = ApiRunAccounting.from_document(rec_2.api_run_accounting)
+            assert_conserved(acc_2)
+            self.assertGreater(acc_2.confirmed, acc_1.confirmed)
+            self.assertEqual(acc_2.uncertain, 0)
+            self.assertEqual(rec_2.transaction.result_sha256, retained_digest_1)
+            self.assertEqual(
+                acc_2.terminal_transaction, rec_2.transaction.transaction_id
+            )
+
+        # 2. `after_dispatch` with unknown HTTP effect (`TimeoutError` concurrent with `closed`):
+        # Persisted `ApiRunAccounting` retains `uncertain >= 1`, `remaining >= 0`, exact
+        # budget conservation, accepted `result_sha256`, and `terminal_transaction is None`.
+        with tempfile.TemporaryDirectory() as tmp_u:
+
+            class _UnknownDispatchCloseFixture(LifecycleEntryFixture):
+                armed = True
+
+                def external(self, request, timeout):
+                    path = urlsplit(request.full_url).path
+                    if (
+                        self.armed
+                        and request.get_method() == "POST"
+                        and path.endswith("/pulls/7/reviews")
+                    ):
+                        self.armed = False
+                        self.pr_state = "closed"
+                        self.trace.append((self.attempt, "POST", path))
+                        raise TimeoutError("lost review POST concurrent with PR close")
+                    return super().external(request, timeout)
+
+            ufx = _UnknownDispatchCloseFixture(Path(tmp_u))
+            code_u, out_u = ufx.run_and_read(human=False)
+            self.assertEqual(code_u, 1)
+            self.assertIsNone(out_u)
+            self.assertEqual(ufx.provider_calls, 1)
+            self.assertEqual(ufx.review_posts, [])
+
+            assert ufx.comment is not None
+            rec_u = parse_session_comment(ufx.comment["body"], identity=IDENTITY)
+            assert rec_u is not None and rec_u.transaction is not None
+            assert isinstance(rec_u.api_run_accounting, dict)
+            acc_u = ApiRunAccounting.from_document(rec_u.api_run_accounting)
+            assert_conserved(acc_u)
+            self.assertGreaterEqual(acc_u.uncertain, 1)
+            self.assertGreater(acc_u.confirmed, 0)
+            self.assertIsNone(acc_u.terminal_transaction)
+            self.assertEqual(rec_u.transaction.phase, "publication_failed")
+            self.assertIsNotNone(rec_u.transaction.result_sha256)
 
 
 if __name__ == "__main__":

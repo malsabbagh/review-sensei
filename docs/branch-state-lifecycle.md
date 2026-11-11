@@ -144,4 +144,13 @@ the five active execution phases:
 Malformed non-boolean `draft` payloads (`null`, `0`, `1`, `"false"`, `"true"`,
 or absent `draft`) fail closed with `GitHubPublicationError` or
 `GitHubConversationError` at every admission, publication, reply, and approval
-finalization preflight (`G24`).
+finalization preflight without truthiness coercion (`G24`).
+
+Across every active-work interruption and replay, `ApiRunAccounting` preserves
+strict budget conservation
+(`startup.liability + prior_nonstartup_liability + confirmed + uncertain + reserved_undispatched + remaining == configuration.limit`,
+`remaining >= 0`), never refunds previously dispatched caller HTTP calls or
+provider invocations, retains accepted `result_sha256` bindings for
+zero-inference replay, and holds `terminal_transaction=None` whenever an
+outbound mutation response is lost (`uncertain >= 1`). Unproven live installed
+workflow/runtime versions remain tracked separately under `G11`.

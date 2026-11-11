@@ -142,10 +142,12 @@ shared distribution manifests remain unchanged.
   confirmation, rebase/force-push delayed old-effect fencing plus `attempt=2`
   zero-inference retained retry journeys, post-`COMMENT` rewrite fencing, and
   `G04` dirty mergeability controls.
-- `tests/test_active_draft_close_g23.py`: 6 comprehensive tests covering
+- `tests/test_active_draft_close_g23.py`: 8 comprehensive tests covering
   `draft=True` and `state="closed"` across all 5 active-work phases on review
-  and reply routes, including lost-response `stored` vs. `unconfirmed`
-  accounting holds.
+  and reply routes, strict `G24` exact-boolean `draft` refusal across active
+  bootstrap/publisher/finalizer/reply gates, exact `ApiRunAccounting` caller
+  request conservation without refund, accepted-result retention, and
+  lost-response `stored` vs. `unconfirmed` accounting holds.
 - Full regression anchors (`test_g04_merge_characterization`,
   `test_draft_validation`, `test_reply_freshness_g33`,
   `test_bounded_v1_publication`, `test_github_publication`, `test_review_run`)
