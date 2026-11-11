@@ -31,6 +31,7 @@ MAX_REVISION = 2147483647
 MAX_CALLS = 512
 _OPERATIONS = {
     "observation",
+    "session_patch",
     "review_publish",
     "check_publish",
     "approval",
