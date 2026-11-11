@@ -26,11 +26,60 @@ from review_sensei.terminal_representability import (
 )
 
 
+def _unlisted_snapshot_part_reads(
+    ledger: Any,
+    current_record: SessionRecord | None,
+    *,
+    action: str,
+    writes_enabled: bool,
+) -> int:
+    if (
+        not writes_enabled
+        or current_record is None
+        or current_record.disposition_snapshot is None
+        or action
+        not in {
+            "accept-risk",
+            "dismiss",
+            "defer",
+            "accept-coverage-uncertainty",
+            "verify",
+        }
+    ):
+        return 0
+    comments_by_id = getattr(ledger, "_comments_by_id", None)
+    if not isinstance(comments_by_id, Mapping):
+        return 0
+    verified = getattr(ledger, "_verified_parts", None)
+    verified_map = verified if isinstance(verified, Mapping) else {}
+    state_manifest = current_record.disposition_snapshot.get("state_manifest")
+    if not isinstance(state_manifest, Mapping) or (
+        state_manifest.get("encoding") != "partitioned-json-v1"
+    ):
+        return 0
+    parts = state_manifest.get("parts")
+    if not isinstance(parts, list):
+        return 0
+    cold = 0
+    for ref in parts:
+        if not isinstance(ref, Mapping):
+            continue
+        sid = str(ref.get("storage_id", ""))
+        if sid in verified_map:
+            continue
+        if sid.isdigit() and int(sid) in comments_by_id:
+            continue
+        cold += 1
+    return cold
+
+
 def _command_pricing(
     caller: Any,
     *,
     action: str,
     writes_enabled: bool,
+    ledger: Any = None,
+    current_record: SessionRecord | None = None,
 ) -> ActionSettlementPricing:
     accounting = caller.accounting
     limit = int(accounting.configuration.limit)
@@ -65,6 +114,13 @@ def _command_pricing(
         refinalize_reqs = 0
         receipt_reqs = 2
 
+    cold_snapshot_reads = _unlisted_snapshot_part_reads(
+        ledger,
+        current_record,
+        action=action,
+        writes_enabled=writes_enabled,
+    )
+
     return ActionSettlementPricing(
         cold_census_requests=0,
         business_mutation_requests=business_reqs,
@@ -74,6 +130,7 @@ def _command_pricing(
         terminal_close_requests=1,
         committed_requests=committed_effective,
         original_api_limit=max(1, limit),
+        snapshot_read_requests=cold_snapshot_reads,
     )
 
 
@@ -171,6 +228,8 @@ def guard_current_command_representability(
         caller,
         action=command.action,
         writes_enabled=writes_enabled,
+        ledger=ledger,
+        current_record=current_record,
     )
     _preview_res, _preview_rec, report = preview_session_command_representability(
         identity=identity,
@@ -188,10 +247,14 @@ def guard_current_command_representability(
         enable_disposition_snapshot_writes=bool(
             getattr(ledger, "enable_disposition_snapshot_writes", False)
         ),
+        supports_paged_disposition_snapshot_writes=bool(
+            getattr(ledger, "supports_paged_disposition_snapshot_writes", False)
+        ),
         evidence_budget=(
             getattr(ledger, "evidence_budget", None)
             or getattr(caller, "budget_view", None)
         ),
+        source_ledger=ledger,
         accounting_version=str(caller.accounting.version),
         pricing=pricing,
         consumed_grants=consumed_grants,

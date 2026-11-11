@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -48,13 +49,16 @@ from review_sensei.coverage import CoverageManifest, FileCoverage
 from review_sensei.disposition import (
     MaintainerCommand,
     MaintainerCommandResult,
+    apply_session_command,
     incomplete_coverage_from_result,
 )
+from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewResult
 from review_sensei.session import (
     MAX_DISPOSITION_BYTES,
     MAX_SESSION_COMMENT_BYTES,
     MAX_SESSION_RECORD_BYTES,
+    LocalSessionLedger,
     SessionRecord,
     disposition_array_bytes,
 )
@@ -164,6 +168,11 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
     def test_exact_section_20_g34_witness_byte_counts_and_pre_effect_refusal(
         self,
     ) -> None:
+        """Preserve the 39-entry historical component witness as an independent control.
+
+        Note: This synthetic component witness exercises the pre-effect guard on a
+        single unrecorded command and does NOT establish a live post-effect loss.
+        """
         files = tuple(
             FileCoverage(
                 path=_deterministic_valid_path(i, total_len=227),
@@ -243,6 +252,9 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
             require_terminal_action_representable(report)
         self.assertEqual(ctx.exception.report.carrier_bytes, 9_750)
         self.assertIn("@reviewsensei review remaining", str(ctx.exception))
+        # Note: this 39-entry component witness (10,195B disposition, 20,933B envelope,
+        # 9,750B carrier in this fixture / 9,690B in the reviewer's standalone probe vs 8,192B)
+        # is an independent historical component control and does NOT establish a live post-effect loss.
 
     def test_early_refusal_304_byte_path_and_256_file_cap_controls(self) -> None:
         fixed_now = datetime(2026, 11, 11, 0, 0, tzinfo=timezone.utc)
@@ -1090,8 +1102,37 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
             self.assertTrue(rep.representable)
             self.assertEqual(shared_budget.calls, 0)
 
-            # Follow-up status/verify on an already-snapshotted record preserves snapshot root reserve:
-            _, _, verify_rep = preview_session_command_representability(
+            # Follow-up verify with pre-loaded snapshot entries serves them in-memory with 0 budget calls:
+            new_disps = tuple(item.to_dict() for item in prev_res.dispositions)
+            all_25_disps = prior_dispositions + new_disps
+            verify_res, verify_rec, verify_rep = (
+                preview_session_command_representability(
+                    identity=IDENTITY,
+                    current_record=prev_rec,
+                    command=MaintainerCommand(
+                        action="verify", actor="alice", head_sha=head_sha
+                    ),
+                    intent_sha256="1" * 64,
+                    binding=binding,
+                    enable_disposition_snapshot_writes=True,
+                    evidence_budget=shared_budget,
+                    preloaded_dispositions=all_25_disps,
+                )
+            )
+            assert verify_res is not None and verify_rec is not None
+            self.assertTrue(verify_res.applied)
+            self.assertEqual(
+                verify_rec.disposition_snapshot, prev_rec.disposition_snapshot
+            )
+            self.assertTrue(verify_rep.representable)
+            self.assertGreaterEqual(
+                verify_rep.projected_record_bytes,
+                estimate_session_record_bytes(prev_rec),
+            )
+            self.assertEqual(shared_budget.calls, 0)
+
+            # Calling verify on an external partitioned snapshot WITHOUT preloaded parts refuses conservatively:
+            _, _, unbacked_rep = preview_session_command_representability(
                 identity=IDENTITY,
                 current_record=prev_rec,
                 command=MaintainerCommand(
@@ -1102,8 +1143,10 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                 enable_disposition_snapshot_writes=True,
                 evidence_budget=shared_budget,
             )
-            self.assertTrue(verify_rep.representable)
-            self.assertGreater(verify_rep.future_reserve_bytes, 0)
+            self.assertFalse(unbacked_rep.representable)
+            self.assertEqual(
+                unbacked_rep.refusal_code, "snapshot_parts_unavailable_for_preview"
+            )
             self.assertEqual(shared_budget.calls, 0)
 
             # Also cover >24 KiB partitioned in-memory staging + readback without budget calls:
@@ -1325,79 +1368,116 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
             transaction=tx,
             dispositions=disps_14,
         )
-        _, snap_rec_1, snap_rep_1 = preview_session_command_representability(
-            identity=IDENTITY,
-            current_record=snap_base,
-            command=MaintainerCommand(
-                action="accept-risk",
-                actor="alice",
-                reason="x" * 220,
-                head_sha=head_sha,
-                finding_references=("RS-000099",),
-            ),
-            intent_sha256="1" * 64,
-            binding=binding,
-            finding_inventory=(
-                FindingIdentity(instance=f"000099{'a' * 58}", needs_human=True),
-            ),
-            actor_role="OWNER",
-            policy_digest="c" * 64,
-            provenance="comment:100",
-            enable_disposition_snapshot_writes=True,
-            evidence_budget=EvidenceReadBudget(),
-        )
-        assert snap_rec_1 is not None and snap_rec_1.disposition_snapshot is not None
-        self.assertEqual(snap_rep_1.future_reserve_bytes, 0)
+        with tempfile.TemporaryDirectory() as snap_tmp:
+            snap_ledger = LocalSessionLedger(
+                Path(snap_tmp),
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            snap_ledger.initialize(IDENTITY)
+            snap_ledger.replace(IDENTITY, lambda _r: snap_base)
+            snap_rec_1_real, _ = apply_session_command(
+                snap_ledger,
+                IDENTITY,
+                MaintainerCommand(
+                    action="accept-risk",
+                    actor="alice",
+                    reason="x" * 220,
+                    head_sha=head_sha,
+                    finding_references=("RS-000099",),
+                ),
+                finding_inventory=(
+                    FindingIdentity(instance=f"000099{'a' * 58}", needs_human=True),
+                ),
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:100",
+            )
+            _, snap_rec_1, snap_rep_1 = preview_session_command_representability(
+                identity=IDENTITY,
+                current_record=snap_base,
+                command=MaintainerCommand(
+                    action="accept-risk",
+                    actor="alice",
+                    reason="x" * 220,
+                    head_sha=head_sha,
+                    finding_references=("RS-000099",),
+                ),
+                intent_sha256="1" * 64,
+                binding=binding,
+                finding_inventory=(
+                    FindingIdentity(instance=f"000099{'a' * 58}", needs_human=True),
+                ),
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:100",
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            assert (
+                snap_rec_1 is not None and snap_rec_1.disposition_snapshot is not None
+            )
+            self.assertEqual(snap_rep_1.future_reserve_bytes, 0)
 
-        # Non-snapshot command on already-snapshotted record keeps existing_snapshot_bytes reserve (> 0):
-        _, pause_rec, pause_rep = preview_session_command_representability(
-            identity=IDENTITY,
-            current_record=snap_rec_1,
-            command=MaintainerCommand(action="pause", actor="alice"),
-            intent_sha256="1" * 64,
-            binding=binding,
-            actor_role="OWNER",
-        )
-        assert pause_rec is not None
-        self.assertGreater(pause_rep.future_reserve_bytes, 0)
+            # Non-snapshot command on already-snapshotted record preserves disposition_snapshot directly on pause_rec:
+            _, pause_rec, pause_rep = preview_session_command_representability(
+                identity=IDENTITY,
+                current_record=snap_rec_1_real,
+                command=MaintainerCommand(action="pause", actor="alice"),
+                intent_sha256="1" * 64,
+                binding=binding,
+                actor_role="OWNER",
+            )
+            assert pause_rec is not None
+            self.assertEqual(
+                pause_rec.disposition_snapshot, snap_rec_1_real.disposition_snapshot
+            )
+            self.assertEqual(
+                pause_rep.projected_record_bytes,
+                estimate_session_record_bytes(pause_rec),
+            )
+            self.assertGreater(pause_rep.projected_record_bytes, 2_000)
 
-        # Command staging a replacement snapshot (> 10,240B) does NOT double-count existing_snapshot_bytes:
-        big_cov = tuple(
-            f"file:{'p' * 220}:{idx:03d}:budget-exhausted" for idx in range(44)
-        )
-        _, snap_rec_2, snap_rep_2 = preview_session_command_representability(
-            identity=IDENTITY,
-            current_record=snap_rec_1,
-            command=MaintainerCommand(
-                action="accept-coverage-uncertainty",
-                actor="alice",
-                reason="ok",
-                head_sha=head_sha,
-            ),
-            intent_sha256="1" * 64,
-            binding=binding,
-            actor_role="OWNER",
-            policy_digest="c" * 64,
-            provenance="comment:101",
-            incomplete_coverage=big_cov,
-            enable_disposition_snapshot_writes=True,
-            evidence_budget=EvidenceReadBudget(),
-        )
-        assert snap_rec_2 is not None and snap_rec_2.disposition_snapshot is not None
-        self.assertEqual(snap_rep_2.future_reserve_bytes, 0)
+            # Command staging a replacement snapshot (> 10,240B) does NOT double-count existing_snapshot_bytes:
+            big_cov = tuple(
+                f"file:{'p' * 220}:{idx:03d}:budget-exhausted" for idx in range(44)
+            )
+            _, snap_rec_2, snap_rep_2 = preview_session_command_representability(
+                identity=IDENTITY,
+                current_record=snap_rec_1_real,
+                command=MaintainerCommand(
+                    action="accept-coverage-uncertainty",
+                    actor="alice",
+                    reason="ok",
+                    head_sha=head_sha,
+                ),
+                intent_sha256="1" * 64,
+                binding=binding,
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:101",
+                incomplete_coverage=big_cov,
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+                source_ledger=snap_ledger,
+            )
+            assert (
+                snap_rec_2 is not None and snap_rec_2.disposition_snapshot is not None
+            )
+            self.assertEqual(snap_rep_2.future_reserve_bytes, 0)
 
-        # Reenroll on snapshotted record clears snapshot -> reserve is 0 (not inflated by old snapshot):
-        _, reenrolled_rec, reenroll_rep = preview_session_command_representability(
-            identity=IDENTITY,
-            current_record=snap_rec_1,
-            command=MaintainerCommand(action="reenroll", actor="alice"),
-            intent_sha256="1" * 64,
-            binding=binding,
-            actor_role="OWNER",
-        )
-        assert reenrolled_rec is not None
-        self.assertIsNone(reenrolled_rec.disposition_snapshot)
-        self.assertEqual(reenroll_rep.future_reserve_bytes, 0)
+            # Reenroll on snapshotted record clears snapshot -> reserve is 0 (not inflated by old snapshot):
+            _, reenrolled_rec, reenroll_rep = preview_session_command_representability(
+                identity=IDENTITY,
+                current_record=snap_rec_1_real,
+                command=MaintainerCommand(action="reenroll", actor="alice"),
+                intent_sha256="1" * 64,
+                binding=binding,
+                actor_role="OWNER",
+            )
+            assert reenrolled_rec is not None
+            self.assertIsNone(reenrolled_rec.disposition_snapshot)
+            self.assertEqual(reenroll_rep.future_reserve_bytes, 0)
 
         # RS-D8093A: missing caller action intent digest fails closed instead of '0' * 64 placeholder:
         missing_intent_caller = SimpleNamespace(
@@ -1479,6 +1559,909 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
         self.assertEqual(
             settle_ctx.exception.report.refusal_code, "carrier_inline_bound_exceeded"
         )
+
+    def test_two_decision_disposition_snapshot_already_recorded_parity_and_zero_budget_calls(
+        self,
+    ) -> None:
+        """Exact G34 2-decision disposition_snapshot reproducer and pre-loaded snapshot parity.
+
+        On unpatched 07179c0f, preview stripped current_record.disposition_snapshot=None
+        and reported carrier_bytes=809, payload_bytes=754, envelope_bytes=1,439,
+        manifest_bytes=1,382, representable=True, receipt='recorded', snapshot=None,
+        whereas actual apply_session_command retained disposition_snapshot and produced
+        carrier_bytes=9,354 (> 8,192), payload_bytes=9,299, envelope_bytes=10,866,
+        manifest_bytes=None, representable=False ('carrier_inline_bound_exceeded'),
+        receipt='already-recorded' (via stored[-1]).
+        """
+        from pathlib import Path
+
+        from review_sensei.disposition import (
+            FindingIdentity,
+            apply_session_command,
+            session_dispositions,
+        )
+        from review_sensei.models import ReviewTransaction
+        from review_sensei.session import LocalSessionLedger, read_session_dispositions
+        from review_sensei.terminal_representability import _InMemoryPreviewLedger
+
+        head_sha = "b" * 40
+        fixed_now = datetime(2026, 11, 11, 0, 0, tzinfo=timezone.utc)
+        intent_sha = action_intent_sha256({"purpose": "command", "source_id": 42})
+        binding = build_action_result_binding(
+            identity=IDENTITY,
+            policy_commit="a" * 40,
+            head_sha=head_sha,
+            intent_sha256=intent_sha,
+            configuration_digest="d" * 64,
+            owner_generation=1,
+            producer="local-ledger",
+        )
+        finding = FindingIdentity(instance="abcdef" + "1" * 58, needs_human=True)
+        tx_id = ReviewTransaction.derive_id(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+            policy_digest="c" * 64,
+            configuration_digest="d" * 64,
+            evidence_digest="e" * 64,
+            reservation_id="2" * 64,
+        )
+        tx = ReviewTransaction(
+            transaction_id=tx_id,
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+            policy_digest="c" * 64,
+            configuration_digest="d" * 64,
+            evidence_digest="e" * 64,
+            generation=1,
+            reservation_id="2" * 64,
+            phase="publication_succeeded",
+            result_sha256="f" * 64,
+        )
+
+        for file_count, expected_carrier, expected_payload, expected_envelope in (
+            (37, 9_354, 9_299, 10_866),
+            (38, 9_578, 9_523, 11_118),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                ledger = LocalSessionLedger(
+                    Path(tmp),
+                    enable_disposition_snapshot_writes=True,
+                    evidence_budget=EvidenceReadBudget(),
+                )
+                rec = ledger.initialize(IDENTITY, now=fixed_now)
+                rec = ledger.replace(
+                    IDENTITY,
+                    lambda r: r.evolve(
+                        completed_initial_reviews=1,
+                        last_committed_reservation_id="2" * 64,
+                        transaction=tx,
+                    ),
+                    now=fixed_now,
+                )
+                files = tuple(
+                    FileCoverage(
+                        path=_deterministic_valid_path(i, total_len=227),
+                        outcome="budget-exhausted",
+                    )
+                    for i in range(file_count)
+                )
+                partial_result = ReviewResult(
+                    summary="Partial",
+                    comments=(),
+                    provider="openai",
+                    review_status="partial",
+                    coverage=CoverageManifest(
+                        files=files,
+                        enumerated_paths=tuple(f.path for f in files),
+                    ),
+                )
+                incomplete = incomplete_coverage_from_result(partial_result)
+                self.assertEqual(len(incomplete), file_count + 1)
+                self.assertEqual(
+                    sum(1 for tok in incomplete if tok.startswith("result:")), 1
+                )
+
+                cmd_override = MaintainerCommand(
+                    action="accept-risk",
+                    actor="alice",
+                    reason="ok",
+                    head_sha=head_sha,
+                    finding_references=("RS-ABCDEF",),
+                )
+                rec, first_res = apply_session_command(
+                    ledger,
+                    IDENTITY,
+                    cmd_override,
+                    finding_inventory=(finding,),
+                    actor_role="OWNER",
+                    policy_digest="c" * 64,
+                    provenance="comment:41",
+                    now=fixed_now,
+                )
+                self.assertEqual(first_res.receipts[0].outcome, "recorded")
+                self.assertIsNone(rec.disposition_snapshot)
+
+                cmd_cov = MaintainerCommand(
+                    action="accept-coverage-uncertainty",
+                    actor="alice",
+                    reason="ok",
+                    head_sha=head_sha,
+                )
+                rec, _ = apply_session_command(
+                    ledger,
+                    IDENTITY,
+                    cmd_cov,
+                    actor_role="OWNER",
+                    policy_digest="c" * 64,
+                    provenance="comment:42",
+                    incomplete_coverage=incomplete,
+                    now=fixed_now,
+                )
+                self.assertIsNotNone(rec.disposition_snapshot)
+                assert rec.disposition_snapshot is not None
+                rec_manifest = rec.disposition_snapshot["state_manifest"]
+                assert isinstance(rec_manifest, dict)
+                self.assertEqual(rec_manifest["encoding"], "partitioned-json-v1")
+                self.assertEqual(len(session_dispositions(rec, ledger=ledger)), 2)
+
+                shared_budget = EvidenceReadBudget()
+                prev_res, prev_rec, prev_rep = preview_session_command_representability(
+                    identity=IDENTITY,
+                    current_record=rec,
+                    command=cmd_override,
+                    intent_sha256=intent_sha,
+                    binding=binding,
+                    finding_inventory=(finding,),
+                    actor_role="OWNER",
+                    policy_digest="c" * 64,
+                    provenance="comment:43",
+                    enable_disposition_snapshot_writes=True,
+                    evidence_budget=shared_budget,
+                    source_ledger=ledger,
+                    now=fixed_now,
+                )
+                self.assertEqual(shared_budget.calls, 0)
+                assert prev_res is not None and prev_rec is not None
+                self.assertEqual(prev_res.receipts[0].outcome, "already-recorded")
+                self.assertEqual(
+                    prev_rec.disposition_snapshot, rec.disposition_snapshot
+                )
+
+                real_rec, real_res = apply_session_command(
+                    ledger,
+                    IDENTITY,
+                    cmd_override,
+                    finding_inventory=(finding,),
+                    actor_role="OWNER",
+                    policy_digest="c" * 64,
+                    provenance="comment:43",
+                    now=fixed_now,
+                )
+                real_rep = evaluate_terminal_action_representability(
+                    identity=IDENTITY,
+                    intent_sha256=intent_sha,
+                    outcome={"kind": "applied", "reason": None},
+                    result_document=asdict(real_res),
+                    binding=binding,
+                    current_record=real_rec,
+                    resolved_dispositions=read_session_dispositions(ledger, real_rec),
+                )
+                self.assertEqual(real_res.receipts[0].outcome, "already-recorded")
+                self.assertEqual(asdict(prev_res), asdict(real_res))
+                self.assertEqual(prev_rep.carrier_bytes, expected_carrier)
+                self.assertEqual(prev_rep.payload_bytes, expected_payload)
+                self.assertEqual(prev_rep.envelope_bytes, expected_envelope)
+                self.assertEqual(prev_rep.carrier_bytes, real_rep.carrier_bytes)
+                self.assertEqual(prev_rep.disposition_bytes, real_rep.disposition_bytes)
+                self.assertGreater(prev_rep.disposition_bytes, MAX_DISPOSITION_BYTES)
+                self.assertIsNone(prev_rep.manifest_bytes)
+                self.assertFalse(prev_rep.representable)
+                self.assertEqual(prev_rep.refusal_code, "carrier_inline_bound_exceeded")
+
+                # Also verify _InMemoryPreviewLedger.read_disposition_snapshot via preloaded_dispositions & tamper guards:
+                auth_disps = read_session_dispositions(ledger, rec)
+                mem_ledger = _InMemoryPreviewLedger(
+                    rec,
+                    producer="local-ledger",
+                    enable_disposition_snapshot_writes=True,
+                    evidence_budget=shared_budget,
+                    preloaded_dispositions=auth_disps,
+                )
+                loaded_via_method = mem_ledger.read_disposition_snapshot(IDENTITY)
+                self.assertEqual(len(loaded_via_method), 2)
+                self.assertEqual(shared_budget.calls, 0)
+
+                tampered = (
+                    {**dict(auth_disps[0]), "reason": "tampered"},
+                    dict(auth_disps[1]),
+                )
+                with self.assertRaisesRegex(
+                    ReviewInputError, "digest does not match authenticated root"
+                ):
+                    _InMemoryPreviewLedger(
+                        rec,
+                        producer="local-ledger",
+                        preloaded_dispositions=tampered,
+                    )
+                with self.assertRaisesRegex(
+                    ReviewInputError, "item_count does not match authenticated root"
+                ):
+                    _InMemoryPreviewLedger(
+                        rec,
+                        producer="local-ledger",
+                        preloaded_dispositions=(dict(auth_disps[0]),),
+                    )
+
+        # Also cover v2 paged disposition_snapshot (supports_paged_disposition_snapshot_writes=True) in preview:
+        class _PagedLocalLedger(LocalSessionLedger):
+            @property
+            def supports_paged_disposition_snapshot_writes(self) -> bool:
+                return True
+
+        with tempfile.TemporaryDirectory() as paged_tmp:
+            paged_ledger = _PagedLocalLedger(
+                Path(paged_tmp),
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            p_rec = paged_ledger.initialize(IDENTITY, now=fixed_now)
+            p_rec = paged_ledger.replace(
+                IDENTITY,
+                lambda r: r.evolve(
+                    completed_initial_reviews=1,
+                    last_committed_reservation_id="2" * 64,
+                    transaction=tx,
+                ),
+                now=fixed_now,
+            )
+            inv_10 = tuple(
+                FindingIdentity(instance=f"{k:06x}{'a' * 58}", needs_human=True)
+                for k in range(10)
+            )
+            refs_10 = tuple(f"RS-{k:06X}" for k in range(10))
+            p_rec, _ = apply_session_command(
+                paged_ledger,
+                IDENTITY,
+                MaintainerCommand(
+                    action="accept-risk",
+                    actor="alice",
+                    reason="batch 1",
+                    head_sha=head_sha,
+                    finding_references=refs_10[:9],
+                ),
+                finding_inventory=inv_10,
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:50",
+                now=fixed_now,
+            )
+            assert p_rec.disposition_snapshot is not None
+            self.assertEqual(p_rec.disposition_snapshot["schema_version"], "2.0")
+
+            paged_budget = EvidenceReadBudget()
+            # Append 10th finding onto v2 paged snapshot in preview:
+            app_res, app_rec, app_rep = preview_session_command_representability(
+                identity=IDENTITY,
+                current_record=p_rec,
+                command=MaintainerCommand(
+                    action="accept-risk",
+                    actor="alice",
+                    reason="batch 2",
+                    head_sha=head_sha,
+                    finding_references=(refs_10[9],),
+                ),
+                intent_sha256=intent_sha,
+                binding=binding,
+                finding_inventory=inv_10,
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:51",
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=paged_budget,
+                source_ledger=paged_ledger,
+                now=fixed_now,
+            )
+            self.assertEqual(paged_budget.calls, 0)
+            assert app_res is not None and app_rec is not None
+            self.assertEqual(app_res.receipts[0].outcome, "recorded")
+            assert app_rec.disposition_snapshot is not None
+            self.assertEqual(app_rec.disposition_snapshot["schema_version"], "2.0")
+            app_manifest = app_rec.disposition_snapshot["state_manifest"]
+            assert isinstance(app_manifest, dict)
+            self.assertEqual(app_manifest["item_count"], 10)
+            self.assertTrue(app_rep.representable)
+            self.assertGreater(app_rep.disposition_bytes, 1_000)
+
+            # Cold fresh-process LocalSessionLedger (empty _part_documents cache, disk .evidence fallback):
+            cold_dir = Path(paged_tmp) / "cold_v1"
+            cold_ledger = LocalSessionLedger(
+                cold_dir,
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            cold_ledger.initialize(IDENTITY, now=fixed_now)
+            cold_ledger.replace(
+                IDENTITY,
+                lambda r: r.evolve(
+                    completed_initial_reviews=1,
+                    last_committed_reservation_id="2" * 64,
+                    transaction=tx,
+                ),
+                now=fixed_now,
+            )
+            cold_rec_1, _ = apply_session_command(
+                cold_ledger,
+                IDENTITY,
+                MaintainerCommand(
+                    action="accept-coverage-uncertainty",
+                    actor="alice",
+                    reason="ok",
+                    head_sha=head_sha,
+                ),
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:52",
+                incomplete_coverage=tuple(
+                    f"file:{_deterministic_valid_path(i, total_len=227)}:budget-exhausted"
+                    for i in range(42)
+                ),
+                now=fixed_now,
+            )
+            cold_disk_only = LocalSessionLedger(
+                cold_dir,
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            self.assertEqual(cold_disk_only._part_documents, {})
+            cold_budget = EvidenceReadBudget()
+            _, _, cold_rep = preview_session_command_representability(
+                identity=IDENTITY,
+                current_record=cold_rec_1,
+                command=MaintainerCommand(
+                    action="verify", actor="alice", head_sha=head_sha
+                ),
+                intent_sha256=intent_sha,
+                binding=binding,
+                actor_role="OWNER",
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=cold_budget,
+                source_ledger=cold_disk_only,
+                now=fixed_now,
+            )
+            self.assertEqual(cold_budget.calls, 0)
+            self.assertTrue(cold_rep.representable)
+
+            # Inline v1 snapshot logical disposition_bytes decoding + hosted comment-map preloading:
+            inline_v1_ledger = LocalSessionLedger(
+                Path(paged_tmp) / "v1_inline",
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            iv1 = inline_v1_ledger.initialize(IDENTITY, now=fixed_now)
+            iv1 = inline_v1_ledger.replace(
+                IDENTITY,
+                lambda r: r.evolve(
+                    completed_initial_reviews=1,
+                    last_committed_reservation_id="2" * 64,
+                    transaction=tx,
+                ),
+                now=fixed_now,
+            )
+            iv1, iv1_res = apply_session_command(
+                inline_v1_ledger,
+                IDENTITY,
+                MaintainerCommand(
+                    action="accept-risk",
+                    actor="alice",
+                    reason="inline-v1",
+                    head_sha=head_sha,
+                    finding_references=refs_10[:2],
+                ),
+                finding_inventory=inv_10,
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:60",
+                now=fixed_now,
+            )
+            # Force inline v1 snapshot via inline_manifest:
+            from review_sensei.bounded_evidence import inline_manifest
+
+            iv1_doc = {
+                "schema_version": "1.0",
+                "result_digest": "f" * 64,
+                "dispositions": [dict(d) for d in iv1.dispositions],
+            }
+            iv1_binding = {
+                "repository": IDENTITY.repository,
+                "repository_id": IDENTITY.repository_id,
+                "pull_request": IDENTITY.pull_request,
+                "base_sha": "a" * 40,
+                "head_sha": head_sha,
+                "policy_digest": "c" * 64,
+                "configuration_digest": "d" * 64,
+                "generation": iv1.generation,
+                "producer": "local-ledger",
+                "purpose": "dispositions",
+                "schema_version": "1.0",
+            }
+            iv1_inline_manifest = inline_manifest(
+                iv1_doc, binding=iv1_binding, item_count=len(iv1.dispositions)
+            )
+            assert iv1_inline_manifest is not None
+            iv1_snap = iv1.evolve(
+                dispositions=(),
+                disposition_snapshot={
+                    "schema_version": "1.0",
+                    "result_digest": "f" * 64,
+                    "state_manifest": iv1_inline_manifest,
+                },
+            )
+            inline_v1_eval = evaluate_terminal_action_representability(
+                identity=IDENTITY,
+                intent_sha256=intent_sha,
+                outcome={"kind": "unknown_write_outcome", "reason": "ambiguous"},
+                result_document=asdict(iv1_res),
+                binding=binding,
+                current_record=iv1_snap,
+            )
+            self.assertGreater(inline_v1_eval.disposition_bytes, 200)
+            self.assertTrue(inline_v1_eval.representable)
+
+    def test_exact_8192_manifest_byte_boundary_8191_8192_8193(self) -> None:
+        """Exact 8,192-byte inline manifest boundary (8191 ok, 8192 ok, 8193 refused)."""
+        from review_sensei.bounded_evidence import encode_evidence
+
+        buf = bytearray()
+        block = 0
+        while len(buf) < 7139:
+            for val in hashlib.sha256(f"boundary:{block}".encode("ascii")).digest():
+                buf.append(ord(_ALPHABET[val & 63]))
+            block += 1
+        summary_text = buf[:7139].decode("ascii")
+        result_doc = {
+            "action": "accept-risk",
+            "applied": True,
+            "summary": summary_text,
+        }
+        outcome = {"kind": "applied", "reason": None}
+
+        for producer, expected_raw_bytes, expected_ok in (
+            ("github-bot:99", 8_191, True),
+            ("github-bot:999", 8_192, True),
+            ("github-bot:9999", 8_193, False),
+        ):
+            binding = build_action_result_binding(
+                identity=IDENTITY,
+                policy_commit="a" * 40,
+                head_sha="b" * 40,
+                intent_sha256="1" * 64,
+                configuration_digest="d" * 64,
+                owner_generation=1,
+                producer=producer,
+            )
+            envelope = {
+                "schema_version": "caller-action-result-v1",
+                "intent_sha256": "1" * 64,
+                "outcome": outcome,
+                "result": result_doc,
+            }
+            carrier = {
+                "schema_version": "caller-action-result-v1",
+                "payload": encode_evidence(envelope, max_decoded_bytes=2_097_152),
+            }
+            raw_manifest = {
+                "encoding": "inline-json-v1",
+                "binding": dict(binding),
+                "item_count": 1,
+                "sha256": hashlib.sha256(canonical_bytes(carrier)).hexdigest(),
+                "document": carrier,
+            }
+            self.assertEqual(len(canonical_bytes(raw_manifest)), expected_raw_bytes)
+
+            rep = evaluate_terminal_action_representability(
+                identity=IDENTITY,
+                intent_sha256="1" * 64,
+                outcome=outcome,
+                result_document=result_doc,
+                binding=binding,
+            )
+            self.assertEqual(rep.representable, expected_ok)
+            if expected_ok:
+                self.assertEqual(rep.manifest_bytes, expected_raw_bytes)
+                self.assertIsNone(rep.refusal_code)
+            else:
+                self.assertIsNone(rep.manifest_bytes)
+                self.assertEqual(rep.refusal_code, "carrier_inline_bound_exceeded")
+
+    def test_physical_budget_pricing_fence_tail_cold_snapshot_reads_and_intermediate_bounds(
+        self,
+    ) -> None:
+        """Cover startup, ancestry, cold snapshot reads, retries, ambiguous writes, 4-call fence tail, and intermediate bounds."""
+        from review_sensei_github.action_representability import (
+            _command_pricing,
+            _unlisted_snapshot_part_reads,
+        )
+
+        # 4-call protected terminal tail: 60 ordinary reads fit (64 - 4 = 60); 61 refuses:
+        p_ok = ActionSettlementPricing(
+            startup_requests=4,
+            ancestry_read_requests=2,
+            snapshot_read_requests=2,
+            retry_reconcile_requests=1,
+            ambiguous_write_charges=3,
+            business_mutation_requests=3,
+            refinalization_requests=3,
+            receipt_publication_requests=2,
+            terminal_close_requests=1,
+            committed_requests=10,
+            ordinary_evidence_reads=58,  # 58 + 2 snapshot reads == 60 == cap!
+            protected_fence_reads=4,
+            evidence_read_limit=64,
+            original_api_limit=512,
+        )
+        self.assertTrue(p_ok.fits())
+        self.assertEqual(p_ok.ordinary_evidence_read_cap, 60)
+
+        p_tail_overflow = ActionSettlementPricing(
+            ordinary_evidence_reads=60,
+            snapshot_read_requests=1,  # 61 > 60 cap!
+            protected_fence_reads=4,
+            evidence_read_limit=64,
+            original_api_limit=512,
+        )
+        self.assertFalse(p_tail_overflow.fits())
+        rep_tail = evaluate_terminal_action_representability(
+            identity=IDENTITY,
+            intent_sha256="1" * 64,
+            outcome={"kind": "applied", "reason": None},
+            result_document={"applied": True, "summary": "ok"},
+            binding=self._default_binding(),
+            pricing=p_tail_overflow,
+        )
+        self.assertFalse(rep_tail.representable)
+        self.assertEqual(
+            rep_tail.refusal_code, "request_budget_exhausted_before_effect"
+        )
+        self.assertIn("preserving 4 fence reads", rep_tail.reason)
+
+        with self.assertRaises(ReviewInputError):
+            ActionSettlementPricing(protected_fence_reads=64, evidence_read_limit=64)
+
+        # Cold unlisted vs warm listed snapshot part reads on hosted ledger:
+        from review_sensei.bounded_evidence import evidence_manifest, partition_evidence
+
+        snap_binding = {
+            "repository": IDENTITY.repository,
+            "repository_id": IDENTITY.repository_id,
+            "pull_request": IDENTITY.pull_request,
+            "base_sha": "a" * 40,
+            "head_sha": "b" * 40,
+            "policy_digest": "c" * 64,
+            "configuration_digest": "d" * 64,
+            "generation": 0,
+            "producer": "github-bot:999",
+            "purpose": "dispositions",
+            "schema_version": "1.0",
+        }
+        snap_doc = {
+            "schema_version": "1.0",
+            "result_digest": "f" * 64,
+            "dispositions": [
+                {
+                    "id": i,
+                    "blob": "".join(
+                        hashlib.sha256(f"part:{i}:{k}".encode("ascii")).hexdigest()
+                        for k in range(600)
+                    ),
+                }
+                for i in range(2)
+            ],
+        }
+        snap_parts = partition_evidence(snap_doc, binding=snap_binding, item_count=2)
+        self.assertEqual(len(snap_parts), 2)
+        part_ids = tuple(str(1001 + idx) for idx in range(len(snap_parts)))
+        snap_record = SessionRecord.create(IDENTITY).evolve(
+            disposition_snapshot={
+                "schema_version": "1.0",
+                "result_digest": "f" * 64,
+                "state_manifest": evidence_manifest(
+                    snap_doc,
+                    binding=snap_binding,
+                    item_count=2,
+                    parts=snap_parts,
+                    storage_ids=part_ids,
+                ),
+            }
+        )
+        hosted_ledger = SimpleNamespace(
+            _comments_by_id={1001: {"id": 1001}},
+            _verified_parts={},
+        )
+        self.assertEqual(
+            _unlisted_snapshot_part_reads(
+                hosted_ledger,
+                snap_record,
+                action="accept-risk",
+                writes_enabled=True,
+            ),
+            1,
+        )
+        caller = SimpleNamespace(
+            accounting=SimpleNamespace(
+                configuration=SimpleNamespace(limit=64),
+                blocks=(),
+            ),
+            usable=50,
+            _block="b0",
+        )
+        priced = _command_pricing(
+            caller,
+            action="accept-risk",
+            writes_enabled=True,
+            ledger=hosted_ledger,
+            current_record=snap_record,
+        )
+        self.assertEqual(priced.snapshot_read_requests, 1)
+
+        # Warm comment-map + startup-snapshot extraction with 0 network/budget calls:
+        from review_sensei.terminal_representability import (
+            _InMemoryPreviewLedger,
+            _preload_snapshot_parts_from_ledger,
+        )
+
+        part_body_1 = (
+            "ReviewSensei immutable evidence part v1\n```json\n"
+            + canonical_bytes(snap_parts[0]).decode("utf-8")
+            + "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
+        )
+        part_body_2 = (
+            "ReviewSensei immutable evidence part v1\n```json\n"
+            + canonical_bytes(snap_parts[1]).decode("utf-8")
+            + "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
+        )
+        warm_hosted = SimpleNamespace(
+            evidence_producer=lambda: "github-bot:999",
+            _verified_parts={},
+            _comments_by_id={1001: {"id": 1001, "body": part_body_1}},
+            _quarantine_startup_snapshot=SimpleNamespace(
+                comments_by_id={1002: {"id": 1002, "body": part_body_2}}
+            ),
+        )
+        warm_budget = EvidenceReadBudget()
+        preloaded_warm = _preload_snapshot_parts_from_ledger(
+            warm_hosted,
+            IDENTITY,
+            snap_record,
+            producer="github-bot:999",
+        )
+        self.assertEqual(len(preloaded_warm), 2)
+        mem_hosted = _InMemoryPreviewLedger(
+            snap_record,
+            producer="github-bot:999",
+            preloaded_parts=preloaded_warm,
+            evidence_budget=warm_budget,
+        )
+        self.assertEqual(len(mem_hosted._preloaded_parts), 2)
+        self.assertEqual(warm_budget.calls, 0)
+        chained_parts = _preload_snapshot_parts_from_ledger(
+            mem_hosted,
+            IDENTITY,
+            snap_record,
+            producer="github-bot:999",
+        )
+        self.assertEqual(len(chained_parts), 2)
+
+        bad_framing_hosted = SimpleNamespace(
+            evidence_producer=lambda: "github-bot:999",
+            _comments_by_id={1001: {"id": 1001, "body": "bad"}},
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "GitHub partition framing is invalid"
+        ):
+            _preload_snapshot_parts_from_ledger(
+                bad_framing_hosted,
+                IDENTITY,
+                snap_record,
+                producer="github-bot:999",
+            )
+
+        # Intermediate SessionRecord overflow caught even when terminal state shrinks:
+        from review_sensei.disposition import FindingDisposition
+
+        small_terminal = SessionRecord.create(IDENTITY)
+        bloated_inter = small_terminal.evolve(
+            dispositions=tuple(
+                FindingDisposition(
+                    fingerprint=f"{i:064x}",
+                    action="accept-risk",
+                    reason="r" * 450,
+                    actor="alice",
+                    head_sha="b" * 40,
+                    actor_role="OWNER",
+                    finding_reference=f"RS-{i:06X}",
+                    recorded_at="2026-11-11T00:00:00Z",
+                    policy_digest="c" * 64,
+                    provenance=f"comment:{i + 1}",
+                    target_kind="finding",
+                ).to_dict()
+                for i in range(10)
+            )
+        )
+        inter_base = estimate_session_record_bytes(bloated_inter)
+        rep_inter = evaluate_terminal_action_representability(
+            identity=IDENTITY,
+            intent_sha256="1" * 64,
+            outcome={"kind": "applied", "reason": None},
+            result_document={"applied": True, "summary": "ok"},
+            binding=self._default_binding(),
+            current_record=small_terminal,
+            intermediate_record=bloated_inter,
+            future_reserve_bytes=(MAX_SESSION_RECORD_BYTES - inter_base + 64),
+        )
+        self.assertFalse(rep_inter.representable)
+        self.assertEqual(rep_inter.refusal_code, "session_root_bytes_exceeded")
+        self.assertLessEqual(rep_inter.projected_record_bytes, MAX_SESSION_RECORD_BYTES)
+        self.assertGreater(
+            rep_inter.max_intermediate_record_bytes, MAX_SESSION_RECORD_BYTES
+        )
+
+    def test_ordinary_hosted_command_to_retention_to_settlement_two_decision_snapshot_guard(
+        self,
+    ) -> None:
+        """Full ordinary hosted command -> snapshot retention -> settlement guard on 2-decision snapshot."""
+        from review_sensei.bounded_evidence import (
+            evidence_manifest,
+            partition_evidence,
+        )
+        from review_sensei.disposition import FindingDisposition
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = _G34CommandFixture(directory, limit=512)
+            patch_file = f.root / "review.patch"
+            base_patch = patch_file.read_text(encoding="utf-8")
+            # 37 binary files -> 37 * 249B file tokens + 1 mandatory 71B result token = 38 tokens!
+            binary_entries = "".join(
+                f"\ndiff --git a/{p} b/{p}\nnew file mode 100644\n"
+                f"index 0000000..1111111\nBinary files /dev/null and b/{p} differ\n"
+                for p in (
+                    f"services_{i:02d}/domain_{i:02d}/"
+                    + _deterministic_valid_path(i, total_len=203)
+                    for i in range(37)
+                )
+            )
+            patch_file.write_text(
+                base_patch + binary_entries, encoding="utf-8", newline="\n"
+            )
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+
+            base_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert base_rec is not None and base_rec.transaction is not None
+            index = parse_finding_index(
+                f.reviews[-1]["body"], repository_id=123, pull_request=7, head_sha=HEAD
+            )
+            assert index is not None
+            finding_fp = index.entries[0].instance
+            finding_ref = "RS-" + finding_fp[:6].upper()
+
+            review_json = json.loads(
+                (f.root / "review.json").read_text(encoding="utf-8")
+            )
+            loaded_result = ReviewResult.from_dict(review_json)
+            inc_tokens = incomplete_coverage_from_result(loaded_result)
+            self.assertEqual(len(inc_tokens), 38)
+
+            # Seed the hosted PR ledger with the authenticated 2-decision disposition_snapshot:
+            disp_1 = FindingDisposition(
+                fingerprint=finding_fp,
+                action="accept-risk",
+                reason="acceptable risk",
+                actor="maintainer",
+                head_sha=HEAD,
+                actor_role="OWNER",
+                finding_reference=finding_ref,
+                recorded_at="2026-11-11T00:00:00Z",
+                policy_digest=base_rec.transaction.policy_digest,
+                provenance="comment:201",
+                target_kind="finding",
+            ).to_dict()
+            disp_2 = FindingDisposition(
+                fingerprint=hashlib.sha256(
+                    (
+                        f"coverage-uncertainty:{HEAD}:{base_rec.transaction.policy_digest}:"
+                        f"{','.join(inc_tokens)}"
+                    ).encode("utf-8")
+                ).hexdigest(),
+                action="accept-coverage-uncertainty",
+                reason="ok",
+                actor="maintainer",
+                head_sha=HEAD,
+                actor_role="OWNER",
+                recorded_at="2026-11-11T00:00:00Z",
+                policy_digest=base_rec.transaction.policy_digest,
+                provenance="comment:202",
+                target_kind="coverage_uncertainty",
+                incomplete_coverage=inc_tokens,
+            ).to_dict()
+            from review_sensei.session import _stored_dispositions
+
+            stored_two = _stored_dispositions([disp_1, disp_2], snapshot=True)
+            bot_id = f.comment["user"]["id"]
+            snap_binding = {
+                "repository": IDENTITY.repository,
+                "repository_id": IDENTITY.repository_id,
+                "pull_request": IDENTITY.pull_request,
+                "base_sha": base_rec.transaction.base_sha,
+                "head_sha": HEAD,
+                "policy_digest": base_rec.transaction.policy_digest,
+                "configuration_digest": base_rec.transaction.configuration_digest,
+                "generation": base_rec.generation,
+                "producer": f"github-bot:{bot_id}",
+                "purpose": "dispositions",
+                "schema_version": "1.0",
+            }
+            snap_doc = {
+                "schema_version": "1.0",
+                "result_digest": base_rec.transaction.result_sha256,
+                "dispositions": list(stored_two),
+            }
+            parts = partition_evidence(snap_doc, binding=snap_binding, item_count=2)
+            self.assertEqual(len(parts), 1)
+            part_comment_id = 1_500_001
+            part_raw = canonical_bytes(parts[0]).decode("utf-8")
+            f.extra_comments[part_comment_id] = {
+                **f.comment,
+                "id": part_comment_id,
+                "body": (
+                    f"ReviewSensei immutable evidence part v1\n```json\n"
+                    f"{part_raw}\n```\n<!-- reviewsensei:evidence-part:v1 -->"
+                ),
+            }
+            snap_manifest = evidence_manifest(
+                snap_doc,
+                binding=snap_binding,
+                item_count=2,
+                parts=parts,
+                storage_ids=(str(part_comment_id),),
+            )
+            seeded_rec = base_rec.evolve(
+                dispositions=(),
+                disposition_snapshot={
+                    "schema_version": "1.0",
+                    "result_digest": base_rec.transaction.result_sha256,
+                    "state_manifest": snap_manifest,
+                },
+            )
+            f.comment["body"] = render_session_comment(
+                record=seeded_rec, repository_id=123, pull_request=7
+            )
+
+            # Replay '@reviewsensei override RS-...' through the ordinary hosted command route!
+            # Without the G34 fix, preview stripped disposition_snapshot and allowed execution,
+            # causing terminal action settlement to crash > 8,192B on stored[-1]!
+            f.SOURCE_ID = 405
+            f.select_command(
+                f"@reviewsensei override {finding_ref} acceptable risk",
+                new_run=True,
+            )
+            self.assertEqual(f.invoke_command(), 0, f.error + f.stdout)
+            self.assertEqual(f.business_writes, 0)
+            self.assertIn("carrier_inline_bound_exceeded", f.stdout)
+
+            settled_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert settled_rec is not None
+            self.assertEqual(
+                settled_rec.disposition_snapshot, seeded_rec.disposition_snapshot
+            )
+            settled_state = ApiRunAccounting.from_document(
+                settled_rec.api_run_accounting
+            )
+            assert settled_state.action is not None
+            self.assertEqual(settled_state.action["phase"], "terminal")
+            self.assertEqual(settled_state.action["outcome"]["kind"], "explicit_noop")
 
 
 if __name__ == "__main__":
