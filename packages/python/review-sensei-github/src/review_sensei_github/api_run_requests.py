@@ -669,7 +669,12 @@ class ApiRunRequestTransport:
             _dispatch(self, request, observation)
         except Exception:
             # Missing supplementary evidence refuses accounting completion.
-            pass
+            try:
+                from .review_lifecycle_diagnostics import check_proof_hook_failed
+
+                check_proof_hook_failed("dispatch")
+            except BaseException:
+                pass
         if observation["mutation"]:
             if self._checkpoint is not None and request.get_method() == "PATCH":
                 self._checkpoint_write_request_id = request_id
@@ -709,7 +714,12 @@ class ApiRunRequestTransport:
 
                 _response(self, observation, observed_status)
             except Exception:
-                pass
+                try:
+                    from .review_lifecycle_diagnostics import check_proof_hook_failed
+
+                    check_proof_hook_failed("response")
+                except BaseException:
+                    pass
 
         # The debit/intent above happens before the physical opener. Exceptions
         # preserve the charge; read/parse/status failures never refund it.
