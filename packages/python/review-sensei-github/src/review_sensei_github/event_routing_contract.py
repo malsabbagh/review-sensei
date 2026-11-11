@@ -2130,6 +2130,208 @@ def evaluate_github_event(
     )
 
 
+@dataclass(frozen=True)
+class InstalledCallerSubscriptionRoute:
+    """Static route descriptor mapping an installed caller trigger to runtime entry."""
+
+    route_id: str
+    event_name: str
+    subscribed_actions: tuple[str, ...]
+    operation: str
+    trigger_resolver_route: str
+    reusable_workflow_entrypoint: str
+    reconciliation_owner: str
+    performs_native_effects: bool
+    requires_model_inference: bool
+
+
+INSTALLED_CALLER_SUBSCRIPTION_ROUTES: tuple[InstalledCallerSubscriptionRoute, ...] = (
+    InstalledCallerSubscriptionRoute(
+        route_id="caller.pull_request.review",
+        event_name="pull_request",
+        subscribed_actions=("opened", "reopened", "synchronize", "ready_for_review"),
+        operation="review",
+        trigger_resolver_route="pull_request_json_to_trigger_py",
+        reusable_workflow_entrypoint="review_run.run_review",
+        reconciliation_owner="hosted_review_admission",
+        performs_native_effects=True,
+        requires_model_inference=True,
+    ),
+    InstalledCallerSubscriptionRoute(
+        route_id="caller.workflow_dispatch.review",
+        event_name="workflow_dispatch",
+        subscribed_actions=("manual",),
+        operation="review",
+        trigger_resolver_route="workflow_dispatch_routing_only",
+        reusable_workflow_entrypoint="review_run.run_review",
+        reconciliation_owner="hosted_review_admission",
+        performs_native_effects=True,
+        requires_model_inference=True,
+    ),
+    InstalledCallerSubscriptionRoute(
+        route_id="caller.issue_comment.review",
+        event_name="issue_comment",
+        subscribed_actions=("created",),
+        operation="review",
+        trigger_resolver_route="issue_comment_fast_review_intent",
+        reusable_workflow_entrypoint="review_run.run_review",
+        reconciliation_owner="hosted_review_admission",
+        performs_native_effects=True,
+        requires_model_inference=True,
+    ),
+    InstalledCallerSubscriptionRoute(
+        route_id="caller.issue_comment.command",
+        event_name="issue_comment",
+        subscribed_actions=("created",),
+        operation="command",
+        trigger_resolver_route="trigger_py_resolver",
+        reusable_workflow_entrypoint="action_run.run_action(purpose='command')",
+        reconciliation_owner="hosted_command_executor",
+        performs_native_effects=True,
+        requires_model_inference=False,
+    ),
+    InstalledCallerSubscriptionRoute(
+        route_id="caller.issue_comment.reply",
+        event_name="issue_comment",
+        subscribed_actions=("created",),
+        operation="reply",
+        trigger_resolver_route="trigger_py_resolver",
+        reusable_workflow_entrypoint="action_run.run_action(purpose='reply')",
+        reconciliation_owner="hosted_reply_executor",
+        performs_native_effects=True,
+        requires_model_inference=True,
+    ),
+    InstalledCallerSubscriptionRoute(
+        route_id="caller.pull_request_review_comment.reply",
+        event_name="pull_request_review_comment",
+        subscribed_actions=("created",),
+        operation="reply",
+        trigger_resolver_route="trigger_py_resolver",
+        reusable_workflow_entrypoint="action_run.run_action(purpose='reply')",
+        reconciliation_owner="hosted_reply_executor",
+        performs_native_effects=True,
+        requires_model_inference=True,
+    ),
+)
+
+_INSTALLED_ROUTE_BY_KEY: Mapping[tuple[str, str], InstalledCallerSubscriptionRoute] = {
+    (route.event_name, route.operation): route
+    for route in INSTALLED_CALLER_SUBSCRIPTION_ROUTES
+}
+
+
+@dataclass(frozen=True)
+class InstalledCallerSubscriptionMapping:
+    """End-to-end mapping from installed caller YAML + event to runtime admission."""
+
+    subscription_report: CallerSubscriptionReport
+    routing: EventRoutingDecision
+    caller_job_admitted: bool
+    matched_route: InstalledCallerSubscriptionRoute | None
+    trigger_resolver_route: str
+    reusable_workflow_entrypoint: str | None
+    reconciliation_owner: str
+    performs_native_effects: bool
+    requires_model_inference: bool
+
+
+def map_installed_caller_subscription(
+    workflow_text: str,
+    *,
+    event_name: str,
+    payload: Mapping[str, Any] | bytes | bytearray | str | object,
+    delivery_id: str | None = None,
+    live_pull_request: Mapping[str, Any] | None = None,
+    retained_state: RetainedSnapshotState | None = None,
+) -> InstalledCallerSubscriptionMapping:
+    """Map an event against an installed caller workflow YAML to its admission route."""
+
+    report = inspect_caller_subscription_contract(workflow_text)
+    if not report.matches_approved_boundary:
+        raise ValueError(
+            f"caller workflow violates approved subscription boundary: {report.unapproved_triggers!r}"
+        )
+    routing = evaluate_github_event(
+        event_name,
+        payload,
+        delivery_id=delivery_id,
+        live_pull_request=live_pull_request,
+        retained_state=retained_state,
+    )
+    if not routing.caller_subscribed:
+        return InstalledCallerSubscriptionMapping(
+            subscription_report=report,
+            routing=routing,
+            caller_job_admitted=False,
+            matched_route=None,
+            trigger_resolver_route="skipped_unsubscribed_event",
+            reusable_workflow_entrypoint=None,
+            reconciliation_owner="caller_workflow_preflight",
+            performs_native_effects=False,
+            requires_model_inference=False,
+        )
+
+    parsed = _coerce_payload_mapping(payload) or {}
+    caller_job_admitted = True
+    if routing.event_name in {"issue_comment", "pull_request_review_comment"}:
+        comment = _as_mapping(parsed.get("comment"))
+        raw_body = _opt_str(comment.get("body")) or ""
+        has_raw_handle = "@reviewsensei" in raw_body or "@sensei" in raw_body
+        issue = _as_mapping(parsed.get("issue"))
+        is_pr_issue = (
+            True
+            if routing.event_name == "pull_request_review_comment"
+            else bool(issue.get("pull_request"))
+        )
+        caller_job_admitted = (
+            routing.action == "created"
+            and is_pr_issue
+            and has_raw_handle
+            and routing.source_identity.actor_type != "Bot"
+            and routing.source_identity.actor_type is not None
+            and routing.source_identity.author_association
+            in ALLOWED_COMMENT_ASSOCIATIONS
+        )
+
+    if not caller_job_admitted or not routing.admitted or routing.operation is None:
+        return InstalledCallerSubscriptionMapping(
+            subscription_report=report,
+            routing=routing,
+            caller_job_admitted=caller_job_admitted,
+            matched_route=None,
+            trigger_resolver_route=(
+                "skipped_at_caller_guard"
+                if not caller_job_admitted
+                else "rejected_or_reused_at_runtime_admission"
+            ),
+            reusable_workflow_entrypoint=None,
+            reconciliation_owner=(
+                "caller_workflow_preflight"
+                if not caller_job_admitted
+                else (
+                    "hosted_review_admission"
+                    if routing.reused_retained_snapshot
+                    else "caller_workflow_preflight"
+                )
+            ),
+            performs_native_effects=False,
+            requires_model_inference=False,
+        )
+
+    matched = _INSTALLED_ROUTE_BY_KEY[(routing.event_name, routing.operation)]
+    return InstalledCallerSubscriptionMapping(
+        subscription_report=report,
+        routing=routing,
+        caller_job_admitted=True,
+        matched_route=matched,
+        trigger_resolver_route=matched.trigger_resolver_route,
+        reusable_workflow_entrypoint=matched.reusable_workflow_entrypoint,
+        reconciliation_owner=matched.reconciliation_owner,
+        performs_native_effects=matched.performs_native_effects,
+        requires_model_inference=routing.requires_model_inference,
+    )
+
+
 OPERATION_LIFECYCLE_PHASES: frozenset[str] = frozenset(
     {
         "intent_accepted_unstarted",
@@ -3720,6 +3922,9 @@ __all__ = [
     "EventDecisionRule",
     "EventRoutingDecision",
     "HumanReviewIndependenceOutcome",
+    "INSTALLED_CALLER_SUBSCRIPTION_ROUTES",
+    "InstalledCallerSubscriptionMapping",
+    "InstalledCallerSubscriptionRoute",
     "LivePullRequestTarget",
     "MAX_EVENT_PAYLOAD_BYTES",
     "MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS",
@@ -3743,6 +3948,7 @@ __all__ = [
     "evaluate_human_pr_review_independence",
     "inspect_caller_subscription_contract",
     "is_merge_queue_ref",
+    "map_installed_caller_subscription",
     "reconcile_event_convergence",
     "reconcile_manual_thread_convergence",
     "reconcile_merge_queue_eviction",
