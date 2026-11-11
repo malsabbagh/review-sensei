@@ -1039,19 +1039,250 @@ def verify_published_title_attribution(
     )
 
 
+HOSTED_BOOTSTRAP_MAX_TITLE_BYTES = 256
+DIRECT_CORE_MAX_TITLE_BYTES = DEFAULT_REVIEW_LIMITS.max_title_bytes
+TITLE_ENTRY_SURFACES = frozenset(
+    {
+        "routing_preflight",
+        "hosted_bootstrap",
+        "direct_core",
+    }
+)
+HOSTED_ENTRY_PURPOSES = frozenset({"review", "command", "reply"})
+
+
+@dataclass(frozen=True)
+class TitleByteLimitEvaluation:
+    """G20 UTF-8 byte-limit evaluation across routing, hosted bootstrap, and core."""
+
+    surface: str
+    hosted_purpose: str | None
+    validated: bool
+    admitted: bool
+    utf8_bytes: int | None
+    codepoint_length: int | None
+    limit_bytes: int | None
+    truncated: bool
+    recovery_instruction: str | None
+    diagnostic: str
+
+    def __post_init__(self) -> None:
+        if self.surface not in TITLE_ENTRY_SURFACES:
+            raise ReviewInputError("title entry surface is unsupported")
+        if self.surface == "hosted_bootstrap":
+            if self.hosted_purpose not in HOSTED_ENTRY_PURPOSES:
+                raise ReviewInputError(
+                    "hosted_bootstrap evaluation requires a valid hosted_purpose"
+                )
+        elif self.hosted_purpose is not None:
+            raise ReviewInputError(
+                "hosted_purpose is only valid on the hosted_bootstrap surface"
+            )
+        for flag_name, flag_val in (
+            ("validated", self.validated),
+            ("admitted", self.admitted),
+            ("truncated", self.truncated),
+        ):
+            if not isinstance(flag_val, bool):
+                raise ReviewInputError(f"{flag_name} must be a boolean")
+        if self.truncated:
+            raise ReviewInputError("silent title truncation is forbidden")
+        if self.surface == "routing_preflight" and self.validated:
+            raise ReviewInputError(
+                "routing_preflight must never claim title validation credit"
+            )
+        if self.utf8_bytes is not None:
+            _positive_int(self.utf8_bytes, label="utf8_bytes", allow_zero=True)
+        if self.codepoint_length is not None:
+            _positive_int(
+                self.codepoint_length, label="codepoint_length", allow_zero=True
+            )
+        if self.limit_bytes is not None:
+            _positive_int(self.limit_bytes, label="limit_bytes")
+        if not self.admitted and not self.recovery_instruction:
+            raise ReviewInputError(
+                "refused title evaluation requires an explicit recovery_instruction"
+            )
+        validate_bounded_text(
+            self.diagnostic,
+            2048,
+            label="title byte-limit diagnostic",
+            allow_empty=False,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "surface": self.surface,
+            "hosted_purpose": self.hosted_purpose,
+            "validated": self.validated,
+            "admitted": self.admitted,
+            "utf8_bytes": self.utf8_bytes,
+            "codepoint_length": self.codepoint_length,
+            "limit_bytes": self.limit_bytes,
+            "truncated": self.truncated,
+            "recovery_instruction": self.recovery_instruction,
+            "diagnostic": self.diagnostic,
+        }
+
+
+def evaluate_title_byte_limit(
+    title: object,
+    *,
+    surface: str,
+    hosted_purpose: str | None = None,
+    custom_core_limit: int | None = None,
+) -> TitleByteLimitEvaluation:
+    """Evaluate PR title UTF-8 byte bounds on ``surface`` without truncation."""
+
+    if surface not in TITLE_ENTRY_SURFACES:
+        raise ReviewInputError("title entry surface is unsupported")
+    if surface == "hosted_bootstrap":
+        purpose = hosted_purpose or "review"
+        if purpose not in HOSTED_ENTRY_PURPOSES:
+            raise ReviewInputError("hosted_purpose must be review, command, or reply")
+        if custom_core_limit is not None:
+            raise ReviewInputError(
+                "custom_core_limit cannot override hosted_bootstrap 256-byte limit"
+            )
+        limit = HOSTED_BOOTSTRAP_MAX_TITLE_BYTES
+    elif surface == "routing_preflight":
+        if hosted_purpose is not None or custom_core_limit is not None:
+            raise ReviewInputError(
+                "routing_preflight does not accept hosted_purpose or custom_core_limit"
+            )
+        return TitleByteLimitEvaluation(
+            surface=surface,
+            hosted_purpose=None,
+            validated=False,
+            admitted=True,
+            utf8_bytes=None,
+            codepoint_length=None,
+            limit_bytes=None,
+            truncated=False,
+            recovery_instruction=None,
+            diagnostic=(
+                "Routing-only preflight does not fetch or validate the live pull "
+                "request title; zero title validation credit is claimed before "
+                "metered bootstrap."
+            ),
+        )
+    else:
+        purpose = None
+        if hosted_purpose is not None:
+            raise ReviewInputError("hosted_purpose is invalid for direct_core")
+        if custom_core_limit is not None:
+            _positive_int(custom_core_limit, label="custom_core_limit")
+            if custom_core_limit > DIRECT_CORE_MAX_TITLE_BYTES:
+                raise ReviewInputError(
+                    "custom_core_limit exceeds DIRECT_CORE_MAX_TITLE_BYTES"
+                )
+            limit = custom_core_limit
+        else:
+            limit = DIRECT_CORE_MAX_TITLE_BYTES
+
+    if not isinstance(title, str):
+        return TitleByteLimitEvaluation(
+            surface=surface,
+            hosted_purpose=purpose,
+            validated=True,
+            admitted=False,
+            utf8_bytes=None,
+            codepoint_length=None,
+            limit_bytes=limit,
+            truncated=False,
+            recovery_instruction=(
+                f"Provide a valid UTF-8 pull request title of <= {limit} UTF-8 bytes."
+            ),
+            diagnostic=(
+                f"Pull request title on {surface} is not a UTF-8 string; "
+                "refusing before authority, session enrollment, or provider spend."
+            ),
+        )
+    try:
+        encoded = title.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return TitleByteLimitEvaluation(
+            surface=surface,
+            hosted_purpose=purpose,
+            validated=True,
+            admitted=False,
+            utf8_bytes=None,
+            codepoint_length=len(title),
+            limit_bytes=limit,
+            truncated=False,
+            recovery_instruction=(
+                f"Remove invalid UTF-8 surrogates and keep the pull request title "
+                f"<= {limit} UTF-8 bytes."
+            ),
+            diagnostic=(
+                f"Pull request title on {surface} contains invalid UTF-8 surrogates; "
+                "refusing without normalization or truncation."
+            ),
+        )
+
+    byte_len = len(encoded)
+    cp_len = len(title)
+    if byte_len > limit:
+        scope_label = (
+            f"hosted_bootstrap ({purpose})" if purpose is not None else "direct_core"
+        )
+        return TitleByteLimitEvaluation(
+            surface=surface,
+            hosted_purpose=purpose,
+            validated=True,
+            admitted=False,
+            utf8_bytes=byte_len,
+            codepoint_length=cp_len,
+            limit_bytes=limit,
+            truncated=False,
+            recovery_instruction=(
+                f"Shorten the pull request title to <= {limit} UTF-8 bytes "
+                f"(currently {byte_len} UTF-8 bytes across {cp_len} characters) "
+                "and re-run."
+            ),
+            diagnostic=(
+                f"Pull request title ({byte_len} UTF-8 bytes, {cp_len} characters) "
+                f"exceeds {scope_label} {limit}-byte bound; refusing before business "
+                "or provider work without truncating."
+            ),
+        )
+
+    return TitleByteLimitEvaluation(
+        surface=surface,
+        hosted_purpose=purpose,
+        validated=True,
+        admitted=True,
+        utf8_bytes=byte_len,
+        codepoint_length=cp_len,
+        limit_bytes=limit,
+        truncated=False,
+        recovery_instruction=None,
+        diagnostic=(
+            f"Pull request title ({byte_len} UTF-8 bytes <= {limit}-byte bound) "
+            f"admitted on {surface}."
+        ),
+    )
+
+
 __all__ = [
+    "DIRECT_CORE_MAX_TITLE_BYTES",
+    "HOSTED_BOOTSTRAP_MAX_TITLE_BYTES",
+    "HOSTED_ENTRY_PURPOSES",
     "INDIVISIBLE_UNIT_KINDS",
     "PERMITTED_RECOVERY_ROUTES",
     "RECOVERY_COMMAND_TEMPLATES",
+    "TITLE_ENTRY_SURFACES",
     "TITLE_FRESHNESS_OUTCOMES",
     "TITLE_LIFECYCLE_PHASES",
     "IndivisibleWorkReport",
     "IndivisibleWorkUnit",
     "TitleAttributionRecord",
+    "TitleByteLimitEvaluation",
     "TitleFreshnessDecision",
     "classify_change_coverage",
     "classify_mandatory_prompt_overflow",
     "classify_work_plan_unprocessed",
+    "evaluate_title_byte_limit",
     "evaluate_title_freshness",
     "verify_published_title_attribution",
 ]
