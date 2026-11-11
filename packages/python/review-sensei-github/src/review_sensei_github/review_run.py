@@ -515,16 +515,24 @@ class ReviewRun:
             else "publication_finalization_incomplete"
         )
         accounting_terminal = False
+        from .check_accounting import denied_accounting_details
+
+        check_rejection = denied_accounting_details(
+            publication, self.caller, self.identity, analysis.result
+        )
         if (
             publication.status
             in {"published", "already_published", "auto_approval_disabled"}
-            and publication.diagnostic
-            in {
-                None,
-                "human_adjudication_open",
-                "approval_withheld",
-                "review_incomplete",
-            }
+            and (
+                check_rejection is not None
+                or publication.diagnostic
+                in {
+                    None,
+                    "human_adjudication_open",
+                    "approval_withheld",
+                    "review_incomplete",
+                }
+            )
             and publication.thread_resolution != "unconfirmed"
         ):
             lifecycle_diagnostics.phase("caller_close")
@@ -549,10 +557,12 @@ class ReviewRun:
             "review_id": publication.review_id,
             "diagnostic": publication.diagnostic,
         }
+        if check_rejection is not None:
+            outcome["check_failure"] = check_rejection
         lifecycle_diagnostics.publication(outcome)
         lifecycle_diagnostics.phase("outcome_write")
         publication_output.write_text(json.dumps(outcome, indent=2) + "\n")
-        return 0 if published and accounting_terminal else 1
+        return 0 if published and accounting_terminal and check_rejection is None else 1
 
 
 def _get(http: GitHubHttp, path: str, token: str) -> dict[str, Any]:

@@ -441,3 +441,35 @@ class CheckDiagnosticsTests(gate.GateAcceptanceCase):
         self.assert_unconfirmed(outcome, calls, "check_temporarily_unavailable")
         self.assertEqual(broker.exchanges, ["review_publish", "check_publish"])
         self.assertEqual(checks.requests, [])
+
+    def test_unqualified_accounting_observer_does_not_inspect_transports_or_payload(
+        self,
+    ):
+        from review_sensei_github.check_accounting import (
+            broker_check_call,
+            native_check_call,
+        )
+
+        class Uninspected:
+            def __getattribute__(self, name):
+                raise AssertionError(
+                    "unqualified observer inspected transport or payload"
+                )
+
+        for context in (None, object()):
+            with self.subTest(context=type(context).__name__):
+                with broker_check_call(Uninspected(), context) as capture:
+                    pass
+                self.assertFalse(capture.valid())
+                with native_check_call(
+                    Uninspected(),
+                    "create",
+                    "POST",
+                    "/unused",
+                    repository="owner/repo",
+                    head_sha=gate.HEAD,
+                    body=Uninspected(),
+                    context=context,
+                ) as capture:
+                    pass
+                self.assertFalse(capture.valid())

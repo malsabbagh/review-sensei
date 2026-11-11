@@ -602,7 +602,9 @@ class GitHubApplication:
                 broker.before_request = budget.consume
 
         def check_capability() -> CheckCapability:
-            capability = self._check_capability(exchange_input, broker=broker)
+            capability = self._check_capability(
+                exchange_input, broker=broker, accounting_context=check_context
+            )
             if budget is not None:
                 budget.check()
             return capability
@@ -655,6 +657,7 @@ class GitHubApplication:
             repository_id=repository_id,
         )
         transaction_record = None
+        check_context = None
         transaction_ledger: SessionLedger | None = None
         expected_configuration_digest: str | None = None
         expected_evidence_digest: str | None = None
@@ -1476,6 +1479,13 @@ class GitHubApplication:
                 else result
             )
             review_policy = options.review_policy()
+            if isinstance(reviewer, ReviewPublisher):
+                from .check_accounting import source_context
+
+                check_context = source_context(
+                    self.http, result, transaction_record, identity
+                )
+                reviewer.checks._accounting_context = check_context
             capability = check_capability()
             publisher_arguments: dict[str, Any] = {
                 "token": token,
@@ -1835,10 +1845,31 @@ class GitHubApplication:
                 # The review is already published. A follow-up inventory comment
                 # must not turn that success into a publication failure.
                 pass
-        return _with_shadow(
+        completed = _with_shadow(
             publication,
             _shadow_observation(_shadow_state(prepared, flags)),
         )
+        if isinstance(reviewer, ReviewPublisher) and not getattr(
+            reviewer, "_check_accounting_unknown", True
+        ):
+            from .check_accounting import confirm_denied_publication
+
+            try:
+                confirm_denied_publication(
+                    completed,
+                    approval=getattr(reviewer, "_check_accounting_approval", None),
+                    failure=getattr(reviewer, "_check_accounting_failure", None),
+                    cleanup=getattr(reviewer, "_accounting_cleanup_result", None),
+                    review_id=getattr(reviewer, "_check_accounting_review_id", None),
+                    http=reviewer.http,
+                    source_result=result,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                )
+            except Exception:
+                pass
+        return completed
 
     def _publish_human_file_request(
         self,
@@ -2590,23 +2621,29 @@ class GitHubApplication:
         return result
 
     def _check_capability(
-        self, exchange_input: str, *, broker: BrokerClient | None = None
+        self,
+        exchange_input: str,
+        *,
+        broker: BrokerClient | None = None,
+        accounting_context=None,
     ) -> CheckCapability:
         """Acquire the separate gate capability without changing review eligibility."""
-        try:
-            token = (broker or self.broker).exchange(
-                exchange_input, capability="check_publish"
-            )
-        except GitHubHTTPTransientError as exc:
-            return CheckCapability(
-                failure=check_failure(
+        from .check_accounting import broker_check_call
+
+        selected = broker or self.broker
+        failure = None
+        token = None
+        with broker_check_call(selected, accounting_context) as capture:
+            try:
+                token = selected.exchange(exchange_input, capability="check_publish")
+            except GitHubHTTPTransientError as exc:
+                failure = check_failure(
                     "capability", status=observed_http_status(exc), transient=True
                 )
-            )
-        except GitHubBrokerClientError as exc:
-            return CheckCapability(
-                failure=check_failure("capability", status=observed_http_status(exc))
-            )
+            except GitHubBrokerClientError as exc:
+                failure = check_failure("capability", status=observed_http_status(exc))
+        if failure is not None:
+            return CheckCapability(failure=capture.bind(failure))
         if not isinstance(token, str) or not token.strip():
             return CheckCapability(failure=check_failure("capability"))
         return CheckCapability(token=token)

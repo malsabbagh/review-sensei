@@ -4715,6 +4715,9 @@ class ReviewPublisher:
         self, publication: PublicationResult
     ) -> PublicationResult:
         """Run optional work only after the caller's mandatory completion."""
+        from .check_accounting import confirm_cleanup
+
+        self._accounting_cleanup_result = None
         cleanup, self._pending_thread_cleanup = self._pending_thread_cleanup, None
         if publication.status not in {
             "published",
@@ -4722,6 +4725,8 @@ class ReviewPublisher:
         }:
             return publication
         if cleanup is None and finalization_confirmed(publication):
+            self._accounting_cleanup_result = publication
+            confirm_cleanup(publication)
             return publication
         # None here is the source's explicit no-replacement branch, rather than
         # an absent result field being interpreted as evidence of completion.
@@ -4736,6 +4741,9 @@ class ReviewPublisher:
                 completed,
                 finalization_completion=_confirmed_cleanup(publication, completed),
             )
+        if diagnostic is None:
+            self._accounting_cleanup_result = completed
+            confirm_cleanup(completed)
         return completed
 
     def _schedule_thread_cleanup(
@@ -4932,6 +4940,7 @@ class ReviewPublisher:
                     title="Historical assessment decision required",
                     summary="Carried historical assessments require exact authorized individual decisions before approval.",
                 )
+        self._check_accounting_failure = None
         if check_token is None:
             return "check_capability_unavailable"
         if outcome is None:
@@ -4951,6 +4960,7 @@ class ReviewPublisher:
                 outcome=outcome,
             )
         if result.status == "check_permission_denied":
+            self._check_accounting_failure = result.failure
             return (
                 result.failure.code
                 if result.failure is not None
@@ -4984,8 +4994,10 @@ class ReviewPublisher:
         next run for the same head.
         """
 
+        from .check_accounting import known_failure
+
         try:
-            return self._publish_check_state(
+            diagnostic = self._publish_check_state(
                 check_token=check_token,
                 repository=repository,
                 head_sha=head_sha,
@@ -4993,11 +5005,21 @@ class ReviewPublisher:
                 outcome=outcome,
             )
         except CheckOperationError as exc:
-            return exc.failure.code
+            self._check_accounting_failure = exc.failure
+            diagnostic = exc.failure.code
         except (GitHubHTTPTransientError, GitHubPublicationTransientError):
-            return "check_temporarily_unavailable"
+            self._check_accounting_failure = None
+            diagnostic = "check_temporarily_unavailable"
         except (GitHubHTTPError, GitHubPublicationError):
-            return "check_publication_failed"
+            self._check_accounting_failure = None
+            diagnostic = "check_publication_failed"
+        if (
+            diagnostic is not None
+            and check_token is not None
+            and not known_failure(self._check_accounting_failure)
+        ):
+            self._check_accounting_unknown = True
+        return diagnostic
 
     def _complete_failed_check(
         self,
@@ -5102,6 +5124,7 @@ class ReviewPublisher:
         )
         if check_token is None and check_capability_failure is not None:
             check_diagnostic = check_capability_failure.code
+            self._check_accounting_failure = check_capability_failure
         finalized = self.finalizer.finalize(
             token=token,
             repository=repository,
@@ -5188,6 +5211,10 @@ class ReviewPublisher:
         self._pending_thread_cleanup = None
         self._confirmed_review_id = None
         self._confirmed_check = None
+        self._check_accounting_failure = None
+        self._check_accounting_approval: PublicationResult | None = None
+        self._check_accounting_review_id: int | None = None
+        self._check_accounting_unknown = False
         owns_operation_budget = (
             self.finalizer.evidence_budget is None
             and self.finalizer._operation_budget is None
@@ -6136,6 +6163,7 @@ class ReviewPublisher:
             and check_capability_failure is not None
         ):
             check_diagnostic = check_capability_failure.code
+            self._check_accounting_failure = check_capability_failure
         eligibility = self._eligibility_with_carried(
             result,
             head_sha=head_sha,
@@ -6474,6 +6502,8 @@ class ReviewPublisher:
         if status == 200 and isinstance(payload, dict):
             review_id = payload.get("id")
             if isinstance(review_id, int):
+                if type(review_id) is int and review_id > 0:
+                    self._check_accounting_review_id = review_id
                 self._schedule_thread_cleanup(
                     token=token,
                     threads=suppression.superseded_threads,
@@ -6663,6 +6693,7 @@ class ReviewPublisher:
             require_persisted=require_persisted,
             assume_inline_unresolved=assume_inline_unresolved,
         )
+        self._check_accounting_approval = finalized
         diagnostic = check_diagnostic
         if diagnostic is None and finalized.status == "approval_withheld":
             diagnostic = finalized.diagnostic

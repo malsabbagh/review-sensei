@@ -520,6 +520,14 @@ aggregate size violations. Selection and serialization are deterministic.
 
 ## Failure behavior
 
+Fresh ordinary publication can enter normal terminal accounting after an original
+confirmed check rejection, separately from successful gate publication. The
+invocation-private proof binds the original debit, response, source transaction,
+approval decision and completed cleanup. An unsuccessful check stays visible and
+the workflow exits 1. Unknown effects and historical transactions are outside
+this proof; existing funding, deadline and terminal guards remain in force. See
+[ADR 0130](adr/0130-known-check-rejection-accounting.md).
+
 Hosted lifecycle entry points emit a bounded versioned stderr observation from
 existing in-memory facts, independently of optional artifacts. Requested,
 bootstrap-observed, admitted, frozen transaction and predecessor scopes remain
