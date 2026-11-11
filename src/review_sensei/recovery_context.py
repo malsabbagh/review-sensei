@@ -50,7 +50,15 @@ SUPPORTED_WRITER_ACCOUNTING_VERSIONS = frozenset(
     {LEGACY_ACCOUNTING_VERSION, ACCOUNTING_VERSION}
 )
 PLACEMENT_MODES = frozenset(
-    {"complete", "bounded", "advisory", "merge_focused", "merge-focused"}
+    {
+        "complete",
+        "bounded",
+        "advisory",
+        "merge_focused",
+        "merge-focused",
+        "strict",
+        "legacy",
+    }
 )
 RUNTIME_ONLY_FIELD_LABELS = frozenset(
     {
@@ -543,6 +551,12 @@ def build_bundle_from_context_documents(
 
     current_key = admission_context.get("current_key")
     if (
+        isinstance(current_key, Mapping)
+        and isinstance(current_key.get("context_digest"), str)
+        and _HEX64_RE.fullmatch(current_key["context_digest"])
+    ):
+        selected_context_digest = canonical_recovery_digest(current_key)
+    elif (
         "active_category_ids" in admission_context
         or "lens_contexts" in admission_context
     ):
@@ -555,16 +569,22 @@ def build_bundle_from_context_documents(
     else:
         selected_context_digest = canonical_recovery_digest(current_key)
 
-    if "learnings" in admission_context:
-        learnings_digest = canonical_recovery_digest(
-            admission_context.get("learnings", [])
-        )
+    if (
+        isinstance(current_key, Mapping)
+        and isinstance(current_key.get("learning_digest"), str)
+        and _HEX64_RE.fullmatch(current_key["learning_digest"])
+    ):
+        learnings_digest = current_key["learning_digest"]
     elif (
         isinstance(current_key, Mapping)
         and isinstance(current_key.get("learnings_digest"), str)
         and _HEX64_RE.fullmatch(current_key["learnings_digest"])
     ):
         learnings_digest = current_key["learnings_digest"]
+    elif "learnings" in admission_context:
+        learnings_digest = canonical_recovery_digest(
+            admission_context.get("learnings", [])
+        )
     else:
         learnings_digest = canonical_recovery_digest([])
 
@@ -1102,3 +1122,96 @@ class RecoveryContextStore:
             unknown_usage_requests=unknown_usage_requests,
             active_reserved_requests=active_reserved_requests,
         )
+
+    def prune_expired(self) -> tuple[Path, ...]:
+        """Unlink authenticated handoff envelopes whose bounded TTL has elapsed."""
+
+        self._validate_directory()
+        if not self.directory.exists():
+            return ()
+        now = self.now()
+        if now.tzinfo is None:
+            raise ReviewInputError("recovery context clock must be timezone-aware")
+        removed: list[Path] = []
+        for index, entry in enumerate(sorted(self.directory.iterdir())):
+            if index >= 32:
+                raise ReviewInputError("recovery context directory entry cap exceeded")
+            if entry.suffix != ".json":
+                continue
+            if entry.is_symlink() or not entry.is_file():
+                raise ReviewInputError("recovery context directory entry is invalid")
+            try:
+                raw = entry.read_bytes()
+                if not raw or len(raw) > MAX_RECOVERY_CONTEXT_BUNDLE_BYTES:
+                    continue
+                envelope = json.loads(raw.decode("utf-8", errors="strict"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if (
+                not isinstance(envelope, Mapping)
+                or set(envelope.keys()) != {"document", "authentication"}
+                or not isinstance(envelope.get("authentication"), str)
+                or not isinstance(envelope.get("document"), Mapping)
+            ):
+                continue
+            document = envelope["document"]
+            if not hmac.compare_digest(
+                envelope["authentication"], self._signature(document)
+            ):
+                continue
+            try:
+                expires_at = datetime.fromisoformat(str(document.get("expires_at", "")))
+            except ValueError:
+                continue
+            if expires_at.tzinfo is not None and now >= expires_at:
+                entry.unlink(missing_ok=True)
+                removed.append(entry)
+        return tuple(removed)
+
+
+def resolve_recovery_context_store(
+    directory: Path | None,
+    key_file: Path | None,
+    *,
+    artifacts_policy: str,
+    ttl_seconds: int = DEFAULT_RECOVERY_TTL_SECONDS,
+    now: Callable[[], datetime] | None = None,
+) -> RecoveryContextStore | None:
+    """Resolve an opt-in RecoveryContextStore under private key and diagnostics policy.
+
+    Returns ``None`` when unconfigured (both ``directory`` and ``key_file`` are
+    ``None``), writing nothing by default per ``docs/data-handling.md``.
+    """
+
+    if directory is None and key_file is None:
+        return None
+    if directory is None or key_file is None or artifacts_policy != "diagnostics":
+        raise ReviewInputError(
+            "recovery context store requires paired directory and key file paths "
+            "and explicit diagnostics artifact policy"
+        )
+    key_path = Path(key_file)
+    try:
+        if key_path.is_symlink() or (
+            os.name == "posix"
+            and (
+                key_path.stat().st_mode & 0o077 or key_path.stat().st_uid != os.getuid()
+            )
+        ):
+            raise ReviewInputError("recovery context key file must be private")
+        with key_path.open("rb") as stream:
+            key = stream.read(4097)
+        if not 32 <= len(key) <= 4096:
+            raise ValueError("key size")
+    except ReviewInputError:
+        raise
+    except (OSError, ValueError):
+        raise ReviewInputError(
+            "recovery context key file is unavailable or invalid"
+        ) from None
+    return RecoveryContextStore(
+        Path(directory),
+        key=key,
+        ttl_seconds=ttl_seconds,
+        now=now,
+    )

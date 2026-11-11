@@ -8,20 +8,26 @@ import importlib.metadata
 import json
 import os
 import re
+import subprocess
 import sys
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, Unpack
 
 import review_sensei.cli as engine_cli
-from review_sensei.baseline import admission_context_from_document
+from review_sensei.api_work import ACCOUNTING_VERSION, DEFAULT_API_REQUEST_LIMIT
+from review_sensei.baseline import (
+    admission_context_document,
+    admission_context_from_document,
+)
 from review_sensei.configuration import customization_directories
 from review_sensei.context import IncrementalReviewPlan, ReviewContextCacheKey
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
 from review_sensei.models import ReviewRequest, ReviewResult
 from review_sensei.outcomes import (
+    DEFAULT_RECOVERY_TTL_SECONDS,
     ResourceBudget,
     ResourceBudgetTracker,
     RunOutcome,
@@ -29,6 +35,11 @@ from review_sensei.outcomes import (
     load_recovery_artifact,
 )
 from review_sensei.providers.base import ReviewProvider
+from review_sensei.recovery_context import (
+    RecoveryRefusalError,
+    build_bundle_from_context_documents,
+    resolve_recovery_context_store,
+)
 from review_sensei.service import ReviewRun, ReviewService
 from review_sensei.session import SessionIdentity, SessionLedger
 from review_sensei.work_recovery import WorkRecoveryStore
@@ -66,6 +77,44 @@ class _ReviewRunOptions(TypedDict, total=False):
     expected_evidence_digest: str | None
     monotonic: Callable[[], float] | None
     sleeper: Callable[[float], None] | None
+
+
+def _resolve_cli_policy_commit(args: argparse.Namespace) -> str:
+    explicit = getattr(args, "policy_commit", None)
+    if explicit is not None:
+        if (
+            not isinstance(explicit, str)
+            or re.fullmatch(r"[a-f0-9]{40}", explicit) is None
+        ):
+            raise RecoveryRefusalError(
+                "truncated_or_corrupt_context: policy_commit must be a 40-char lowercase Git SHA",
+                refusal_code="truncated_or_corrupt_context",
+            )
+        return explicit
+    trusted_root = getattr(args, "trusted_context_root", None)
+    config_path = getattr(args, "config", None)
+    candidate_dir = (
+        Path(trusted_root)
+        if trusted_root is not None
+        else (Path(config_path).parent if config_path is not None else Path.cwd())
+    )
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(candidate_dir), "rev-parse", "--verify", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        resolved = completed.stdout.strip()
+        if re.fullmatch(r"[a-f0-9]{40}", resolved) is not None:
+            return resolved
+    raise RecoveryRefusalError(
+        "absent_context: recovery context store requires --policy-commit or a Git checkout HEAD",
+        refusal_code="absent_context",
+    )
 
 
 class _HostedProviderOptions(_ReviewRunOptions, total=False):
@@ -309,6 +358,16 @@ def _github_parser() -> argparse.ArgumentParser:
             "dispositions durable."
         ),
     )
+    review.add_argument("--recovery-context-dir", type=Path, default=None)
+    review.add_argument("--recovery-context-key-file", type=Path, default=None)
+    review.add_argument(
+        "--recovery-context-ttl-seconds",
+        type=int,
+        default=DEFAULT_RECOVERY_TTL_SECONDS,
+    )
+    review.add_argument("--policy-commit", type=str, default=None)
+    review.add_argument("--original-api-limit", type=int, default=None)
+    review.add_argument("--prior-consumed-requests", type=int, default=0)
     command = subparsers.add_parser(
         "command",
         help="Apply an authenticated @reviewsensei maintainer command to the session ledger",
@@ -622,7 +681,6 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             authorized_override,
             parse_maintainer_command,
         )
-        from review_sensei.session import SessionIdentity
 
         parsed = parse_maintainer_command(
             args.comment_body,
@@ -899,6 +957,24 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         operation_entry = (
             args.operation_entry or publication_configuration.github.operation_entry
         )
+        recovery_store = resolve_recovery_context_store(
+            getattr(args, "recovery_context_dir", None),
+            getattr(args, "recovery_context_key_file", None),
+            artifacts_policy=publication_configuration.github.artifacts,
+            ttl_seconds=getattr(
+                args, "recovery_context_ttl_seconds", DEFAULT_RECOVERY_TTL_SECONDS
+            ),
+        )
+        from review_sensei_github.publication_context_recovery import (
+            capture_recovery_context_bundle,
+            resolve_recovery_placement_mode,
+            verify_stored_recovery_context,
+        )
+
+        recovery_placement_mode = resolve_recovery_placement_mode(
+            publication_inventory=publication_inventory,
+            review_mode=convergence_policy.mode,
+        )
         from review_sensei.bounded_evidence import EvidenceReadBudget
 
         publication_budget = EvidenceReadBudget()
@@ -971,7 +1047,6 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 )
             from contextlib import nullcontext
 
-            from review_sensei.session import SessionIdentity
             from review_sensei_github.session_ledger import (
                 GitHubIssueCommentSessionLedger,
             )
@@ -1013,6 +1088,14 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                         publication_session_ledger,
                     )
 
+                    cli_original_limit = (
+                        args.original_api_limit
+                        if getattr(args, "original_api_limit", None) is not None
+                        else DEFAULT_API_REQUEST_LIMIT
+                    )
+                    cli_prior_consumed = (
+                        getattr(args, "prior_consumed_requests", 0) or 0
+                    )
                     reconstructed = reconstruct_publication_contexts(
                         source_root=args.trusted_context_root,
                         diff=diff,
@@ -1031,11 +1114,86 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                         base_sha=args.base_sha,
                         head_sha=args.head_sha,
                         policy=convergence_policy,
+                        recovery_store=recovery_store,
+                        policy_commit=(
+                            _resolve_cli_policy_commit(args)
+                            if recovery_store is not None
+                            else getattr(args, "policy_commit", None)
+                        ),
+                        base_ref=args.base_branch or "main",
+                        placement_mode=recovery_placement_mode,
+                        producer="github-publish-cli",
+                        current_run_id=2,
+                        attempt=2,
+                        original_api_limit=cli_original_limit,
+                        already_consumed_requests=cli_prior_consumed,
                     )
                     configuration_context = reconstructed.configuration
                     evidence_context = reconstructed.evidence
                     admission_baseline = reconstructed.baseline
                     admission_current_key = reconstructed.current_key
+                elif recovery_store is not None:
+                    if configuration_context is None or args.admission_context is None:
+                        raise RecoveryRefusalError(
+                            "absent_context: stored recovery context verification requires configuration and admission contexts",
+                            refusal_code="absent_context",
+                        )
+                    loaded_rec = recovery_ledger.load(
+                        SessionIdentity(
+                            args.repository,
+                            args.pull_request,
+                            repository_id=args.repository_id,
+                        )
+                    )
+                    if (
+                        loaded_rec.status not in {"ok", "migrated"}
+                        or loaded_rec.record is None
+                        or loaded_rec.record.transaction is None
+                    ):
+                        raise RecoveryRefusalError(
+                            "absent_context: original context ledger or transaction is unavailable",
+                            refusal_code="absent_context",
+                        )
+                    raw_admission_doc = engine_cli._load_context_document(
+                        args.admission_context, label="admission context"
+                    )
+                    rec_accounting_version = ACCOUNTING_VERSION
+                    if isinstance(loaded_rec.record.api_run_accounting, Mapping):
+                        raw_ver = loaded_rec.record.api_run_accounting.get(
+                            "version",
+                            loaded_rec.record.api_run_accounting.get("schema_version"),
+                        )
+                        if isinstance(raw_ver, str) and raw_ver.strip():
+                            rec_accounting_version = raw_ver
+                    expected_bundle = build_bundle_from_context_documents(
+                        transaction=loaded_rec.record.transaction,
+                        configuration_context=configuration_context,
+                        admission_context=raw_admission_doc,
+                        evidence_context=evidence_context,
+                        decision_policy_digest=publication_configuration.decision.digest(),
+                        diff_sha256=hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+                        policy_commit=_resolve_cli_policy_commit(args),
+                        base_ref=args.base_branch or "main",
+                        repository_id=args.repository_id,
+                        placement_mode=recovery_placement_mode,
+                        accounting_version=rec_accounting_version,
+                        producer="github-publish-cli",
+                        run_id=2,
+                        attempt=2,
+                    )
+                    verify_stored_recovery_context(
+                        recovery_store,
+                        expected_bundle=expected_bundle,
+                        current_run_id=2,
+                        original_api_limit=(
+                            args.original_api_limit
+                            if getattr(args, "original_api_limit", None) is not None
+                            else DEFAULT_API_REQUEST_LIMIT
+                        ),
+                        already_consumed_requests=(
+                            getattr(args, "prior_consumed_requests", 0) or 0
+                        ),
+                    )
                 if configuration_context is None or evidence_context is None:
                     raise ReviewInputError(
                         "retained result recovery requires trusted configuration and evidence contexts"
@@ -1099,7 +1257,6 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             acceptance_http = publication_http(http, publication_budget)
             if result.transaction is not None and configuration_context is not None:
                 from review_sensei.models import ReviewTransaction
-                from review_sensei.session import SessionIdentity
 
                 acceptance_ledger = session_ledger
                 if args.recover_retained or args.reconstruct_contexts:
@@ -1174,6 +1331,58 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             if comments_path not in http.primed_issue_comments:
                 http.primed_issue_comments[comments_path] = list(accepted_comments)
                 primed_comments_path = comments_path
+        if (
+            recovery_store is not None
+            and not args.recover_retained
+            and not args.reconstruct_contexts
+            and not args.recover_from
+        ):
+            if (
+                result.transaction is None
+                or configuration_context is None
+                or admission_current_key is None
+            ):
+                raise RecoveryRefusalError(
+                    "absent_context: recovery context capture requires transactional result, configuration context, and admission context",
+                    refusal_code="absent_context",
+                )
+            capture_accounting_version = ACCOUNTING_VERSION
+            if session_ledger is not None:
+                loaded_cap = session_ledger.load(
+                    SessionIdentity(
+                        args.repository,
+                        args.pull_request,
+                        repository_id=args.repository_id,
+                    )
+                )
+                if loaded_cap.record is not None and isinstance(
+                    loaded_cap.record.api_run_accounting, Mapping
+                ):
+                    raw_cap_ver = loaded_cap.record.api_run_accounting.get(
+                        "version",
+                        loaded_cap.record.api_run_accounting.get("schema_version"),
+                    )
+                    if isinstance(raw_cap_ver, str) and raw_cap_ver.strip():
+                        capture_accounting_version = raw_cap_ver
+            capture_recovery_context_bundle(
+                recovery_store,
+                transaction=result.transaction,
+                configuration_context=configuration_context,
+                admission_context=admission_context_document(
+                    admission_baseline, admission_current_key
+                ),
+                evidence_context=evidence_context,
+                decision_policy_digest=publication_configuration.decision.digest(),
+                diff=diff,
+                policy_commit=_resolve_cli_policy_commit(args),
+                base_ref=args.base_branch or "main",
+                repository_id=args.repository_id,
+                placement_mode=recovery_placement_mode,
+                accounting_version=capture_accounting_version,
+                producer="github-publish-cli",
+                run_id=1,
+                attempt=1,
+            )
         try:
             review_outcome = application.publish_review(
                 options=GitHubWriteOptions(
