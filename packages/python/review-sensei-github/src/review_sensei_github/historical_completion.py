@@ -430,3 +430,14 @@ def authenticate_historical_publication(
         key=lambda item: str(item["instance"]),
     )
     return _complete_selection(selection, effects, assessments)
+
+
+from .recovery_route_advisor import (  # noqa: E402
+    RecoveryClassification as RecoveryClassification,
+)
+from .recovery_route_advisor import (  # noqa: E402
+    classify_live_ledger_recovery as classify_live_ledger_recovery,
+)
+from .recovery_route_advisor import (  # noqa: E402
+    classify_recovery_state as classify_recovery_state,
+)
