@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from review_sensei.api_work import ApiExecutionOwner, ApiRunIdentity
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionIdentity
 
 from .reservation_recovery import ActionsReservationEvidence, _stamp
+
+BUSINESS_WRITER_JOBS: Final[tuple[str, ...]] = ("hosted", "local", "command")
 
 
 def claim_review_startup(
@@ -58,7 +60,7 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
     """
 
     def __init__(self, http, *, token: str, command_run_id: str, job: str = "hosted"):
-        if job not in {"hosted", "local", "command"}:
+        if job not in BUSINESS_WRITER_JOBS:
             raise ReviewInputError("review owner job is unsupported")
         super().__init__(http, token=token, command_run_id=command_run_id)
         self.job = job
@@ -120,9 +122,7 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             j
             for j in jobs
             if j.get("status") == "in_progress"
-            and any(
-                _writer_name(j.get("name"), n) for n in ("hosted", "local", "command")
-            )
+            and any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
         ]
         if (
             len(matching) != 1
@@ -325,6 +325,14 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         matching = [j for j in jobs if _writer_name(j.get("name"), predecessor.job)]
         if len(matching) != 1:
             raise ReviewInputError("API predecessor job is missing or ambiguous")
+        incomplete_writers = [
+            j
+            for j in jobs
+            if j.get("status") != "completed"
+            and any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
+        ]
+        if incomplete_writers:
+            raise ReviewInputError("API predecessor has not ceased")
         job = matching[0]
         conclusion = job.get("conclusion")
         if (
