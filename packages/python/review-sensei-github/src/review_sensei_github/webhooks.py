@@ -7,8 +7,8 @@ import hmac
 import json
 import os
 import re
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from review_sensei.api_work import ApiRunAccounting
@@ -30,6 +30,13 @@ from .source_comment_lifecycle import (
 
 if TYPE_CHECKING:
     from .api_run_requests import ApiRunRequestTransport
+    from .event_routing_contract import (
+        AcceptedOperationRecord,
+        ConvergenceDecision,
+        EventRoutingDecision,
+        LivePullRequestTarget,
+        RetainedSnapshotState,
+    )
     from .session_ledger import GitHubIssueCommentSessionLedger
 
 MAX_WEBHOOK_BODY_BYTES = 1024 * 1024
@@ -157,6 +164,22 @@ class VerifiedCommentLifecycleDelivery:
     duplicate_delivery_id: bool = False
     lifecycle_classification: SourceLifecycleClassification | None = None
     lifecycle_outcome: SessionRecord | ApiRunAccounting | None = None
+
+
+@dataclass(frozen=True)
+class VerifiedEventRouteDelivery:
+    """Validated signed webhook delivery with G01/G07/G13/G26/G28 routing and convergence."""
+
+    app_id: int
+    event: str
+    action: str
+    delivery_id: str
+    digest: str
+    repository: str | None
+    repository_id: int | None
+    duplicate_delivery_id: bool
+    routing: EventRoutingDecision
+    convergence: ConvergenceDecision | None = None
 
 
 class DeliveryLedger(Protocol):
@@ -540,6 +563,118 @@ class WebhookVerifier:
             duplicate_delivery_id=duplicate_delivery_id,
             lifecycle_classification=classification,
             lifecycle_outcome=outcome,
+        )
+
+    def verify_event_route(
+        self,
+        *,
+        body: bytes,
+        signature: str | None,
+        event: str,
+        delivery_id: str,
+        live_pull_request: Mapping[str, Any] | None = None,
+        retained_state: RetainedSnapshotState | None = None,
+        live_target: LivePullRequestTarget | None = None,
+        records: Sequence[AcceptedOperationRecord] = (),
+        was_queued_replaced: bool = False,
+        current_state_fingerprint: str | None = None,
+        max_no_progress_attempts: int = 2,
+        reject_merge_group: bool = False,
+    ) -> VerifiedEventRouteDelivery:
+        """Verify a signed GitHub webhook and evaluate G01/G07/G13/G26/G28 routing."""
+
+        from .event_routing_contract import (
+            evaluate_github_event,
+            reconcile_event_convergence,
+            resolve_reconciliation_owner,
+        )
+
+        self._verify_signed_envelope(
+            body=body,
+            signature=signature,
+            event=event,
+            delivery_id=delivery_id,
+        )
+        normalized_event = event.strip()
+        if reject_merge_group and normalized_event == "merge_group":
+            raise GitHubMergeGroupUnsupportedError(
+                "GitHub merge_group webhook event is unsupported"
+            )
+        payload = self._parse_json_object(body)
+        duplicate_delivery_id = self.ledger.is_known(
+            app_id=self.app_id,
+            delivery_id=delivery_id,
+        )
+        self.ledger.record(app_id=self.app_id, delivery_id=delivery_id)
+
+        raw_action = payload.get("action")
+        action = (
+            raw_action.strip()
+            if isinstance(raw_action, str) and raw_action.strip()
+            else ("manual" if normalized_event == "workflow_dispatch" else "")
+        )
+        repository_slug: str | None = None
+        repository_id: int | None = None
+        repository_obj = payload.get("repository")
+        if isinstance(repository_obj, dict):
+            full_name = repository_obj.get("full_name")
+            if isinstance(full_name, str) and REPOSITORY_SLUG_PATTERN.fullmatch(
+                full_name
+            ):
+                repository_slug = full_name
+            rid = repository_obj.get("id")
+            if not isinstance(rid, bool) and isinstance(rid, int) and rid > 0:
+                repository_id = rid
+
+        effective_live_pr = (
+            live_target.to_pull_mapping()
+            if (live_pull_request is None and live_target is not None)
+            else live_pull_request
+        )
+        routing = evaluate_github_event(
+            normalized_event,
+            payload,
+            delivery_id=delivery_id,
+            live_pull_request=effective_live_pr,
+            retained_state=retained_state,
+        )
+        convergence: ConvergenceDecision | None = None
+        if live_target is not None:
+            convergence = reconcile_event_convergence(
+                normalized_event,
+                payload,
+                live_target=live_target,
+                records=records,
+                delivery_id=delivery_id,
+                was_queued_replaced=was_queued_replaced,
+                current_state_fingerprint=current_state_fingerprint,
+                max_no_progress_attempts=max_no_progress_attempts,
+            )
+            if duplicate_delivery_id and convergence.schedules_new_inference:
+                convergence = replace(
+                    convergence,
+                    status="converged_reused",
+                    outcome_code="duplicate_delivery_reused",
+                    schedules_new_inference=False,
+                    schedules_native_reconciliation=False,
+                    reconciliation_owner=resolve_reconciliation_owner(
+                        routing, status="converged_reused"
+                    ),
+                )
+        digest = hashlib.sha256(
+            bytes(json.dumps(payload, sort_keys=True), "utf-8")
+        ).hexdigest()
+        return VerifiedEventRouteDelivery(
+            app_id=self.app_id,
+            event=normalized_event,
+            action=action,
+            delivery_id=delivery_id,
+            digest=digest,
+            repository=repository_slug,
+            repository_id=repository_id,
+            duplicate_delivery_id=duplicate_delivery_id,
+            routing=routing,
+            convergence=convergence,
         )
 
     def _signature_for(self, body: bytes) -> str:

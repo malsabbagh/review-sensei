@@ -37,6 +37,15 @@ from .api_run_requests import ApiRunRequestTransport
 from .application import GitHubApplication, GitHubWriteOptions
 from .comment_intent import verify_live_comment_source
 from .conversation import ConversationPublisher
+from .errors import GitHubMergeGroupUnsupportedError
+from .event_routing_contract import (
+    MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS,
+    RECONCILIATION_OWNERS,
+    AcceptedOperationRecord,
+    ConvergenceDecision,
+    LivePullRequestTarget,
+    reconcile_event_convergence,
+)
 from .learning_pr import LearningPRPublisher
 from .publication import ReviewPublisher, parse_finding_index
 from .review_run import ActionRunLedger, ReviewRun, bootstrap
@@ -192,6 +201,11 @@ def _cross_run_unstarted_rollover_guard(
 
 def event_source(args: Any, *, purpose: str) -> dict[str, object]:
     """The runner event selects a source; live Worker reads authenticate it."""
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    if event_name.strip() == "merge_group":
+        raise GitHubMergeGroupUnsupportedError(
+            "GitHub merge_group event is unsupported by action admission"
+        )
     path = Path(os.environ.get("GITHUB_EVENT_PATH", ""))
     with path.open("rb") as stream:
         raw = stream.read(1024 * 1024 + 1)
@@ -203,10 +217,106 @@ def event_source(args: Any, *, purpose: str) -> dict[str, object]:
         pull_request=args.pull_request,
         source_comment_id=args.source_comment_id,
         purpose=purpose,
-        event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
+        event_name=event_name,
         expected_body=getattr(args, "comment_body", None),
         expected_updated_at=getattr(args, "source_updated_at", None),
     )
+
+
+def evaluate_action_convergence_progress(
+    run: ReviewRun,
+    *,
+    purpose: str,
+    source: Mapping[str, Any],
+    comment_body: str = "",
+    records: Sequence[AcceptedOperationRecord] = (),
+    delivery_id: str | None = None,
+    was_queued_replaced: bool = False,
+    current_state_fingerprint: str | None = None,
+    max_no_progress_attempts: int = MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS,
+) -> ConvergenceDecision:
+    """Enforce G13 current-state reconciliation ownership and finite stop rule."""
+
+    kind = str(source.get("kind", "issue_comment"))
+    event_name = (
+        "pull_request_review_comment" if kind == "review_comment" else "issue_comment"
+    )
+    comment_id = source.get("id")
+    updated_at = str(source.get("updated_at", "1970-01-01T00:00:00Z"))
+    if type(run.identity.repository_id) is not int or run.identity.repository_id <= 0:
+        raise ReviewInputError(
+            "action convergence requires a positive integer repository_id"
+        )
+    live_target = LivePullRequestTarget(
+        repository_id=run.identity.repository_id,
+        pull_request_number=run.identity.pull_request,
+        base_sha=run.base_sha,
+        base_ref=run.base_branch or "main",
+        head_sha=run.head_sha,
+        head_ref="HEAD",
+    )
+    if event_name == "pull_request_review_comment":
+        payload: dict[str, Any] = {
+            "action": "created",
+            "pull_request": live_target.to_pull_mapping(),
+            "comment": {
+                "id": comment_id,
+                "body": comment_body,
+                "updated_at": updated_at,
+                "pull_request_url": (
+                    f"https://api.github.com/repos/{run.identity.repository}"
+                    f"/pulls/{run.identity.pull_request}"
+                ),
+                "author_association": "MEMBER",
+                "user": {"login": "authenticated-caller", "type": "User"},
+            },
+        }
+    else:
+        payload = {
+            "action": "created",
+            "issue": {
+                "number": run.identity.pull_request,
+                "pull_request": {
+                    "url": (
+                        f"https://api.github.com/repos/{run.identity.repository}"
+                        f"/pulls/{run.identity.pull_request}"
+                    )
+                },
+            },
+            "comment": {
+                "id": comment_id,
+                "body": comment_body,
+                "updated_at": updated_at,
+                "author_association": "MEMBER",
+                "user": {"login": "authenticated-caller", "type": "User"},
+            },
+        }
+    decision = reconcile_event_convergence(
+        event_name,
+        payload,
+        live_target=live_target,
+        records=records,
+        delivery_id=delivery_id,
+        was_queued_replaced=was_queued_replaced,
+        current_state_fingerprint=current_state_fingerprint,
+        max_no_progress_attempts=max_no_progress_attempts,
+    )
+    if decision.reconciliation_owner not in RECONCILIATION_OWNERS:
+        raise ReviewInputError("action reconciliation owner is invalid")
+    if decision.stopped_no_progress:
+        raise ReviewInputError(
+            "action reconciliation halted by finite no-progress stop rule"
+        )
+    if decision.status == "held_queued_replaced":
+        raise ReviewInputError(
+            f"queued {purpose} run was replaced before execution; "
+            f"recover via {decision.recovery_command}"
+        )
+    if decision.status == "held_uncertain_operation":
+        raise ReviewInputError(
+            "action reconciliation held due to uncertain prior dispatch"
+        )
+    return decision
 
 
 def reconcile_action_source_lifecycle(
@@ -570,6 +680,9 @@ def run_action(
     event_delivery: Mapping[str, Any] | None = None,
     has_pending_receipt: bool = False,
     unstarted_recovery: UnstartedCallerRecoveryGate | None = None,
+    convergence_records: Sequence[AcceptedOperationRecord] = (),
+    current_state_fingerprint: str | None = None,
+    was_queued_replaced: bool = False,
 ) -> int:
     parser = argparse.ArgumentParser(prog="review-sensei-github " + purpose + "-run")
     parser.add_argument("--policy-commit", required=True)
@@ -639,6 +752,16 @@ def run_action(
     if lifecycle is not None and lifecycle.route == "g32_unstarted_cancellation":
         print("Unstarted action canceled after source change")
         return 0
+    if was_queued_replaced or convergence_records:
+        evaluate_action_convergence_progress(
+            run,
+            purpose=purpose,
+            source=source,
+            comment_body=getattr(args, "comment_body", "") or "",
+            records=convergence_records,
+            was_queued_replaced=was_queued_replaced,
+            current_state_fingerprint=current_state_fingerprint,
+        )
     if purpose == "command":
         return execute_command(run, args)
     from .action_reply import execute_reply
