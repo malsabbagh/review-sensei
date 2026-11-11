@@ -53,11 +53,14 @@ record.
 | Scenario | Live Writes While Closed / Deleted | Ledger & Obligation Continuity | Failed-Attempt Allowance | Approval Reuse |
 | :--- | :--- | :--- | :--- | :--- |
 | Closed PR (`state != "open"`) | Blocked (`skipped_pr_state`, `reason="pr_closed"`) | Preserved on `(repository_id, pull_request)` | Unchanged | Blocked while closed |
-| Deleted head repository/ref (`head.repo is None`) | Fail-closed refusal (`review preflight head repository was invalid`) | Preserved on `(repository_id, pull_request)` | Unchanged | Blocked |
-| Reopened at **same** `(base_sha, head_sha)` | Admitted | Preserves all unresolved obligations | **Zero** fresh allowance minted | Reuses valid same-SHA publication (`already_published`, zero inference) only when obligations are satisfied |
-| Reopened or branch recreated at **changed** `head_sha` or `base_sha` | Admitted on new snapshot | Preserves unresolved baseline obligations for rebinding | Scoped to each `head_sha` | Prior-SHA approval invalidated; new snapshot requires verification |
-| Duplicate / reordered `reopened` / `synchronize` deliveries | Idempotent | Monotonic generation; no duplicate review emission | Unchanged | Idempotent (`already_published`) |
+| Deleted head repository or branch ref (`head.repo is None` or `branch_ref_exists=False`) | Fail-closed refusal on `head.repo is None`; `head_branch_deleted_blocking_writes` (`admits_live_writes=False`) when ref absent | Preserved on `(repository_id, pull_request)` | Unchanged | Blocked |
+| Reopened at **same** `(base_ref, base_sha, head_sha)` | Admitted | Preserves all unresolved obligations | **Zero** fresh allowance minted | Reuses valid same-SHA publication (`already_published`, zero inference) only when obligations are satisfied |
+| Reopened or branch recreated at **changed** `head_sha`, `base_sha`, or `base_ref` | Admitted on new snapshot | Preserves unresolved baseline obligations for rebinding | Scoped to each `head_sha` | Prior-SHA approval invalidated; new snapshot requires verification |
+| Duplicate or out-of-order `reopened` / `closed` / `synchronize` deliveries | Live authenticated `GET /pulls/{n}` state governs; stale/closed events fail closed pre-inference | Monotonic generation; no duplicate review emission | Unchanged | Idempotent (`already_published`) when live state matches |
+| Late review / approval / mention-reply effects after close or changed-SHA reopen | Blocked (`skipped_pr_state` while closed; `skipped_stale_head` after reopen on `H2`) | Prior confirmed dispatches are never claimed revoked; obligations remain intact | Unchanged | Spurious `APPROVE` withheld |
 | New PR `#N+1` on recreated branch name | Admitted under PR `#N+1` | Completely isolated from PR `#N` | Fresh per `(repository_id, N+1)` | Never inherits PR `#N` markers |
+
+> **Provenance boundary (`G11`):** Source qualification in `tests/test_reopen_branch_lifecycle_g05.py` proves deterministic behavior across integrated `review_sensei` and `review_sensei_github` entry points. Installed consumer workflow pins, live webhook queueing order, and deployed version telemetry are tracked separately under `G11` and are never inferred from source tests alone.
 
 ---
 

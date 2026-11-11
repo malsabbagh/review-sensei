@@ -44,9 +44,15 @@ type-checked lifecycle decision module and wire live write gates across
    - Bind session state exclusively to `SessionIdentity(repository_id, pull_request)`.
    - Centralize pre-mutation live PR admission in `evaluate_live_pr_write_gate`
      and `evaluate_finalizer_pr_gate`, enforcing exact-boolean `draft` checks,
-     `state == "open"`, non-null same-repository `head.repo` / `base.repo`, and
-     exact `(base_branch, base_sha, head_sha)` matching without adding extra
+     `state == "open"`, non-null same-repository `head.repo` / `base.repo`,
+     branch-ref liveness (`branch_ref_exists`), and exact
+     `(base_branch, base_sha, head_sha)` matching without adding extra
      happy-path HTTP requests.
+   - Fence delayed review, approval-finalizer, and mention-reply effects
+     arriving after close (`skipped_pr_state`) or after changed-SHA reopen
+     (`skipped_stale_head`), and evaluate out-of-order `reopened` / `closed` /
+     `synchronize` deliveries against live authenticated GitHub PR state rather
+     than stale event snapshots.
    - Preserve prior unresolved obligations and head-scoped `failed_attempts`
      across same-PR close/reopen, minting zero fresh failed-attempt allowance on
      same-SHA reopen while isolating distinct PR numbers on recreated branches.
@@ -119,11 +125,14 @@ shared distribution manifests remain unchanged.
 
 ## Validation
 
-- `tests/test_reopen_branch_lifecycle_g05.py`: 8 end-to-end and unit tests
-  covering close/reopen, deleted/recreated branches, cold-start and base-ref
-  retarget matrix cells, PR `#7` vs. PR `#8` isolation, failed-attempt
-  conservation, duplicate/reordered deliveries, and live publisher/finalizer
-  write gates.
+- `tests/test_reopen_branch_lifecycle_g05.py`: 10 end-to-end and unit tests
+  covering close/reopen, deleted/recreated branches (`head.repo=None` and
+  `branch_ref_exists=False`), cold-start and base-ref retarget matrix cells,
+  PR `#7` vs. PR `#8` isolation, failed-attempt conservation, duplicate and
+  out-of-order `reopened`/`closed`/`synchronize` deliveries, delayed review /
+  approval / mention-reply effects after close and changed-SHA reopen, and live
+  publisher/finalizer write gates (live consumer deployment telemetry remains
+  tracked separately under `G11`).
 - `tests/test_force_push_ancestry_g06.py`: 7 end-to-end, reconciliation-matrix,
   and real-Git ancestry tests covering commit-graph and combined head+base-ref
   retarget transitions, `H1 -> H2 -> H1` obligation preservation and
