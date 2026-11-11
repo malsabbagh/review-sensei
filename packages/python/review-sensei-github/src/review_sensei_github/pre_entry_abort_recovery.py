@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -42,6 +43,7 @@ from review_sensei.session import SessionIdentity, SessionRecord
 from . import controlled_restart
 from .publication import (
     APPROVAL_MARKER_PREFIX,
+    MAX_PAGINATION_PAGES,
     REVIEW_MARKER_PREFIX,
     finding_publication_scope,
     review_identity_marker,
@@ -50,6 +52,21 @@ from .session_ledger import parse_session_comment
 
 _HEX40 = re.compile(r"[a-f0-9]{40}")
 _HEX64 = re.compile(r"[a-f0-9]{64}")
+_PAGE_SIZE = 100
+_MAX_LATE_EFFECTS_WALL_SECONDS = 30.0
+_TERMINAL_JOB_CONCLUSIONS = frozenset(
+    {
+        "action_required",
+        "cancelled",
+        "failure",
+        "neutral",
+        "skipped",
+        "stale",
+        "startup_failure",
+        "success",
+        "timed_out",
+    }
+)
 
 NO_TRANSACTION_STATES = frozenset(
     {
@@ -267,7 +284,7 @@ def _count_prior_obligations(record: SessionRecord) -> int:
 
                     decoded_baseline = baseline_from_history_document(dict(baseline))
                     counts.append(len(decoded_baseline.findings))
-                except Exception:
+                except (ReviewInputError, KeyError, TypeError, ValueError):
                     pass
     queue = record.assessment_queue
     if isinstance(queue, Mapping):
@@ -343,15 +360,28 @@ def _validate_analysis_abort_receipt(
     return (len(failures) == 0), abort_tx, tuple(failures)
 
 
-def verify_reenroll_forbidden(record: SessionRecord) -> None:
-    """Reject unauthorized `reenroll` or fresh-enrollment reset on enrolled state."""
+def verify_reenroll_forbidden(record: SessionRecord) -> bool:
+    """Reject unauthorized `reenroll` or fresh-enrollment reset on enrolled state.
+
+    Returns `False` strictly for an initial unenrolled session record (zero
+    generation, no API accounting, no transaction, and no reservation) where
+    initial enrollment is still permitted; raises `ReviewInputError` whenever
+    any enrolled state or lineage already exists.
+    """
     if not isinstance(record, SessionRecord):
         raise ReviewInputError("session record is required")
-    if record.api_run_accounting is not None:
+    if (
+        record.api_run_accounting is not None
+        or record.generation > 0
+        or record.transaction is not None
+        or record.reservation_id is not None
+        or record.reserved_slot is not None
+    ):
         raise ReviewInputError(
             "fresh reenroll/reset is forbidden on an enrolled API-accounted PR; "
             "recover via pre-entry abort rollover or designated controlled serialized restart"
         )
+    return False
 
 
 def qualify_no_transaction_abort(
@@ -770,6 +800,16 @@ def _probe_owner_ceased(
     old: ApiRunAccounting,
     actions_token: str | None,
 ) -> bool:
+    """Verify whether the predecessor Actions run attempt has ceased executing.
+
+    For G29 pre-entry aborts, non-entry proof comes from the authenticated
+    `analysis_abort` receipt rather than workflow exit status—aborted or
+    cancelled runs legitimately exit with `failure` or `cancelled`. Any
+    recognized terminal conclusion (`_TERMINAL_JOB_CONCLUSIONS`) paired with
+    `status == "completed"` across every paginated job in the target attempt
+    proves runner execution has ceased; incomplete, truncated, or unrecognized
+    job pages fail closed (`False`).
+    """
     http = getattr(ledger, "http", None)
     token = actions_token or getattr(ledger, "token", None)
     if http is not None and isinstance(token, str) and token.strip():
@@ -780,48 +820,81 @@ def _probe_owner_ceased(
         if status == 200 and isinstance(run_payload, dict):
             repo = run_payload.get("repository")
             attempt = run_payload.get("run_attempt")
+            run_conclusion = run_payload.get("conclusion")
             if (
                 run_payload.get("id") == old.identity.run_id
                 and isinstance(repo, dict)
                 and repo.get("id") == identity.repository_id
                 and repo.get("full_name") == identity.repository
                 and run_payload.get("status") == "completed"
+                and (
+                    run_conclusion is None
+                    or run_conclusion in _TERMINAL_JOB_CONCLUSIONS
+                )
                 and isinstance(attempt, int)
                 and not isinstance(attempt, bool)
                 and attempt >= old.owner.run_attempt
             ):
-                jobs_path = http.repository_path(
-                    identity.repository,
-                    f"/actions/runs/{old.identity.run_id}/attempts/{old.owner.run_attempt}/jobs?per_page=100&page=1",
-                )
-                j_status, j_payload = http.request("GET", jobs_path, token=token)
-                if j_status == 200 and isinstance(j_payload, dict):
-                    jobs = j_payload.get("jobs")
+                all_jobs: list[dict[str, Any]] = []
+                seen_job_ids: set[int] = set()
+                expected_total: int | None = None
+                reached_end = False
+                for page in range(1, MAX_PAGINATION_PAGES + 1):
+                    jobs_path = http.repository_path(
+                        identity.repository,
+                        f"/actions/runs/{old.identity.run_id}/attempts/"
+                        f"{old.owner.run_attempt}/jobs?per_page={_PAGE_SIZE}&page={page}",
+                    )
+                    j_status, j_payload = http.request("GET", jobs_path, token=token)
+                    if j_status != 200 or not isinstance(j_payload, dict):
+                        return False
+                    page_jobs = j_payload.get("jobs")
                     total_count = j_payload.get("total_count")
-                    if (
-                        isinstance(jobs, list)
-                        and (
-                            total_count is None
+                    if not isinstance(page_jobs, list) or len(page_jobs) > _PAGE_SIZE:
+                        return False
+                    if total_count is not None:
+                        if (
+                            type(total_count) is not int
+                            or total_count < 0
                             or (
-                                isinstance(total_count, int)
-                                and not isinstance(total_count, bool)
-                                and total_count == len(jobs)
+                                expected_total is not None
+                                and total_count != expected_total
                             )
-                        )
-                        and all(
-                            isinstance(j, dict) and j.get("status") == "completed"
-                            for j in jobs
-                        )
-                    ):
-                        return True
-                return False
+                        ):
+                            return False
+                        expected_total = total_count
+                    for job in page_jobs:
+                        if not isinstance(job, dict):
+                            return False
+                        jid = job.get("id")
+                        if type(jid) is int:
+                            if jid in seen_job_ids:
+                                return False
+                            seen_job_ids.add(jid)
+                        all_jobs.append(job)
+                    if len(page_jobs) < _PAGE_SIZE:
+                        reached_end = True
+                        break
+                if not reached_end:
+                    return False
+                if expected_total is not None and expected_total != len(all_jobs):
+                    return False
+                return all(
+                    j.get("status") == "completed"
+                    and (
+                        j.get("conclusion") is None
+                        or j.get("conclusion") in _TERMINAL_JOB_CONCLUSIONS
+                    )
+                    for j in all_jobs
+                )
+        return False
     run_reader = getattr(ledger, "_run_reader", None)
     ceased_fn = getattr(run_reader, "ceased_owner", None)
     if callable(ceased_fn):
         try:
             ceased_fn(identity, old.identity, old.owner)
             return True
-        except Exception:
+        except ReviewInputError:
             return False
     return False
 
@@ -831,8 +904,17 @@ def _detect_late_native_effects(
     identity: SessionIdentity,
     record: SessionRecord,
     old: ApiRunAccounting,
+    *,
+    max_wall_seconds: float = _MAX_LATE_EFFECTS_WALL_SECONDS,
 ) -> bool:
-    """Detect whether ReviewSensei reviews or threads exist for an aborted scope."""
+    """Detect whether ReviewSensei reviews or threads exist for an aborted scope.
+
+    Paginates both REST `/pulls/{pr}/reviews` and GraphQL `reviewThreads` up to
+    `MAX_PAGINATION_PAGES` under a bounded wall-clock budget. Any unavailable,
+    malformed, timed-out, or truncated pagination fails closed (`True`, treating
+    late native effects as potentially present) so rollover is never granted on
+    incomplete evidence.
+    """
     abort_head: str | None = None
     if isinstance(old.analysis_abort, Mapping):
         raw_tx = old.analysis_abort.get("transaction")
@@ -851,22 +933,36 @@ def _detect_late_native_effects(
     ):
         return False
 
-    reviews_path = http.repository_path(
-        identity.repository,
-        f"/pulls/{identity.pull_request}/reviews?per_page=100&page=1",
-    )
-    r_status, reviews = http.request("GET", reviews_path, token=token)
-    if r_status == 200 and isinstance(reviews, list):
-        expected_prefix = (
-            review_identity_marker(
-                repository_id=identity.repository_id,
-                pull_request=identity.pull_request,
-                head_sha=abort_head,
-            )
-            if abort_head is not None
-            else f"{REVIEW_MARKER_PREFIX} repo={identity.repository_id} pr={identity.pull_request} "
+    deadline = time.monotonic() + max(0.1, float(max_wall_seconds))
+    expected_prefix = (
+        review_identity_marker(
+            repository_id=identity.repository_id,
+            pull_request=identity.pull_request,
+            head_sha=abort_head,
         )
-        approval_prefix = f"{APPROVAL_MARKER_PREFIX} repo={identity.repository_id} pr={identity.pull_request} "
+        if abort_head is not None
+        else f"{REVIEW_MARKER_PREFIX} repo={identity.repository_id} pr={identity.pull_request} "
+    )
+    approval_prefix = (
+        f"{APPROVAL_MARKER_PREFIX} repo={identity.repository_id} "
+        f"pr={identity.pull_request} "
+    )
+
+    reviews_complete = False
+    for page in range(1, MAX_PAGINATION_PAGES + 1):
+        if time.monotonic() > deadline:
+            return True
+        reviews_path = http.repository_path(
+            identity.repository,
+            f"/pulls/{identity.pull_request}/reviews?per_page={_PAGE_SIZE}&page={page}",
+        )
+        r_status, reviews = http.request("GET", reviews_path, token=token)
+        if (
+            r_status != 200
+            or not isinstance(reviews, list)
+            or len(reviews) > _PAGE_SIZE
+        ):
+            return True
         for item in reviews:
             if not isinstance(item, dict):
                 continue
@@ -885,63 +981,123 @@ def _detect_late_native_effects(
             ):
                 if abort_head is None or f"head={abort_head}" in body:
                     return True
+        if len(reviews) < _PAGE_SIZE:
+            reviews_complete = True
+            break
+    if not reviews_complete:
+        return True
 
     owner, _, name = identity.repository.partition("/")
-    gql_status, gql_payload = http.request(
-        "POST",
-        "/graphql",
-        body={
-            "query": (
-                "query LateAbortEffects($owner: String!, $name: String!, $number: Int!, $first: Int!) { "
-                "repository(owner: $owner, name: $name) { pullRequest(number: $number) { "
-                "reviewThreads(first: $first) { nodes { id isResolved comments(first: 1) { nodes { body } } } } "
-                "} } }"
-            ),
-            "variables": {
-                "owner": owner,
-                "name": name,
-                "number": identity.pull_request,
-                "first": 100,
+    after_cursor: str | None = None
+    seen_cursors: set[str] = set()
+    threads_complete = False
+    for _page in range(MAX_PAGINATION_PAGES):
+        if time.monotonic() > deadline:
+            return True
+        gql_status, gql_payload = http.request(
+            "POST",
+            "/graphql",
+            body={
+                "query": (
+                    "query LateAbortEffects($owner: String!, $name: String!, "
+                    "$number: Int!, $first: Int!, $after: String) { "
+                    "repository(owner: $owner, name: $name) { pullRequest(number: $number) { "
+                    "reviewThreads(first: $first, after: $after) { "
+                    "pageInfo { hasNextPage endCursor } "
+                    "nodes { id isResolved comments(first: 1) { nodes { body } } } "
+                    "} } } }"
+                ),
+                "variables": {
+                    "owner": owner,
+                    "name": name,
+                    "number": identity.pull_request,
+                    "first": _PAGE_SIZE,
+                    "after": after_cursor,
+                },
             },
-        },
-        token=token,
-    )
-    if gql_status == 200 and isinstance(gql_payload, dict):
-        threads = (
-            gql_payload.get("data", {})
-            .get("repository", {})
-            .get("pullRequest", {})
-            .get("reviewThreads", {})
-            .get("nodes")
+            token=token,
         )
-        if isinstance(threads, list):
-            for thread in threads:
-                if not isinstance(thread, dict):
-                    continue
-                nodes = thread.get("comments", {}).get("nodes")
-                if not isinstance(nodes, list) or not nodes:
-                    continue
-                first_body = (
-                    nodes[0].get("body") if isinstance(nodes[0], dict) else None
-                )
-                if not isinstance(first_body, str):
-                    continue
-                f_scope = finding_publication_scope(first_body)
-                if f_scope is not None:
-                    repo_id, pr, head, _base, _blocking, _human = f_scope
-                    if (repo_id, pr) == (
-                        identity.repository_id,
-                        identity.pull_request,
+        if (
+            gql_status != 200
+            or not isinstance(gql_payload, dict)
+            or gql_payload.get("errors")
+        ):
+            return True
+        data = gql_payload.get("data")
+        repo_node = data.get("repository") if isinstance(data, dict) else None
+        pr_node = repo_node.get("pullRequest") if isinstance(repo_node, dict) else None
+        thread_conn = (
+            pr_node.get("reviewThreads") if isinstance(pr_node, dict) else None
+        )
+        if not isinstance(thread_conn, dict):
+            return True
+        threads = thread_conn.get("nodes")
+        page_info = thread_conn.get("pageInfo")
+        if not isinstance(threads, list) or not isinstance(page_info, dict):
+            return True
+        has_next = page_info.get("hasNextPage")
+        end_cursor = page_info.get("endCursor")
+        if type(has_next) is not bool:
+            return True
+        for thread in threads:
+            if not isinstance(thread, dict):
+                continue
+            nodes = thread.get("comments", {}).get("nodes")
+            if not isinstance(nodes, list) or not nodes:
+                continue
+            first_body = nodes[0].get("body") if isinstance(nodes[0], dict) else None
+            if not isinstance(first_body, str):
+                continue
+            f_scope = finding_publication_scope(first_body)
+            if f_scope is not None:
+                repo_id, pr, head, _base, _blocking, _human = f_scope
+                if (repo_id, pr) == (
+                    identity.repository_id,
+                    identity.pull_request,
+                ):
+                    if abort_head is not None and head == abort_head:
+                        return True
+                    if (
+                        abort_head is None
+                        and record.transaction is None
+                        and old.terminal_transaction is None
                     ):
-                        if abort_head is not None and head == abort_head:
-                            return True
-                        if (
-                            abort_head is None
-                            and record.transaction is None
-                            and old.terminal_transaction is None
-                        ):
-                            return True
+                        return True
+        if not has_next:
+            threads_complete = True
+            break
+        if (
+            not isinstance(end_cursor, str)
+            or not end_cursor
+            or end_cursor in seen_cursors
+        ):
+            return True
+        seen_cursors.add(end_cursor)
+        after_cursor = end_cursor
+    if not threads_complete:
+        return True
     return False
+
+
+def _author_matches_configured_bot(author: Any, ledger: Any) -> bool:
+    """Verify session comment author is a Bot matching configured ReviewSensei identity."""
+    if not isinstance(author, Mapping) or author.get("type") != "Bot":
+        return False
+    app_slug = getattr(ledger, "app_slug", None)
+    if isinstance(app_slug, str) and app_slug.strip():
+        base_slug = app_slug.strip().casefold().removesuffix("[bot]")
+        login = author.get("login")
+        if not isinstance(login, str) or login.casefold() not in {
+            base_slug,
+            f"{base_slug}[bot]",
+        }:
+            return False
+    expected_author_id = getattr(ledger, "_evidence_author_id", None)
+    if type(expected_author_id) is int and expected_author_id > 0:
+        author_id = author.get("id")
+        if author_id != expected_author_id:
+            return False
+    return True
 
 
 def inspect_live_no_transaction_predecessor(
@@ -962,26 +1118,43 @@ def inspect_live_no_transaction_predecessor(
     if http is None or not isinstance(token, str) or not token.strip():
         raise ReviewInputError("live no-transaction inspection requires an HTTP ledger")
 
-    comments_path = http.repository_path(
-        identity.repository,
-        f"/issues/{identity.pull_request}/comments?per_page=100&page=1",
-    )
-    status, comments = http.request("GET", comments_path, token=token)
-    if status != 200 or not isinstance(comments, list):
-        raise ReviewInputError(
-            "unable to read issue comments for no-transaction inspection"
-        )
-
     matched_comments: list[tuple[dict[str, Any], SessionRecord]] = []
-    for item in comments:
-        if not isinstance(item, dict) or not isinstance(item.get("body"), str):
-            continue
-        author = item.get("user")
-        if isinstance(author, dict) and author.get("type") != "Bot":
-            continue
-        parsed = parse_session_comment(item["body"], identity=identity)
-        if parsed is not None:
-            matched_comments.append((item, parsed))
+    seen_comment_ids: set[int] = set()
+    comments_complete = False
+    for page in range(1, MAX_PAGINATION_PAGES + 1):
+        comments_path = http.repository_path(
+            identity.repository,
+            f"/issues/{identity.pull_request}/comments?per_page={_PAGE_SIZE}&page={page}",
+        )
+        status, comments = http.request("GET", comments_path, token=token)
+        if (
+            status != 200
+            or not isinstance(comments, list)
+            or len(comments) > _PAGE_SIZE
+        ):
+            raise ReviewInputError(
+                "unable to read issue comments for no-transaction inspection"
+            )
+        for item in comments:
+            if not isinstance(item, dict) or not isinstance(item.get("body"), str):
+                continue
+            cid = item.get("id")
+            if type(cid) is int and cid > 0:
+                if cid in seen_comment_ids:
+                    continue
+                seen_comment_ids.add(cid)
+            if not _author_matches_configured_bot(item.get("user"), ledger):
+                continue
+            parsed = parse_session_comment(item["body"], identity=identity)
+            if parsed is not None:
+                matched_comments.append((item, parsed))
+        if len(comments) < _PAGE_SIZE:
+            comments_complete = True
+            break
+    if not comments_complete:
+        raise ReviewInputError(
+            "issue comment pagination exceeded safety bound during no-transaction inspection"
+        )
     if not matched_comments:
         raise ReviewInputError("no enrolled session comment found on pull request")
     if len(matched_comments) > 1:

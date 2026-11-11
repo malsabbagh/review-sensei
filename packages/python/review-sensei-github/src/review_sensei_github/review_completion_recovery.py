@@ -621,21 +621,21 @@ def _confirm_native_effects(
     }
 
 
+# Backward-compatible advisory re-exports (`authority=False`).
 from .recovery_route_advisor import (  # noqa: E402
-    MISSING_WITNESSES as MISSING_WITNESSES,
+    MISSING_WITNESSES,
+    RECOVERY_STATES,
+    SUPPORTED_RECOVERY_ROUTES,
+    RecoveryClassification,
+    classify_live_ledger_recovery,
+    classify_recovery_state,
 )
-from .recovery_route_advisor import (  # noqa: E402
-    RECOVERY_STATES as RECOVERY_STATES,
-)
-from .recovery_route_advisor import (  # noqa: E402
-    SUPPORTED_RECOVERY_ROUTES as SUPPORTED_RECOVERY_ROUTES,
-)
-from .recovery_route_advisor import (  # noqa: E402
-    RecoveryClassification as RecoveryClassification,
-)
-from .recovery_route_advisor import (  # noqa: E402
-    classify_live_ledger_recovery as classify_live_ledger_recovery,
-)
-from .recovery_route_advisor import (  # noqa: E402
-    classify_recovery_state as classify_recovery_state,
-)
+
+__all__ = [
+    "MISSING_WITNESSES",
+    "RECOVERY_STATES",
+    "SUPPORTED_RECOVERY_ROUTES",
+    "RecoveryClassification",
+    "classify_live_ledger_recovery",
+    "classify_recovery_state",
+]

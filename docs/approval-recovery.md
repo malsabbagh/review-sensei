@@ -334,40 +334,47 @@ selected ([ADR 0133](adr/0133-historical-review-recovery-and-nonterminal-boundar
 
 - **Historical recovery matrix (`recovery_route_advisor`, G03):** Every session
   record and completion witness resolves to a closed state code and bounded
-  route (`already_settled`, `verify_finalization_replay`,
-  `review_remaining_text_window`, `same_run_attempt2_retained_replay`,
-  `quarantine_published_tail`, `quarantine_prepublication_isolation`, or
-  `controlled_serialized_restart`). Missing or unconfirmed completion witnesses
-  (`CompletionState.UNKNOWN` or `UNCONFIRMED`) fail closed and withhold terminal
-  authority until live native review, check, and thread state are reconciled.
-  Route descriptors carry `authority=False` and never waive ledger or token gates.
+  route (`ordinary_rollover`, `automatic_historical_completion`,
+  `same_run_attempt2_retained_replay`, `pre_entry_abort_rollover`,
+  `pending_reassessment_continuation`, `targeted_human_disposition`,
+  `quarantine_published_tail_isolation`, `quarantine_prepublication_isolation`,
+  or `controlled_serialized_restart`). Missing or unconfirmed completion
+  witnesses (`CompletionState.UNKNOWN` or `UNCONFIRMED`) fail closed and withhold
+  terminal authority until live native review, check, and thread state are
+  reconciled. Route descriptors carry `authority=False` and never waive ledger
+  or token gates.
 - **Pre-entry abort vs provider-entered holds (`pre_entry_abort_recovery`, G29):**
-  A `phase=no-transaction` abort qualifies as `confirmed_non_entry_zero_remote_effects`
-  only when no session reservation, transaction, provider dispatch, or uncertain
-  remote write occurred (`confirmed == 0`, `uncertain == 0`,
-  `reserved_undispatched == 0`). Any run that entered provider execution, held a
-  live reservation, or left an uncertain request stays held under
-  `provider_entered_unconfirmed_abort_hold` or
-  `uncertain_remote_mutation_abort_hold`, retaining its full non-startup caller
-  liability upper bound into `controlled-restart-registry-v1`.
+  A `phase=no-transaction` abort qualifies as `qualified_pre_entry_abort`
+  (`pre_entry_abort_rollover`) only when an authenticated `analysis_abort`
+  receipt, ceased owner, confirmed reservation release, clean caller dispatch
+  (`uncertain == 0`), zero provider entry, and absence of late native effects
+  are proven. Any run that entered provider execution, held a live reservation,
+  left an uncertain request, or lacks an abort receipt stays held under
+  `no_transaction_provider_entered`, `no_transaction_active_reservation`,
+  `no_transaction_unknown_dispatch`, or `no_transaction_unconfirmed_predecessor`,
+  retaining its full non-startup caller liability upper bound into
+  `controlled-restart-registry-v1`.
 - **Zero-decision human reassessment vs failed finalizer (`pending_reassessment_recovery`, G30):**
-  A maintainer explanation with zero explicit disposition tokens (`decision_count=0`)
-  persists a durable `PendingAssessmentReceipt` bound to the exact comment ID,
-  actor, body digest, and head SHA. Recovery distinguishes unfinished
-  reassessment (`finalizer_entered=False`, replayable via the retained receipt
-  on the unchanged head) from a failed finalizer after reassessment completed
-  (`finalizer_entered=True`, recoverable via `verify` without repeating model
-  inference). Duplicate receipt replay, changed head/base, and repeated
-  zero-delta explanations beyond `NO_PROGRESS_ZERO_DECISION_LIMIT` fail closed.
+  A maintainer explanation with zero cleared findings (`zero_decisions_recorded=True`)
+  persists durable `pending_reply_pages` receipts bound to the exact comment ID,
+  actor, body digest, and head SHA. Recovery distinguishes
+  `unfinished_zero_decision_assessment` (`finalizer_entered=False`) from
+  `failed_finalizer_after_reassessment` (`finalizer_entered=True`, including
+  after `override`/`accept-risk` pending-set reductions, recoverable via `verify`
+  without repeating model inference). Duplicate receipt replay, changed head/base,
+  and repeated zero-delta explanations reaching `NO_PROGRESS_ZERO_DECISION_LIMIT`
+  fail closed.
 - **Nonterminal publication overflow and response-loss controls (`publication_overflow_recovery`, G31):**
   Prepublication body-limit overflows (such as TaskAlong `#41` under non-`c7`
   executors) keep the retained `ReviewResult` and `ReviewConvergencePolicy`
   digests immutable, preserve the `65,536`-byte review-body ceiling and `512`-call
-  caller allowance without enlargement, and never auto-enroll non-`c7` executors
-  into `body-limit-prepublication-v1`. Same-head replay compacts only the
-  non-authoritative narrative via `ConfirmedNarrativeArchive` while preserving
-  every finding index entry, prose explanation, and eligibility marker.
-  Confirmed failure-before-write (`confirmed_failure_before_write=True`) remains
-  strictly separated from lost-response states (`response_loss_unobserved_remote_hold`
-  and `response_loss_echo_observed_reconcilable`), which reconcile existing
-  native reviews before permitting any write.
+  caller allowance without enlargement, require `archive_excerpt_fits_ceiling`,
+  and never auto-enroll non-`c7` executors into `body-limit-prepublication-v1`.
+  Same-head replay compacts only the non-authoritative narrative via
+  `ConfirmedNarrativeArchive` while preserving every finding index entry, prose
+  explanation, and eligibility marker. Confirmed failure-before-write
+  (`confirmed_failure_before_write=True`) remains strictly separated from
+  lost-response states (`response_loss_unobserved_remote_hold` and
+  `response_loss_echo_observed_reconcilable`), which route to
+  `reconcile_observed_exact_review` or `reconcile_observed_review_hold` and
+  refuse blind restart whenever an exact App review echo already exists.

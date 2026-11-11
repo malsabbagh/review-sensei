@@ -1187,17 +1187,17 @@ def classify_recovery_state(
         if executor_status == "active_or_unconfirmed":
             missing_failed.append("predecessor_owner_cessation")
 
-        can_prepub_quarantine = (
+        quarantine_structural_ok = (
             head_relation == "different_head"
             and old.owner.run_attempt == 1
             and old.owner.generation == 0
             and old.owner.job in {"hosted", "local"}
-            and not record.operator_paused
             and not explicit_rescan
             and record.quarantine_lineage is None
             and dispatch_status == "known_clean"
             and retained_context_available
         )
+        can_prepub_quarantine = quarantine_structural_ok and not record.operator_paused
         if can_prepub_quarantine:
             return RecoveryClassification(
                 state_code="publication_failed_isolation_required",
@@ -1221,7 +1221,7 @@ def classify_recovery_state(
             )
         fallbacks_failed: tuple[str, ...] = (
             ("quarantine_prepublication_isolation",)
-            if head_relation == "different_head" and record.quarantine_lineage is None
+            if quarantine_structural_ok and record.operator_paused
             else ()
         )
         return RecoveryClassification(
@@ -1308,9 +1308,17 @@ def _probe_executor_status_readonly(
     owner: ApiExecutionOwner,
     tx_head_sha: str | None,
 ) -> str:
-    probe_id = str(run_id + 1)
-    actions = ApiRunActionsEvidence(
-        ro_http, token=actions_token, command_run_id=probe_id, job=owner.job
+    """Inspect predecessor Actions run cessation and executor contract read-only.
+
+    Uses a single `ApiRunActionsEvidence` anchored to `str(run_id)` (avoiding
+    any synthetic `command_run_id` offset) and separates job-level owner
+    cessation (`ceased`) from failed job exit (`failed`) and uncatalogued
+    workflow source (`unrecognized`).
+    """
+    if type(run_id) is not int or run_id < 1:
+        return "active_or_unconfirmed"
+    run_reader = ApiRunActionsEvidence(
+        ro_http, token=actions_token, command_run_id=str(run_id), job=owner.job
     )
     if (
         tx_head_sha is not None
@@ -1319,34 +1327,52 @@ def _probe_executor_status_readonly(
         and owner.job in {"hosted", "local"}
     ):
         try:
-            actions.qualified_publication_cessation(
+            run_reader.qualified_publication_cessation(
                 identity, run_id, owner, head_sha=tx_head_sha
             )
             return "qualified_success"
         except ReviewInputError:
             pass
-    run_reader = ApiRunActionsEvidence(
-        ro_http, token=actions_token, command_run_id=str(run_id), job=owner.job
-    )
+
     try:
-        _rid, _job_id, _stamp, conclusion = actions.ceased_run_owner(
-            identity, run_id, owner
-        )
+        _job_id, _stamp, job_conclusion = run_reader.ceased_owner(identity, owner)
     except ReviewInputError:
-        try:
-            _job_id, _stamp, conclusion = run_reader.ceased_owner(identity, owner)
-        except ReviewInputError:
-            return "active_or_unconfirmed"
-        return "ceased" if conclusion == "success" else "failed"
+        return "active_or_unconfirmed"
+
+    if job_conclusion != "success":
+        return "failed"
 
     try:
         run_doc = run_reader._get(identity, f"/actions/runs/{run_id}")
     except ReviewInputError:
-        return "failed" if conclusion != "success" else "unrecognized"
+        return "ceased"
 
-    run_conclusion = run_doc.get("conclusion")
-    if conclusion != "success" or run_conclusion != "success":
-        return "failed"
+    repository = run_doc.get("repository")
+    run_attempt = run_doc.get("run_attempt")
+    if (
+        type(run_doc.get("id")) is not int
+        or run_doc.get("id") != run_id
+        or not isinstance(repository, dict)
+        or repository.get("id") != identity.repository_id
+        or repository.get("full_name") != identity.repository
+        or type(run_attempt) is not int
+        or run_attempt < owner.run_attempt
+    ):
+        return "active_or_unconfirmed"
+
+    if run_attempt > owner.run_attempt:
+        return "ceased"
+
+    if run_doc.get("status") != "completed":
+        return "active_or_unconfirmed"
+
+    if (
+        tx_head_sha is None
+        or owner.job == "command"
+        or run_doc.get("conclusion") != "success"
+    ):
+        return "ceased"
+
     refs = run_doc.get("referenced_workflows")
     if isinstance(refs, list) and len(refs) == 1 and isinstance(refs[0], dict):
         sha = refs[0].get("sha")
@@ -1375,6 +1401,11 @@ def classify_live_ledger_recovery(
     _require_sha(current_head, "current_head")
     if dispatch_status not in DISPATCH_STATUSES:
         raise ReviewInputError("recovery dispatch_status is unsupported")
+    effective_app_id = app_id if app_id is not None else ledger.authenticated_app_id
+    if effective_app_id is not None and (
+        type(effective_app_id) is not int or effective_app_id <= 0
+    ):
+        raise ReviewInputError("live recovery app_id must be a positive integer")
 
     from .review_completion_recovery import _ReadOnlyHttp
 
@@ -1468,57 +1499,65 @@ def classify_live_ledger_recovery(
         except ReviewInputError:
             action_authenticated = False
 
+    producer: str | None = None
+    author_id: int | None = None
+    try:
+        candidate_producer = ro_ledger.evidence_producer()
+    except ReviewInputError:
+        candidate_producer = None
+    if candidate_producer is not None and candidate_producer.startswith("github-bot:"):
+        raw_author = candidate_producer.removeprefix("github-bot:")
+        if raw_author.isdigit() and int(raw_author) > 0:
+            producer = candidate_producer
+            author_id = int(raw_author)
+
     tx = record.transaction
     retained_ok = True
     coverage_only_partial = False
-    if tx is not None and ro_ledger._evidence_author_id is not None:
-        port = GitHubIssueCommentOperationPort(
-            ro_http,
-            token=ro_ledger.token,
-            repository=identity.repository,
-            pull_request=identity.pull_request,
-            app_user_id=ro_ledger._evidence_author_id,
-            strict_association=True,
-        )
-        effective_app_id = (
-            app_id
-            if app_id is not None
-            else getattr(ledger, "authenticated_app_id", None)
-        )
-        store = CheckpointResultStore(
-            port,
-            app_user_id=ro_ledger._evidence_author_id,
-            http=ro_http,
-            identity=identity,
-            transaction=tx,
-            app_id=effective_app_id,
-            compact_write=False,
-        )
-        try:
-            available = store.read_available(event_key=_event_key(identity, tx))
-        except ReviewInputError:
-            available = None
-        if available is None:
+    if tx is not None:
+        if author_id is None:
             retained_ok = False
         else:
+            port = GitHubIssueCommentOperationPort(
+                ro_http,
+                token=ro_ledger.token,
+                repository=identity.repository,
+                pull_request=identity.pull_request,
+                app_user_id=author_id,
+                strict_association=True,
+            )
+            store = CheckpointResultStore(
+                port,
+                app_user_id=author_id,
+                http=ro_http,
+                identity=identity,
+                transaction=tx,
+                app_id=effective_app_id,
+                compact_write=False,
+            )
             try:
-                parsed_result = ReviewResult.from_dict(json.loads(available[1]))
-            except (ValueError, TypeError, ReviewInputError):
+                available = store.read_available(event_key=_event_key(identity, tx))
+            except ReviewInputError:
+                available = None
+            if available is None:
                 retained_ok = False
             else:
-                if (
-                    _payload(parsed_result, projected=store.last_read_was_projection)
-                    != available[1]
-                    or parsed_result.content_digest() != tx.result_sha256
-                    or (
+                try:
+                    parsed_result = ReviewResult.from_dict(json.loads(available[1]))
+                    _payload(parsed_result, projected=True)
+                except (ValueError, TypeError, ReviewInputError):
+                    retained_ok = False
+                else:
+                    if parsed_result.content_digest() != tx.result_sha256 or (
                         parsed_result.transaction is not None
                         and parsed_result.transaction.transaction_id
                         != tx.transaction_id
-                    )
-                ):
-                    retained_ok = False
-                else:
-                    coverage_only_partial = bool(parsed_result.coverage_only_partial)
+                    ):
+                        retained_ok = False
+                    else:
+                        coverage_only_partial = bool(
+                            parsed_result.coverage_only_partial
+                        )
 
     executor_status = "not_applicable"
     if actions_token is not None and old.owner.job in {"hosted", "local", "command"}:
@@ -1530,10 +1569,6 @@ def classify_live_ledger_recovery(
             owner=old.owner,
             tx_head_sha=tx.head_sha if tx is not None else None,
         )
-
-    producer: str | None = None
-    if ro_ledger.app_slug is not None and ro_ledger._evidence_author_id is not None:
-        producer = ro_ledger.evidence_producer()
 
     return classify_recovery_state(
         record,

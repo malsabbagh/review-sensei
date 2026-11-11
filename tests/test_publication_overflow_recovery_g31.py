@@ -626,8 +626,22 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
             ):
                 normalize_tail_contract(be1_manifest)
 
-            # Contrast superseded head: `be1` -> `controlled_serialized_restart`,
-            # whereas exact `c7` (`EXECUTOR` + `BODY_CALLER_BLOB`) -> `quarantine_prepublication_isolation`!
+            # Contrast superseded head:
+            # - `be1` -> `controlled_serialized_restart` even when archive fits
+            # - `c7` with unfit archive -> fails closed to `controlled_serialized_restart` (RS-E537F9)
+            # - `c7` with fitting archive -> `quarantine_prepublication_isolation`
+            comp_fit = replace(
+                comp_unfit,
+                archive_excerpt_fits_ceiling=True,
+                archive_failure_check=None,
+                archive_framed_body="archived-excerpt-body",
+                archive_framed_bytes=4096,
+                bytes_saved_by_excerpt=62_000,
+                finding_index_identical=True,
+                eligibility_digest_identical=True,
+                finding_explanations_preserved=True,
+                carrier_links_verified=True,
+            )
             qual_be1_new_head = qualify_nonterminal_publication_failure(
                 identity=IDENTITY,
                 record=failed_rec,
@@ -638,13 +652,32 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
                 live_reviews=[],
                 app_slug=APP,
                 owner_ceased=True,
-                formatter_comparison=comp_unfit,
+                formatter_comparison=comp_fit,
                 executor_sha=TASKALONG_41_BE1_EXECUTOR,
                 caller_blob=TASKALONG_41_CALLER_BLOB,
             )
             self.assertFalse(qual_be1_new_head.is_c7_body_limit_qualified)
             self.assertEqual(
                 qual_be1_new_head.primary_route, "controlled_serialized_restart"
+            )
+
+            qual_c7_new_head_unfit = qualify_nonterminal_publication_failure(
+                identity=IDENTITY,
+                record=failed_rec,
+                result=unfit_result,
+                policy=POLICY,
+                current_base_sha=BASE,
+                current_head_sha="f" * 40,
+                live_reviews=[],
+                app_slug=APP,
+                owner_ceased=True,
+                formatter_comparison=comp_unfit,
+                executor_sha=EXECUTOR,
+                caller_blob=BODY_CALLER_BLOB,
+            )
+            self.assertTrue(qual_c7_new_head_unfit.is_c7_body_limit_qualified)
+            self.assertEqual(
+                qual_c7_new_head_unfit.primary_route, "controlled_serialized_restart"
             )
 
             qual_c7_new_head = qualify_nonterminal_publication_failure(
@@ -657,7 +690,7 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
                 live_reviews=[],
                 app_slug=APP,
                 owner_ceased=True,
-                formatter_comparison=comp_unfit,
+                formatter_comparison=comp_fit,
                 executor_sha=EXECUTOR,
                 caller_blob=BODY_CALLER_BLOB,
             )
@@ -887,6 +920,56 @@ class PublicationOverflowRecoveryG31Tests(unittest.TestCase):
             self.assertEqual(qual_echo.observed_review_id, 40)
             self.assertFalse(qual_echo.confirmed_failure_before_write)
             self.assertEqual(qual_echo.primary_route, "reconcile_observed_exact_review")
+            self.assertEqual(qual_echo.fallback_routes, ())
+
+            # RS-9F052C & RS-A97A39: `[bot]`-suffixed `app_slug` normalizes cleanly,
+            # and observed echo under drifted head holds (`reconcile_observed_review_hold`)
+            # and refuses blind controlled-restart descriptor issuance!
+            qual_echo_drifted = qualify_nonterminal_publication_failure(
+                identity=IDENTITY,
+                record=acct_b,
+                result=res_b,
+                policy=POLICY,
+                current_base_sha=BASE,
+                current_head_sha="f" * 40,
+                live_reviews=state_b.reviews,
+                app_slug=f"{APP}[bot]",
+                owner_ceased=True,
+            )
+            self.assertEqual(
+                qual_echo_drifted.state_code,
+                "response_loss_echo_observed_reconcilable",
+            )
+            self.assertEqual(qual_echo_drifted.observed_review_id, 40)
+            self.assertEqual(
+                qual_echo_drifted.primary_route, "reconcile_observed_review_hold"
+            )
+            self.assertEqual(qual_echo_drifted.fallback_routes, ())
+            echo_comment = render_session_comment(
+                repository_id=1, pull_request=1, record=acct_b
+            ).encode("utf-8")
+            with self.assertRaisesRegex(
+                ReviewInputError, "exact App review echo is already persisted"
+            ):
+                build_overflow_recovery_descriptor(
+                    identity=IDENTITY,
+                    record=acct_b,
+                    qualification=qual_echo_drifted,
+                    old_comments=[
+                        {
+                            "id": 40,
+                            "bytes": len(echo_comment),
+                            "sha256": hashlib.sha256(echo_comment).hexdigest(),
+                        }
+                    ],
+                    designated_run_id="5001",
+                    base_sha=BASE,
+                    head_sha="f" * 40,
+                    policy_commit=BASE,
+                    workflow_sha=EXECUTOR,
+                    issuance_disabled_at=100,
+                    retire_after=200,
+                )
 
             # Reconcile on same head: reuses existing review id=40 with ZERO new
             # `POST /pulls/1/reviews` writes and settles `publication_succeeded`!

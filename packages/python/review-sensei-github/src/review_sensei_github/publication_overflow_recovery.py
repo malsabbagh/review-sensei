@@ -105,6 +105,7 @@ OVERFLOW_RECOVERY_ROUTES: frozenset[str] = frozenset(
     {
         "same_run_attempt2_retained_replay",
         "reconcile_observed_exact_review",
+        "reconcile_observed_review_hold",
         "quarantine_prepublication_isolation",
         "controlled_serialized_restart",
         "wait_for_owner_cessation",
@@ -668,14 +669,20 @@ def _find_exact_app_review_id(
     app_slug: str,
     result: ReviewResult,
 ) -> int | None:
+    """Locate an App-authored exact-head review matching `review_marker`.
+
+    Requires `user.type == "Bot"` so a human GitHub account (`type == "User"`)
+    whose username matches `app_slug` can never spoof an App review echo; both
+    `slug` and `slug[bot]` login forms are normalized and accepted.
+    """
     expected_marker = review_marker(
         repository_id=repository_id,
         pull_request=pull_request,
         head_sha=head_sha,
         result=result,
     )
-    expected_login = app_slug.casefold()
-    expected_logins = {expected_login, f"{expected_login}[bot]"}
+    base_login = app_slug.strip().casefold().removesuffix("[bot]")
+    expected_logins = {base_login, f"{base_login}[bot]"}
     for review in reviews:
         if not isinstance(review, Mapping):
             continue
@@ -826,10 +833,22 @@ def qualify_nonterminal_publication_failure(
             primary = (
                 "reconcile_observed_exact_review"
                 if can_reconcile_same_head
-                else "controlled_serialized_restart"
+                else "reconcile_observed_review_hold"
             )
-            fallbacks = (
-                ("controlled_serialized_restart",) if can_reconcile_same_head else ()
+            action_text = (
+                (
+                    f"Exact App-authored review (id={observed_review_id}) is already "
+                    "persisted on GitHub despite lost HTTP acknowledgement; reconcile "
+                    "the existing review without posting a duplicate review."
+                )
+                if can_reconcile_same_head
+                else (
+                    f"Exact App-authored review (id={observed_review_id}) is already "
+                    "persisted on GitHub despite lost HTTP acknowledgement, and "
+                    "same-head attempt-2 reconciliation is unavailable; hold blind "
+                    "controlled restart to avoid duplicating the persisted review "
+                    "and reconcile the observed review explicitly."
+                )
             )
             return NonterminalPublicationQualification(
                 classifier_id=PUBLICATION_OVERFLOW_CLASSIFIER_ID,
@@ -853,19 +872,17 @@ def qualify_nonterminal_publication_failure(
                 policy_digest=pol_digest,
                 formatter_comparison=formatter_comparison,
                 primary_route=primary,
-                fallback_routes=fallbacks,
-                operator_action=(
-                    f"Exact App-authored review (id={observed_review_id}) is already "
-                    "persisted on GitHub despite lost HTTP acknowledgement; reconcile "
-                    "the existing review without posting a duplicate review."
-                ),
+                fallback_routes=(),
+                operator_action=action_text,
             )
         return NonterminalPublicationQualification(
             classifier_id=PUBLICATION_OVERFLOW_CLASSIFIER_ID,
             state_code="response_loss_unobserved_remote_hold",
             failure_boundary="response_loss_uncertain",
             transaction_phase=tx.phase,
-            remote_effect_uncertain=True,
+            remote_effect_uncertain=(
+                tx.phase == "publication_pending" or old.uncertain > 0
+            ),
             confirmed_failure_before_write=False,
             observed_review_id=None,
             executor_sha=executor_sha,
@@ -954,6 +971,7 @@ def qualify_nonterminal_publication_failure(
     if (
         head_rel == "different_head"
         and is_c7_qualified
+        and archive_can_fit
         and old.owner.run_attempt == 1
         and old.owner.generation == 0
         and not record.operator_paused
@@ -1059,6 +1077,14 @@ def build_overflow_recovery_descriptor(
     if qualification.state_code == "predecessor_owner_active_hold":
         raise ReviewInputError(
             "cannot issue overflow recovery descriptor while predecessor owner is active"
+        )
+    if (
+        qualification.observed_review_id is not None
+        or qualification.state_code == "response_loss_echo_observed_reconcilable"
+    ):
+        raise ReviewInputError(
+            "cannot issue blind controlled-restart descriptor when an exact App "
+            "review echo is already persisted on GitHub; reconcile observed review first"
         )
     if requested_body_ceiling != MAX_PUBLISHED_REVIEW_BODY_BYTES:
         raise ReviewInputError(

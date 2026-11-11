@@ -109,9 +109,13 @@ def _diagnostic_ledger(fixture: Any) -> GitHubIssueCommentSessionLedger:
                         "repository": {
                             "pullRequest": {
                                 "reviewThreads": {
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
                                     "nodes": copy.deepcopy(
                                         getattr(fixture, "threads", [])
-                                    )
+                                    ),
                                 }
                             }
                         }
@@ -587,7 +591,11 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
         ):
             verify_reenroll_forbidden(valid_rec)
         unenrolled = _make_record(accounting=None, generation=0)
-        verify_reenroll_forbidden(unenrolled)
+        self.assertIs(verify_reenroll_forbidden(unenrolled), False)
+        with self.assertRaisesRegex(
+            ReviewInputError, "fresh reenroll/reset is forbidden"
+        ):
+            verify_reenroll_forbidden(_make_record(accounting=None, generation=1))
         with self.assertRaises(ReviewInputError):
             qualify_no_transaction_abort(unenrolled)
 
@@ -1149,10 +1157,21 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
         self.assertTrue(_probe_owner_ceased(reader_ok, IDENTITY, base_acc, None))
         reader_fail = SimpleNamespace(
             _run_reader=SimpleNamespace(
-                ceased_owner=lambda *_: (_ for _ in ()).throw(RuntimeError("active"))
+                ceased_owner=lambda *_: (_ for _ in ()).throw(
+                    ReviewInputError("active")
+                )
             )
         )
         self.assertFalse(_probe_owner_ceased(reader_fail, IDENTITY, base_acc, None))
+        reader_bug = SimpleNamespace(
+            _run_reader=SimpleNamespace(
+                ceased_owner=lambda *_: (_ for _ in ()).throw(
+                    RuntimeError("unexpected client bug")
+                )
+            )
+        )
+        with self.assertRaises(RuntimeError):
+            _probe_owner_ceased(reader_bug, IDENTITY, base_acc, None)
         self.assertFalse(
             _probe_owner_ceased(SimpleNamespace(), IDENTITY, base_acc, None)
         )
@@ -1227,6 +1246,10 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                         "repository": {
                             "pullRequest": {
                                 "reviewThreads": {
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
                                     "nodes": [
                                         "skip-non-dict",
                                         {"comments": {"nodes": []}},
@@ -1244,7 +1267,7 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                                                 ]
                                             }
                                         },
-                                    ]
+                                    ],
                                 }
                             }
                         }
@@ -1365,6 +1388,214 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             inspect_live_no_transaction_predecessor(
                 ledger=guard_ledger, identity=IDENTITY
             )
+
+    def test_multi_page_pagination_bot_identity_and_fail_closed_controls(self) -> None:
+        import json
+        from types import SimpleNamespace
+
+        from review_sensei_github.pre_entry_abort_recovery import (
+            _detect_late_native_effects,
+            _probe_owner_ceased,
+        )
+        from review_sensei_github.publication import (
+            FINDING_MARKER_PREFIX_V2,
+            REVIEW_MARKER_PREFIX,
+        )
+
+        base_acc = _base_accounting(run_id=1001)
+        abort_tx = replace(
+            ReviewTransaction.create(
+                repository="owner/repo",
+                pull_request=7,
+                base_sha=BASE_SHA,
+                head_sha=HEAD_SHA,
+                reservation_id="5" * 64,
+                policy_digest="2" * 64,
+                configuration_digest="1" * 64,
+                evidence_digest="3" * 64,
+                generation=1,
+            ),
+            phase="analysis",
+            result_sha256=None,
+        )
+        abort_acc = replace(
+            base_acc,
+            analysis_abort={
+                "source_root": "1" * 64,
+                "cleanup_root": "2" * 64,
+                "transaction": abort_tx.to_dict(),
+                "entry_state": "not_started",
+                "run_id": 1001,
+                "owner": asdict(base_acc.owner),
+            },
+        )
+        abort_rec = _make_record(accounting=abort_acc, generation=2)
+        session_body = render_session_comment(
+            repository_id=123, pull_request=7, record=abort_rec
+        )
+
+        state: dict[str, Any] = {
+            "comments_p1": [
+                {"id": i, "body": "benign note", "user": {"type": "User", "login": "u"}}
+                for i in range(1, 101)
+            ],
+            "comments_p2": [
+                # Authorless comment and foreign bot comment must be ignored!
+                {"id": 201, "body": session_body, "user": None},
+                {
+                    "id": 202,
+                    "body": session_body,
+                    "user": {"type": "Bot", "login": "foreign-app[bot]", "id": 777},
+                },
+                {
+                    "id": 203,
+                    "body": session_body,
+                    "user": {"type": "Bot", "login": "reviewsensei[bot]", "id": 999},
+                },
+            ],
+            "run_conclusion": "cancelled",
+            "jobs_p1": [
+                {"id": i, "status": "completed", "conclusion": "failure"}
+                for i in range(1, 101)
+            ],
+            "jobs_p2": [{"id": 101, "status": "completed", "conclusion": "cancelled"}],
+            "jobs_total": 101,
+            "reviews_p1": [{"id": i, "body": "human review"} for i in range(1, 101)],
+            "reviews_p2": [],
+            "threads_p1": {
+                "pageInfo": {"hasNextPage": True, "endCursor": "cur-p1"},
+                "nodes": [{"id": "t1", "comments": {"nodes": [{"body": "note"}]}}],
+            },
+            "threads_p2": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [],
+            },
+        }
+
+        def paged_opener(request: Any, timeout: float | None = None) -> Any:
+            target = urlsplit(request.full_url)
+            path, query = target.path, parse_qs(target.query)
+            page = int(query.get("page", ["1"])[0])
+            if path.endswith("/issues/7/comments"):
+                return json_response(
+                    state["comments_p1"] if page == 1 else state["comments_p2"]
+                )
+            if path.endswith("/actions/runs/1001"):
+                return json_response(
+                    {
+                        "id": 1001,
+                        "repository": {"id": 123, "full_name": "owner/repo"},
+                        "status": "completed",
+                        "conclusion": state["run_conclusion"],
+                        "run_attempt": 1,
+                    }
+                )
+            if path.endswith("/actions/runs/1001/attempts/1/jobs"):
+                return json_response(
+                    {
+                        "total_count": state["jobs_total"],
+                        "jobs": state["jobs_p1"] if page == 1 else state["jobs_p2"],
+                    }
+                )
+            if path.endswith("/pulls/7/reviews"):
+                return json_response(
+                    state["reviews_p1"] if page == 1 else state["reviews_p2"]
+                )
+            if path == "/graphql":
+                payload = json.loads(request.data.decode("utf-8"))
+                after = payload["variables"]["after"]
+                conn = state["threads_p1"] if after is None else state["threads_p2"]
+                return json_response(
+                    {"data": {"repository": {"pullRequest": {"reviewThreads": conn}}}}
+                )
+            raise AssertionError(f"unexpected request: {path}")
+
+        paged_ledger = SimpleNamespace(
+            http=GitHubHttp(api_url="https://api.github.test", opener=paged_opener),
+            token="tok",
+            app_slug="reviewsensei[bot]",
+            _evidence_author_id=999,
+        )
+
+        # 1. Clean multi-page rollover qualification (comment on p2, cancelled job on p2,
+        #    reviews p2 empty, GraphQL threads p2 empty):
+        qual_ok, ref_ok = inspect_live_no_transaction_predecessor(
+            ledger=paged_ledger, identity=IDENTITY, actions_token="tok"
+        )
+        self.assertEqual(ref_ok["id"], 203)
+        self.assertTrue(qual_ok.qualifies_rollover)
+        self.assertTrue(qual_ok.owner_ceased)
+        self.assertTrue(qual_ok.late_effects_absent)
+
+        # 2. Multi-page conflicting ReviewSensei Bot comments across p1 and p2 -> fail closed!
+        state["comments_p1"][0] = {
+            "id": 1,
+            "body": session_body,
+            "user": {"type": "Bot", "login": "reviewsensei[bot]", "id": 999},
+        }
+        with self.assertRaisesRegex(
+            ReviewInputError, "multiple conflicting session comments"
+        ):
+            inspect_live_no_transaction_predecessor(
+                ledger=paged_ledger, identity=IDENTITY, actions_token="tok"
+            )
+        state["comments_p1"][0] = {
+            "id": 1,
+            "body": "benign note",
+            "user": {"type": "User", "login": "u"},
+        }
+
+        # 3. Job on page 2 still `in_progress` -> owner NOT ceased!
+        state["jobs_p2"] = [{"id": 101, "status": "in_progress", "conclusion": None}]
+        self.assertFalse(_probe_owner_ceased(paged_ledger, IDENTITY, abort_acc, "tok"))
+        state["jobs_p2"] = [
+            {"id": 101, "status": "completed", "conclusion": "cancelled"}
+        ]
+
+        # 4. Late review on page 2 -> detected (`late_native_effects_present=True`)!
+        state["reviews_p2"] = [
+            {
+                "id": 500,
+                "body": f"{REVIEW_MARKER_PREFIX} repo=123 pr=7 head={HEAD_SHA} -->\nLate",
+            }
+        ]
+        self.assertTrue(
+            _detect_late_native_effects(paged_ledger, IDENTITY, abort_rec, abort_acc)
+        )
+        state["reviews_p2"] = []
+
+        # 5. Late finding thread on GraphQL page 2 -> detected!
+        state["threads_p2"] = {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [
+                {
+                    "id": "t2",
+                    "comments": {
+                        "nodes": [
+                            {
+                                "body": (
+                                    f"{FINDING_MARKER_PREFIX_V2} repo=123 pr=7 "
+                                    f"head={HEAD_SHA} base={BASE_SHA} "
+                                    f"fingerprint={'b' * 64} state=new blocking=true -->\nLate"
+                                )
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+        self.assertTrue(
+            _detect_late_native_effects(paged_ledger, IDENTITY, abort_rec, abort_acc)
+        )
+
+        # 6. Non-advancing GraphQL cursor fails closed (`return True`)!
+        state["threads_p2"] = {
+            "pageInfo": {"hasNextPage": True, "endCursor": "cur-p1"},
+            "nodes": [],
+        }
+        self.assertTrue(
+            _detect_late_native_effects(paged_ledger, IDENTITY, abort_rec, abort_acc)
+        )
 
 
 if __name__ == "__main__":

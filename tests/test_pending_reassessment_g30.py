@@ -43,6 +43,7 @@ from review_sensei_github.operation_comments import (
 )
 from review_sensei_github.operation_host import GitHubCommentOperationStore
 from review_sensei_github.pending_reassessment_recovery import (
+    NO_PROGRESS_ZERO_DECISION_LIMIT,
     PENDING_REASSESSMENT_CLASSIFIER_ID,
     PendingReassessmentAttribution,
     PendingReassessmentRecoveryDescriptor,
@@ -974,6 +975,9 @@ class PendingReassessmentG30Tests(unittest.TestCase):
                     "controlled-restart-registry-v1",
                 )
                 self.assertEqual(descriptor.to_dict()["authority"], False)
+                self.assertEqual(
+                    descriptor.to_dict()["request_id"], descriptor.request_id
+                )
 
                 row_data = descriptor.controlled_restart_registration
                 original_external = rf.external
@@ -1524,6 +1528,109 @@ class PendingReassessmentG30Tests(unittest.TestCase):
                 workflow_sha=BASE,
                 issuance_disabled_at=100,
                 retire_after=200,
+            )
+
+        # RS-540BF2: `override`/`accept-risk` pending-set reduction WITHOUT adding
+        # to `resolved` is still recognized as `failed_finalizer_after_reassessment`
+        # when finalization has not settled!
+        obs_first = PendingReceiptObservation(
+            source_comment_id=10,
+            source_updated_digest=_sha256("t1"),
+            pull_request=1,
+            head_sha=HEAD,
+            report_digest="d" * 64,
+            expected_pages=1,
+            part_comment_ids=((1, 40),),
+            complete=True,
+        )
+        two_item = prior(extra_human=True)
+        assert two_item.human_review is not None
+        overridden_inv = replace(
+            two_item.human_review,
+            findings=two_item.human_review.findings[1:],
+            resolved=two_item.human_review.resolved,
+        )
+        overridden_elig = replace(two_item, human_review=overridden_inv)
+        attr_override_fin = qualify_pending_reassessment(
+            original_eligibility=two_item,
+            latest_eligibility=overridden_elig,
+            bound_source_comment_id=10,
+            bound_source_updated_at="t1",
+            bound_source_body_sha256="1" * 64,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pending_receipt=obs_first,
+        )
+        self.assertEqual(
+            attr_override_fin.state_code, "failed_finalizer_after_reassessment"
+        )
+        self.assertTrue(attr_override_fin.finalizer_entered)
+        self.assertTrue(attr_override_fin.finalizer_failed)
+        self.assertEqual(attr_override_fin.primary_route, "resume_exact_head_finalizer")
+
+        # RS-9BFA77 & RS-04CE57: monotonic durable-receipt derivation when
+        # `consecutive_zero_decision_attempts` is omitted, plus `>= 1` & source_kind guards!
+        self.assertEqual(NO_PROGRESS_ZERO_DECISION_LIMIT, 2)
+        obs_second = PendingReceiptObservation(
+            source_comment_id=11,
+            source_updated_digest=_sha256("t2"),
+            pull_request=1,
+            head_sha=HEAD,
+            report_digest="e" * 64,
+            expected_pages=1,
+            part_comment_ids=((1, 41),),
+            complete=True,
+        )
+        auto_exhausted = qualify_pending_reassessment(
+            original_eligibility=orig_elig,
+            latest_eligibility=orig_elig,
+            bound_source_comment_id=11,
+            bound_source_updated_at="t2",
+            bound_source_body_sha256="2" * 64,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pending_receipt=obs_second,
+            prior_receipt_digests=(obs_first.report_digest,),
+        )
+        self.assertEqual(auto_exhausted.consecutive_zero_decision_attempts, 2)
+        self.assertEqual(
+            auto_exhausted.state_code, "pending_reassessment_no_progress_exhausted"
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "consecutive_zero_decision_attempts >= 1"
+        ):
+            qualify_pending_reassessment(
+                original_eligibility=orig_elig,
+                latest_eligibility=orig_elig,
+                bound_source_comment_id=10,
+                bound_source_updated_at="t1",
+                bound_source_body_sha256="1" * 64,
+                bound_source_kind="issue",
+                bound_base_sha=BASE,
+                bound_head_sha=HEAD,
+                current_base_sha=BASE,
+                current_head_sha=HEAD,
+                pending_receipt=obs_first,
+                consecutive_zero_decision_attempts=0,
+            )
+        with self.assertRaisesRegex(ReviewInputError, "invalid bound_source_kind"):
+            qualify_pending_reassessment(
+                original_eligibility=orig_elig,
+                latest_eligibility=orig_elig,
+                bound_source_comment_id=10,
+                bound_source_updated_at="t1",
+                bound_source_body_sha256="1" * 64,
+                bound_source_kind="attacker_kind",
+                bound_base_sha=BASE,
+                bound_head_sha=HEAD,
+                current_base_sha=BASE,
+                current_head_sha=HEAD,
             )
 
 

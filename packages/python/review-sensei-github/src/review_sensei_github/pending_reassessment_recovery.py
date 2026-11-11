@@ -40,6 +40,10 @@ _PART_TAIL_RE = re.compile(r"(\d+)/(\d+) content=([a-f0-9]{64}) -->")
 
 PENDING_REASSESSMENT_CLASSIFIER_ID = "pending-reassessment-attribution-v1"
 DEFAULT_MAX_ZERO_DECISION_ATTEMPTS = 2
+NO_PROGRESS_ZERO_DECISION_LIMIT = DEFAULT_MAX_ZERO_DECISION_ATTEMPTS
+_VALID_SOURCE_KINDS: frozenset[str] = frozenset(
+    {"inline", "issue", "review_comment", "issue_comment"}
+)
 
 PENDING_REASSESSMENT_STATES: frozenset[str] = frozenset(
     {
@@ -367,6 +371,7 @@ class PendingReassessmentRecoveryDescriptor:
         return {
             "classifier_id": self.classifier_id,
             "authority": False,
+            "request_id": self.request_id,
             "attribution_state": self.attribution_state,
             "predecessor_run_id": self.predecessor_run_id,
             "predecessor_root_sha256": self.predecessor_root_sha256,
@@ -402,7 +407,7 @@ def inspect_durable_pending_receipts(
     absence of duplicate or conflicting report digests/pages for the bound
     `(source_comment_id, source_updated_at, head_sha)`.
     """
-    if source_kind not in {"inline", "issue", "review_comment", "issue_comment"}:
+    if source_kind not in _VALID_SOURCE_KINDS:
         raise ReviewInputError("invalid pending receipt source_kind")
     _require_hex(head_sha, _HEX40, "head_sha")
     if expected_report_digest is not None:
@@ -635,29 +640,44 @@ def qualify_pending_reassessment(
     pending_receipt: PendingReceiptObservation | None = None,
     record: SessionRecord | None = None,
     prior_receipt_digests: Sequence[str] = (),
-    consecutive_zero_decision_attempts: int = 1,
+    consecutive_zero_decision_attempts: int | None = None,
     max_zero_decision_attempts: int = DEFAULT_MAX_ZERO_DECISION_ATTEMPTS,
 ) -> PendingReassessmentAttribution:
     """Classify a pending or completed human reassessment with exact attribution.
 
+    Preconditions:
+    - `bound_source_*` parameters must come from an already admitted human source
+      event; `source_actor` is informational diagnostic metadata (`authority=False`)
+      and any downstream follow-up mention still undergoes full actor/permission
+      admission.
+    - When `consecutive_zero_decision_attempts` is omitted (`None`), attempt
+      counting derives monotonically from the durable `prior_receipt_digests`
+      (including any complete `pending_receipt.report_digest`). When supplied
+      explicitly, callers must maintain a durable monotonic per-(source, head)
+      counter (`>= 1` on active zero-decision attempts).
+
     Strictly distinguishes:
-    - **Unfinished zero-decision assessment**: zero findings resolved in durable
-      eligibility (`latest_eligibility == original_eligibility`), `finalizer_entered`
-      is `False`, `finalizer_failed` is `False`, and durable pending receipt
-      attribution is preserved.
+    - **Unfinished zero-decision assessment**: zero findings resolved or disposed
+      in durable eligibility (`latest_eligibility == original_eligibility`),
+      `finalizer_entered` is `False`, `finalizer_failed` is `False`, and durable
+      pending receipt attribution is preserved.
     - **Failed finalizer after reassessment**: durable eligibility review WAS
-      published (`latest_eligibility != original_eligibility` or zero pending
-      items remain), `finalizer_entered` is `True`, and finalization left check,
-      thread cleanup, or approval unconfirmed (`finalizer_failed=True`).
+      published (`latest_eligibility != original_eligibility`—whether via newly
+      resolved items, `override`/`accept-risk` pending-set reductions, or updated
+      eligibility metadata—or zero pending items remain), `finalizer_entered` is
+      `True`, and finalization left check, thread cleanup, or approval unconfirmed
+      (`finalizer_failed=True`).
     """
     if not isinstance(original_eligibility, ReviewApprovalEligibility):
         raise ReviewInputError("original_eligibility is required")
     if original_eligibility.human_review is None:
         raise ReviewInputError("original_eligibility has no human_review inventory")
-    if (
-        type(max_zero_decision_attempts) is not int
-        or max_zero_decision_attempts <= 0
-        or type(consecutive_zero_decision_attempts) is not int
+    if bound_source_kind not in _VALID_SOURCE_KINDS:
+        raise ReviewInputError("invalid bound_source_kind")
+    if type(max_zero_decision_attempts) is not int or max_zero_decision_attempts <= 0:
+        raise ReviewInputError("zero-decision attempt bounds must be valid integers")
+    if consecutive_zero_decision_attempts is not None and (
+        type(consecutive_zero_decision_attempts) is not int
         or consecutive_zero_decision_attempts < 0
     ):
         raise ReviewInputError("zero-decision attempt bounds must be valid integers")
@@ -670,10 +690,24 @@ def qualify_pending_reassessment(
         else orig_inv
     )
     pending_ids = tuple(item.fingerprint for item in effective_inv.pending)
+    pending_set = set(pending_ids)
     resolved_ids = tuple(effective_inv.resolved)
     orig_resolved = set(orig_inv.resolved)
     newly_resolved = tuple(fid for fid in resolved_ids if fid not in orig_resolved)
-    zero_decisions = len(newly_resolved) == 0 and len(orig_inv.pending) > 0
+    newly_disposed = tuple(
+        item.fingerprint
+        for item in orig_inv.pending
+        if item.fingerprint not in pending_set
+    )
+    eligibility_delta_published = (
+        latest_eligibility is not None and latest_eligibility != original_eligibility
+    )
+    zero_decisions = (
+        len(newly_resolved) == 0
+        and len(newly_disposed) == 0
+        and not eligibility_delta_published
+        and len(orig_inv.pending) > 0
+    )
 
     predecessor_run_id: int | None = None
     operation_key: str | None = None
@@ -697,6 +731,12 @@ def qualify_pending_reassessment(
         and pending_receipt.report_digest not in normalized_prior
     ):
         normalized_prior.append(pending_receipt.report_digest)
+
+    effective_zero_attempts = (
+        (max(1, len(normalized_prior)) if zero_decisions else 0)
+        if consecutive_zero_decision_attempts is None
+        else consecutive_zero_decision_attempts
+    )
 
     # 1. Head or base drift invalidates continuing on the bound snapshot.
     if (
@@ -729,7 +769,7 @@ def qualify_pending_reassessment(
             newly_resolved_finding_ids=newly_resolved,
             pending_receipt=pending_receipt,
             prior_receipt_digests=tuple(normalized_prior),
-            consecutive_zero_decision_attempts=consecutive_zero_decision_attempts,
+            consecutive_zero_decision_attempts=effective_zero_attempts,
             max_zero_decision_attempts=max_zero_decision_attempts,
             evidence_diagnostic=evidence_diag,
             predecessor_run_id=predecessor_run_id,
@@ -779,7 +819,7 @@ def qualify_pending_reassessment(
             newly_resolved_finding_ids=newly_resolved,
             pending_receipt=pending_receipt,
             prior_receipt_digests=tuple(normalized_prior),
-            consecutive_zero_decision_attempts=consecutive_zero_decision_attempts,
+            consecutive_zero_decision_attempts=effective_zero_attempts,
             max_zero_decision_attempts=max_zero_decision_attempts,
             evidence_diagnostic=evidence_diag,
             predecessor_run_id=predecessor_run_id,
@@ -823,7 +863,7 @@ def qualify_pending_reassessment(
             newly_resolved_finding_ids=newly_resolved,
             pending_receipt=pending_receipt,
             prior_receipt_digests=tuple(normalized_prior),
-            consecutive_zero_decision_attempts=consecutive_zero_decision_attempts,
+            consecutive_zero_decision_attempts=effective_zero_attempts,
             max_zero_decision_attempts=max_zero_decision_attempts,
             evidence_diagnostic=evidence_diag,
             predecessor_run_id=predecessor_run_id,
@@ -838,12 +878,12 @@ def qualify_pending_reassessment(
         )
 
     # 4. Durably recorded decisions (`latest_eligibility != original_eligibility`
-    #    or `not orig_inv.pending`) entered finalization path!
+    #    — including newly resolved items, `override`/`accept-risk` pending-set
+    #    reductions, or updated eligibility metadata — or `not orig_inv.pending`)
+    #    entered the finalization path!
     decisions_durably_published = (
-        latest_eligibility is not None
-        and latest_eligibility != original_eligibility
-        and len(newly_resolved) > 0
-    ) or len(orig_inv.pending) == 0
+        eligibility_delta_published or len(orig_inv.pending) == 0
+    )
 
     if decisions_durably_published:
         finalizer_confirmed = (
@@ -1001,7 +1041,7 @@ def qualify_pending_reassessment(
             newly_resolved_finding_ids=(),
             pending_receipt=pending_receipt,
             prior_receipt_digests=tuple(normalized_prior),
-            consecutive_zero_decision_attempts=consecutive_zero_decision_attempts,
+            consecutive_zero_decision_attempts=effective_zero_attempts,
             max_zero_decision_attempts=max_zero_decision_attempts,
             evidence_diagnostic=evidence_diag,
             predecessor_run_id=predecessor_run_id,
@@ -1020,7 +1060,11 @@ def qualify_pending_reassessment(
         )
 
     # 6. Complete pending receipt with zero cleared decisions: check no-progress cap.
-    if consecutive_zero_decision_attempts >= max_zero_decision_attempts:
+    if effective_zero_attempts < 1:
+        raise ReviewInputError(
+            "active zero-decision reassessment requires consecutive_zero_decision_attempts >= 1"
+        )
+    if effective_zero_attempts >= max_zero_decision_attempts:
         return PendingReassessmentAttribution(
             classifier_id=PENDING_REASSESSMENT_CLASSIFIER_ID,
             state_code="pending_reassessment_no_progress_exhausted",
@@ -1043,7 +1087,7 @@ def qualify_pending_reassessment(
             newly_resolved_finding_ids=(),
             pending_receipt=pending_receipt,
             prior_receipt_digests=tuple(normalized_prior),
-            consecutive_zero_decision_attempts=consecutive_zero_decision_attempts,
+            consecutive_zero_decision_attempts=effective_zero_attempts,
             max_zero_decision_attempts=max_zero_decision_attempts,
             evidence_diagnostic=evidence_diag,
             predecessor_run_id=predecessor_run_id,
@@ -1051,7 +1095,7 @@ def qualify_pending_reassessment(
             primary_route="targeted_human_disposition",
             fallback_routes=("controlled_serialized_restart",),
             operator_action=(
-                f"Reached {consecutive_zero_decision_attempts}/"
+                f"Reached {effective_zero_attempts}/"
                 f"{max_zero_decision_attempts} consecutive zero-decision "
                 "reassessment attempts with no finding progress. Do not loop "
                 "unchanged mention replies; apply explicit maintainer disposition "
@@ -1082,7 +1126,7 @@ def qualify_pending_reassessment(
         newly_resolved_finding_ids=(),
         pending_receipt=pending_receipt,
         prior_receipt_digests=tuple(normalized_prior),
-        consecutive_zero_decision_attempts=consecutive_zero_decision_attempts,
+        consecutive_zero_decision_attempts=effective_zero_attempts,
         max_zero_decision_attempts=max_zero_decision_attempts,
         evidence_diagnostic=evidence_diag,
         predecessor_run_id=predecessor_run_id,
@@ -1100,6 +1144,52 @@ def qualify_pending_reassessment(
             "an unclosed `action.pending` ledger via controlled serialized restart."
         ),
     )
+
+
+def _build_validated_restart_row(
+    *,
+    identity: SessionIdentity,
+    base_sha: str,
+    head_sha: str,
+    policy_commit: str,
+    workflow_sha: str,
+    designated_run_id: str,
+    job: str,
+    issuance_disabled_at: int,
+    retire_after: int,
+    old_run_ids: list[int],
+    old_comments: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Construct and round-trip validate a `controlled-restart-registry-v1` row."""
+    row_body: dict[str, Any] = {
+        "repository": identity.repository,
+        "repository_id": identity.repository_id,
+        "pull_request": identity.pull_request,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "policy_commit": policy_commit,
+        "workflow_sha": workflow_sha,
+        "run_id": designated_run_id,
+        "job": job,
+        "issuance_disabled_at": issuance_disabled_at,
+        "retire_after": retire_after,
+        "old_runs": old_run_ids,
+        "old_comments": [dict(ref) for ref in old_comments],
+    }
+    expected_request_id = hashlib.sha256(canonical_bytes(row_body)).hexdigest()
+    row_body["request_id"] = expected_request_id
+    registry_bytes = canonical_bytes(
+        {
+            "schema_version": "controlled-restart-registry-v1",
+            "registrations": [row_body],
+        }
+    )
+    validated_row = controlled_restart.read_registry(registry_bytes)[0]
+    if validated_row.get("request_id") != expected_request_id:
+        raise ReviewInputError(
+            "controlled restart registration request_id diverged during validation"
+        )
+    return validated_row
 
 
 def build_pending_reassessment_recovery_descriptor(
@@ -1163,29 +1253,19 @@ def build_pending_reassessment_recovery_descriptor(
         if run_id not in old_run_ids:
             old_run_ids.append(run_id)
 
-    row_body: dict[str, Any] = {
-        "repository": identity.repository,
-        "repository_id": identity.repository_id,
-        "pull_request": identity.pull_request,
-        "base_sha": base_sha,
-        "head_sha": head_sha,
-        "policy_commit": policy_commit,
-        "workflow_sha": workflow_sha,
-        "run_id": designated_run_id,
-        "job": job,
-        "issuance_disabled_at": issuance_disabled_at,
-        "retire_after": retire_after,
-        "old_runs": old_run_ids,
-        "old_comments": [dict(ref) for ref in old_comments],
-    }
-    row_body["request_id"] = hashlib.sha256(canonical_bytes(row_body)).hexdigest()
-    registry_bytes = canonical_bytes(
-        {
-            "schema_version": "controlled-restart-registry-v1",
-            "registrations": [row_body],
-        }
+    validated_row = _build_validated_restart_row(
+        identity=identity,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        policy_commit=policy_commit,
+        workflow_sha=workflow_sha,
+        designated_run_id=designated_run_id,
+        job=job,
+        issuance_disabled_at=issuance_disabled_at,
+        retire_after=retire_after,
+        old_run_ids=old_run_ids,
+        old_comments=old_comments,
     )
-    validated_row = controlled_restart.read_registry(registry_bytes)[0]
 
     return PendingReassessmentRecoveryDescriptor(
         classifier_id=PENDING_REASSESSMENT_CLASSIFIER_ID,
@@ -1210,6 +1290,7 @@ def build_pending_reassessment_recovery_descriptor(
 
 __all__ = [
     "DEFAULT_MAX_ZERO_DECISION_ATTEMPTS",
+    "NO_PROGRESS_ZERO_DECISION_LIMIT",
     "PENDING_REASSESSMENT_CLASSIFIER_ID",
     "PENDING_REASSESSMENT_ROUTES",
     "PENDING_REASSESSMENT_STATES",

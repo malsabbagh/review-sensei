@@ -17,6 +17,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -189,6 +190,7 @@ def _make_record(
 def _diagnostic_ledger(
     fixture: object,
 ) -> tuple[GitHubIssueCommentSessionLedger, list[tuple[str, str]]]:
+    """Build a pure read-only ledger over `fixture` (never mutating `fixture.trace`)."""
     observed: list[tuple[str, str]] = []
     bot = {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"}
 
@@ -927,6 +929,18 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
         self.assertEqual(
             failed_uncertain.primary_route, "controlled_serialized_restart"
         )
+        self.assertEqual(failed_uncertain.fallback_routes, ())
+
+        failed_paused = classify_recovery_state(
+            _make_record(accounting=acc, transaction=tx_failed, operator_paused=True),
+            current_base=BASE_A,
+            current_head=HEAD_B,
+            executor_status="failed",
+        )
+        self.assertEqual(failed_paused.primary_route, "controlled_serialized_restart")
+        self.assertEqual(
+            failed_paused.fallback_routes, ("quarantine_prepublication_isolation",)
+        )
 
         # publication_pending, publication_suppressed, and analysis
         self.assertEqual(
@@ -1020,6 +1034,7 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
             ]
             old_provider_calls = f.provider_calls
 
+            trace_before_diag = list(f.trace)
             ledger, observed = _diagnostic_ledger(f)
             classified = classify_live_ledger_recovery(
                 ledger=ledger,
@@ -1029,6 +1044,7 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                 actions_token="synthetic-actions",
                 native_effects_confirmed=True,
             )
+            self.assertEqual(f.trace, trace_before_diag)
             self.assertEqual(
                 classified.state_code, "historical_publication_completion_eligible"
             )
@@ -1146,6 +1162,14 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
             )
             self.assertEqual(f.provider_calls, saved_calls)
             self.assertEqual(f.comment, saved_comment)
+            self.assertEqual(
+                parse_session_comment(
+                    f.comment["body"], identity=IDENTITY
+                ).record_sha256,
+                parse_session_comment(
+                    saved_comment["body"], identity=IDENTITY
+                ).record_sha256,
+            )
 
             # Control B: Restore exact same base on unclosed `publication_succeeded`:
             # `retained_analysis` refuses unverified published tails on attempt 2, so
@@ -1169,7 +1193,9 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
             self.assertEqual(
                 same_head_class.primary_route, "quarantine_published_tail_isolation"
             )
-            for claim in f.root.glob("reviewsensei-api-*-2-*.claim"):
+            claims = list(f.root.glob("reviewsensei-api-*-2-*.claim"))
+            self.assertTrue(claims)
+            for claim in claims:
                 claim.unlink()
             self.assertEqual(f.invoke(human=True), 1, f.error)
             self.assertIn(
@@ -1217,6 +1243,26 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                 settled.api_run_accounting["terminal_transaction"],
                 settled.transaction.transaction_id,
             )
+            settled_acc = ApiRunAccounting.from_document(settled.api_run_accounting)
+            self.assertEqual(settled_acc.uncertain, 0)
+            self.assertEqual(
+                [p.request_id for b in settled_acc.blocks for p in b.pending], []
+            )
+            self.assertIn(
+                (settled_acc.owner.job, 2),
+                set(settled_acc.startup_used),
+            )
+            settled_ledger, _ = _diagnostic_ledger(fp)
+            self.assertEqual(
+                classify_live_ledger_recovery(
+                    ledger=settled_ledger,
+                    identity=IDENTITY,
+                    current_base=fp.requested_base,
+                    current_head=fp.requested_head,
+                    actions_token="synthetic-actions",
+                ).state_code,
+                "terminal_review_settled",
+            )
 
     def test_negative_controls_fail_closed_and_recover_via_controlled_restart(
         self,
@@ -1255,6 +1301,7 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
             f_failed = ConsecutiveReviewRunTests.historical_case(directory)
             # Remove the synthetic old soft-cleanup qualification so the predecessor
             # run remains a genuine failed executor (`conclusion == "failure"`).
+            self.assertTrue(f_failed.qualified_old_soft_cleanup_successes)
             f_failed.qualified_old_soft_cleanup_successes.clear()
             ledger, _ = _diagnostic_ledger(f_failed)
             failed_class = classify_live_ledger_recovery(
@@ -1311,6 +1358,8 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
 
                 original_external = rf.external
                 original_main = cli.main
+                comments_list_calls: list[str] = []
+                prepare_diff_calls: list[dict[str, object]] = []
 
                 def external(request, timeout):
                     path = urlsplit(request.full_url).path
@@ -1344,6 +1393,7 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                         return json_response(old_comment)
                     response = original_external(request, timeout)
                     if path.endswith("/issues/7/comments") and request.method == "GET":
+                        comments_list_calls.append(request.full_url)
                         return json_response([old_comment, *json.loads(response.body)])
                     return response
 
@@ -1362,6 +1412,7 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                     return original_main(argv)
 
                 def prepare_diff(**kwargs):
+                    prepare_diff_calls.append(dict(kwargs))
                     kwargs["output"].write_text(
                         HostedAnalysisCliTests.ANALYSIS_DIFF,
                         encoding="utf-8",
@@ -1374,6 +1425,10 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                     patch.object(review_run, "prepare_diff", side_effect=prepare_diff),
                 ):
                     self.assertEqual(rf.invoke(), 0, rf.error)
+                self.assertTrue(comments_list_calls)
+                self.assertEqual(len(prepare_diff_calls), 1)
+                self.assertEqual(prepare_diff_calls[0]["head_ref"], rf.requested_head)
+                self.assertEqual(prepare_diff_calls[0]["base_ref"], rf.requested_base)
                 self.assertIsNotNone(rf.selected.caller.accounting.terminal_transaction)
                 archived = json.loads((rf.root / "abandoned-history.json").read_bytes())
                 self.assertEqual(archived["comments"][0]["body"], old_body)
@@ -1416,6 +1471,10 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                     current_head=ACTION_HEAD,
                 )
                 if partitioned:
+                    # Intentional negative control: `caller-requests-v3` without the
+                    # matching writer version contract is rejected by
+                    # `ApiRunAccounting.require_writer_version()` and fails closed
+                    # to `legacy_or_corrupt_accounting`.
                     self.assertEqual(
                         classified.state_code, "legacy_or_corrupt_accounting"
                     )
@@ -1435,6 +1494,14 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                     f.SOURCE_ID = 205
                     f.select_command("@reviewsensei review status", new_run=True)
                     self.assertEqual(f.invoke_command(), 0, f.error)
+                    rolled = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                    self.assertGreater(rolled.generation, record.generation)
+                    self.assertEqual(
+                        rolled.api_run_accounting["identity"]["run_id"], f.run_id
+                    )
+                    self.assertEqual(
+                        rolled.api_run_accounting["action"]["phase"], "terminal"
+                    )
 
         # Also verify real CommandEntryFixture terminal action + corrupt control via live classifier!
         from test_action_run import PublishedPartialCommandAdmissionTests
@@ -1564,6 +1631,299 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                     identity=IDENTITY,
                     current_base=BASE_A,
                     current_head=HEAD_A,
+                )
+
+    def test_probe_executor_status_readonly_and_projected_checkpoint_store_controls(
+        self,
+    ) -> None:
+        from review_sensei_github.accepted_result import selected_accepted_result
+        from review_sensei_github.checkpoint_result_store import CheckpointResultStore
+        from review_sensei_github.operation_comments import (
+            GitHubIssueCommentOperationPort,
+            ResultPartStore,
+        )
+        from review_sensei_github.publication_recovery import (
+            _event_key,
+            _publication_transport,
+        )
+        from review_sensei_github.recovery_route_advisor import (
+            _probe_executor_status_readonly,
+        )
+        from review_sensei_github.review_completion_recovery import _ReadOnlyHttp
+
+        from review_sensei.historical_completion import QUALIFIED_EXECUTORS
+        from review_sensei.models import ReviewResult
+
+        # Part 1: Direct matrix over `_probe_executor_status_readonly` (RS-DC1058, RS-F5D8A2, RS-8D77D7)
+        owner = ApiExecutionOwner(1, "hosted", 0)
+        catalog_sha, catalog_contract = next(iter(QUALIFIED_EXECUTORS.items()))
+        probe_state: dict[str, object] = {
+            "job_status": "in_progress",
+            "job_conclusion": None,
+            "run_http_status": 200,
+            "run_status": "completed",
+            "run_conclusion": "success",
+            "run_attempt": 1,
+            "workflow_sha": "f" * 40,
+            "workflow_path": catalog_contract["workflow_path"],
+            "workflow_ref": catalog_contract["workflow_ref"],
+        }
+
+        def probe_opener(request, timeout=None):
+            path = urlsplit(request.full_url).path
+            if path.endswith("/actions/runs/777"):
+                if probe_state["run_http_status"] != 200:
+                    return json_response(
+                        {"message": "unavailable"}, int(probe_state["run_http_status"])
+                    )
+                return json_response(
+                    {
+                        "id": 777,
+                        "repository": {"id": 123, "full_name": "owner/repo"},
+                        "status": probe_state["run_status"],
+                        "conclusion": probe_state["run_conclusion"],
+                        "run_attempt": probe_state["run_attempt"],
+                        "head_sha": HEAD_A,
+                        "event": "pull_request",
+                        "referenced_workflows": [
+                            {
+                                "sha": probe_state["workflow_sha"],
+                                "path": probe_state["workflow_path"],
+                                "ref": probe_state["workflow_ref"],
+                            }
+                        ],
+                    }
+                )
+            if path.endswith("/actions/runs/777/attempts/1/jobs"):
+                return json_response(
+                    {
+                        "total_count": 1,
+                        "jobs": [
+                            {
+                                "id": 10,
+                                "name": "hosted",
+                                "run_id": 777,
+                                "run_attempt": 1,
+                                "status": probe_state["job_status"],
+                                "conclusion": probe_state["job_conclusion"],
+                                "completed_at": "2026-11-10T12:05:00Z",
+                                "steps": [
+                                    {
+                                        "number": 1,
+                                        "name": "Wrong step",
+                                        "status": "completed",
+                                        "conclusion": "success",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                )
+            raise AssertionError(f"unexpected probe path: {path}")
+
+        ro_http = _ReadOnlyHttp(
+            GitHubHttp(api_url="https://api.github.test", opener=probe_opener)
+        )
+        self.assertEqual(
+            _probe_executor_status_readonly(
+                ro_http,
+                actions_token="tok",
+                identity=IDENTITY,
+                run_id=0,
+                owner=owner,
+                tx_head_sha=HEAD_A,
+            ),
+            "active_or_unconfirmed",
+        )
+        # 1a. Active job -> `active_or_unconfirmed`
+        self.assertEqual(
+            _probe_executor_status_readonly(
+                ro_http,
+                actions_token="tok",
+                identity=IDENTITY,
+                run_id=777,
+                owner=owner,
+                tx_head_sha=HEAD_A,
+            ),
+            "active_or_unconfirmed",
+        )
+        # 1b. Failed job -> `failed`
+        probe_state["job_status"] = "completed"
+        probe_state["job_conclusion"] = "failure"
+        self.assertEqual(
+            _probe_executor_status_readonly(
+                ro_http,
+                actions_token="tok",
+                identity=IDENTITY,
+                run_id=777,
+                owner=owner,
+                tx_head_sha=HEAD_A,
+            ),
+            "failed",
+        )
+        # 1c. Successful job + unreadable `run_doc` -> `ceased` (RS-F5D8A2)
+        probe_state["job_conclusion"] = "success"
+        probe_state["run_http_status"] = 404
+        self.assertEqual(
+            _probe_executor_status_readonly(
+                ro_http,
+                actions_token="tok",
+                identity=IDENTITY,
+                run_id=777,
+                owner=owner,
+                tx_head_sha=HEAD_A,
+            ),
+            "ceased",
+        )
+        # 1d. Successful job + non-success overall run conclusion -> `ceased` (RS-F5D8A2)
+        probe_state["run_http_status"] = 200
+        probe_state["run_conclusion"] = "failure"
+        self.assertEqual(
+            _probe_executor_status_readonly(
+                ro_http,
+                actions_token="tok",
+                identity=IDENTITY,
+                run_id=777,
+                owner=owner,
+                tx_head_sha=HEAD_A,
+            ),
+            "ceased",
+        )
+        # 1e. Successful job & run + uncatalogued workflow SHA -> `unrecognized`
+        probe_state["run_conclusion"] = "success"
+        self.assertEqual(
+            _probe_executor_status_readonly(
+                ro_http,
+                actions_token="tok",
+                identity=IDENTITY,
+                run_id=777,
+                owner=owner,
+                tx_head_sha=HEAD_A,
+            ),
+            "unrecognized",
+        )
+        # 1f. Catalogued workflow SHA whose step/head contract failed -> `failed`
+        probe_state["workflow_sha"] = catalog_sha
+        self.assertEqual(
+            _probe_executor_status_readonly(
+                ro_http,
+                actions_token="tok",
+                identity=IDENTITY,
+                run_id=777,
+                owner=owner,
+                tx_head_sha=HEAD_A,
+            ),
+            "failed",
+        )
+
+        # Part 2: `classify_live_ledger_recovery` over a projected `CheckpointResultStore`
+        # carrier (`CHECKPOINT_VERSION`) and `app_id` validation (RS-E917E3, RS-7B4178):
+        with tempfile.TemporaryDirectory() as directory:
+            fp = EntryFixture(directory, limit=512)
+
+            def stop_before_pub() -> None:
+                raise KeyboardInterrupt()
+
+            fp.before_publication = stop_before_pub
+            self.assertEqual(fp.invoke(), 130, fp.error)
+            rec = parse_session_comment(fp.comment["body"], identity=IDENTITY)
+            assert rec.transaction is not None
+            tx = rec.transaction
+            captured = selected_accepted_result(fp.selected.http, tx, app_id=999)
+            bound = replace(
+                ReviewResult.from_dict(json.loads(captured.payload)),
+                transaction=tx,
+            )
+            key = _event_key(IDENTITY, tx)
+            # Replace the raw result parts in `fp.extra_comments` with a compact
+            # `operation-checkpoint-projection-v1` carrier written by `CheckpointResultStore`!
+            port = GitHubIssueCommentOperationPort(
+                fp.selected.http,
+                token="installation-token",
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                app_user_id=999,
+                strict_association=True,
+            )
+            # Clear raw checkpoint parts for `key`, keeping the accepted source event comments.
+            raw_store = ResultPartStore(port, app_user_id=999)
+            existing = raw_store.read_available_with_carriers(event_key=key)
+            assert existing is not None
+            for cid in existing[2]:
+                fp.extra_comments.pop(cid, None)
+
+            physical = _publication_transport(fp.selected.http)
+            compact_store = CheckpointResultStore(
+                port,
+                app_user_id=999,
+                http=fp.selected.http,
+                identity=IDENTITY,
+                transaction=tx,
+                app_id=999,
+                compact_write=True,
+            )
+            with (
+                patch.object(
+                    physical,
+                    "_quarantine_capacity_guard",
+                    SimpleNamespace(
+                        before_request=lambda *_a, **_kw: None,
+                        after_response=lambda *_a, **_kw: None,
+                        admit_comment_batch=lambda *_a, **_kw: None,
+                    ),
+                ),
+                patch(
+                    "review_sensei_github.checkpoint_result_store.selected_accepted_result",
+                    return_value=replace(
+                        captured, native_format="literal-malformed-v1"
+                    ),
+                ),
+            ):
+                compact_store.write(
+                    event_key=key,
+                    result=canonical_bytes(bound.to_dict()),
+                    _check_existing=False,
+                )
+
+            fp.attempt = 2
+            ledger_proj, _ = _diagnostic_ledger(fp)
+            proj_class = classify_live_ledger_recovery(
+                ledger=ledger_proj,
+                identity=IDENTITY,
+                current_base=fp.requested_base,
+                current_head=fp.requested_head,
+                actions_token="synthetic-actions",
+            )
+            self.assertEqual(
+                proj_class.state_code,
+                "publication_pending_same_head_replay_eligible",
+            )
+            self.assertEqual(
+                proj_class.primary_route, "same_run_attempt2_retained_replay"
+            )
+
+            # Without `app_id` (`authenticated_app_id=None`), compact checkpoint
+            # source authentication fails closed -> `nonterminal_transaction_isolation_required`!
+            ledger_no_app, _ = _diagnostic_ledger(fp)
+            ledger_no_app.authenticated_app_id = None
+            no_app_class = classify_live_ledger_recovery(
+                ledger=ledger_no_app,
+                identity=IDENTITY,
+                current_base=fp.requested_base,
+                current_head=fp.requested_head,
+                actions_token="synthetic-actions",
+            )
+            self.assertEqual(
+                no_app_class.state_code,
+                "nonterminal_transaction_isolation_required",
+            )
+            with self.assertRaisesRegex(ReviewInputError, "positive integer"):
+                classify_live_ledger_recovery(
+                    ledger=ledger_no_app,
+                    identity=IDENTITY,
+                    current_base=fp.requested_base,
+                    current_head=fp.requested_head,
+                    app_id=0,
                 )
 
 

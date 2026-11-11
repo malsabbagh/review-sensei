@@ -43,26 +43,31 @@ replay/restart routes that preserve every existing safety invariant:
 
 1. **Historical recovery route matrix (`recovery_route_advisor.py`, `historical_completion.py`, `review_completion_recovery.py` — G03):**
    - Classify historical and current records into a closed state vocabulary and
-     deterministic recovery route (`already_settled`, `verify_finalization_replay`,
-     `review_remaining_text_window`, `same_run_attempt2_retained_replay`,
-     `quarantine_published_tail`, `quarantine_prepublication_isolation`,
-     `controlled_serialized_restart`).
+     deterministic recovery route (`ordinary_rollover`,
+     `automatic_historical_completion`, `same_run_attempt2_retained_replay`,
+     `pre_entry_abort_rollover`, `pending_reassessment_continuation`,
+     `targeted_human_disposition`, `quarantine_published_tail_isolation`,
+     `quarantine_prepublication_isolation`, `controlled_serialized_restart`).
    - Treat missing or unconfirmed completion witnesses as non-settled holds that
      must reconcile live native GitHub artifacts before claiming completion.
 
 2. **Pre-entry abort boundary qualification (`pre_entry_abort_recovery.py` — G29):**
-   - Qualify `confirmed_non_entry_zero_remote_effects` strictly when no
-     transaction, reservation, provider dispatch, or uncertain API request
-     exists (`confirmed == 0`, `uncertain == 0`, `reserved_undispatched == 0`).
-   - Hold provider-entered, reservation-bearing, or uncertain-request runs in
-     `provider_entered_unconfirmed_abort_hold` or
-     `uncertain_remote_mutation_abort_hold`, carrying full predecessor
+   - Qualify `qualified_pre_entry_abort` (`pre_entry_abort_rollover`) strictly
+     when an authenticated `analysis_abort` receipt, ceased owner, confirmed
+     reservation release, clean caller dispatch (`uncertain == 0`), zero
+     provider entry, and absence of late native effects are all proven.
+   - Hold provider-entered, reservation-bearing, uncertain-dispatch, or
+     unconfirmed runs in `no_transaction_provider_entered`,
+     `no_transaction_active_reservation`, `no_transaction_unknown_dispatch`, or
+     `no_transaction_unconfirmed_predecessor`, carrying full predecessor
      non-startup caller liability into `controlled-restart-registry-v1`.
 
 3. **Pending reassessment attribution and finalizer separation (`pending_reassessment_recovery.py` — G30):**
-   - Distinguish `unfinished_zero_decision_reassessment` (`finalizer_entered=False`)
+   - Distinguish `unfinished_zero_decision_assessment` (`finalizer_entered=False`)
      from `failed_finalizer_after_reassessment` (`finalizer_entered=True`) using
-     durable `PendingAssessmentReceipt` state and finalizer-close observations.
+     durable pending-receipt state, eligibility deltas (including newly resolved
+     findings and `override`/`accept-risk` pending-set reductions), and
+     finalizer-close observations.
    - Preserve exact source comment ID, actor, body SHA-256, and head SHA across
      delayed or fresh-process recovery; fail closed on duplicate receipt replay,
      head/base drift, or repeated zero-delta reassessment attempts reaching
@@ -74,13 +79,15 @@ replay/restart routes that preserve every existing safety invariant:
      immutability of both `ReviewResult` and `ReviewConvergencePolicy`.
    - Enforce `MAX_PUBLISHED_REVIEW_BODY_BYTES` (`65,536`), `MAX_PART_READS`
      (`64` ceiling / `60` ordinary), and the predecessor's frozen `512`-call
-     caller allowance without enlargement, and refuse silent enrollment of
-     non-`c7` executors into `quarantine_body_limit`.
+     caller allowance without enlargement, require `archive_excerpt_fits_ceiling`
+     on both same-head replay and `c7` superseded-head quarantine, and refuse
+     silent enrollment of non-`c7` executors into `body-limit-prepublication-v1`.
    - Separate `confirmed_prepublication_overflow_before_write` from
      `response_loss_unobserved_remote_hold` (`tx.phase == "publication_pending"`
      or `uncertain > 0`) and `response_loss_echo_observed_reconcilable` (live
-     exact-marker review already persisted on GitHub, reconciled with zero
-     duplicate review `POST`s).
+     exact-marker review already persisted on GitHub, routed to
+     `reconcile_observed_exact_review` or `reconcile_observed_review_hold` and
+     refusing blind restart to prevent duplicate review `POST`s).
 
 ## Scope
 
