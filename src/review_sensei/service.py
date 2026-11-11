@@ -23,6 +23,7 @@ from .context import (
     reconcile_finding_set,
 )
 from .coverage import CoverageManifest
+from .decision_configuration import DecisionConfiguration
 from .dependencies import dependency_review_note
 from .diff import DiffAnalysis, analyze_diff
 from .errors import (
@@ -55,6 +56,7 @@ from .planning import (
     plan_change,
 )
 from .providers.base import ReviewProvider
+from .review_decision_contract import ReviewDecisionProvider
 from .stages import (
     ReviewCategory,
     Stage,
@@ -280,9 +282,20 @@ def review_work_policy_digest(
     work_budgets: ReviewWorkBudgets,
     budget: ResourceBudget,
     capabilities: ProviderCapabilities | None = None,
+    *,
+    decision: DecisionConfiguration | None = None,
 ) -> str | None:
     """Compute review configuration identity without constructing a provider."""
 
+    if decision is not None and decision.enabled:
+        from .decision_provider import digest
+
+        return digest(
+            {
+                "review": review_work_policy_digest(work_budgets, budget, capabilities),
+                "decision": decision.digest(),
+            }
+        )
     if work_budgets.mode != "unified":
         return None
     from .evidence import evidence_digest
@@ -311,7 +324,10 @@ class ReviewService:
     @property
     def work_policy_digest(self) -> str | None:
         return review_work_policy_digest(
-            self.work_budgets, self.budget, self.capabilities
+            self.work_budgets,
+            self.budget,
+            self.capabilities,
+            decision=self.decision_configuration,
         )
 
     def __init__(
@@ -325,7 +341,23 @@ class ReviewService:
         cache: ReviewContextCache | None = None,
         work_budgets: ReviewWorkBudgets | None = None,
         capabilities: ProviderCapabilities | None = None,
+        decision_provider: ReviewDecisionProvider | None = None,
+        decision_configuration: DecisionConfiguration | None = None,
     ) -> None:
+        self.decision_configuration = decision_configuration or DecisionConfiguration()
+        self.decision_provider = decision_provider
+        if self.decision_configuration.enabled and (
+            decision_provider is None
+            or decision_provider.name != self.decision_configuration.provider
+            or decision_provider.model != self.decision_configuration.model
+        ):
+            raise ReviewInputError(
+                "enabled decision adapter does not match configuration"
+            )
+        if not self.decision_configuration.enabled and decision_provider is not None:
+            raise ReviewInputError(
+                "decision adapter requires explicit opt-in configuration"
+            )
         self.provider = provider
         self.enforce_locations = enforce_locations
         self.stages = tuple(stages) if stages is not None else DEFAULT_STAGES
@@ -397,7 +429,7 @@ class ReviewService:
             if not isinstance(stage_model, str) or not stage_model.strip():
                 return None
             bindings[stage.name] = (selected.name, stage_model)
-        if self.work_budgets.mode == "unified":
+        if self.work_budgets.mode == "unified" or self.decision_configuration.enabled:
             if request.work_policy_digest not in {None, self.work_policy_digest}:
                 raise ReviewInputError("review request work policy identity is invalid")
             request = replace(request, work_policy_digest=self.work_policy_digest)
@@ -520,7 +552,10 @@ class ReviewService:
                 )
             ),
         )
-        return _remember_result_work_policy(updated, self.work_policy_digest)
+        return _remember_result_work_policy(
+            updated,
+            self.work_policy_digest if self.work_budgets.mode == "unified" else None,
+        )
 
     @staticmethod
     def _status_with_coverage(status: str, coverage: CoverageManifest) -> str:
@@ -632,7 +667,7 @@ class ReviewService:
                 orchestrate_large_changes=False,
             )
             try:
-                chunk_run = self.run(
+                chunk_run = self._run_analysis(
                     chunk_request,
                     incremental=incremental,
                     current_key=current_key,
@@ -941,7 +976,67 @@ class ReviewService:
             raise ReviewFormatError("provider request failed")
         return run.result
 
-    def run(
+    def run(self, request: ReviewRequest, **kwargs: Any) -> ReviewRun:
+        if not self.decision_configuration.enabled:
+            return self._run_analysis(request, **kwargs)
+        from .review_decision import run_decisions
+
+        tracker = kwargs.get("tracker")
+        if tracker is None:
+            tracker = ResourceBudgetTracker(
+                kwargs.get("budget") or self.budget,
+                monotonic=kwargs.get("monotonic") or time.monotonic,
+                sleeper=kwargs.get("sleeper") or time.sleep,
+            )
+            kwargs["tracker"] = tracker
+        run = self._run_analysis(request, **kwargs)
+        if run.result is None:
+            return run
+        assert self.decision_provider is not None
+        snapshot_request = replace(
+            request,
+            base_sha=kwargs.get("trusted_base_sha") or request.base_sha,
+            head_sha=kwargs.get("trusted_head_sha") or request.head_sha,
+        )
+        result = run_decisions(
+            snapshot_request,
+            run.result,
+            provider=self.decision_provider,
+            review_provider=kwargs.get("provider_override") or self.provider,
+            settings=self.decision_configuration,
+            tracker=tracker,
+            incremental=kwargs.get("incremental"),
+            total_input_limit=self.work_budgets.max_total_prompt_bytes,
+            total_output_limit=self.work_budgets.max_total_output_bytes,
+            analysis_complete=run.outcome.status == "reviewed"
+            and run.result.review_status == "complete",
+        )
+        status, diagnostic = self._run_outcome_for_result(result)
+        decision_status = (
+            result.decision_pass["status"]
+            if result.decision_pass is not None
+            else "incomplete"
+        )
+        return replace(
+            run,
+            result=result,
+            bounded_stop_execution=None,
+            outcome=replace(
+                run.outcome,
+                status=status,
+                diagnostic=diagnostic,
+                provider_calls=tracker.provider_calls,
+                prompt_bytes=tracker.prompt_bytes,
+                response_bytes=tracker.response_bytes,
+                elapsed_ms=tracker.elapsed_ms(),
+                stage_summary={
+                    **run.outcome.stage_summary,
+                    "decision": str(decision_status),
+                },
+            ),
+        )
+
+    def _run_analysis(
         self,
         request: ReviewRequest,
         *,
@@ -975,7 +1070,7 @@ class ReviewService:
         mismatched key before change orchestration or any provider/cache work.
         """
 
-        if self.work_budgets.mode == "unified":
+        if self.work_budgets.mode == "unified" or self.decision_configuration.enabled:
             if (
                 request.work_policy_digest is not None
                 and request.work_policy_digest != self.work_policy_digest
@@ -984,7 +1079,11 @@ class ReviewService:
             request = replace(request, work_policy_digest=self.work_policy_digest)
         elif request.work_policy_digest is not None:
             raise ReviewInputError("review work policy requires the unified mechanism")
-        elif work_recovery is not None and work_recovery.enabled:
+        if (
+            self.work_budgets.mode != "unified"
+            and work_recovery is not None
+            and work_recovery.enabled
+        ):
             raise ReviewInputError(
                 "work receipt recovery requires the unified mechanism"
             )
@@ -1908,6 +2007,7 @@ class ReviewService:
         # to full with no prior state.
         if (
             self.cache is not None
+            and not self.decision_configuration.enabled
             and coverage.current_key is not None
             and review_complete
         ):
@@ -1917,7 +2017,10 @@ class ReviewService:
                 (coverage.generation, coverage.mode, len(lifecycles)),
                 generation=coverage.generation,
             )
-        return _remember_result_work_policy(result, self.work_policy_digest)
+        return _remember_result_work_policy(
+            result,
+            self.work_policy_digest if self.work_budgets.mode == "unified" else None,
+        )
 
     def _format_prompt(
         self,

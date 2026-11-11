@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .configuration import (
@@ -34,6 +34,7 @@ from .configuration import (
     load_configuration,
     resolve_inference,
 )
+from .decision_configuration import DecisionConfiguration
 
 RUNNER_KINDS = ("hosted", "local")
 _OUTPUT_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -87,12 +88,14 @@ class HostedPlan:
     policy: HostedPolicy
     source: str | None
     provenance: Mapping[str, Provenance]
+    decision: DecisionConfiguration = field(default_factory=DecisionConfiguration)
 
     def source_of(self, field_name: str) -> Provenance:
         return self.provenance[field_name]
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "decision": self.decision.to_dict(),
             "backend": self.backend,
             "model": self.model,
             "base_url": self.base_url,
@@ -146,7 +149,22 @@ def plan_hosted_execution(
             source=configuration.source,
         )
     policy = _hosted_policy(configuration)
-    return _plan_from(resolved, policy, source=configuration.source)
+    decision = configuration.decision
+    if decision.enabled:
+        if decision.provider == "ollama" and resolved.runner_kind != "local":
+            raise ConfigurationError(
+                "local decision inference requires the local hosted runner route"
+            )
+        if decision.provider == "openrouter" and (
+            resolved.backend != "openrouter"
+            or decision.api_key_env != resolved.credential_env
+        ):
+            raise ConfigurationError(
+                "hosted decision inference requires an explicitly selected credential available on its runner; the current hosted OpenRouter route forwards its named review credential only"
+            )
+    return replace(
+        _plan_from(resolved, policy, source=configuration.source), decision=decision
+    )
 
 
 def _hosted_policy(configuration: ProductConfiguration) -> HostedPolicy:
@@ -284,6 +302,7 @@ def render_hosted_plan(plan: HostedPlan, *, as_json: bool) -> str:
         f"artifacts={plan.policy.artifacts}"
     )
     lines.append(f"configuration: {plan.source or 'none (packaged defaults)'}")
+    lines.append("decision: " + json.dumps(plan.decision.to_dict(), sort_keys=True))
     return "\n".join(lines) + "\n"
 
 

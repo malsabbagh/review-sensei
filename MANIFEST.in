@@ -174,3 +174,8 @@ include tests/fixtures/regressions/review-lifecycle-403.json
 include tests/fixtures/regressions/review-lifecycle-session122.json
 include tests/fixtures/regressions/review-lifecycle-sitevault141.json
 global-exclude *.py[cod]
+
+include tests/test_review_decision_adapters.py
+include tests/test_review_decision_engine.py
+include tests/test_review_decision_configuration.py
+include tests/test_review_decision_binding.py

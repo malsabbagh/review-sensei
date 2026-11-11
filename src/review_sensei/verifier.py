@@ -2465,6 +2465,7 @@ def prepare_publishable_review(
         summary = f"{summary}\n\n{coverage}" if summary else coverage
     prepared = ReviewResult(
         summary=summary,
+        decision_pass=result.decision_pass,
         comments=tuple(published),
         provider=result.provider,
         model=result.model,

@@ -6,6 +6,27 @@
   "additionalProperties": false,
   "required": ["summary", "comments", "provider"],
   "properties": {
+    "decision_pass": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "policy_digest", "input_sha256", "inventory_sha256", "status", "provider", "model", "models", "candidates", "calls", "input_bytes", "output_bytes", "output_reserved", "elapsed_ms", "verification_called"],
+      "properties": {
+        "schema_version": {"const": "1.0"},
+        "policy_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "input_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "inventory_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "status": {"enum": ["complete", "incomplete"]},
+        "provider": {"type": "string", "minLength": 1, "maxLength": 256},
+        "model": {"type": "string", "minLength": 1, "maxLength": 256},
+        "models": {"type": "array", "maxItems": 8, "items": {"type": "object"}},
+        "candidates": {"type": "array", "maxItems": 250, "items": {"type": "object"}},
+        "calls": {"type": "integer", "minimum": 0, "maximum": 8},
+        "input_bytes": {"type": "integer", "minimum": 0, "maximum": 262144},
+        "output_bytes": {"type": "integer", "minimum": 0},
+        "output_reserved": {"type": "integer", "minimum": 0, "maximum": 65536},
+        "elapsed_ms": {"type": "integer", "minimum": 0},
+        "verification_called": {"type": "boolean"}
+      }
+    },
     "publication_selection": {"$ref": "https://reviewsensei.dev/schemas/v1/publication-selection.schema.json"},
     "review_verdict": {"$ref": "https://reviewsensei.dev/schemas/v1/review-verdict.schema.json"},
     "summary": {"type": "string", "minLength": 1},

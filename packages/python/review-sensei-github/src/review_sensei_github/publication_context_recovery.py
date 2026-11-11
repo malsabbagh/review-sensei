@@ -98,7 +98,9 @@ def reconstruct_publication_contexts(
     budget = _configured_resource_budget(
         ResourceBudget.for_limits(DEFAULT_REVIEW_LIMITS), configuration
     )
-    work_policy = review_work_policy_digest(configuration.advanced.review_work, budget)
+    work_policy = review_work_policy_digest(
+        configuration.advanced.review_work, budget, decision=configuration.decision
+    )
     stages, categories = transaction_stage_identity(DEFAULT_STAGES)
     reconstructed_configuration = build_transaction_configuration_context(
         provider=provider,

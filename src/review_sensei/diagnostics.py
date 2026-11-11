@@ -111,6 +111,16 @@ def _diagnostic_provider_configuration(
             api_key_env=api_key_env,
             provider_mode=mode,
         )
+        if (
+            profile is not None
+            and configuration.get("inference_location") == "local"
+            and configuration_file.decision.enabled
+            and configuration_file.decision.provider != "ollama"
+        ):
+            raise ReviewInputError(
+                "a local-only review profile cannot enable remote decisions"
+            )
+        configuration["decision"] = configuration_file.decision.to_dict()
         return mode, configuration
     environment = {
         key: value
@@ -177,6 +187,7 @@ def _diagnostic_provider_configuration(
         "timeout_seconds": resolved.timeout_seconds,
         "qualification_status": "unknown",
         "provenance": provenance,
+        "decision": configuration_file.decision.to_dict(),
     }
 
 
@@ -1187,6 +1198,11 @@ def render_diagnostic(document: dict[str, Any], *, as_json: bool = False) -> str
         timeout_seconds = provider_configuration.get("timeout_seconds")
         if timeout_seconds is not None:
             lines.append(f"timeout_seconds: {timeout_seconds}")
+        if "decision" in provider_configuration:
+            lines.append(
+                "decision: "
+                + json.dumps(provider_configuration["decision"], sort_keys=True)
+            )
     review_convergence = document.get("review_convergence")
     if isinstance(review_convergence, dict) and review_convergence.get("mode"):
         lines.append(
