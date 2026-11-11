@@ -797,3 +797,21 @@ describe("pull-request lookup exact failure handling", () => {
     } finally { fetchMock.mockRestore(); }
   });
 });
+
+
+describe("post-header PR lookup transport evidence", () => {
+  it("distinguishes a lost response body from a pre-response transport failure", async () => {
+    const client = api();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.error(new TypeError("ghs_body_transport_canary")); },
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(stream, { status: 200 }));
+    try {
+      const error = await client.pullRequestHead("acme/widgets", 7, "ghs_token_canary").catch(error => error);
+      expect(error.message).toBe("github_response_unavailable");
+      expect(error.pullRequestLookup).toEqual({ outcome: "transport", upstream_status: 200 });
+      expect(JSON.stringify(error)).not.toContain("canary");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally { fetchMock.mockRestore(); }
+  });
+});
