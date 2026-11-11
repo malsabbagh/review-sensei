@@ -42,6 +42,17 @@ from .session_ledger import (
     GitHubIssueCommentSessionLedger,
     parse_session_comment,
 )
+from .trust_transitions import (
+    TRANSITION_PHASES,
+    TRUST_TRANSITION_KINDS,
+    AuthenticatedTrustMigration,
+    AuthenticatedTrustSnapshot,
+    TrustMigrationReceipt,
+    TrustTransitionDecision,
+    detect_trust_transitions,
+    evaluate_trust_boundary,
+    verify_and_migrate_trust_boundary,
+)
 
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _COMMIT_SHA_RE = re.compile(r"^[a-f0-9]{40,64}$")
@@ -820,15 +831,24 @@ __all__ = [
     "AUTHORITY_ARTIFACT_KINDS",
     "ArchiveChainPartRef",
     "ArtifactEvaluationDecision",
+    "AuthenticatedTrustMigration",
+    "AuthenticatedTrustSnapshot",
     "EVIDENCE_ARTIFACT_KINDS",
     "ObservedGitHubArtifact",
     "OperatorReenrollEligibility",
     "OperatorReenrollReceipt",
     "OperatorReenrollRequest",
     "PROJECTION_ARTIFACT_KINDS",
+    "TRANSITION_PHASES",
+    "TRUST_TRANSITION_KINDS",
+    "TrustMigrationReceipt",
+    "TrustTransitionDecision",
     "classify_review_artifact",
+    "detect_trust_transitions",
     "evaluate_observed_artifact",
     "evaluate_operator_reenroll",
+    "evaluate_trust_boundary",
     "execute_restricted_operator_reenroll",
+    "verify_and_migrate_trust_boundary",
     "verify_archive_chain_integrity",
 ]
