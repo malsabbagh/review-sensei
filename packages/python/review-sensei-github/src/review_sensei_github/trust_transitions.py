@@ -110,7 +110,12 @@ def _require_commit_sha(value: object, *, label: str) -> str:
 
 @dataclass(frozen=True)
 class AuthenticatedTrustSnapshot:
-    """Authenticated repository, installation, permission, and actor snapshot."""
+    """Authenticated repository, installation, permission, and actor snapshot.
+
+    ``permission_epoch`` is monotonically non-decreasing across enrollment and
+    migration generations: epoch regressions fail closed, and any change to
+    ``granted_permissions`` during migration must advance ``permission_epoch``.
+    """
 
     repository_id: int
     owner_id: int
@@ -182,6 +187,14 @@ class AuthenticatedTrustSnapshot:
         _require_positive_int(self.permission_epoch, label="permission_epoch")
 
     def to_session_identity(self) -> SessionIdentity:
+        """Return ledger-addressing key ``(repository, pull_request, repository_id)``.
+
+        ``SessionIdentity`` addresses the PR session ledger only; admission,
+        native-effect, and migration authorization MUST bind against the full
+        ``AuthenticatedTrustSnapshot`` (including ``owner_id``,
+        ``installation_id``, ``actor_id``, and ``permission_epoch``).
+        """
+
         return SessionIdentity(
             repository=self.repository_slug,
             pull_request=self.pull_request,
@@ -287,9 +300,23 @@ def detect_trust_transitions(
     if perms_changed:
         detected.append("permission_revoke_or_restore")
 
-    actor_downgraded = PERMISSION_RANKS[observed.actor_permission] < PERMISSION_RANKS[
-        enrolled.actor_permission
-    ] or not observed.actor_meets_operation(operation)
+    same_actor_downgraded = observed.actor_id == enrolled.actor_id and (
+        PERMISSION_RANKS[observed.actor_permission]
+        < PERMISSION_RANKS[enrolled.actor_permission]
+        or (
+            authorized_override(
+                association=enrolled.actor_association,
+                permission=enrolled.actor_permission,
+            )
+            and not authorized_override(
+                association=observed.actor_association,
+                permission=observed.actor_permission,
+            )
+        )
+    )
+    actor_downgraded = same_actor_downgraded or not observed.actor_meets_operation(
+        operation
+    )
     if actor_downgraded:
         detected.append("actor_privilege_downgrade")
 
@@ -361,7 +388,7 @@ def evaluate_trust_boundary(
     cross_repo_risk = (
         enrolled.repository_id != observed.repository_id
         or enrolled.owner_id != observed.owner_id
-        or enrolled.repository_slug != observed.repository_slug
+        or enrolled.owner_login.lower() != observed.owner_login.lower()
         or enrolled.pull_request != observed.pull_request
     )
 
@@ -394,17 +421,16 @@ def evaluate_trust_boundary(
         )
 
     primary = transitions[0] if transitions else "cross_pull_request_mismatch"
-    charges_held = has_prior_charges or phase in {
-        "before_native_effect",
-        "after_unknown_effect",
-    }
+    charges_held = has_prior_charges or has_unknown_effect
+    fork_blocked = enrolled.is_fork or observed.is_fork
+    epoch_regressed = observed.permission_epoch < enrolled.permission_epoch
 
     # Determine explicit bounded recovery routes per transition class!
     routes: list[str] = []
     if has_unknown_effect:
         routes.append("reconcile-unknown-effect")
 
-    if "fork_status_change" in transitions and observed.is_fork:
+    if "fork_status_change" in transitions and fork_blocked:
         routes.append("unsupported-fork-boundary")
     if (
         "repository_selection_change" in transitions
@@ -415,6 +441,8 @@ def evaluate_trust_boundary(
         observed.has_required_permissions(required_permissions)
     ):
         routes.append("restore-app-permissions")
+    if epoch_regressed:
+        routes.append("operator-reconcile")
     if "actor_privilege_downgrade" in transitions:
         routes.append("authorized-maintainer-command")
     if (
@@ -428,7 +456,8 @@ def evaluate_trust_boundary(
                 "permission_revoke_or_restore",
             )
         )
-        and not observed.is_fork
+        and not fork_blocked
+        and not epoch_regressed
     ):
         routes.append("authenticated-trust-migration")
 
@@ -440,7 +469,7 @@ def evaluate_trust_boundary(
         allowed=False,
         detected_transitions=transitions,
         reason_code=f"trust-transition-refused:{primary}",
-        cross_repository_write_blocked=cross_repo_risk or phase != "before_admission",
+        cross_repository_write_blocked=cross_repo_risk,
         fresh_allowance_minted=False,
         obligations_preserved=True,
         charges_held=charges_held,
@@ -449,12 +478,59 @@ def evaluate_trust_boundary(
     )
 
 
+def compute_transfer_attestation_sha256(
+    *,
+    repository_id: int,
+    previous_owner_id: int,
+    previous_owner_login: str,
+    new_owner_id: int,
+    new_owner_login: str,
+    pull_request: int,
+    head_sha: str,
+    permission_epoch: int,
+    previous_owner_witness: str,
+) -> str:
+    """Compute canonical preimage digest for cross-owner transfer attestation."""
+
+    _require_positive_int(repository_id, label="repository_id")
+    _require_positive_int(previous_owner_id, label="previous_owner_id")
+    _require_positive_int(new_owner_id, label="new_owner_id")
+    if (
+        not isinstance(previous_owner_login, str)
+        or _LOGIN_RE.fullmatch(previous_owner_login) is None
+        or not isinstance(new_owner_login, str)
+        or _LOGIN_RE.fullmatch(new_owner_login) is None
+    ):
+        raise ReviewInputError("transfer attestation owner login is invalid")
+    _require_positive_int(pull_request, label="pull_request")
+    _require_commit_sha(head_sha, label="head_sha")
+    _require_positive_int(permission_epoch, label="permission_epoch")
+    _require_reason(previous_owner_witness)
+    return hashlib.sha256(
+        b"reviewsensei:ownership-transfer-attestation:v1:"
+        + canonical_bytes(
+            {
+                "repository_id": repository_id,
+                "previous_owner_id": previous_owner_id,
+                "previous_owner_login": previous_owner_login.lower(),
+                "new_owner_id": new_owner_id,
+                "new_owner_login": new_owner_login.lower(),
+                "pull_request": pull_request,
+                "head_sha": head_sha,
+                "permission_epoch": permission_epoch,
+                "previous_owner_witness": previous_owner_witness,
+            }
+        )
+    ).hexdigest()
+
+
 @dataclass(frozen=True)
 class AuthenticatedTrustMigration:
     """Explicit operator-authenticated migration proof across a trust transition."""
 
     old_snapshot_sha256: str
     new_snapshot_sha256: str
+    operator_id: int
     operator_login: str
     operator_association: str
     operator_permission: str
@@ -466,6 +542,7 @@ class AuthenticatedTrustMigration:
     def __post_init__(self) -> None:
         _require_sha256(self.old_snapshot_sha256, label="old_snapshot_sha256")
         _require_sha256(self.new_snapshot_sha256, label="new_snapshot_sha256")
+        _require_positive_int(self.operator_id, label="migration operator_id")
         if (
             not isinstance(self.operator_login, str)
             or _LOGIN_RE.fullmatch(self.operator_login) is None
@@ -514,6 +591,7 @@ def verify_and_migrate_trust_boundary(
     migration: AuthenticatedTrustMigration,
     has_unknown_effect: bool = False,
     required_permissions: Mapping[str, str] = DEFAULT_REQUIRED_INSTALLATION_PERMISSIONS,
+    expected_transfer_attestation_sha256: str | None = None,
 ) -> TrustMigrationReceipt:
     """Authenticate and execute a bounded trust migration without resetting history.
 
@@ -534,6 +612,11 @@ def verify_and_migrate_trust_boundary(
     if not isinstance(migration, AuthenticatedTrustMigration):
         raise ReviewInputError("migration must be an AuthenticatedTrustMigration")
     _require_bool(has_unknown_effect, label="has_unknown_effect")
+    if expected_transfer_attestation_sha256 is not None:
+        _require_sha256(
+            expected_transfer_attestation_sha256,
+            label="expected_transfer_attestation_sha256",
+        )
 
     if migration.old_snapshot_sha256 != enrolled.digest():
         raise ReviewInputError("migration old_snapshot_sha256 does not match enrolled")
@@ -558,9 +641,13 @@ def verify_and_migrate_trust_boundary(
         raise ReviewInputError(
             "trust migration cannot cross repository_id, pull_request, or head_sha"
         )
-    if target.is_fork:
+    if enrolled.is_fork or target.is_fork:
         raise ReviewInputError(
-            "fork repositories cannot acquire hosted write authority via migration"
+            "fork repositories and fork-origin transitions cannot acquire hosted write authority via migration"
+        )
+    if target.permission_epoch < enrolled.permission_epoch:
+        raise ReviewInputError(
+            "target permission_epoch cannot regress below enrolled permission_epoch"
         )
     if not target.repository_selected:
         raise ReviewInputError(
@@ -569,6 +656,23 @@ def verify_and_migrate_trust_boundary(
     if not target.has_required_permissions(required_permissions):
         raise ReviewInputError(
             "target installation lacks required permissions for migration"
+        )
+    if (
+        dict(enrolled.granted_permissions) != dict(target.granted_permissions)
+        and target.permission_epoch <= enrolled.permission_epoch
+    ):
+        raise ReviewInputError(
+            "permission grant changes require a strictly newer permission_epoch"
+        )
+    if (
+        migration.operator_id != target.actor_id
+        or migration.operator_login.lower() != target.actor_login.lower()
+        or migration.operator_association != target.actor_association
+        or migration.operator_permission != target.actor_permission
+        or not target.actor_meets_operation("override")
+    ):
+        raise ReviewInputError(
+            "migration operator identity and authority must match authenticated target actor"
         )
     if has_unknown_effect and migration.reconciled_effect_sha256 is None:
         raise ReviewInputError(
@@ -584,14 +688,20 @@ def verify_and_migrate_trust_boundary(
     if not transitions:
         raise ReviewInputError("no trust transition requires migration")
 
-    if (
-        "ownership_transfer" in transitions
-        and migration.previous_owner_transfer_attestation_sha256 is None
-    ):
-        raise ReviewInputError(
-            "ownership transfer requires explicit previous_owner_transfer_attestation_sha256; "
-            "unchanged numeric repository_id alone never proves transfer trust"
-        )
+    if "ownership_transfer" in transitions:
+        if migration.previous_owner_transfer_attestation_sha256 is None:
+            raise ReviewInputError(
+                "ownership transfer requires explicit previous_owner_transfer_attestation_sha256; "
+                "unchanged numeric repository_id alone never proves transfer trust"
+            )
+        if (
+            expected_transfer_attestation_sha256 is not None
+            and migration.previous_owner_transfer_attestation_sha256
+            != expected_transfer_attestation_sha256
+        ):
+            raise ReviewInputError(
+                "previous_owner_transfer_attestation_sha256 does not match verified transfer attestation"
+            )
 
     # Rebind SessionRecord repository slug while preserving ALL historical counters,
     # reservations, convergence history, failed_attempts, and inventory obligations!
@@ -630,7 +740,17 @@ def verify_and_migrate_trust_boundary(
             {
                 "old_snapshot_sha256": migration.old_snapshot_sha256,
                 "new_snapshot_sha256": migration.new_snapshot_sha256,
+                "repository_id": target.repository_id,
+                "owner_id": target.owner_id,
+                "installation_id": target.installation_id,
+                "operator_id": migration.operator_id,
                 "operator_login": migration.operator_login,
+                "operator_association": migration.operator_association,
+                "operator_permission": migration.operator_permission,
+                "operator_attestation_sha256": migration.operator_attestation_sha256,
+                "previous_owner_transfer_attestation_sha256": (
+                    migration.previous_owner_transfer_attestation_sha256
+                ),
                 "transitions": list(transitions),
                 "inventory_digest": inventory.digest(),
                 "completed_initial_reviews": migrated_session.completed_initial_reviews,
@@ -659,6 +779,7 @@ __all__ = [
     "TRUST_TRANSITION_KINDS",
     "TrustMigrationReceipt",
     "TrustTransitionDecision",
+    "compute_transfer_attestation_sha256",
     "detect_trust_transitions",
     "evaluate_trust_boundary",
     "verify_and_migrate_trust_boundary",

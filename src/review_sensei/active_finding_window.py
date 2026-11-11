@@ -283,12 +283,14 @@ def extract_decision_proposals(result: ReviewResult) -> tuple[DecisionProposal, 
     if receipt is None:
         return ()
     validate_decision_receipt(receipt)
-    assert isinstance(receipt, Mapping)
+    if not isinstance(receipt, Mapping):
+        raise ReviewInputError("decision receipt must be a mapping")
     expected_inventory = decision_digest([c.to_dict() for c in result.comments])
     if receipt["inventory_sha256"] != expected_inventory:
         raise ReviewInputError("decision receipt inventory_sha256 does not match")
     candidates = receipt["candidates"]
-    assert isinstance(candidates, list)
+    if not isinstance(candidates, list):
+        raise ReviewInputError("decision receipt candidates must be a list")
     if len(candidates) != len(result.comments):
         raise ReviewInputError("decision receipt candidate count does not match")
     proposals: list[DecisionProposal] = []
@@ -826,7 +828,8 @@ def select_display_active_window(
 
     entries: list[ActiveWindowEntry] = []
     for item in incumbents:
-        assert item.native_target is not None
+        if item.native_target is None:
+            raise ReviewInputError("incumbent obligation is missing native_target")
         slot = by_target[item.native_target]
         entries.append(
             ActiveWindowEntry(
@@ -1105,7 +1108,13 @@ def _match_prior_obligations(
         return None, tuple(by_fp)
 
     if lifecycle.concern is not None:
-        by_concern = [p for p in priors if p.concern == lifecycle.concern]
+        by_concern = [
+            p
+            for p in priors
+            if p.concern == lifecycle.concern
+            and p.defect_kind == defect_kind
+            and (p.path == comment.path or (p.symbol and p.symbol == comment.symbol))
+        ]
         if len(by_concern) == 1:
             return by_concern[0], ()
         if len(by_concern) > 1:
@@ -1206,12 +1215,6 @@ def evaluate_active_window_round(
     ]
     prior_by_id = {item.obligation_id: item for item in prior_items}
 
-    for oid in set(fixes_by_id) | set(overrides_by_id):
-        if oid not in prior_by_id or not prior_by_id[oid].unresolved:
-            raise ReviewInputError(
-                "resolution references unknown or already-resolved obligation_id"
-            )
-
     slot_map: dict[str, PublishedSlot] = {slot.target: slot for slot in slots}
     if len(slot_map) != len(slots):
         raise ReviewInputError("duplicate target in supplied slots")
@@ -1224,8 +1227,9 @@ def evaluate_active_window_round(
         and authorized_rescan.mode == "full"
         and review_complete
     )
-    rescan_proof = (
-        hashlib.sha256(
+    rescan_proof: str | None = None
+    if full_rescan_qualified and authorized_rescan is not None:
+        rescan_proof = hashlib.sha256(
             canonical_bytes(
                 {
                     "kind": authorized_rescan.kind,
@@ -1235,16 +1239,14 @@ def evaluate_active_window_round(
                 }
             )
         ).hexdigest()
-        if full_rescan_qualified and authorized_rescan is not None
-        else None
-    )
 
     # Match current comments against unresolved prior obligations first.
     claimed_by_prior: dict[str, list[int]] = {}
     ambiguous_prior_ids: set[str] = set()
     ambiguous_comment_indices: set[int] = set()
     matched_prior_for_comment: dict[int, AuthoritativeObligation] = {}
-    reopened_by_prior: dict[str, int] = {}
+    reopen_claims: dict[str, list[int]] = {}
+    ambiguous_reopen_prior_ids: set[str] = set()
 
     for index, comment in enumerate(result.comments):
         matched, candidates = _match_prior_obligations(comment, unresolved_priors)
@@ -1256,16 +1258,48 @@ def evaluate_active_window_round(
             matched_prior_for_comment[index] = matched
             claimed_by_prior.setdefault(matched.obligation_id, []).append(index)
         elif reopenable_priors:
-            reopened, reopen_ambiguous = _match_prior_obligations(
-                comment, reopenable_priors
+            comment_required = comment.blocks_approval or comment.needs_human
+            comment_ev = "supported-source" if comment_required else "advisory"
+            eligible_reopen_priors = [
+                p
+                for p in reopenable_priors
+                if (not p.required or comment_required)
+                and EVIDENCE_RANKS[comment_ev] <= EVIDENCE_RANKS[p.evidence]
+            ]
+            if eligible_reopen_priors:
+                reopened, reopen_ambiguous = _match_prior_obligations(
+                    comment, eligible_reopen_priors
+                )
+                if reopen_ambiguous:
+                    ambiguous_comment_indices.add(index)
+                    for candidate in reopen_ambiguous:
+                        ambiguous_reopen_prior_ids.add(candidate.obligation_id)
+                elif reopened is not None:
+                    reopen_claims.setdefault(reopened.obligation_id, []).append(index)
+                    matched_prior_for_comment[index] = reopened
+
+    reopened_by_prior: dict[str, int] = {}
+    for prior_id, indices in reopen_claims.items():
+        if len(indices) > 1 or prior_id in ambiguous_reopen_prior_ids:
+            ambiguous_reopen_prior_ids.add(prior_id)
+            ambiguous_comment_indices.update(indices)
+        else:
+            reopened_by_prior[prior_id] = indices[0]
+
+    for oid in sorted(set(fixes_by_id) | set(overrides_by_id)):
+        if oid not in prior_by_id:
+            raise ReviewInputError(
+                "resolution references unknown or already-resolved obligation_id"
             )
-            if reopen_ambiguous:
-                ambiguous_comment_indices.add(index)
-            elif (
-                reopened is not None and reopened.obligation_id not in reopened_by_prior
-            ):
-                reopened_by_prior[reopened.obligation_id] = index
-                matched_prior_for_comment[index] = reopened
+        if not prior_by_id[oid].unresolved:
+            if oid not in reopened_by_prior and oid not in ambiguous_reopen_prior_ids:
+                raise ReviewInputError(
+                    "resolution references unknown or already-resolved obligation_id"
+                )
+            if oid in fixes_by_id:
+                raise ReviewInputError(
+                    "confirmed fix evidence conflicts with active regression reopening obligation"
+                )
 
     for prior_id, indices in claimed_by_prior.items():
         if len(indices) > 1:
@@ -1277,29 +1311,107 @@ def evaluate_active_window_round(
     for item in prior_items:
         if item.unresolved:
             continue
-        if item.obligation_id in reopened_by_prior:
-            c_idx = reopened_by_prior[item.obligation_id]
-            comment = result.comments[c_idx]
-            proposal = proposal_by_index.get(c_idx)
+        if item.obligation_id in ambiguous_reopen_prior_ids:
+            reopen_proof = (
+                hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "obligation_id": item.obligation_id,
+                            "target": item.native_target,
+                            "head_sha": head_sha,
+                            "state": "reopen-ambiguous",
+                        }
+                    )
+                ).hexdigest()
+                if item.native_target is not None
+                else None
+            )
             next_obligations.append(
                 replace(
                     item,
-                    path=comment.path,
-                    line=comment.line,
-                    side=comment.side,
-                    symbol=comment.symbol or item.symbol,
-                    blocking=item.blocking or comment.blocks_approval,
-                    needs_human=item.needs_human or comment.needs_human,
-                    lifecycle_state="active-unresolved",
+                    blocking=True,
+                    needs_human=True,
+                    lifecycle_state="ambiguous-identity",
+                    target_proof_sha256=reopen_proof,
                     resolution_proof_sha256=None,
-                    proposal_rank=(
-                        proposal.proposal_rank
-                        if proposal is not None
-                        else item.proposal_rank
-                    ),
-                    comment=comment,
                 )
             )
+        elif item.obligation_id in reopened_by_prior:
+            c_idx = reopened_by_prior[item.obligation_id]
+            comment = result.comments[c_idx]
+            proposal = proposal_by_index.get(c_idx)
+            reopen_override = overrides_by_id.get(item.obligation_id)
+            if reopen_override is not None:
+                new_target_state = item.target_state
+                if item.native_target is not None:
+                    current_slot = slot_map.get(item.native_target)
+                    if current_slot is None:
+                        raise ReviewInputError("override obligation slot is missing")
+                    if current_slot.state == "uncertain":
+                        raise ReviewInputError(
+                            "uncertain native slot must reconcile before slot release"
+                        )
+                    new_target_state = (
+                        "released" if reopen_override.slot_released else "contingent"
+                    )
+                    slot_map[item.native_target] = PublishedSlot(
+                        target=item.native_target,
+                        state=new_target_state,
+                        proof_sha256=reopen_override.proof_sha256,
+                    )
+                next_obligations.append(
+                    replace(
+                        item,
+                        path=comment.path,
+                        line=comment.line,
+                        side=comment.side,
+                        symbol=comment.symbol or item.symbol,
+                        lifecycle_state="authorized-override",
+                        target_state=new_target_state,
+                        target_proof_sha256=(
+                            reopen_override.proof_sha256
+                            if item.native_target is not None
+                            else None
+                        ),
+                        resolution_proof_sha256=reopen_override.proof_sha256,
+                        comment=comment,
+                    )
+                )
+            else:
+                reopen_proof = (
+                    hashlib.sha256(
+                        canonical_bytes(
+                            {
+                                "obligation_id": item.obligation_id,
+                                "target": item.native_target,
+                                "head_sha": head_sha,
+                                "state": "reopen-pending",
+                            }
+                        )
+                    ).hexdigest()
+                    if item.native_target is not None
+                    else None
+                )
+                next_obligations.append(
+                    replace(
+                        item,
+                        path=comment.path,
+                        line=comment.line,
+                        side=comment.side,
+                        symbol=comment.symbol or item.symbol,
+                        blocking=item.blocking or comment.blocks_approval,
+                        needs_human=item.needs_human or comment.needs_human,
+                        lifecycle_state="active-unresolved",
+                        target_proof_sha256=reopen_proof,
+                        resolution_proof_sha256=None,
+                        proposal_rank=(
+                            proposal.proposal_rank
+                            if proposal is not None
+                            else item.proposal_rank
+                        ),
+                        comment=comment,
+                    )
+                )
         else:
             next_obligations.append(item)
 
@@ -1391,8 +1503,14 @@ def evaluate_active_window_round(
                 raise ReviewInputError(
                     "confirmed fix criterion does not match original obligation"
                 )
-            path_verified = prior.path is None or (
-                prior.path in prior_fix.verified_paths and prior.path in reviewed_set
+            path_verified = (
+                bool(reviewed_set)
+                and all(vp in reviewed_set for vp in prior_fix.verified_paths)
+                if prior.path is None
+                else (
+                    prior.path in prior_fix.verified_paths
+                    and prior.path in reviewed_set
+                )
             )
             if review_complete and path_verified:
                 new_target_state = prior.target_state
@@ -1429,7 +1547,11 @@ def evaluate_active_window_round(
             new_target_state = prior.target_state
             if prior.native_target is not None:
                 current_slot = slot_map.get(prior.native_target)
-                if current_slot is not None and current_slot.state != "uncertain":
+                if current_slot is not None:
+                    if current_slot.state == "uncertain":
+                        raise ReviewInputError(
+                            "uncertain native slot must reconcile before rescan release"
+                        )
                     new_target_state = "released"
                     slot_map[prior.native_target] = PublishedSlot(
                         target=prior.native_target,
@@ -1522,8 +1644,8 @@ def evaluate_active_window_round(
 def commit_window_publication(
     state: ActiveWindowRoundState,
     *,
-    created_targets: Mapping[str, str] = {},
-    uncertain_targets: Mapping[str, str] = {},
+    created_targets: Mapping[str, str] | None = None,
+    uncertain_targets: Mapping[str, str] | None = None,
 ) -> ActiveWindowRoundState:
     """Record confirmed or uncertain native target creation/reopening receipts.
 
@@ -1535,7 +1657,13 @@ def commit_window_publication(
         raise ReviewInputError(
             "commit_window_publication requires an ActiveWindowRoundState"
         )
-    overlap = set(created_targets) & set(uncertain_targets)
+    if created_targets is not None and not isinstance(created_targets, Mapping):
+        raise ReviewInputError("created_targets must be a mapping")
+    if uncertain_targets is not None and not isinstance(uncertain_targets, Mapping):
+        raise ReviewInputError("uncertain_targets must be a mapping")
+    created_map = {} if created_targets is None else dict(created_targets)
+    uncertain_map = {} if uncertain_targets is None else dict(uncertain_targets)
+    overlap = set(created_map) & set(uncertain_map)
     if overlap:
         raise ReviewInputError(
             "obligation cannot be both confirmed and uncertain in one publication"
@@ -1543,7 +1671,7 @@ def commit_window_publication(
     entries_by_id = {
         entry.obligation_id: entry for entry in state.display_active_findings.entries
     }
-    for oid in set(created_targets) | set(uncertain_targets):
+    for oid in sorted(set(created_map) | set(uncertain_map)):
         if oid not in entries_by_id:
             raise ReviewInputError(
                 "publication target receipt references a non-displayed obligation"
@@ -1552,16 +1680,24 @@ def commit_window_publication(
     slot_map: dict[str, PublishedSlot] = {
         slot.target: slot for slot in state.display_active_findings.slots
     }
+    claimed_unresolved_by_target: dict[str, str] = {
+        item.native_target: item.obligation_id
+        for item in state.authoritative_decision_inventory.obligations
+        if item.unresolved and item.native_target is not None
+    }
     updated_obligations: list[AuthoritativeObligation] = []
 
     for item in state.authoritative_decision_inventory.obligations:
         entry = entries_by_id.get(item.obligation_id)
-        if item.obligation_id in created_targets:
-            assert entry is not None
+        if item.obligation_id in created_map:
+            if entry is None:
+                raise ReviewInputError(
+                    "publication target receipt references a non-displayed obligation"
+                )
             if entry.target_action != "create":
                 raise ReviewInputError("created_targets applies only to create actions")
             target_id = _require_target_id(
-                created_targets[item.obligation_id], label="created target_id"
+                created_map[item.obligation_id], label="created target_id"
             )
             if target_id in slot_map:
                 raise ReviewInputError("created target_id collides with existing slot")
@@ -1578,6 +1714,7 @@ def commit_window_publication(
             slot_map[target_id] = PublishedSlot(
                 target=target_id, state="active", proof_sha256=proof
             )
+            claimed_unresolved_by_target[target_id] = item.obligation_id
             updated_obligations.append(
                 replace(
                     item,
@@ -1586,10 +1723,13 @@ def commit_window_publication(
                     target_proof_sha256=proof,
                 )
             )
-        elif item.obligation_id in uncertain_targets:
-            assert entry is not None
+        elif item.obligation_id in uncertain_map:
+            if entry is None:
+                raise ReviewInputError(
+                    "publication target receipt references a non-displayed obligation"
+                )
             target_id = _require_target_id(
-                uncertain_targets[item.obligation_id], label="uncertain target_id"
+                uncertain_map[item.obligation_id], label="uncertain target_id"
             )
             if entry.target_action == "create" and target_id in slot_map:
                 raise ReviewInputError(
@@ -1608,6 +1748,7 @@ def commit_window_publication(
             slot_map[target_id] = PublishedSlot(
                 target=target_id, state="uncertain", proof_sha256=proof
             )
+            claimed_unresolved_by_target[target_id] = item.obligation_id
             updated_obligations.append(
                 replace(
                     item,
@@ -1621,6 +1762,16 @@ def commit_window_publication(
             and entry.target_action == "reopen"
             and item.native_target is not None
         ):
+            existing_slot = slot_map.get(item.native_target)
+            other_owner = claimed_unresolved_by_target.get(item.native_target)
+            if (
+                existing_slot is None
+                or existing_slot.state not in {"released", "contingent"}
+                or (other_owner is not None and other_owner != item.obligation_id)
+            ):
+                raise ReviewInputError(
+                    "reopen target collides with an active or uncertain slot"
+                )
             proof = hashlib.sha256(
                 canonical_bytes(
                     {
@@ -1634,6 +1785,7 @@ def commit_window_publication(
             slot_map[item.native_target] = PublishedSlot(
                 target=item.native_target, state="active", proof_sha256=proof
             )
+            claimed_unresolved_by_target[item.native_target] = item.obligation_id
             updated_obligations.append(
                 replace(
                     item,
@@ -1672,7 +1824,15 @@ def reconcile_uncertain_slot(
     resolved_state: str,
     proof_sha256: str,
 ) -> ActiveWindowRoundState:
-    """Reconcile an uncertain native slot after exact owned readback."""
+    """Reconcile an uncertain native slot after exact owned readback.
+
+    When ``resolved_state == "released"``, readback proved that the native
+    target was never created on GitHub: ``PublishedSlot(target=target,
+    state="released", proof_sha256=proof_sha256)`` retains the audit link in
+    ``slots``, while ``native_target`` is cleared on the obligation so the next
+    round emits ``target_action="create"`` rather than reopening a nonexistent
+    thread.
+    """
 
     if not isinstance(state, ActiveWindowRoundState):
         raise ReviewInputError(

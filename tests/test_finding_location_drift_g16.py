@@ -1070,6 +1070,319 @@ class FindingLocationDriftG16Tests(unittest.TestCase):
                 ),
             )
 
+    def test_drift_review_regressions_concern_scope_coverage_reopen_and_finalize(
+        self,
+    ) -> None:
+        # 1) RS-03B9CC & RS-73DC43: additive whole-file rewrite on existing file
+        #    and deduplication of copy headers against rename headers:
+        additive_rewrite_diff = (
+            "diff --git a/src/regenerated.py b/src/regenerated.py\n"
+            "--- a/src/regenerated.py\n"
+            "+++ b/src/regenerated.py\n"
+            "@@ -0,0 +1,6 @@\n"
+            "+def step_1(): pass\n"
+            "+def step_2(): pass\n"
+            "+def step_3(): pass\n"
+            "+def step_4(): pass\n"
+            "+def step_5(): pass\n"
+            "+def step_6(): pass\n"
+        )
+        extracted_add = extract_drift_descriptors_from_diff(additive_rewrite_diff)
+        self.assertEqual(len(extracted_add), 1)
+        self.assertEqual(extracted_add[0].drift_kind, "whole_file_rewrite")
+
+        rename_with_copy_lines = (
+            "diff --git a/src/old_mod.py b/src/new_mod.py\n"
+            "similarity index 90%\n"
+            "rename from src/old_mod.py\n"
+            "rename to src/new_mod.py\n"
+            "copy from src/old_mod.py\n"
+            "copy to src/new_mod.py\n"
+            "--- a/src/old_mod.py\n"
+            "+++ b/src/new_mod.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-x = 1\n"
+            "+x = 2\n"
+        )
+        deduped = extract_drift_descriptors_from_diff(rename_with_copy_lines)
+        self.assertEqual([d.drift_kind for d in deduped], ["file_rename"])
+
+        # 2) RS-4DAC38: identical prose concern on an unrelated file/symbol must NOT
+        #    collapse into the existing obligation!
+        c_prior = _comment(
+            "src/auth_a.py",
+            line=10,
+            body="Unsafe input handling allows unvalidated parameter injection.",
+            symbol="parse_a",
+            defect_kind="input_validation",
+        )
+        r_prior = evaluate_drift_round(
+            _result(c_prior, paths=("src/auth_a.py",)),
+            head_sha=HEAD_1,
+            base_sha=BASE_SHA,
+            max_active_findings=4,
+        )
+        c_unrelated = _comment(
+            "src/unrelated_b.py",
+            line=10,
+            body="Unsafe input handling allows unvalidated parameter injection.",
+            symbol="parse_b",
+            defect_kind="input_validation",
+        )
+        r_distinct = evaluate_drift_round(
+            _result(c_unrelated, paths=("src/unrelated_b.py",)),
+            head_sha=HEAD_2,
+            base_sha=BASE_SHA,
+            max_active_findings=4,
+            round_number=2,
+            coverage_mode="incremental",
+            prior_inventory=r_prior.inventory,
+        )
+        self.assertEqual(len(r_distinct.inventory.obligations), 2)
+        states_by_path = {
+            o.present_anchor.path: o.lifecycle_state
+            for o in r_distinct.inventory.obligations
+        }
+        # RS-226427: src/auth_a.py was NOT in reviewed_set, so it stays active-unresolved!
+        self.assertEqual(states_by_path["src/auth_a.py"], "active-unresolved")
+        self.assertEqual(states_by_path["src/unrelated_b.py"], "active-unresolved")
+
+        # RS-226427: fallback-full with partial coverage on unreviewed file ALSO stays
+        # active-unresolved rather than omitted-uncertain!
+        partial_fallback = evaluate_drift_round(
+            _result(
+                status="partial",
+                coverage=_coverage("src/other.py", partial_path="src/auth_a.py"),
+            ),
+            head_sha=HEAD_2,
+            base_sha=BASE_SHA,
+            max_active_findings=4,
+            round_number=2,
+            coverage_mode="fallback-full",
+            prior_inventory=r_prior.inventory,
+        )
+        self.assertEqual(
+            partial_fallback.inventory.obligations[0].lifecycle_state,
+            "active-unresolved",
+        )
+
+        # 3) RS-44D4B2 & RS-CD7439: AuthorizedRescan(mode="full") must NOT supersede
+        #    an obligation whose target path was absent from reviewed_set, and must
+        #    reject uncertain thread slots!
+        r_unreviewed_rescan = evaluate_drift_round(
+            _result(paths=("src/other_only.py",)),
+            head_sha=HEAD_2,
+            base_sha=BASE_SHA,
+            max_active_findings=4,
+            round_number=2,
+            coverage_mode="full",
+            prior_inventory=r_prior.inventory,
+            authorized_rescan=AuthorizedRescan(
+                kind="issue_comment",
+                request_id=700,
+                source=_published_transaction(HEAD_2),
+                review_id=701,
+                mode="full",
+            ),
+        )
+        self.assertFalse(r_unreviewed_rescan.approved)
+        self.assertEqual(
+            r_unreviewed_rescan.inventory.obligations[0].lifecycle_state,
+            "active-unresolved",
+        )
+
+        uncertain_ob = replace(
+            r_prior.inventory.obligations[0],
+            thread_binding=NativeThreadBinding(
+                thread_id="uncertain-rescan-t",
+                comment_id=999,
+                placement=INLINE_PLACEMENT,
+                body_reason=None,
+                slot_state="uncertain",
+                proof_sha256=_sha("unc"),
+            ),
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "uncertain thread slot must reconcile before rescan"
+        ):
+            evaluate_drift_round(
+                _result(paths=("src/auth_a.py",)),
+                head_sha=HEAD_2,
+                base_sha=BASE_SHA,
+                max_active_findings=4,
+                round_number=2,
+                coverage_mode="full",
+                prior_inventory=DriftInventory(obligations=(uncertain_ob,)),
+                authorized_rescan=AuthorizedRescan(
+                    kind="issue_comment",
+                    request_id=702,
+                    source=_published_transaction(HEAD_2),
+                    review_id=703,
+                    mode="full",
+                ),
+            )
+
+        # 4) RS-827D99, RS-949993, RS-B6E862, RS-E3E9F4:
+        #    Reopen parity, stale fix proof replacement, released challenger reopen,
+        #    and host-thread resolve gated strictly on not item.unresolved!
+        publisher = SyntheticNativeDriftPublisher()
+        r_pub1, _ = publisher.publish_and_finalize(r_prior)
+        ob_fixed_target = r_pub1.inventory.obligations[0]
+        fix_proof = _sha("fix-auth-a")
+        r_fixed, rec_fixed = publisher.publish_and_finalize(
+            evaluate_drift_round(
+                _result(paths=("src/auth_a.py",)),
+                head_sha=HEAD_2,
+                base_sha=BASE_SHA,
+                max_active_findings=2,
+                round_number=2,
+                prior_inventory=r_pub1.inventory,
+                confirmed_fixes=(
+                    ConfirmedFixEvidence(
+                        obligation_id=ob_fixed_target.obligation_id,
+                        resolution_criterion=ob_fixed_target.criterion.resolution_criterion,
+                        head_sha=HEAD_2,
+                        evidence_sha256=fix_proof,
+                        verified_paths=("src/auth_a.py",),
+                    ),
+                ),
+            )
+        )
+        self.assertTrue(r_fixed.approved)
+        self.assertEqual(rec_fixed.resolved_threads, 1)
+
+        # Advisory comment cannot reopen a blocking verified-fixed obligation:
+        advisory_reg = _comment(
+            "src/auth_a.py",
+            line=10,
+            body="Minor advisory cleanup suggestion.",
+            blocking=False,
+            severity="low",
+            symbol="parse_a",
+            defect_kind="input_validation",
+        )
+        r_no_reopen = evaluate_drift_round(
+            _result(advisory_reg, paths=("src/auth_a.py",)),
+            head_sha=HEAD_3,
+            base_sha=BASE_SHA,
+            max_active_findings=2,
+            round_number=3,
+            prior_inventory=r_fixed.inventory,
+        )
+        self.assertEqual(
+            r_no_reopen.inventory.obligations[0].lifecycle_state, "verified-fixed"
+        )
+
+        # Blocking regression reopens with fresh proof (replacing stale fix_proof),
+        # emits thread_action == "reopen", rejects conflicting fix, and honors override!
+        blocking_reg = _comment(
+            "src/auth_a.py",
+            line=14,
+            body="Parameter injection reintroduced in parse_a.",
+            blocking=True,
+            severity="high",
+            symbol="parse_a",
+            defect_kind="input_validation",
+        )
+        with self.assertRaisesRegex(ReviewInputError, "regressed on current head"):
+            evaluate_drift_round(
+                _result(blocking_reg, paths=("src/auth_a.py",)),
+                head_sha=HEAD_3,
+                base_sha=BASE_SHA,
+                max_active_findings=2,
+                round_number=3,
+                prior_inventory=r_fixed.inventory,
+                confirmed_fixes=(
+                    ConfirmedFixEvidence(
+                        obligation_id=ob_fixed_target.obligation_id,
+                        resolution_criterion=ob_fixed_target.criterion.resolution_criterion,
+                        head_sha=HEAD_3,
+                        evidence_sha256=_sha("contradictory-fix"),
+                        verified_paths=("src/auth_a.py",),
+                    ),
+                ),
+            )
+
+        r_reopened = evaluate_drift_round(
+            _result(blocking_reg, paths=("src/auth_a.py",)),
+            head_sha=HEAD_3,
+            base_sha=BASE_SHA,
+            max_active_findings=2,
+            round_number=3,
+            prior_inventory=r_fixed.inventory,
+        )
+        reopened_ob = r_reopened.inventory.obligations[0]
+        assert reopened_ob.thread_binding is not None
+        self.assertNotEqual(reopened_ob.thread_binding.proof_sha256, fix_proof)
+        self.assertEqual(r_reopened.active_entries[0].thread_action, "reopen")
+
+        r_reopen_ovr = evaluate_drift_round(
+            _result(blocking_reg, paths=("src/auth_a.py",)),
+            head_sha=HEAD_3,
+            base_sha=BASE_SHA,
+            max_active_findings=2,
+            round_number=3,
+            prior_inventory=r_fixed.inventory,
+            human_overrides=(
+                AuthorizedHumanOverride(
+                    obligation_id=ob_fixed_target.obligation_id,
+                    action="accept-risk",
+                    actor="sec-lead",
+                    association="OWNER",
+                    head_sha=HEAD_3,
+                    reason="Validated upstream at API gateway.",
+                    proof_sha256=_sha("reopen-ovr"),
+                ),
+            ),
+        )
+        self.assertTrue(r_reopen_ovr.approved)
+
+        # RS-E3E9F4: If an unresolved obligation has slot_state == "released" and
+        # does not fit in max_active_findings (entry is None), publish_and_finalize
+        # must NEVER resolve its open host thread!
+        incumbent_crit = _comment(
+            "src/incumbent.py",
+            line=2,
+            body="Critical incumbent occupying the sole active slot.",
+            severity="critical",
+            symbol="crit_fn",
+            defect_kind="rce",
+        )
+        r_cap1, _ = publisher.publish_and_finalize(
+            evaluate_drift_round(
+                _result(incumbent_crit, paths=("src/incumbent.py",)),
+                head_sha=HEAD_3,
+                base_sha=BASE_SHA,
+                max_active_findings=1,
+                round_number=3,
+            )
+        )
+        # Force gh-drift-thread-1 open on host while reopened_ob is deferred (entry is None):
+        publisher.threads["gh-drift-thread-1"] = replace(
+            publisher.threads["gh-drift-thread-1"], resolved=False
+        )
+        combined_prior = DriftInventory(
+            obligations=(
+                r_cap1.inventory.obligations[0],
+                r_fixed.inventory.obligations[0],
+            )
+        )
+        r_deferred_reopen = evaluate_drift_round(
+            _result(
+                incumbent_crit,
+                blocking_reg,
+                paths=("src/incumbent.py", "src/auth_a.py"),
+            ),
+            head_sha=HEAD_4,
+            base_sha=BASE_SHA,
+            max_active_findings=1,
+            round_number=4,
+            prior_inventory=combined_prior,
+        )
+        _, rec_deferred = publisher.publish_and_finalize(r_deferred_reopen)
+        self.assertEqual(rec_deferred.resolved_threads, 0)
+        self.assertFalse(publisher.threads["gh-drift-thread-1"].resolved)
+
 
 if __name__ == "__main__":
     unittest.main()

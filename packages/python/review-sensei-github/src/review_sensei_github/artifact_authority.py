@@ -35,7 +35,7 @@ from review_sensei.active_finding_window import AuthoritativeDecisionInventory
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.disposition import _require_reason, authorized_override
 from review_sensei.errors import ReviewInputError
-from review_sensei.session import SessionIdentity, SessionRecord
+from review_sensei.session import SessionIdentity, SessionLoadError, SessionRecord
 
 from .session_ledger import (
     SESSION_MARKER_PREFIX,
@@ -49,6 +49,7 @@ from .trust_transitions import (
     AuthenticatedTrustSnapshot,
     TrustMigrationReceipt,
     TrustTransitionDecision,
+    compute_transfer_attestation_sha256,
     detect_trust_transitions,
     evaluate_trust_boundary,
     verify_and_migrate_trust_boundary,
@@ -164,7 +165,9 @@ class ObservedGitHubArtifact:
         if type(self.duplicate_count) is not int or self.duplicate_count < 0:
             raise ReviewInputError("duplicate_count must be >= 0")
         if not self.present and self.duplicate_count != 0:
-            object.__setattr__(self, "duplicate_count", 0)
+            raise ReviewInputError("absent artifact requires duplicate_count == 0")
+        if self.present and self.duplicate_count < 1:
+            raise ReviewInputError("present artifact requires duplicate_count >= 1")
         if self.expected_sha256 is not None:
             _require_sha256(self.expected_sha256, label="expected_sha256")
         if self.observed_sha256 is not None:
@@ -181,7 +184,16 @@ class ObservedGitHubArtifact:
 
 @dataclass(frozen=True)
 class ArtifactEvaluationDecision:
-    """Closed outcome of evaluating one or more observed review artifacts."""
+    """Closed outcome of evaluating one or more observed review artifacts.
+
+    ``authority_intact`` reports whether authoritative session and obligation
+    state remains uncorrupted: non-authoritative projection edits leave
+    session authority intact (``True``) while recording
+    ``verdict="ignored_projection_mutation"``, whereas response-lost
+    unconfirmed writes and corrupted authority/evidence artifacts report
+    ``authority_intact=False``. ``auto_recreate`` is retained as an explicit
+    closed ``False`` invariant proving zero automatic comment recreation.
+    """
 
     artifact_kind: str
     artifact_class: str
@@ -294,6 +306,7 @@ def evaluate_observed_artifact(
             not observed.present
             or observed.edited_by_human
             or not observed.author_is_authenticated_app
+            or observed.duplicate_count != 1
             or (
                 observed.expected_sha256 is not None
                 and observed.observed_sha256 != observed.expected_sha256
@@ -343,10 +356,8 @@ def evaluate_observed_artifact(
             not observed.author_is_authenticated_app
             or observed.edited_by_human
             or observed.duplicate_count != 1
-            or (
-                observed.expected_sha256 is not None
-                and observed.observed_sha256 != observed.expected_sha256
-            )
+            or observed.expected_sha256 is None
+            or observed.observed_sha256 != observed.expected_sha256
         ):
             code = (
                 "archive-part-corrupted"
@@ -608,6 +619,7 @@ class OperatorReenrollRequest:
     pr_open: bool = True
     pr_draft: bool = False
     enrollment_witness_present: bool = False
+    enrollment_witness_sha256: str | None = None
     active_blocking_obligations: int = 0
     has_active_reservation: bool = False
     has_uncertain_write: bool = False
@@ -630,6 +642,14 @@ class OperatorReenrollRequest:
         _require_bool(
             self.enrollment_witness_present, label="enrollment_witness_present"
         )
+        if self.enrollment_witness_sha256 is not None:
+            _require_sha256(
+                self.enrollment_witness_sha256, label="enrollment_witness_sha256"
+            )
+            if not self.enrollment_witness_present:
+                raise ReviewInputError(
+                    "enrollment_witness_sha256 requires enrollment_witness_present=True"
+                )
         if (
             type(self.active_blocking_obligations) is not int
             or self.active_blocking_obligations < 0
@@ -725,7 +745,10 @@ def evaluate_operator_reenroll(
             reason_code=f"reenroll-refused-{ledger_status}",
             recovery_routes=("operator-reconcile",),
         )
-    if ledger_status == "missing" and not request.enrollment_witness_present:
+    if ledger_status == "missing" and (
+        not request.enrollment_witness_present
+        or request.enrollment_witness_sha256 is None
+    ):
         return OperatorReenrollEligibility(
             eligible=False,
             reason_code="reenroll-missing-enrollment-witness",
@@ -764,14 +787,31 @@ def execute_restricted_operator_reenroll(
         raise ReviewInputError("request must be an OperatorReenrollRequest")
 
     loaded = ledger.load(request.identity, now=now)
+    inspected_record = loaded.record
+    if inspected_record is None and loaded.status == "expired":
+        try:
+            _cid, inspected_record = ledger._discover(request.identity, now=now)
+        except SessionLoadError:
+            inspected_record = None
     quarantine_present = request.quarantine_lineage_present or (
-        loaded.record is not None and loaded.record.quarantine_lineage is not None
+        inspected_record is not None and inspected_record.quarantine_lineage is not None
     )
     queue_present = request.assessment_queue_present or (
-        loaded.record is not None and loaded.record.assessment_queue is not None
+        inspected_record is not None and inspected_record.assessment_queue is not None
     )
     reservation_present = request.has_active_reservation or (
-        loaded.record is not None and loaded.record.reservation_id is not None
+        inspected_record is not None and inspected_record.reservation_id is not None
+    )
+    uncertain_present = request.has_uncertain_write or (
+        inspected_record is not None
+        and (
+            inspected_record.publication_staging is not None
+            or (
+                inspected_record.transaction is not None
+                and inspected_record.transaction.phase
+                in {"publication_pending", "publication_failed"}
+            )
+        )
     )
     enriched_request = OperatorReenrollRequest(
         identity=request.identity,
@@ -783,9 +823,10 @@ def execute_restricted_operator_reenroll(
         pr_open=request.pr_open,
         pr_draft=request.pr_draft,
         enrollment_witness_present=request.enrollment_witness_present,
+        enrollment_witness_sha256=request.enrollment_witness_sha256,
         active_blocking_obligations=request.active_blocking_obligations,
         has_active_reservation=reservation_present,
-        has_uncertain_write=request.has_uncertain_write,
+        has_uncertain_write=uncertain_present,
         quarantine_lineage_present=quarantine_present,
         assessment_queue_present=queue_present,
     )
@@ -808,6 +849,7 @@ def execute_restricted_operator_reenroll(
                 "operator_login": request.operator_login,
                 "previous_status": loaded.status,
                 "restored_record_sha256": restored.record_sha256,
+                "enrollment_witness_sha256": request.enrollment_witness_sha256,
                 "reason": request.reason,
             }
         )
@@ -844,6 +886,7 @@ __all__ = [
     "TrustMigrationReceipt",
     "TrustTransitionDecision",
     "classify_review_artifact",
+    "compute_transfer_attestation_sha256",
     "detect_trust_transitions",
     "evaluate_observed_artifact",
     "evaluate_operator_reenroll",

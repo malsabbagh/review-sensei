@@ -54,6 +54,14 @@ count. Opt-in `#427` decision-provider receipts remain bounded proposals used
 solely for intra-tier tiebreaking; they never drop obligations, downgrade
 blocking status, or prove fixes.
 
+**Relationship to ADR 0042:** ADR 0042 introduced `PublishedSlot` states
+(`active`, `contingent`, `uncertain`, `released`) and bounded inline selection.
+This ADR refines and extends ADR 0042 across multi-round lifecycles without
+changing `PublishedSlot` wire or state semantics: ADR 0042's slot invariants
+govern per-target reservation inside `display_active_findings`, while this ADR
+separates `changed_file_coverage` and `authoritative_decision_inventory` so
+non-displayed obligations remain durable approval gates.
+
 ### 2. Orthogonal criterion, anchor, and thread tracking (`review_sensei.finding_drift`)
 
 Track `OriginalFindingCriterion` independently from `PresentLocationAnchor` and
@@ -65,39 +73,66 @@ thread in-place (falling back to `BODY_PLACEMENT` via `plan_finding_placement_de
 when unanchored). Multi-target copies, split moves, and duplicate code hold in
 `ambiguous-multi-target` until positive `ConfirmedFixEvidence` covers every
 implicated path, an `AuthorizedHumanOverride` is recorded, or a complete
-head-bound `AuthorizedRescan(mode="full")` supersedes prior state.
+head-bound `AuthorizedRescan(mode="full")` (whose `reviewed_paths` include all
+present candidate paths) supersedes prior state.
+
+An `AuthorizedHumanOverride` on `ambiguous-multi-target` requires authenticated
+maintainer/admin authority (`OWNER`, `MEMBER`, or `COLLABORATOR` meeting
+`authorized_override` policy) bound to the exact `obligation_id` and `head_sha`
+with a non-empty audit reason and `proof_sha256`. Recording an override is an
+explicit whole-obligation disposition across the entire `candidate_paths` set;
+partial-file fixes without maintainer override must instead supply
+`ConfirmedFixEvidence` covering every implicated path.
 
 ### 3. Three-tier artifact classification (`review_sensei_github.artifact_authority`)
 
 Classify GitHub review surfaces into:
 - `authority`: `session_ledger_marker`, `retained_result_part`,
   `retained_context_part`;
-- `evidence`: `owned_readback_receipt`, `archive_chain_part`;
+- `evidence`: `owned_readback_receipt`, `archive_chain_part` (each requiring an
+  explicit `expected_sha256` so missing expected digests fail closed);
 - `projection`: `native_review_summary`, `inline_review_comment`,
   `check_run_text`, `comment_reaction`.
 
 Mutations or deletions of `projection` surfaces never alter authority, erase
 obligations, manufacture approval, or auto-recreate spam comments. Tampered,
 duplicated, stale, or foreign `authority` markers and missing/corrupted
-`archive_chain_part` carriers fail closed. After HTTP response loss, exact
-unedited App-owned readback reconciles once, whereas human edits or deletions
-preserve conservative `uncertain-after-response-loss` holds. Restricted operator
-`reenroll` is permitted only for authenticated maintainers/admins on open,
-non-draft PRs when the marker is `missing` (with enrollment witness) or
-`expired` and zero active blocking obligations, reservations, uncertain writes,
-quarantine lineage, or assessment queues exist.
+`archive_chain_part` carriers fail closed. After HTTP response loss, the target
+slot enters an exclusive `uncertain` hold that blocks any concurrent or
+duplicate re-dispatch before readback completes: exact unedited App-owned
+readback reconciles idempotently at most once (`reconciled-via-owned-readback`),
+whereas human edits, duplicates, or deletions preserve conservative
+`uncertain-after-response-loss` holds. Restricted operator `reenroll` is
+permitted only for authenticated maintainers/admins on open, non-draft PRs when
+the marker is `missing` (backed by a cryptographic `enrollment_witness_sha256`
+bound into the audit digest from verified prior delivery/check state) or
+`expired` and zero active blocking obligations, reservations, staged
+publications, in-flight publication phases, uncertain writes, quarantine
+lineage, or assessment queues exist.
 
 ### 4. Repository and trust-boundary transitions (`review_sensei_github.trust_transitions`)
 
 Bind `repository_id`, `owner_id`, `owner_login`, `repository_slug`, `is_fork`,
-`installation_id`, `repository_selected`, `granted_permissions`, and actor
-authority in `AuthenticatedTrustSnapshot`. Classify all seven transitions
-separately across `before_admission`, `before_native_effect`, and
-`after_unknown_effect`. Enforce that unchanged numeric `repository_id` alone
-never proves `ownership_transfer` trust. Legitimate renames, reinstalls,
-permission/selection restorations, and dual-attested transfers recover via
-`verify_and_migrate_trust_boundary` while preserving 100% of session charges,
-reservations, and obligation history (`fresh_allowance_minted=False`).
+`installation_id`, `repository_selected`, `granted_permissions`, monotonic
+`permission_epoch`, and actor authority in `AuthenticatedTrustSnapshot`.
+Classify all seven transitions separately across `before_admission`,
+`before_native_effect`, and `after_unknown_effect`. Both fork directions
+(`False -> True` and `True -> False` unfork) fail closed on hosted write
+boundaries (`unsupported-fork-boundary`) and are excluded from automated trust
+migration. Enforce that unchanged numeric `repository_id` alone never proves
+`ownership_transfer` trust: `verify_and_migrate_trust_boundary` binds
+`migration.operator_id`, `operator_login`, `operator_association`, and
+`operator_permission` to the authenticated `target` snapshot (requiring
+override-level authority on `target`), rejects `permission_epoch` regressions,
+and for `ownership_transfer` requires a domain-separated
+`previous_owner_transfer_attestation_sha256` computed by
+`compute_transfer_attestation_sha256` over `(repository_id, previous_owner_id,
+previous_owner_login, new_owner_id, new_owner_login, pull_request, head_sha,
+permission_epoch, previous_owner_witness)` and verified against expected prior-owner control
+plane records. Legitimate renames, reinstalls, permission/selection
+restorations, and dual-attested transfers recover while preserving 100% of
+session charges, reservations, and obligation history
+(`fresh_allowance_minted=False`).
 
 ## Scope
 

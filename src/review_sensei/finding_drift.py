@@ -69,6 +69,8 @@ _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _COMMIT_SHA_RE = re.compile(r"^[a-f0-9]{40,64}$")
 _COPY_FROM_RE = re.compile(r"^copy from (.+)$", re.MULTILINE)
 _COPY_TO_RE = re.compile(r"^copy to (.+)$", re.MULTILINE)
+_MARKDOWN_ESCAPE_RE = re.compile(r"([\\`*\[\]|<>~\r\n])")
+_MAX_SUMMARY_BODY_BYTES = 65_536
 
 DRIFT_KINDS = frozenset(
     {
@@ -140,6 +142,14 @@ def _require_target_id(value: object, *, label: str) -> str:
     return value
 
 
+def _escape_markdown_inline(value: object) -> str:
+    text = "none" if value is None else str(value)
+    return _MARKDOWN_ESCAPE_RE.sub(
+        lambda match: " " if match.group(1) in {"\r", "\n"} else f"\\{match.group(1)}",
+        text,
+    )
+
+
 @dataclass(frozen=True)
 class FileDriftDescriptor:
     """Explicit or diff-derived structural file/symbol movement fact."""
@@ -192,7 +202,9 @@ def extract_drift_descriptors_from_diff(diff: str) -> tuple[FileDriftDescriptor,
             )
         )
 
-    # Detect Git copy headers if present in raw diff blocks.
+    # Detect Git copy headers if present in raw diff blocks, deduplicating
+    # against pairs already classified as renames or duplicate chunks.
+    seen_copies: set[tuple[str, str]] = set()
     for chunk in diff.split("diff --git "):
         if not chunk.strip():
             continue
@@ -201,13 +213,15 @@ def extract_drift_descriptors_from_diff(diff: str) -> tuple[FileDriftDescriptor,
         if copy_from is not None and copy_to is not None:
             src = copy_from.group(1).strip()
             dst = copy_to.group(1).strip()
-            descriptors.append(
-                FileDriftDescriptor(
-                    drift_kind="file_copy",
-                    source_path=src,
-                    target_paths=(dst,),
+            if (src, dst) not in renamed_pairs and (src, dst) not in seen_copies:
+                seen_copies.add((src, dst))
+                descriptors.append(
+                    FileDriftDescriptor(
+                        drift_kind="file_copy",
+                        source_path=src,
+                        target_paths=(dst,),
+                    )
                 )
-            )
 
     for record in analysis.file_records:
         if (
@@ -222,22 +236,30 @@ def extract_drift_descriptors_from_diff(diff: str) -> tuple[FileDriftDescriptor,
                     target_paths=(),
                 )
             )
-        elif (
+            continue
+
+        if (
             record.old_path is not None
             and record.new_path == record.old_path
-            and record.deleted_lines
-            and record.added_lines
+            and len(record.hunks) == 1
+            and record.hunks[0].new_start == 1
+            and len(record.deleted_lines) == record.hunks[0].old_count
+            and len(record.added_lines) == record.hunks[0].new_count
         ):
-            # Whole-file rewrite heuristic: single hunk starting at line 1
-            # replacing >= 5 lines with zero preserved context lines.
-            if (
-                len(record.hunks) == 1
-                and record.hunks[0].old_start == 1
-                and record.hunks[0].new_start == 1
+            # Whole-file rewrite heuristic: single hunk with zero preserved
+            # context lines either replacing >= 3 existing lines from line 1 or
+            # populating an existing empty file with >= 5 added lines.
+            is_full_replacement = (
+                record.hunks[0].old_start == 1
                 and len(record.deleted_lines) >= 3
-                and len(record.deleted_lines) == record.hunks[0].old_count
-                and len(record.added_lines) == record.hunks[0].new_count
-            ):
+                and len(record.added_lines) >= 1
+            )
+            is_additive_rewrite = (
+                record.hunks[0].old_start in {0, 1}
+                and record.hunks[0].old_count == 0
+                and len(record.added_lines) >= 5
+            )
+            if is_full_replacement or is_additive_rewrite:
                 descriptors.append(
                     FileDriftDescriptor(
                         drift_kind="whole_file_rewrite",
@@ -826,12 +848,6 @@ def _comment_matches_prior_with_drift(
 
     if lifecycle.fingerprint == prior.criterion.original_fingerprint:
         return True
-    if (
-        lifecycle.concern is not None
-        and prior.criterion.concern is not None
-        and lifecycle.concern == prior.criterion.concern
-    ):
-        return True
 
     allowed_paths = set(expected_paths)
     if prior_path is not None:
@@ -839,9 +855,23 @@ def _comment_matches_prior_with_drift(
     if prior.criterion.origin_path is not None:
         allowed_paths.add(prior.criterion.origin_path)
 
+    path_or_symbol_compatible = (
+        (comment.path is not None and comment.path in allowed_paths)
+        or (comment.path is None and not allowed_paths)
+        or (prior_symbol is not None and comment.symbol == prior_symbol)
+    )
+    if (
+        lifecycle.concern is not None
+        and prior.criterion.concern is not None
+        and lifecycle.concern == prior.criterion.concern
+        and defect_kind == prior.criterion.defect_kind
+        and path_or_symbol_compatible
+    ):
+        return True
+
     # Cross-file symbol + defect_kind identity survives path changes!
     if (
-        prior_symbol
+        prior_symbol is not None
         and comment.symbol == prior_symbol
         and defect_kind == prior.criterion.defect_kind
         and defect_kind != "unknown"
@@ -949,12 +979,6 @@ def evaluate_drift_round(
     ]
     prior_by_id = {item.obligation_id: item for item in prior_items}
 
-    for oid in set(fixes_by_id) | set(overrides_by_id):
-        if oid not in prior_by_id or not prior_by_id[oid].unresolved:
-            raise ReviewInputError(
-                "resolution references unknown or already-resolved obligation_id"
-            )
-
     review_complete = (
         result.review_status == "complete" and coverage_state.fully_reviewed
     )
@@ -963,8 +987,9 @@ def evaluate_drift_round(
         and authorized_rescan.mode == "full"
         and review_complete
     )
-    rescan_proof = (
-        hashlib.sha256(
+    rescan_proof: str | None = None
+    if full_rescan_qualified and authorized_rescan is not None:
+        rescan_proof = hashlib.sha256(
             canonical_bytes(
                 {
                     "kind": authorized_rescan.kind,
@@ -974,9 +999,6 @@ def evaluate_drift_round(
                 }
             )
         ).hexdigest()
-        if full_rescan_qualified and authorized_rescan is not None
-        else None
-    )
 
     drift_plan: dict[str, tuple[str, tuple[str, ...]]] = {
         prior.obligation_id: _expected_paths_for_prior(prior, descriptors)
@@ -1009,55 +1031,199 @@ def evaluate_drift_round(
             ambiguous_prior_ids.add(oid)
             ambiguous_comment_indices.update(matched_indices)
 
-    # Check regressions of previously fixed obligations on unmatched comments.
-    reopened_by_prior: dict[str, int] = {}
+    # Check regressions of previously fixed obligations on unmatched comments,
+    # requiring required/evidence parity and preserving multi-comment ambiguity.
+    reopen_candidates_by_prior: dict[str, list[int]] = {}
     for idx, comment in enumerate(result.comments):
         if priors_for_comment[idx]:
             continue
+        comment_required = comment.blocks_approval or comment.needs_human
+        comment_ev = "supported-source" if comment_required else "advisory"
         reopen_matches = [
             p
             for p in reopenable_priors
-            if _comment_matches_prior_with_drift(
-                comment, p, (p.present_anchor.path,) if p.present_anchor.path else ()
+            if (not p.criterion.required or comment_required)
+            and EVIDENCE_RANKS[comment_ev] <= EVIDENCE_RANKS[p.criterion.evidence]
+            and _comment_matches_prior_with_drift(
+                comment,
+                p,
+                _expected_paths_for_prior(p, descriptors)[1],
             )
         ]
         if len(reopen_matches) == 1:
             rp = reopen_matches[0]
-            if rp.obligation_id not in reopened_by_prior:
-                reopened_by_prior[rp.obligation_id] = idx
+            reopen_candidates_by_prior.setdefault(rp.obligation_id, []).append(idx)
 
+    reopened_by_prior: dict[str, int] = {}
+    ambiguous_reopen_prior_ids: dict[str, list[int]] = {}
+    for oid, c_indices in reopen_candidates_by_prior.items():
+        if len(c_indices) == 1:
+            reopened_by_prior[oid] = c_indices[0]
+        else:
+            ambiguous_reopen_prior_ids[oid] = c_indices
+
+    all_reopening_ids = set(reopened_by_prior) | set(ambiguous_reopen_prior_ids)
+    for oid in sorted(set(fixes_by_id) | set(overrides_by_id)):
+        if oid not in prior_by_id:
+            raise ReviewInputError(
+                "resolution references unknown or already-resolved obligation_id"
+            )
+        prior_obj = prior_by_id[oid]
+        if not prior_obj.unresolved and oid not in all_reopening_ids:
+            raise ReviewInputError(
+                "resolution references unknown or already-resolved obligation_id"
+            )
+        if (
+            oid in all_reopening_ids
+            and oid in fixes_by_id
+            and oid not in overrides_by_id
+        ):
+            raise ReviewInputError(
+                "confirmed fix cannot resolve an obligation that regressed on current head"
+            )
+
+    active_prior_tids = {
+        p.thread_binding.thread_id
+        for p in unresolved_priors
+        if p.thread_binding is not None
+    }
     reviewed_set = set(coverage_state.reviewed_paths)
     next_obligations: list[DriftTrackedObligation] = []
 
     for item in prior_items:
         if item.unresolved:
             continue
-        if item.obligation_id in reopened_by_prior:
-            c_idx = reopened_by_prior[item.obligation_id]
-            comment = result.comments[c_idx]
-            anchor_loc = (
-                "left"
-                if comment.side == "LEFT" and comment.line is not None
-                else ("right" if comment.line is not None else "file")
+        if item.obligation_id in all_reopening_ids:
+            if (
+                item.thread_binding is not None
+                and item.thread_binding.thread_id in active_prior_tids
+            ):
+                raise ReviewInputError(
+                    "reopened obligation collides with active thread_id"
+                )
+            reopen_override = overrides_by_id.get(item.obligation_id)
+            if item.obligation_id in ambiguous_reopen_prior_ids:
+                amb_indices = ambiguous_reopen_prior_ids[item.obligation_id]
+                primary_comment = result.comments[amb_indices[0]]
+                reopen_cand_paths: list[str] = []
+                for i in amb_indices:
+                    cp = result.comments[i].path
+                    if cp is not None and cp not in reopen_cand_paths:
+                        reopen_cand_paths.append(cp)
+                reopen_anchor = PresentLocationAnchor(
+                    head_sha=head_sha,
+                    path=(
+                        reopen_cand_paths[0]
+                        if reopen_cand_paths
+                        else item.present_anchor.path
+                    ),
+                    line=None,
+                    side="FILE",
+                    symbol=primary_comment.symbol or item.present_anchor.symbol,
+                    anchor_location="file" if reopen_cand_paths else "summary",
+                    drift_kind="duplicate_code",
+                    candidate_paths=tuple(reopen_cand_paths),
+                )
+                reopen_comment = primary_comment
+                reopen_state = "ambiguous-multi-target"
+                reopen_crit = replace(item.criterion, blocking=True, needs_human=True)
+            else:
+                c_idx = reopened_by_prior[item.obligation_id]
+                reopen_comment = result.comments[c_idx]
+                if (
+                    reopen_comment.path is not None
+                    and reopen_comment.line is not None
+                    and reopen_comment.side in {"LEFT", "RIGHT"}
+                ):
+                    anchor_loc = "left" if reopen_comment.side == "LEFT" else "right"
+                    anchor_side = reopen_comment.side
+                    anchor_line: int | None = reopen_comment.line
+                elif reopen_comment.path is not None:
+                    anchor_loc = "file"
+                    anchor_side = "FILE"
+                    anchor_line = None
+                else:
+                    anchor_loc = "summary"
+                    anchor_side = "FILE"
+                    anchor_line = None
+                reopen_anchor = PresentLocationAnchor(
+                    head_sha=head_sha,
+                    path=reopen_comment.path,
+                    line=anchor_line,
+                    side=anchor_side,
+                    symbol=reopen_comment.symbol or item.present_anchor.symbol,
+                    anchor_location=anchor_loc,
+                    drift_kind=item.present_anchor.drift_kind,
+                    candidate_paths=(
+                        (reopen_comment.path,) if reopen_comment.path else ()
+                    ),
+                )
+                reopen_state = "active-unresolved"
+                reopen_crit = item.criterion
+
+            if reopen_override is not None:
+                override_binding = (
+                    replace(
+                        item.thread_binding,
+                        slot_state=(
+                            "released"
+                            if reopen_override.slot_released
+                            else "contingent"
+                        ),
+                        proof_sha256=reopen_override.proof_sha256,
+                    )
+                    if item.thread_binding is not None
+                    else None
+                )
+                next_obligations.append(
+                    replace(
+                        item,
+                        criterion=reopen_crit,
+                        present_anchor=reopen_anchor,
+                        lifecycle_state="authorized-override",
+                        thread_binding=override_binding,
+                        resolution_proof_sha256=reopen_override.proof_sha256,
+                        latest_comment=reopen_comment,
+                    )
+                )
+                continue
+
+            reopen_proof = hashlib.sha256(
+                b"reviewsensei:drift-reopen-pending:v1:"
+                + canonical_bytes(
+                    {
+                        "obligation_id": item.obligation_id,
+                        "head_sha": head_sha,
+                        "round_number": round_number,
+                    }
+                )
+            ).hexdigest()
+            reopen_binding = (
+                replace(
+                    item.thread_binding,
+                    slot_state="released",
+                    proof_sha256=reopen_proof,
+                    host_marked_outdated=(
+                        item.thread_binding.host_marked_outdated
+                        or item.thread_binding.thread_id in host_outdated_threads
+                    ),
+                    host_marked_resolved=(
+                        item.thread_binding.host_marked_resolved
+                        or item.thread_binding.thread_id in host_resolved_threads
+                    ),
+                )
+                if item.thread_binding is not None
+                else None
             )
             next_obligations.append(
                 replace(
                     item,
-                    present_anchor=PresentLocationAnchor(
-                        head_sha=head_sha,
-                        path=comment.path,
-                        line=comment.line if anchor_loc in {"left", "right"} else None,
-                        side=comment.side
-                        if anchor_loc in {"left", "right"}
-                        else "FILE",
-                        symbol=comment.symbol or item.present_anchor.symbol,
-                        anchor_location=anchor_loc,
-                        drift_kind=item.present_anchor.drift_kind,
-                        candidate_paths=(comment.path,) if comment.path else (),
-                    ),
-                    lifecycle_state="active-unresolved",
+                    criterion=reopen_crit,
+                    present_anchor=reopen_anchor,
+                    lifecycle_state=reopen_state,
+                    thread_binding=reopen_binding,
                     resolution_proof_sha256=None,
-                    latest_comment=comment,
+                    latest_comment=reopen_comment,
                 )
             )
         else:
@@ -1133,9 +1299,16 @@ def evaluate_drift_round(
                     else ()
                 )
             )
-            paths_verified = all(
-                p in prior_fix.verified_paths and p in reviewed_set
-                for p in required_paths
+            paths_verified = (
+                all(
+                    p in prior_fix.verified_paths and p in reviewed_set
+                    for p in required_paths
+                )
+                if required_paths
+                else (
+                    bool(reviewed_set)
+                    and all(vp in reviewed_set for vp in prior_fix.verified_paths)
+                )
             )
             if (
                 review_complete
@@ -1200,12 +1373,22 @@ def evaluate_drift_round(
                 drift_kind=effective_drift,
                 candidate_paths=tuple(cand_paths),
             )
+            multi_paths_reviewed = (
+                all(p in reviewed_set for p in cand_paths)
+                if cand_paths
+                else (bool(reviewed_set) or not coverage_state.enumerated_paths)
+            )
             if (
                 full_rescan_qualified
                 and rescan_proof is not None
                 and not matched_indices
+                and multi_paths_reviewed
             ):
-                if binding is not None and binding.slot_state != "uncertain":
+                if binding is not None:
+                    if binding.slot_state == "uncertain":
+                        raise ReviewInputError(
+                            "uncertain thread slot must reconcile before rescan release"
+                        )
                     binding = replace(
                         binding, slot_state="released", proof_sha256=rescan_proof
                     )
@@ -1219,6 +1402,8 @@ def evaluate_drift_round(
                     )
                 )
             else:
+                # Preserve any uncertain binding as-is so both uncertain-native-slot
+                # and ambiguous-drift-target withhold approval until reconciled.
                 next_obligations.append(
                     replace(
                         prior,
@@ -1296,8 +1481,26 @@ def evaluate_drift_round(
             continue
 
         # Prior obligation was omitted from result.comments and has no confirmed fix.
-        if full_rescan_qualified and rescan_proof is not None:
-            if binding is not None and binding.slot_state != "uncertain":
+        present_required_paths: list[str] = []
+        if drift_kind != "line_deletion":
+            for req_path in (*expected_paths, *prior.present_anchor.candidate_paths):
+                if req_path not in present_required_paths:
+                    present_required_paths.append(req_path)
+            if not present_required_paths:
+                fallback_p = prior.present_anchor.path or prior.criterion.origin_path
+                if fallback_p is not None:
+                    present_required_paths.append(fallback_p)
+        rescan_paths_reviewed = (
+            all(p in reviewed_set for p in present_required_paths)
+            if present_required_paths
+            else (bool(reviewed_set) or not coverage_state.enumerated_paths)
+        )
+        if full_rescan_qualified and rescan_proof is not None and rescan_paths_reviewed:
+            if binding is not None:
+                if binding.slot_state == "uncertain":
+                    raise ReviewInputError(
+                        "uncertain thread slot must reconcile before rescan release"
+                    )
                 binding = replace(
                     binding, slot_state="released", proof_sha256=rescan_proof
                 )
@@ -1344,16 +1547,34 @@ def evaluate_drift_round(
             drift_kind=drift_kind,
             candidate_paths=expected_paths,
         )
-        implicated_reviewed = (
-            drift_kind != "unchanged"
-            or coverage_mode == "fallback-full"
-            or target_path is None
-            or target_path in reviewed_set
-            or (
-                prior.criterion.origin_path is not None
-                and prior.criterion.origin_path in reviewed_set
+        candidate_implicated = [
+            p
+            for p in (
+                target_path,
+                *expected_paths,
+                prior.present_anchor.path,
+                prior.criterion.origin_path,
             )
-        )
+            if p is not None
+        ]
+        if drift_kind == "line_deletion":
+            implicated_reviewed = review_complete or any(
+                p in reviewed_set for p in candidate_implicated
+            )
+        elif candidate_implicated:
+            implicated_reviewed = (
+                target_path in reviewed_set
+                if target_path is not None
+                else any(p in reviewed_set for p in candidate_implicated)
+            ) or (
+                coverage_mode == "fallback-full"
+                and review_complete
+                and coverage_state.enumeration_complete
+            )
+        else:
+            implicated_reviewed = (
+                review_complete and coverage_state.enumeration_complete
+            )
         next_obligations.append(
             replace(
                 prior,
@@ -1369,9 +1590,14 @@ def evaluate_drift_round(
     # If a comment triggered multi-target ambiguity on an existing prior, do not
     # mint redundant active-slot duplicates when the prior already holds ambiguity,
     # unless multiple brand-new comments duplicate each other without any prior!
-    matched_to_any_prior = {
-        idx for idx, priors in priors_for_comment.items() if priors
-    } | set(reopened_by_prior.values())
+    ambiguous_reopen_comment_indices = {
+        idx for indices in ambiguous_reopen_prior_ids.values() for idx in indices
+    }
+    matched_to_any_prior = (
+        {idx for idx, priors in priors_for_comment.items() if priors}
+        | set(reopened_by_prior.values())
+        | ambiguous_reopen_comment_indices
+    )
 
     unmatched_comments = [
         (idx, result.comments[idx])
@@ -1486,7 +1712,7 @@ def evaluate_drift_round(
         if tb is None:
             t_action = "create" if placement == INLINE_PLACEMENT else "body-only"
             tid = None
-        elif tb.slot_state == "released" or tb.host_marked_resolved:
+        elif consumes_new or tb.slot_state == "released" or tb.host_marked_resolved:
             t_action = "reopen"
             tid = tb.thread_id
         else:
@@ -1504,7 +1730,7 @@ def evaluate_drift_round(
             placement=placement,
             body_reason=reason,
             thread_id=tid,
-            thread_action=t_action if not consumes_new or tb is not None else t_action,
+            thread_action=t_action,
         )
 
     for item in incumbents:
@@ -1663,30 +1889,18 @@ class SyntheticNativeDriftPublisher:
         for item in evaluation.inventory.obligations:
             entry = entries_by_oid.get(item.obligation_id)
 
-            # Resolve native threads whose obligations are now resolved + released!
-            if (
-                not item.unresolved
-                and item.thread_binding is not None
-                and item.thread_binding.slot_state == "released"
-            ):
-                tid = item.thread_binding.thread_id
-                if tid in self.threads and not self.threads[tid].resolved:
-                    self.threads[tid] = replace(self.threads[tid], resolved=True)
-                    resolved_count += 1
-                updated_obligations.append(item)
-                continue
-
             if entry is None:
                 updated_obligations.append(item)
                 continue
 
             rendered = (
-                f"[{item.criterion.defect_kind}] "
-                f"origin={item.criterion.origin_path}:{item.criterion.origin_line} "
-                f"present={item.present_anchor.path}:{item.present_anchor.line} "
-                f"drift={item.present_anchor.drift_kind} "
-                f"state={item.lifecycle_state}"
+                f"[{_escape_markdown_inline(item.criterion.defect_kind)}] "
+                f"origin={_escape_markdown_inline(item.criterion.origin_path)}:{item.criterion.origin_line} "
+                f"present={_escape_markdown_inline(item.present_anchor.path)}:{item.present_anchor.line} "
+                f"drift={_escape_markdown_inline(item.present_anchor.drift_kind)} "
+                f"state={_escape_markdown_inline(item.lifecycle_state)}"
             )
+            body_sha256 = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
             if entry.placement == BODY_PLACEMENT:
                 body_lines.append(rendered)
 
@@ -1714,6 +1928,8 @@ class SyntheticNativeDriftPublisher:
                             "comment_id": cid,
                             "head_sha": evaluation.head_sha,
                             "obligation_id": item.obligation_id,
+                            "placement": entry.placement,
+                            "body_sha256": body_sha256,
                         }
                     )
                 ).hexdigest()
@@ -1727,12 +1943,20 @@ class SyntheticNativeDriftPublisher:
                 )
                 updated_obligations.append(replace(item, thread_binding=binding))
             elif entry.thread_action in {"update", "reopen"}:
-                assert item.thread_binding is not None
+                if item.thread_binding is None:
+                    raise ReviewInputError(
+                        "update/reopen entry requires an existing thread_binding"
+                    )
                 tid = item.thread_binding.thread_id
+                if tid not in self.threads:
+                    raise ReviewInputError("bound thread_id missing from host store")
                 existing = self.threads[tid]
                 was_reopen = entry.thread_action == "reopen" or existing.resolved
                 self.threads[tid] = replace(
                     existing,
+                    anchor_path=entry.present_path,
+                    anchor_line=entry.present_line,
+                    anchor_side=entry.present_side,
                     body=rendered,
                     resolved=False,
                     update_count=existing.update_count + (0 if was_reopen else 1),
@@ -1749,6 +1973,8 @@ class SyntheticNativeDriftPublisher:
                             "head_sha": evaluation.head_sha,
                             "obligation_id": item.obligation_id,
                             "action": "reopen" if was_reopen else "update",
+                            "placement": entry.placement,
+                            "body_sha256": body_sha256,
                         }
                     )
                 ).hexdigest()
@@ -1767,6 +1993,30 @@ class SyntheticNativeDriftPublisher:
                 updated_obligations.append(item)
 
         new_inventory = DriftInventory(obligations=tuple(updated_obligations))
+
+        # Re-derive host-thread resolution strictly from new_inventory so an
+        # obligation that remains unresolved in this round never resolves its
+        # bound host thread even if an incoming slot_state was released.
+        live_bound_tids = {
+            o.thread_binding.thread_id
+            for o in new_inventory.obligations
+            if o.unresolved and o.thread_binding is not None
+        }
+        for o in new_inventory.obligations:
+            if (
+                not o.unresolved
+                and o.thread_binding is not None
+                and o.thread_binding.slot_state == "released"
+            ):
+                tid = o.thread_binding.thread_id
+                if (
+                    tid not in live_bound_tids
+                    and tid in self.threads
+                    and not self.threads[tid].resolved
+                ):
+                    self.threads[tid] = replace(self.threads[tid], resolved=True)
+                    resolved_count += 1
+
         new_slots = tuple(
             item.thread_binding.to_slot()
             for item in new_inventory.obligations
@@ -1803,13 +2053,20 @@ class SyntheticNativeDriftPublisher:
         check_conclusion = "success" if committed.approved else "action_required"
         public_status = committed.to_public_status()
 
+        active_window_tids = {
+            o.thread_binding.thread_id
+            for o in new_inventory.obligations
+            if o.unresolved
+            and o.thread_binding is not None
+            and o.thread_binding.slot_state in {"active", "contingent"}
+        }
         active_tids = tuple(
             sorted(tid for tid, rec in self.threads.items() if not rec.resolved)
         )
         resolved_tids = tuple(
             sorted(tid for tid, rec in self.threads.items() if rec.resolved)
         )
-        if len(active_tids) > committed.max_active_findings:
+        if len(active_window_tids) > committed.max_active_findings:
             raise ReviewInputError("published open threads exceed max_active_findings")
         if review_event == "APPROVE" and (
             active_tids or committed.inventory.blocking_obligations
@@ -1818,12 +2075,18 @@ class SyntheticNativeDriftPublisher:
                 "APPROVE forbidden while blocking obligations remain"
             )
 
+        summary_body = "\n".join(body_lines)
+        if len(summary_body.encode("utf-8")) > _MAX_SUMMARY_BODY_BYTES:
+            raise ReviewInputError(
+                "drift summary_body exceeds 65536-byte transport ceiling"
+            )
+
         receipt = DriftFinalizationReceipt(
             head_sha=committed.head_sha,
             review_event=review_event,
             check_conclusion=check_conclusion,
             approved=committed.approved,
-            summary_body="\n".join(body_lines),
+            summary_body=summary_body,
             active_thread_ids=active_tids,
             resolved_thread_ids=resolved_tids,
             created_threads=created,

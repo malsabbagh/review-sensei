@@ -129,6 +129,7 @@ class ArtifactMutationResilienceG14Tests(unittest.TestCase):
                     artifact_kind=kind,
                     artifact_id=f"{kind}-1",
                     present=False,
+                    duplicate_count=0,
                     expected_sha256=expected,
                 ),
                 inventory=inventory,
@@ -281,6 +282,7 @@ class ArtifactMutationResilienceG14Tests(unittest.TestCase):
                 artifact_kind="session_ledger_marker",
                 artifact_id="c-1",
                 present=False,
+                duplicate_count=0,
             ),
             enrollment_witness_present=True,
             inventory=inventory,
@@ -295,6 +297,7 @@ class ArtifactMutationResilienceG14Tests(unittest.TestCase):
                 artifact_kind="session_ledger_marker",
                 artifact_id="c-1",
                 present=False,
+                duplicate_count=0,
             ),
             enrollment_witness_present=True,
             inventory=AuthoritativeDecisionInventory(obligations=()),
@@ -308,6 +311,7 @@ class ArtifactMutationResilienceG14Tests(unittest.TestCase):
                     artifact_kind=part_kind,
                     artifact_id="part-1",
                     present=False,
+                    duplicate_count=0,
                 ),
                 inventory=inventory,
             )
@@ -378,6 +382,7 @@ class ArtifactMutationResilienceG14Tests(unittest.TestCase):
                 artifact_kind="retained_result_part",
                 artifact_id="part-77",
                 present=False,
+                duplicate_count=0,
                 expected_sha256=expected,
                 response_lost=True,
             )
@@ -440,6 +445,7 @@ class ArtifactMutationResilienceG14Tests(unittest.TestCase):
             association="OWNER",
             reason="Marker accidentally deleted by repo cleanup bot.",
             enrollment_witness_present=True,
+            enrollment_witness_sha256=_sha("verified-enrollment-witness"),
         )
 
         # Gate 1: Non-maintainer refused
@@ -495,7 +501,18 @@ class ArtifactMutationResilienceG14Tests(unittest.TestCase):
         )
         self.assertEqual(
             evaluate_operator_reenroll(
-                replace(base_req, enrollment_witness_present=False),
+                replace(
+                    base_req,
+                    enrollment_witness_present=False,
+                    enrollment_witness_sha256=None,
+                ),
+                ledger_status="missing",
+            ).reason_code,
+            "reenroll-missing-enrollment-witness",
+        )
+        self.assertEqual(
+            evaluate_operator_reenroll(
+                replace(base_req, enrollment_witness_sha256=None),
                 ledger_status="missing",
             ).reason_code,
             "reenroll-missing-enrollment-witness",
@@ -609,12 +626,169 @@ class ArtifactMutationResilienceG14Tests(unittest.TestCase):
         )
         restored_exp, receipt_exp = execute_restricted_operator_reenroll(
             ledger_exp,
-            replace(base_req, enrollment_witness_present=False),
+            replace(
+                base_req,
+                enrollment_witness_present=False,
+                enrollment_witness_sha256=None,
+            ),
             now=FIXED_NOW,
         )
         self.assertEqual(receipt_exp.previous_status, "expired")
         self.assertEqual(restored_exp.record_sha256, receipt_exp.restored_record_sha256)
         self.assertEqual(ledger_exp.load(IDENTITY, now=FIXED_NOW).status, "ok")
+
+    def test_evidence_missing_expected_digest_duplicate_projection_and_inflight_ledger_guards(
+        self,
+    ) -> None:
+        # 1) RS-80F54E: evidence artifacts without expected_sha256 fail closed!
+        for ev_kind, expected_code in (
+            ("owned_readback_receipt", "readback-evidence-corrupted"),
+            ("archive_chain_part", "archive-part-corrupted"),
+        ):
+            missing_expected = evaluate_observed_artifact(
+                ObservedGitHubArtifact(
+                    artifact_kind=ev_kind,
+                    artifact_id="ev-1",
+                    present=True,
+                    expected_sha256=None,
+                    observed_sha256=_sha("some-body"),
+                )
+            )
+            self.assertEqual(missing_expected.verdict, "refused")
+            self.assertEqual(missing_expected.reason_code, expected_code)
+            self.assertFalse(missing_expected.authority_intact)
+
+        ok_receipt = evaluate_observed_artifact(
+            ObservedGitHubArtifact(
+                artifact_kind="owned_readback_receipt",
+                artifact_id="ev-ok",
+                present=True,
+                expected_sha256=_sha("match"),
+                observed_sha256=_sha("match"),
+            )
+        )
+        self.assertEqual(ok_receipt.verdict, "accepted")
+        self.assertEqual(ok_receipt.reason_code, "evidence-verified")
+
+        # 2) RS-86E37A: contradictory present=False with nonzero duplicate_count fails closed!
+        with self.assertRaisesRegex(
+            ReviewInputError, "absent artifact requires duplicate_count == 0"
+        ):
+            ObservedGitHubArtifact(
+                artifact_kind="session_ledger_marker",
+                artifact_id="c-bad",
+                present=False,
+                duplicate_count=1,
+            )
+        with self.assertRaisesRegex(
+            ReviewInputError, "present artifact requires duplicate_count >= 1"
+        ):
+            ObservedGitHubArtifact(
+                artifact_kind="session_ledger_marker",
+                artifact_id="c-bad-0",
+                present=True,
+                duplicate_count=0,
+            )
+        with self.assertRaisesRegex(
+            ReviewInputError, "enrollment_witness_sha256 requires"
+        ):
+            OperatorReenrollRequest(
+                identity=IDENTITY,
+                head_sha=HEAD_SHA,
+                operator_login="repo-admin",
+                association="OWNER",
+                reason="Contradictory witness fields.",
+                enrollment_witness_present=False,
+                enrollment_witness_sha256=_sha("unexpected"),
+            )
+
+        # 3) RS-304AC2: duplicated projection comment is treated as non-authoritative mutation:
+        dup_proj = evaluate_observed_artifact(
+            ObservedGitHubArtifact(
+                artifact_kind="native_review_summary",
+                artifact_id="rev-dup",
+                present=True,
+                duplicate_count=2,
+                expected_sha256=_sha("match"),
+                observed_sha256=_sha("match"),
+            )
+        )
+        self.assertEqual(dup_proj.verdict, "ignored_projection_mutation")
+
+        # 4) RS-2D07CD: expired ledger carrying an in-flight publication_pending
+        #    transaction blocks restricted operator reenroll!
+        from review_sensei.models import ReviewTransaction
+
+        pending_tx = ReviewTransaction(
+            transaction_id=ReviewTransaction.derive_id(
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                base_sha=BASE_SHA,
+                head_sha=HEAD_SHA,
+                policy_digest=_sha("pol"),
+                configuration_digest=_sha("cfg"),
+                evidence_digest=_sha("ev"),
+                reservation_id=_sha("resv"),
+            ),
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            policy_digest=_sha("pol"),
+            configuration_digest=_sha("cfg"),
+            evidence_digest=_sha("ev"),
+            reservation_id=_sha("resv"),
+            generation=1,
+            phase="publication_pending",
+            result_sha256=_sha("res"),
+        )
+        expired_pending_rec = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW - timedelta(days=31),
+            ttl=timedelta(days=30),
+            completed_initial_reviews=1,
+            generation=1,
+            last_committed_reservation_id=_sha("resv"),
+            transaction=pending_tx,
+        )
+        pending_body = render_session_comment(
+            repository_id=99, pull_request=136, record=expired_pending_rec
+        )
+
+        def pending_opener(request, timeout):
+            del request, timeout
+            return FakeHTTPResponse(
+                json.dumps(
+                    [
+                        {
+                            "id": 88,
+                            "body": pending_body,
+                            "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+                        }
+                    ]
+                ).encode("utf-8"),
+                status=200,
+            )
+
+        ledger_pending = GitHubIssueCommentSessionLedger(
+            GitHubHttp(api_url="https://api.github.test", opener=pending_opener),
+            token="token",
+            app_slug="reviewsensei[bot]",
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "reenroll-blocked-by-uncertain-write"
+        ):
+            execute_restricted_operator_reenroll(
+                ledger_pending,
+                OperatorReenrollRequest(
+                    identity=IDENTITY,
+                    head_sha=HEAD_SHA,
+                    operator_login="repo-admin",
+                    association="OWNER",
+                    reason="Attempt reenroll while publication_pending.",
+                ),
+                now=FIXED_NOW,
+            )
 
     def test_validation_error_boundaries(self) -> None:
         with self.assertRaises(ReviewInputError):

@@ -15,6 +15,7 @@ from review_sensei_github.trust_transitions import (
     AuthenticatedTrustMigration,
     AuthenticatedTrustSnapshot,
     TrustTransitionDecision,
+    compute_transfer_attestation_sha256,
     detect_trust_transitions,
     evaluate_trust_boundary,
     verify_and_migrate_trust_boundary,
@@ -240,12 +241,13 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
         for expected_kind, observed, operation, expected_route in scenarios:
             for phase in TRANSITION_PHASES:
                 with self.subTest(transition=expected_kind, phase=phase):
+                    has_prior = phase == "before_admission"
                     decision = evaluate_trust_boundary(
                         enrolled,
                         observed,
                         phase=phase,
                         operation=operation,
-                        has_prior_charges=(phase == "before_admission"),
+                        has_prior_charges=has_prior,
                     )
                     self.assertFalse(decision.allowed)
                     self.assertIn(expected_kind, decision.detected_transitions)
@@ -255,10 +257,15 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
                     )
                     self.assertFalse(decision.fresh_allowance_minted)
                     self.assertTrue(decision.obligations_preserved)
-                    self.assertTrue(decision.charges_held)
+                    self.assertEqual(
+                        decision.charges_held,
+                        has_prior or phase == "after_unknown_effect",
+                    )
+                    self.assertEqual(
+                        decision.cross_repository_write_blocked,
+                        expected_kind == "ownership_transfer",
+                    )
                     self.assertIn(expected_route, decision.recovery_routes)
-                    if phase != "before_admission":
-                        self.assertTrue(decision.cross_repository_write_blocked)
                     if phase == "after_unknown_effect":
                         self.assertTrue(decision.unknown_effect_held)
                         self.assertIn(
@@ -345,6 +352,7 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
         migration = AuthenticatedTrustMigration(
             old_snapshot_sha256=enrolled.digest(),
             new_snapshot_sha256=renamed_reinstalled.digest(),
+            operator_id=42,
             operator_login="alice-maintainer",
             operator_association="MEMBER",
             operator_permission="maintain",
@@ -436,12 +444,28 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
             owner_login="newcorp",
             repository_slug="newcorp/widgets",
             installation_id=4002,
+            actor_id=84,
+            actor_login="newcorp-admin",
+            actor_association="OWNER",
+            actor_permission="admin",
+        )
+        transfer_attest = compute_transfer_attestation_sha256(
+            repository_id=enrolled.repository_id,
+            previous_owner_id=enrolled.owner_id,
+            previous_owner_login=enrolled.owner_login,
+            new_owner_id=transferred.owner_id,
+            new_owner_login=transferred.owner_login,
+            pull_request=enrolled.pull_request,
+            head_sha=enrolled.head_sha,
+            permission_epoch=enrolled.permission_epoch,
+            previous_owner_witness="Verified prior-owner transfer approval.",
         )
 
         # 1. Refused without previous_owner_transfer_attestation_sha256 even though repository_id==9001!
         missing_prev_owner = AuthenticatedTrustMigration(
             old_snapshot_sha256=enrolled.digest(),
             new_snapshot_sha256=transferred.digest(),
+            operator_id=84,
             operator_login="newcorp-admin",
             operator_association="OWNER",
             operator_permission="admin",
@@ -463,12 +487,13 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
         unreconciled_transfer = AuthenticatedTrustMigration(
             old_snapshot_sha256=enrolled.digest(),
             new_snapshot_sha256=transferred.digest(),
+            operator_id=84,
             operator_login="newcorp-admin",
             operator_association="OWNER",
             operator_permission="admin",
             reason="Dual-attested transfer before reconciling unknown effect.",
             operator_attestation_sha256=_sha("newcorp-attest"),
-            previous_owner_transfer_attestation_sha256=_sha("acme-prev-owner-attest"),
+            previous_owner_transfer_attestation_sha256=transfer_attest,
         )
         with self.assertRaisesRegex(
             ReviewInputError, "unknown native effect must be reconciled"
@@ -480,6 +505,7 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
                 inventory=inventory,
                 migration=unreconciled_transfer,
                 has_unknown_effect=True,
+                expected_transfer_attestation_sha256=transfer_attest,
             )
 
         # 3. Succeeds with dual owner attestation + reconciled unknown-effect receipt,
@@ -487,12 +513,13 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
         valid_transfer = AuthenticatedTrustMigration(
             old_snapshot_sha256=enrolled.digest(),
             new_snapshot_sha256=transferred.digest(),
+            operator_id=84,
             operator_login="newcorp-admin",
             operator_association="OWNER",
             operator_permission="admin",
             reason="Dual-attested org transfer with reconciled readback.",
             operator_attestation_sha256=_sha("newcorp-attest"),
-            previous_owner_transfer_attestation_sha256=_sha("acme-prev-owner-attest"),
+            previous_owner_transfer_attestation_sha256=transfer_attest,
             reconciled_effect_sha256=_sha("owned-readback-reconciled"),
         )
         receipt = verify_and_migrate_trust_boundary(
@@ -502,15 +529,17 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
             inventory=inventory,
             migration=valid_transfer,
             has_unknown_effect=True,
+            expected_transfer_attestation_sha256=transfer_attest,
         )
         self.assertIn("ownership_transfer", receipt.migrated_transitions)
         self.assertEqual(receipt.migrated_session.repository, "newcorp/widgets")
         self.assertFalse(receipt.fresh_allowance_minted)
 
         # Also verify actor_privilege_downgrade recovery: downgraded actor is refused,
-        # while newcorp-admin maintainer authority succeeds and overrides cleanly!
+        # while another maintainer/admin authority succeeds and overrides cleanly!
         downgraded_actor = replace(
             receipt.migrated_snapshot,
+            actor_id=99,
             actor_login="junior-dev",
             actor_association="COLLABORATOR",
             actor_permission="read",
@@ -525,9 +554,10 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
         )
         maintainer_actor = replace(
             receipt.migrated_snapshot,
-            actor_login="newcorp-admin",
-            actor_association="OWNER",
-            actor_permission="admin",
+            actor_id=85,
+            actor_login="newcorp-sec-lead",
+            actor_association="MEMBER",
+            actor_permission="maintain",
         )
         self.assertTrue(
             evaluate_trust_boundary(
@@ -583,9 +613,10 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
             return AuthenticatedTrustMigration(
                 old_snapshot_sha256=old_snap.digest(),
                 new_snapshot_sha256=new_snap.digest(),
-                operator_login="alice-maintainer",
-                operator_association="MEMBER",
-                operator_permission="maintain",
+                operator_id=new_snap.actor_id,
+                operator_login=new_snap.actor_login,
+                operator_association=new_snap.actor_association,
+                operator_permission=new_snap.actor_permission,
                 reason="Boundary check.",
                 operator_attestation_sha256=_sha("attest"),
             )
@@ -815,6 +846,7 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
             AuthenticatedTrustMigration(
                 old_snapshot_sha256=enrolled.digest(),
                 new_snapshot_sha256=renamed.digest(),
+                operator_id=99,
                 operator_login="contributor-bob",
                 operator_association="CONTRIBUTOR",
                 operator_permission="read",
@@ -825,12 +857,238 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
             AuthenticatedTrustMigration(
                 old_snapshot_sha256=enrolled.digest(),
                 new_snapshot_sha256=renamed.digest(),
+                operator_id=42,
                 operator_login="bad login",
                 operator_association="MEMBER",
                 operator_permission="maintain",
                 reason="Invalid login.",
                 operator_attestation_sha256=_sha("attest"),
             )
+
+    def test_actor_handoff_unfork_epoch_operator_binding_and_audit_digests(
+        self,
+    ) -> None:
+        enrolled = replace(
+            _enrolled_snapshot(),
+            actor_association="OWNER",
+            actor_permission="admin",
+            permission_epoch=2,
+        )
+        session = _session_with_charges(enrolled)
+        inventory = _blocking_inventory()
+
+        # 1) RS-366E18: Different actor (actor_id=77) who meets operation ("override")
+        #    is NOT flagged as actor_privilege_downgrade even though admin -> maintain!
+        peer_maintainer = replace(
+            enrolled,
+            actor_id=77,
+            actor_login="peer-maintainer",
+            actor_association="MEMBER",
+            actor_permission="maintain",
+        )
+        self.assertEqual(
+            detect_trust_transitions(enrolled, peer_maintainer, operation="override"),
+            (),
+        )
+        peer_dec = evaluate_trust_boundary(
+            enrolled,
+            peer_maintainer,
+            phase="before_native_effect",
+            operation="override",
+            has_prior_charges=False,
+        )
+        self.assertTrue(peer_dec.allowed)
+        self.assertFalse(peer_dec.charges_held)
+
+        # Same actor (actor_id=42) dropping admin -> maintain IS flagged as downgrade!
+        same_actor_drop = replace(
+            enrolled,
+            actor_association="MEMBER",
+            actor_permission="maintain",
+        )
+        self.assertIn(
+            "actor_privilege_downgrade",
+            detect_trust_transitions(enrolled, same_actor_drop, operation="override"),
+        )
+
+        # 2) RS-377BA7: Unfork transition (True -> False) is blocked from migration
+        #    and routed to unsupported-fork-boundary!
+        fork_enrolled = replace(enrolled, is_fork=True)
+        unforked_target = replace(enrolled, is_fork=False)
+        unfork_dec = evaluate_trust_boundary(
+            fork_enrolled, unforked_target, phase="before_admission"
+        )
+        self.assertFalse(unfork_dec.allowed)
+        self.assertIn("unsupported-fork-boundary", unfork_dec.recovery_routes)
+        self.assertNotIn("authenticated-trust-migration", unfork_dec.recovery_routes)
+        with self.assertRaisesRegex(ReviewInputError, "fork repositories"):
+            verify_and_migrate_trust_boundary(
+                enrolled=fork_enrolled,
+                target=unforked_target,
+                session_record=_session_with_charges(fork_enrolled),
+                inventory=inventory,
+                migration=AuthenticatedTrustMigration(
+                    old_snapshot_sha256=fork_enrolled.digest(),
+                    new_snapshot_sha256=unforked_target.digest(),
+                    operator_id=unforked_target.actor_id,
+                    operator_login=unforked_target.actor_login,
+                    operator_association=unforked_target.actor_association,
+                    operator_permission=unforked_target.actor_permission,
+                    reason="Attempt unfork migration.",
+                    operator_attestation_sha256=_sha("unfork"),
+                ),
+            )
+
+        # 3) RS-CB5C9C: permission_epoch regression is blocked from migration!
+        regressed_epoch = replace(enrolled, permission_epoch=1)
+        epoch_dec = evaluate_trust_boundary(
+            enrolled, regressed_epoch, phase="before_admission"
+        )
+        self.assertFalse(epoch_dec.allowed)
+        self.assertIn("operator-reconcile", epoch_dec.recovery_routes)
+        self.assertNotIn("authenticated-trust-migration", epoch_dec.recovery_routes)
+        with self.assertRaisesRegex(
+            ReviewInputError, "permission_epoch cannot regress"
+        ):
+            verify_and_migrate_trust_boundary(
+                enrolled=enrolled,
+                target=regressed_epoch,
+                session_record=session,
+                inventory=inventory,
+                migration=AuthenticatedTrustMigration(
+                    old_snapshot_sha256=enrolled.digest(),
+                    new_snapshot_sha256=regressed_epoch.digest(),
+                    operator_id=regressed_epoch.actor_id,
+                    operator_login=regressed_epoch.actor_login,
+                    operator_association=regressed_epoch.actor_association,
+                    operator_permission=regressed_epoch.actor_permission,
+                    reason="Epoch regression.",
+                    operator_attestation_sha256=_sha("epoch-reg"),
+                ),
+            )
+
+        # Changing granted_permissions without advancing permission_epoch fails closed:
+        expanded_perms = dict(DEFAULT_REQUIRED_INSTALLATION_PERMISSIONS)
+        expanded_perms["metadata"] = "read"
+        stale_epoch_perms = replace(enrolled, granted_permissions=expanded_perms)
+        with self.assertRaisesRegex(
+            ReviewInputError, "strictly newer permission_epoch"
+        ):
+            verify_and_migrate_trust_boundary(
+                enrolled=enrolled,
+                target=stale_epoch_perms,
+                session_record=session,
+                inventory=inventory,
+                migration=AuthenticatedTrustMigration(
+                    old_snapshot_sha256=enrolled.digest(),
+                    new_snapshot_sha256=stale_epoch_perms.digest(),
+                    operator_id=stale_epoch_perms.actor_id,
+                    operator_login=stale_epoch_perms.actor_login,
+                    operator_association=stale_epoch_perms.actor_association,
+                    operator_permission=stale_epoch_perms.actor_permission,
+                    reason="Expanded perms without epoch bump.",
+                    operator_attestation_sha256=_sha("perm-epoch"),
+                ),
+            )
+
+        # 4) RS-A6D906: Spoofed operator identity not matching target snapshot fails!
+        renamed_target = replace(enrolled, repository_slug="acme/widgets-renamed")
+        with self.assertRaisesRegex(
+            ReviewInputError, "operator identity and authority must match"
+        ):
+            verify_and_migrate_trust_boundary(
+                enrolled=enrolled,
+                target=renamed_target,
+                session_record=session,
+                inventory=inventory,
+                migration=AuthenticatedTrustMigration(
+                    old_snapshot_sha256=enrolled.digest(),
+                    new_snapshot_sha256=renamed_target.digest(),
+                    operator_id=9999,
+                    operator_login="spoofed-admin",
+                    operator_association="OWNER",
+                    operator_permission="admin",
+                    reason="Spoofed operator id/login.",
+                    operator_attestation_sha256=_sha("spoof"),
+                ),
+            )
+
+        # 5) RS-6D39F3 & RS-98D766: Transfer attestation mismatch fails closed, and
+        #    audit_sha256 binds installation_id and operator authority!
+        transferred_target = replace(
+            enrolled,
+            owner_id=900,
+            owner_login="destorg",
+            repository_slug="destorg/widgets",
+            installation_id=7001,
+        )
+        expected_attest = compute_transfer_attestation_sha256(
+            repository_id=enrolled.repository_id,
+            previous_owner_id=enrolled.owner_id,
+            previous_owner_login=enrolled.owner_login,
+            new_owner_id=transferred_target.owner_id,
+            new_owner_login=transferred_target.owner_login,
+            pull_request=enrolled.pull_request,
+            head_sha=enrolled.head_sha,
+            permission_epoch=enrolled.permission_epoch,
+            previous_owner_witness="Verified prior-owner transfer approval.",
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "does not match verified transfer attestation"
+        ):
+            verify_and_migrate_trust_boundary(
+                enrolled=enrolled,
+                target=transferred_target,
+                session_record=session,
+                inventory=inventory,
+                migration=AuthenticatedTrustMigration(
+                    old_snapshot_sha256=enrolled.digest(),
+                    new_snapshot_sha256=transferred_target.digest(),
+                    operator_id=transferred_target.actor_id,
+                    operator_login=transferred_target.actor_login,
+                    operator_association=transferred_target.actor_association,
+                    operator_permission=transferred_target.actor_permission,
+                    reason="Wrong transfer attestation.",
+                    operator_attestation_sha256=_sha("op"),
+                    previous_owner_transfer_attestation_sha256=_sha("wrong-attest"),
+                ),
+                expected_transfer_attestation_sha256=expected_attest,
+            )
+
+        rec_a = verify_and_migrate_trust_boundary(
+            enrolled=enrolled,
+            target=renamed_target,
+            session_record=session,
+            inventory=inventory,
+            migration=AuthenticatedTrustMigration(
+                old_snapshot_sha256=enrolled.digest(),
+                new_snapshot_sha256=renamed_target.digest(),
+                operator_id=renamed_target.actor_id,
+                operator_login=renamed_target.actor_login,
+                operator_association=renamed_target.actor_association,
+                operator_permission=renamed_target.actor_permission,
+                reason="Audit check A.",
+                operator_attestation_sha256=_sha("op-a"),
+            ),
+        )
+        renamed_other_install = replace(renamed_target, installation_id=8888)
+        rec_b = verify_and_migrate_trust_boundary(
+            enrolled=enrolled,
+            target=renamed_other_install,
+            session_record=session,
+            inventory=inventory,
+            migration=AuthenticatedTrustMigration(
+                old_snapshot_sha256=enrolled.digest(),
+                new_snapshot_sha256=renamed_other_install.digest(),
+                operator_id=renamed_other_install.actor_id,
+                operator_login=renamed_other_install.actor_login,
+                operator_association=renamed_other_install.actor_association,
+                operator_permission=renamed_other_install.actor_permission,
+                reason="Audit check A.",
+                operator_attestation_sha256=_sha("op-a"),
+            ),
+        )
+        self.assertNotEqual(rec_a.audit_sha256, rec_b.audit_sha256)
 
 
 if __name__ == "__main__":

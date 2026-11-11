@@ -169,7 +169,7 @@ class _StubReviewProvider:
 
 
 class _StubDecisionAdapter:
-    name = "ollama"
+    name = "fixture"
     model = "decision-v1"
 
     def __init__(self, choice_map: dict[str, dict[str, str]]) -> None:
@@ -181,7 +181,8 @@ class _StubDecisionAdapter:
         def send(_timeout: float, _max_bytes: int) -> str:
             out: dict[str, str] = {}
             for q in request.questions:
-                cid, key = q.name.rsplit("_", 1)
+                cid = q.subject
+                key = q.name.removeprefix(f"{cid}_")
                 out[q.name] = self.choice_map[cid][key]
             return canonical(out)
 
@@ -638,6 +639,18 @@ class ActiveWindowLifecycleG10Tests(unittest.TestCase):
         )
         self.assertFalse(r3_rem.approval_eligibility.approved)
 
+        # Without AuthorizedRescan, full coverage + zero comments still withholds approval!
+        r3_no_rescan = evaluate_active_window_round(
+            _result(),
+            head_sha=HEAD_3,
+            base_sha=BASE_SHA,
+            max_active_findings=3,
+            round_number=3,
+            coverage_mode="full",
+            prior_inventory=r2.authoritative_decision_inventory,
+        )
+        self.assertFalse(r3_no_rescan.approval_eligibility.approved)
+
         # Full-mode rescan with complete coverage supersedes ambiguous/omitted obligations:
         r3_full = evaluate_active_window_round(
             _result(),
@@ -713,7 +726,10 @@ class ActiveWindowLifecycleG10Tests(unittest.TestCase):
             provider=adapter,
             review_provider=_StubReviewProvider(),
             settings=DecisionConfiguration(
-                enabled=True, provider="ollama", model="decision-v1"
+                enabled=True,
+                provider="fixture",
+                model="decision-v1",
+                base_url="http://127.0.0.1:8080/v1",
             ),
             tracker=tracker,
         )
@@ -1417,6 +1433,169 @@ class ActiveWindowLifecycleG10Tests(unittest.TestCase):
                 target="missing",
                 resolved_state="active",
                 proof_sha256=_sha("p"),
+            )
+
+    def test_reopen_parity_override_and_slot_uniqueness_guards(self) -> None:
+        c_block = _comment(
+            "src/app.py",
+            line=10,
+            body="Blocking token bypass in login handler.",
+            blocking=True,
+            severity="critical",
+            symbol="login_user",
+            defect_kind="authn",
+        )
+        r1 = commit_window_publication(
+            evaluate_active_window_round(
+                _result(c_block),
+                head_sha=HEAD_1,
+                base_sha=BASE_SHA,
+                max_active_findings=2,
+            ),
+            created_targets={
+                obligation_from_comment(c_block).obligation_id: "thread-login"
+            },
+        )
+        ob1 = r1.authoritative_decision_inventory.obligations[0]
+        fix_proof = _sha("fix-login-1")
+        r2 = evaluate_active_window_round(
+            _result(),
+            head_sha=HEAD_2,
+            base_sha=BASE_SHA,
+            max_active_findings=2,
+            round_number=2,
+            prior_inventory=r1.authoritative_decision_inventory,
+            slots=r1.display_active_findings.slots,
+            confirmed_fixes=(
+                ConfirmedFixEvidence(
+                    obligation_id=ob1.obligation_id,
+                    resolution_criterion=ob1.resolution_criterion,
+                    head_sha=HEAD_2,
+                    evidence_sha256=fix_proof,
+                    verified_paths=("src/app.py",),
+                ),
+            ),
+        )
+        self.assertTrue(r2.approval_eligibility.approved)
+
+        # 1) RS-827D99: Advisory comment cannot reopen a verified-fixed blocking obligation:
+        c_advisory = _comment(
+            "src/app.py",
+            line=10,
+            body="Optional docstring tweak on login_user.",
+            blocking=False,
+            severity="low",
+            symbol="login_user",
+            defect_kind="authn",
+        )
+        r3_adv = evaluate_active_window_round(
+            _result(c_advisory),
+            head_sha=HEAD_3,
+            base_sha=BASE_SHA,
+            max_active_findings=2,
+            round_number=3,
+            prior_inventory=r2.authoritative_decision_inventory,
+            slots=r2.display_active_findings.slots,
+        )
+        self.assertEqual(
+            r3_adv.authoritative_decision_inventory.obligations[0].lifecycle_state,
+            "verified-fixed",
+        )
+
+        # 2) RS-827D99 & RS-949993: Blocking regression reopens with fresh proof,
+        #    rejects contradictory ConfirmedFixEvidence, and honors AuthorizedHumanOverride!
+        c_regressed = _comment(
+            "src/app.py",
+            line=12,
+            body="Token bypass reintroduced in login_user.",
+            blocking=True,
+            severity="critical",
+            symbol="login_user",
+            defect_kind="authn",
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "conflicts with active regression"
+        ):
+            evaluate_active_window_round(
+                _result(c_regressed),
+                head_sha=HEAD_3,
+                base_sha=BASE_SHA,
+                max_active_findings=2,
+                round_number=3,
+                prior_inventory=r2.authoritative_decision_inventory,
+                slots=r2.display_active_findings.slots,
+                confirmed_fixes=(
+                    ConfirmedFixEvidence(
+                        obligation_id=ob1.obligation_id,
+                        resolution_criterion=ob1.resolution_criterion,
+                        head_sha=HEAD_3,
+                        evidence_sha256=_sha("conflicting-fix"),
+                        verified_paths=("src/app.py",),
+                    ),
+                ),
+            )
+
+        r3_reopen = evaluate_active_window_round(
+            _result(c_regressed),
+            head_sha=HEAD_3,
+            base_sha=BASE_SHA,
+            max_active_findings=2,
+            round_number=3,
+            prior_inventory=r2.authoritative_decision_inventory,
+            slots=r2.display_active_findings.slots,
+        )
+        reopened = r3_reopen.authoritative_decision_inventory.obligations[0]
+        self.assertEqual(reopened.lifecycle_state, "active-unresolved")
+        self.assertNotEqual(reopened.target_proof_sha256, fix_proof)
+
+        r3_ovr = evaluate_active_window_round(
+            _result(c_regressed),
+            head_sha=HEAD_3,
+            base_sha=BASE_SHA,
+            max_active_findings=2,
+            round_number=3,
+            prior_inventory=r2.authoritative_decision_inventory,
+            slots=r2.display_active_findings.slots,
+            human_overrides=(
+                AuthorizedHumanOverride(
+                    obligation_id=ob1.obligation_id,
+                    action="accept-risk",
+                    actor="sec-admin",
+                    association="OWNER",
+                    head_sha=HEAD_3,
+                    reason="Enforced by upstream reverse-proxy auth layer.",
+                    proof_sha256=_sha("reopen-override"),
+                ),
+            ),
+        )
+        self.assertTrue(r3_ovr.approval_eligibility.approved)
+
+        # 3) RS-A87B22: Reopen target colliding with an active slot fails closed:
+        other_active = replace(
+            obligation_from_comment(
+                _comment("src/db.py", line=8, symbol="query_x", defect_kind="sqli")
+            ),
+            native_target="thread-login",
+            target_state="active",
+            target_proof_sha256=_sha("claimed"),
+        )
+        colliding_inv = AuthoritativeDecisionInventory(
+            obligations=(
+                r2.authoritative_decision_inventory.obligations[0],
+                other_active,
+            )
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "multiple unresolved obligations share one native_target"
+        ):
+            evaluate_active_window_round(
+                _result(c_regressed),
+                head_sha=HEAD_3,
+                base_sha=BASE_SHA,
+                max_active_findings=2,
+                round_number=3,
+                prior_inventory=colliding_inv,
+                slots=(PublishedSlot("thread-login", "active", _sha("claimed")),),
             )
 
 

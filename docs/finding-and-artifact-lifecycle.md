@@ -57,8 +57,21 @@ Each `DriftTrackedObligation` separates:
 | `file_copy` | Holds obligation in `ambiguous-multi-target` across source and copied paths without duplicating threads. | `ConfirmedFixEvidence` covering **all** copied/source paths, `AuthorizedHumanOverride`, or full `AuthorizedRescan`. |
 | `cross_file_move` | Unique symbol+kind move reuses `obligation_id` and updates existing thread; split multi-file move enters `ambiguous-multi-target`. | Unique target fix proof, or override / full `AuthorizedRescan` for split moves. |
 | `line_deletion` | Outdated anchor or collaborator UI thread resolution never resolves the concern; falls back to `BODY_PLACEMENT` (`BODY_REASON_UNANCHORED`) and reopens prematurely resolved threads. | Positive `ConfirmedFixEvidence` on the surviving caller/router diff, `AuthorizedHumanOverride`, or full `AuthorizedRescan`. |
-| `duplicate_code` | Multi-instance claim enters `ambiguous-multi-target` and withholds approval. | Multi-path `ConfirmedFixEvidence`, `AuthorizedHumanOverride`, or full `AuthorizedRescan`. |
+| `duplicate_code` | Multi-instance claim enters `ambiguous-multi-target` and withholds approval. | Multi-path `ConfirmedFixEvidence`, whole-obligation maintainer `AuthorizedHumanOverride`, or full `AuthorizedRescan` covering all candidate paths. |
 | `whole_file_rewrite` | 100% diff coverage on a rewritten file without fix proof remains `omitted-uncertain`. | `ConfirmedFixEvidence` bound to original `resolution_criterion`, `AuthorizedHumanOverride`, or full `AuthorizedRescan`. |
+
+### Multi-Target Override Scope and Rescan Coverage
+
+- **Whole-obligation maintainer override:** `AuthorizedHumanOverride` requires
+  authenticated maintainer/admin association (`OWNER`, `MEMBER`, or
+  `COLLABORATOR` with override authority) bound to the exact `obligation_id` and
+  `head_sha`. On `ambiguous-multi-target`, it dispositions the entire
+  `candidate_paths` set explicitly; partial single-file code changes without an
+  override must instead verify all implicated paths via `ConfirmedFixEvidence`.
+- **Implicated-path rescan check:** `AuthorizedRescan(mode="full")` transitions
+  drifted or multi-target obligations to `rescan-superseded` only when all
+  present candidate/target paths are included in `reviewed_paths` and any
+  uncertain native thread slot has been reconciled first.
 
 ---
 
@@ -69,21 +82,25 @@ Module: `packages/python/review-sensei-github/src/review_sensei_github/artifact_
 | Class | Artifact kinds | Mutation / deletion rule |
 |---|---|---|
 | `authority` | `session_ledger_marker`, `retained_result_part`, `retained_context_part` | Must be App-owned, single-instance, current-generation, and digest-valid. Deletion, human edit, duplication, or foreign authorship fails closed (`auto_recreate=False`). |
-| `evidence` | `owned_readback_receipt`, `archive_chain_part` | Missing or human-edited archive-chain comments refuse cleanly (`archive-part-missing` / `archive-part-corrupted`) without inventing history. |
-| `projection` | `native_review_summary`, `inline_review_comment`, `check_run_text`, `comment_reaction` | Non-authoritative display only. Human edits or deletions never manufacture approval, erase obligations, or trigger comment-recreation spam. |
+| `evidence` | `owned_readback_receipt`, `archive_chain_part` | Requires explicit `expected_sha256`; missing expected digest, missing artifact, duplicate carrier, or human edit refuses cleanly (`archive-part-missing` / `archive-part-corrupted`) without inventing history. |
+| `projection` | `native_review_summary`, `inline_review_comment`, `check_run_text`, `comment_reaction` | Non-authoritative display only. Human edits, duplicates, or deletions never manufacture approval, erase obligations, or trigger comment-recreation spam (`authority_intact=True` reflects that authoritative ledger state is untouched). |
 
 ### Response Loss and Restricted Operator `reenroll`
 
-- **HTTP response loss (`response_lost=True`):** If exact App-owned readback
+- **HTTP response loss (`response_lost=True`) and idempotent readback:** On
+  response loss, the target slot is locked in `uncertain` so no concurrent or
+  duplicate write is dispatched before readback. If exact App-owned readback
   confirms an unedited single artifact matching `expected_sha256`, the write
-  reconciles once (`reconciled-via-owned-readback`). If a human edited or
-  deleted the artifact after response loss, state stays
+  reconciles idempotently once (`reconciled-via-owned-readback`). If a human
+  edited, duplicated, or deleted the artifact after response loss, state stays
   `uncertain-after-response-loss` with charges and obligations held.
 - **Restricted `reenroll`:** `execute_restricted_operator_reenroll` requires
   maintainer/admin authority on an open, non-draft PR where ledger status is
-  `missing` (with enrollment witness) or `expired`, and **refuses** whenever
-  active blocking obligations, active reservations, uncertain writes, quarantine
-  lineage, or assessment queues exist.
+  `missing` (with `enrollment_witness_present=True` and cryptographic
+  `enrollment_witness_sha256` bound into the audit digest) or `expired`, and
+  **refuses** whenever active blocking obligations, active reservations, ledger
+  `publication_staging` / in-flight publication phases, uncertain writes,
+  quarantine lineage, or assessment queues exist.
 
 ---
 
@@ -95,22 +112,33 @@ All seven transitions are evaluated across `before_admission`,
 `before_native_effect`, and `after_unknown_effect`:
 
 1. `repository_rename`: Same `repository_id` and `owner_id`, changed slug ->
-   refuses cross-slug writes until authenticated migration.
+   refuses cross-slug writes (`cross_repository_write_blocked=False` for
+   same-owner rename) until authenticated migration.
 2. `ownership_transfer`: Changed `owner_id` or `owner_login` (even with
-   **identical numeric `repository_id`**) -> refuses; requires explicit
-   `previous_owner_transfer_attestation_sha256` plus new-owner maintainer
-   attestation.
-3. `fork_status_change`: Fork target (`is_fork=True`) -> refuses hosted writes
-   unconditionally (`unsupported-fork-boundary`).
+   **identical numeric `repository_id`**) -> refuses with
+   `cross_repository_write_blocked=True`; requires explicit
+   `previous_owner_transfer_attestation_sha256` (domain-separated SHA-256 via
+   `compute_transfer_attestation_sha256` over `repository_id`,
+   `previous_owner_id`, `previous_owner_login`, `new_owner_id`,
+   `new_owner_login`, `pull_request`, `head_sha`, `permission_epoch`, and
+   `previous_owner_witness`) plus new-owner maintainer attestation bound to
+   `target.actor_id`.
+3. `fork_status_change`: Fork boundary (`enrolled.is_fork` or `observed.is_fork`,
+   including unfork `True -> False`) -> refuses hosted writes unconditionally
+   (`unsupported-fork-boundary`) and blocks migration.
 4. `app_reinstall`: Changed `installation_id` -> refuses until authenticated
-   migration verifies the new installation.
+   migration verifies the new installation and binds `installation_id` in
+   `audit_sha256`.
 5. `repository_selection_change`: Unselected repository -> refuses with
    `restore-repository-selection` + migration route.
 6. `permission_revoke_or_restore`: Missing required permissions or unverified
-   permission epoch change -> refuses until permissions are restored and
-   re-verified.
-7. `actor_privilege_downgrade`: Actor below operation privilege -> refuses until
-   an authorized maintainer/admin issues the command or override.
+   monotonic `permission_epoch` change (epoch regressions fail closed) ->
+   refuses until permissions are restored and re-verified with an incremented
+   `permission_epoch`.
+7. `actor_privilege_downgrade`: Same-actor privilege drop or a new actor below
+   `actor_meets_operation(operation)` -> refuses until an authorized
+   maintainer/admin (`migration.operator_id == target.actor_id`) issues the
+   command or override.
 
 ### Universal Review Recovery Guarantee Summary
 
