@@ -10,6 +10,7 @@ from typing import Any
 from review_sensei_github.event_routing_contract import (
     CALLER_SUBSCRIBED_EVENTS,
     EVENT_DECISION_TABLE,
+    MAX_EVENT_PAYLOAD_BYTES,
     REQUIRED_EVENT_FAMILIES,
     RetainedSnapshotState,
     decision_rule_for,
@@ -162,6 +163,23 @@ class TriggerCoverageG01Tests(unittest.TestCase):
                 write_escalated
             ).read_only_caller_permissions
         )
+
+        quoted_keys = (
+            checked_in.replace("\non:\n", '\n"on":\n', 1)
+            .replace("\npermissions:\n", '\n"permissions":\n', 1)
+            .replace("    types: [", '    "types": [', 1)
+        )
+        self.assertTrue(
+            inspect_caller_subscription_contract(quoted_keys).matches_approved_boundary
+        )
+
+        comment_spoofed_guard = checked_in.replace(
+            "github.event.comment.user.type != 'Bot'",
+            "true # github.event.comment.user.type != 'Bot'",
+        )
+        spoofed_report = inspect_caller_subscription_contract(comment_spoofed_guard)
+        self.assertFalse(spoofed_report.enforces_non_bot_comments)
+        self.assertFalse(spoofed_report.matches_approved_boundary)
 
     def test_decision_table_covers_all_required_event_families(self) -> None:
         covered_families = {rule.family for rule in EVENT_DECISION_TABLE}
@@ -346,6 +364,8 @@ class TriggerCoverageG01Tests(unittest.TestCase):
             ("pull_request", "{not-json"),
             ("pull_request", "[]"),
             ("pull_request", 12345),
+            ("pull_request", b'{"a":"' + (b"x" * MAX_EVENT_PAYLOAD_BYTES) + b'"}'),
+            ("pull_request", '{"a":"' + ("x" * MAX_EVENT_PAYLOAD_BYTES) + '"}'),
         ):
             with self.subTest(bad_event=bad_event, bad_payload=repr(bad_payload)):
                 decision = evaluate_github_event(
@@ -555,6 +575,77 @@ class TriggerCoverageG01Tests(unittest.TestCase):
             "live_pull_request_unavailable",
         )
 
+        # Non-PR issue comments exclude issue numbers and reject edited/deleted consistently.
+        for non_pr_action in ("created", "edited", "deleted"):
+            non_pr_decision = evaluate_github_event(
+                "issue_comment",
+                comment_event(
+                    "@reviewsensei verify", action=non_pr_action, is_pr=False
+                ),
+                live_pull_request=live_pr,
+            )
+            self.assertFalse(non_pr_decision.admitted)
+            self.assertEqual(non_pr_decision.outcome_code, "not_pull_request_comment")
+            self.assertIsNone(non_pr_decision.source_identity.pull_request_number)
+
+        # Handle boundaries, homoglyphs, inline code spans, and closed/unclosed fences do not admit.
+        for non_actionable_body in (
+            "@reviewsensei_bot please review",
+            "@sensei_bot please review",
+            "contact dev@sensei.example for help",
+            "@r\u0435viewsensei rescan",
+            "Use `@reviewsensei verify` after fixing",
+            "Example:\n```\n@reviewsensei rescan\n```\n",
+            "Unclosed fence:\n```yaml\n@sensei verify\n",
+        ):
+            with self.subTest(non_actionable_body=non_actionable_body):
+                ignored = evaluate_github_event(
+                    "issue_comment",
+                    comment_event(non_actionable_body),
+                    live_pull_request=live_pr,
+                )
+                self.assertFalse(ignored.admitted)
+                self.assertEqual(ignored.outcome_code, "no_sensei_mention")
+
+        # Inline review comment URL must match https://api.github.com/repos/<owner>/<repo>/pulls/<n>.
+        for bad_url in (
+            "https://evil.example/repos/o/r/pulls/42",
+            "http://api.github.com/repos/o/r/pulls/42",
+            "https://api.github.com/repos/other/repo/pulls/42",
+        ):
+            with self.subTest(bad_url=bad_url):
+                bad_inline = evaluate_github_event(
+                    "pull_request_review_comment",
+                    {
+                        "action": "created",
+                        "repository": {"full_name": "o/r"},
+                        "comment": {
+                            "id": 9010,
+                            "body": "@sensei please check",
+                            "updated_at": "2026-11-11T00:01:00Z",
+                            "pull_request_url": bad_url,
+                            "author_association": "MEMBER",
+                            "user": {"login": "collab", "type": "User"},
+                        },
+                    },
+                    live_pull_request=live_pr,
+                )
+                self.assertFalse(bad_inline.admitted)
+                self.assertEqual(
+                    bad_inline.outcome_code, "invalid_comment_pull_request_url"
+                )
+                self.assertIsNone(bad_inline.source_identity.pull_request_number)
+
+        mismatched_pr_comment = evaluate_github_event(
+            "issue_comment",
+            comment_event("@reviewsensei verify"),
+            live_pull_request=_pull_payload(number=99),
+        )
+        self.assertFalse(mismatched_pr_comment.admitted)
+        self.assertEqual(
+            mismatched_pr_comment.outcome_code, "pull_request_number_mismatch"
+        )
+
     def test_unchanged_duplicate_events_create_zero_second_analysis_and_preserve_obligations(
         self,
     ) -> None:
@@ -697,6 +788,62 @@ class TriggerCoverageG01Tests(unittest.TestCase):
         self.assertTrue(ref_only_edited.ref_only_base_retarget)
         self.assertEqual(
             ref_only_edited.outcome_code, "base_ref_retargeted_without_sha_change"
+        )
+
+        # Without retained_state, ref-only retargets with unchanged SHA do not claim SHA invalidation.
+        ref_only_no_retained = evaluate_github_event(
+            "pull_request",
+            {
+                "action": "edited",
+                "changes": {
+                    "base": {
+                        "ref": {"from": "release/1.0"},
+                        "sha": {"from": BASE_SHA_1},
+                    }
+                },
+                "pull_request": ref_only_pr,
+            },
+            retained_state=None,
+        )
+        self.assertFalse(ref_only_no_retained.invalidates_retained_baseline)
+        self.assertTrue(ref_only_no_retained.ref_only_base_retarget)
+        self.assertEqual(
+            ref_only_no_retained.outcome_code,
+            "base_ref_retargeted_without_sha_change",
+        )
+
+        sha_changed_no_retained = evaluate_github_event(
+            "pull_request",
+            {
+                "action": "edited",
+                "changes": {
+                    "base": {
+                        "ref": {"from": "release/1.0"},
+                        "sha": {"from": BASE_SHA_1},
+                    }
+                },
+                "pull_request": retargeted_pr,
+            },
+            retained_state=None,
+        )
+        self.assertTrue(sha_changed_no_retained.invalidates_retained_baseline)
+        self.assertEqual(
+            sha_changed_no_retained.outcome_code, "base_retargeted_invalidation"
+        )
+
+        unknown_sha_no_retained = evaluate_github_event(
+            "pull_request",
+            {
+                "action": "edited",
+                "changes": {"base": {"ref": {"from": "release/1.0"}}},
+                "pull_request": ref_only_pr,
+            },
+            retained_state=None,
+        )
+        self.assertFalse(unknown_sha_no_retained.invalidates_retained_baseline)
+        self.assertFalse(unknown_sha_no_retained.ref_only_base_retarget)
+        self.assertEqual(
+            unknown_sha_no_retained.outcome_code, "base_changed_unknown_reuse"
         )
 
         recovery_dispatch = evaluate_github_event(

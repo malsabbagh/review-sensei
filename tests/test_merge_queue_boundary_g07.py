@@ -126,9 +126,13 @@ class MergeQueueBoundaryG07Tests(unittest.TestCase):
             self.assertFalse(rejection.ledger_mutated)
             self.assertFalse(rejection.check_published)
 
+        missing_action_mg = reject_merge_group_event({})
+        self.assertEqual(missing_action_mg.outcome_code, "merge_group_unsupported")
+        self.assertEqual(missing_action_mg.merge_group_action, "<missing>")
+
         malformed_mg = reject_merge_group_event(b"{invalid-json")
-        self.assertEqual(malformed_mg.outcome_code, "merge_group_unsupported")
-        self.assertEqual(malformed_mg.merge_group_action, "<missing>")
+        self.assertEqual(malformed_mg.outcome_code, "merge_group_payload_unparseable")
+        self.assertEqual(malformed_mg.merge_group_action, "<invalid>")
 
     def test_pr_head_receipt_never_certifies_merge_queue_sha_ref_or_multi_pr_group(
         self,
@@ -370,6 +374,13 @@ class MergeQueueBoundaryG07Tests(unittest.TestCase):
         self.assertEqual(unreviewed.outcome_code, "pr_unreviewed_after_queue_eviction")
         self.assertTrue(unreviewed.requires_new_review)
         self.assertEqual(unreviewed.recovery_command, "workflow_dispatch")
+
+        with self.assertRaises(ValueError):
+            reconcile_merge_queue_eviction(
+                destroyed_payload=b"{invalid-json",
+                live_pr_target=unchanged_pr,
+                pr_receipt=receipt,
+            )
 
 
 if __name__ == "__main__":

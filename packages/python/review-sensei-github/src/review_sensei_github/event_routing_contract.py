@@ -12,8 +12,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from .approval import (
     AutoApprovalDecision,
@@ -21,20 +23,32 @@ from .approval import (
     approval_withheld_diagnostic,
     evaluate_approval_facts,
 )
-from .checks import REVIEW_CHECK_NAME, review_check_outcome
+from .checks import REVIEW_CHECK_NAME, REVIEW_POLICY_MODES, review_check_outcome
 from .thread_resolution import ThreadResolutionResult, resolution_records
 from .trigger import (
     TriggerResolution,
     comment_mentions_sensei,
+    extract_requested_commit,
     issue_comment_requests_remaining,
     issue_comment_requests_rescan,
     resolve_issue_comment,
     resolve_pull_request_event,
     resolve_review_comment_event,
 )
+from .webhooks import MAX_WEBHOOK_BODY_BYTES
 
 _GIT_SHA_FULL = re.compile(r"^[a-f0-9]{40}$")
 _GIT_REF = re.compile(r"^[A-Za-z0-9._/-]+$")
+_REPO_SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_GITHUB_PR_API_PATH = re.compile(
+    r"\A/repos/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pulls/([1-9][0-9]*)\Z"
+)
+_ACTIONABLE_SENSEI_MENTION = re.compile(
+    r"(?:^|[\s(])(?:@sensei|(?ai:@reviewsensei))(?=$|\s|[.,!?:;)])"
+)
+_INLINE_CODE_SPAN = re.compile(r"(`+)([^`]*?)\1")
+
+MAX_EVENT_PAYLOAD_BYTES: int = MAX_WEBHOOK_BODY_BYTES
 
 CALLER_SUBSCRIBED_EVENTS: Mapping[str, tuple[str, ...]] = {
     "pull_request": ("opened", "reopened", "synchronize", "ready_for_review"),
@@ -333,6 +347,31 @@ class CallerSubscriptionReport:
         )
 
 
+def _strip_yaml_comment(line: str) -> str:
+    """Strip an unquoted YAML ``#`` comment from a single line."""
+
+    in_single = False
+    in_double = False
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_double:
+            escaped = True
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if char == "#" and not in_single and not in_double:
+            if index == 0 or line[index - 1].isspace():
+                return line[:index].rstrip()
+    return line.rstrip()
+
+
 def _parse_inline_or_block_types(
     lines: list[str], start_index: int, indent: int
 ) -> tuple[str, ...]:
@@ -343,8 +382,7 @@ def _parse_inline_or_block_types(
     in_types_block = False
     types_indent = indent + 2
     while idx < len(lines):
-        raw = lines[idx]
-        stripped = raw.split("#", 1)[0].rstrip()
+        stripped = _strip_yaml_comment(lines[idx])
         if not stripped.strip():
             idx += 1
             continue
@@ -352,22 +390,24 @@ def _parse_inline_or_block_types(
         if current_indent <= indent:
             break
         content = stripped.strip()
-        if content.startswith("types:"):
-            remainder = content[len("types:") :].strip()
-            if remainder.startswith("[") and remainder.endswith("]"):
-                inner = remainder[1:-1].strip()
-                if inner:
-                    values.extend(
-                        item.strip().strip("'\"")
-                        for item in inner.split(",")
-                        if item.strip()
-                    )
-                in_types_block = False
-            elif not remainder:
-                in_types_block = True
-                types_indent = current_indent
-            idx += 1
-            continue
+        if ":" in content and not content.startswith("- "):
+            raw_key, raw_rest = content.split(":", 1)
+            if raw_key.strip().strip("'\"") == "types":
+                remainder = raw_rest.strip()
+                if remainder.startswith("[") and remainder.endswith("]"):
+                    inner = remainder[1:-1].strip()
+                    if inner:
+                        values.extend(
+                            item.strip().strip("'\"")
+                            for item in inner.split(",")
+                            if item.strip()
+                        )
+                    in_types_block = False
+                elif not remainder:
+                    in_types_block = True
+                    types_indent = current_indent
+                idx += 1
+                continue
         if in_types_block:
             if current_indent <= types_indent:
                 in_types_block = False
@@ -378,10 +418,56 @@ def _parse_inline_or_block_types(
     return tuple(values)
 
 
+def _extract_job_if_expressions(lines: list[str]) -> str:
+    """Extract uncommented job-level ``if:`` guard expressions under ``jobs:``."""
+
+    collected: list[str] = []
+    idx = 0
+    in_jobs = False
+    while idx < len(lines):
+        stripped = _strip_yaml_comment(lines[idx])
+        if not stripped.strip():
+            idx += 1
+            continue
+        indent = len(stripped) - len(stripped.lstrip(" "))
+        content = stripped.strip()
+        if indent == 0:
+            top_key = content[:-1].strip().strip("'\"") if content.endswith(":") else ""
+            in_jobs = top_key == "jobs"
+            idx += 1
+            continue
+        if in_jobs and indent == 4 and ":" in content:
+            key, rest = content.split(":", 1)
+            if key.strip().strip("'\"") == "if":
+                rest_clean = rest.strip()
+                if rest_clean and not rest_clean.startswith((">", "|")):
+                    collected.append(rest_clean)
+                idx += 1
+                while idx < len(lines):
+                    sub = _strip_yaml_comment(lines[idx])
+                    if not sub.strip():
+                        idx += 1
+                        continue
+                    sub_indent = len(sub) - len(sub.lstrip(" "))
+                    if sub_indent <= 4:
+                        break
+                    collected.append(sub.strip())
+                    idx += 1
+                continue
+        idx += 1
+    return "\n".join(collected)
+
+
 def inspect_caller_subscription_contract(
     workflow_text: str,
 ) -> CallerSubscriptionReport:
-    """Inspect caller YAML subscriptions and runtime admission guards without PyYAML."""
+    """Inspect caller YAML subscriptions and runtime admission guards without PyYAML.
+
+    Supports the strict 2-space block-indented caller workflow YAML subset
+    generated by ``SetupPlanBuilder`` and checked into ``.github/workflows/``,
+    including single/double-quoted keys, quote-aware ``#`` comments, inline or
+    block ``types`` lists, and inline or folded/literal job ``if:`` guards.
+    """
 
     if not isinstance(workflow_text, str) or not workflow_text.strip():
         raise ValueError("caller workflow text must be a non-empty string")
@@ -391,18 +477,17 @@ def inspect_caller_subscription_contract(
 
     idx = 0
     while idx < len(lines):
-        raw = lines[idx]
-        stripped = raw.split("#", 1)[0].rstrip()
+        stripped = _strip_yaml_comment(lines[idx])
         if not stripped.strip():
             idx += 1
             continue
         indent = len(stripped) - len(stripped.lstrip(" "))
         content = stripped.strip()
-        if indent == 0 and content == "on:":
+        top_key = content[:-1].strip().strip("'\"") if content.endswith(":") else ""
+        if indent == 0 and top_key == "on":
             idx += 1
             while idx < len(lines):
-                sub_raw = lines[idx]
-                sub_stripped = sub_raw.split("#", 1)[0].rstrip()
+                sub_stripped = _strip_yaml_comment(lines[idx])
                 if not sub_stripped.strip():
                     idx += 1
                     continue
@@ -428,11 +513,10 @@ def inspect_caller_subscription_contract(
                         on_triggers[trigger_key] = ()
                 idx += 1
             continue
-        if indent == 0 and content == "permissions:":
+        if indent == 0 and top_key == "permissions":
             idx += 1
             while idx < len(lines):
-                perm_raw = lines[idx]
-                perm_stripped = perm_raw.split("#", 1)[0].rstrip()
+                perm_stripped = _strip_yaml_comment(lines[idx])
                 if not perm_stripped.strip():
                     idx += 1
                     continue
@@ -441,7 +525,7 @@ def inspect_caller_subscription_contract(
                     break
                 if perm_indent == 2 and ":" in perm_stripped:
                     key, val = perm_stripped.strip().split(":", 1)
-                    top_permissions[key.strip()] = val.strip()
+                    top_permissions[key.strip().strip("'\"")] = val.strip().strip("'\"")
                 idx += 1
             continue
         idx += 1
@@ -461,12 +545,13 @@ def inspect_caller_subscription_contract(
             if item not in expected:
                 unapproved.append(f"{trigger_name}:{item}")
 
-    enforces_non_bot = "github.event.comment.user.type != 'Bot'" in workflow_text
+    if_guards = _extract_job_if_expressions(lines)
+    enforces_non_bot = "github.event.comment.user.type != 'Bot'" in if_guards
     enforces_associations = all(
-        f"github.event.comment.author_association == '{role}'" in workflow_text
+        f"github.event.comment.author_association == '{role}'" in if_guards
         for role in ("OWNER", "MEMBER", "COLLABORATOR")
     )
-    enforces_pr_issue = "github.event.issue.pull_request" in workflow_text
+    enforces_pr_issue = "github.event.issue.pull_request" in if_guards
 
     expected_permissions = {
         "contents": "read",
@@ -589,21 +674,42 @@ def _as_mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _extract_pr_number_from_url(url: object) -> int | None:
-    if not isinstance(url, str):
+def _extract_pr_number_from_url(
+    url: object,
+    *,
+    expected_repo: str | None = None,
+) -> int | None:
+    if not isinstance(url, str) or not url:
         return None
-    match = re.search(r"/pulls/([1-9][0-9]*)\Z", url)
+    parts = urlsplit(url)
+    if (
+        parts.scheme != "https"
+        or parts.netloc.lower() != "api.github.com"
+        or parts.query
+        or parts.fragment
+    ):
+        return None
+    match = _GITHUB_PR_API_PATH.fullmatch(parts.path)
     if match is None:
         return None
-    return int(match.group(1))
+    if (
+        expected_repo is not None
+        and match.group(1).casefold() != expected_repo.casefold()
+    ):
+        return None
+    return int(match.group(2))
 
 
 def _coerce_payload_mapping(
     raw_payload: Mapping[str, Any] | bytes | bytearray | str | object,
+    *,
+    max_bytes: int = MAX_EVENT_PAYLOAD_BYTES,
 ) -> Mapping[str, Any] | None:
     if isinstance(raw_payload, Mapping):
         return raw_payload
     if isinstance(raw_payload, (bytes, bytearray)):
+        if len(raw_payload) > max_bytes:
+            return None
         try:
             decoded = bytes(raw_payload).decode("utf-8", errors="strict")
             parsed = json.loads(decoded)
@@ -611,6 +717,14 @@ def _coerce_payload_mapping(
             return None
         return parsed if isinstance(parsed, dict) else None
     if isinstance(raw_payload, str):
+        if len(raw_payload) > max_bytes:
+            return None
+        try:
+            encoded = raw_payload.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            return None
+        if len(encoded) > max_bytes:
+            return None
         try:
             parsed = json.loads(raw_payload)
         except json.JSONDecodeError:
@@ -619,17 +733,81 @@ def _coerce_payload_mapping(
     return None
 
 
-def _validate_exact_draft_flag(pull: Mapping[str, Any]) -> tuple[bool, str | None]:
-    """Enforce G24 exact boolean draft validation (False/True vs malformed)."""
+def _validate_exact_draft_flag(pull: Mapping[str, Any]) -> str | None:
+    """Enforce G24 exact boolean draft validation (``None`` when non-draft)."""
 
     if "draft" not in pull:
-        return False, "draft_boolean_invalid"
+        return "draft_boolean_invalid"
     draft = pull.get("draft")
     if type(draft) is not bool:
-        return False, "draft_boolean_invalid"
+        return "draft_boolean_invalid"
     if draft is True:
-        return False, "draft_skipped"
-    return True, None
+        return "draft_skipped"
+    return None
+
+
+def _strip_code_spans_and_fences(body: str) -> str:
+    """Replace Markdown fenced code blocks and inline code spans with whitespace."""
+
+    lines: list[str] = []
+    in_fence: str | None = None
+    fence_len = 0
+    for raw_line in body.splitlines(keepends=True):
+        stripped_leading = raw_line.lstrip(" ")
+        leading_spaces = len(raw_line) - len(stripped_leading)
+        if in_fence is None:
+            if leading_spaces <= 3:
+                fence_match = re.match(r"(`{3,}|~{3,})", stripped_leading)
+                if fence_match is not None:
+                    marker = fence_match.group(1)
+                    rest = stripped_leading[len(marker) :]
+                    if marker[0] == "~" or "`" not in rest:
+                        in_fence = marker[0]
+                        fence_len = len(marker)
+                        lines.append("\n")
+                        continue
+            lines.append(raw_line)
+        else:
+            if leading_spaces <= 3:
+                close_match = re.match(
+                    rf"({re.escape(in_fence)}{{{fence_len},}})[ \t]*\r?\n?\Z",
+                    stripped_leading,
+                )
+                if close_match is not None:
+                    in_fence = None
+                    fence_len = 0
+            lines.append("\n")
+    without_fences = "".join(lines)
+    return _INLINE_CODE_SPAN.sub(" ", without_fences)
+
+
+def _comment_has_actionable_sensei_mention(body: str) -> bool:
+    """Return whether ``body`` mentions ReviewSensei outside code fences/spans."""
+
+    prose = _strip_code_spans_and_fences(body)
+    return (
+        comment_mentions_sensei(prose)
+        and _ACTIONABLE_SENSEI_MENTION.search(prose) is not None
+    )
+
+
+def _has_requested_commit_mismatch(body: str, pull: Mapping[str, Any]) -> bool:
+    """Detect explicit ``commit <sha>`` mismatch structurally without message parsing."""
+
+    if not (
+        issue_comment_requests_rescan(body) or issue_comment_requests_remaining(body)
+    ):
+        return False
+    requested = extract_requested_commit(body)
+    if requested is None:
+        return False
+    head = _as_mapping(pull.get("head"))
+    head_sha = _opt_str(head.get("sha"))
+    if head_sha is None or not _GIT_SHA_FULL.fullmatch(head_sha):
+        return False
+    if len(requested) == 40:
+        return requested != head_sha
+    return not head_sha.startswith(requested)
 
 
 def _snapshot_compatibility(
@@ -848,9 +1026,17 @@ def evaluate_github_event(
     if normalized_event == "pull_request_review":
         rule = decision_rule_for("pull_request_review.human")
         pr_obj = _as_mapping(parsed.get("pull_request"))
-        review_pr_number = _positive_int(pr_obj.get("number"))
+        effective_review_pull = (
+            live_pull_request if isinstance(live_pull_request, Mapping) else pr_obj
+        )
+        review_pr_number = _positive_int(
+            effective_review_pull.get("number")
+        ) or _positive_int(pr_obj.get("number"))
         review_obj = _as_mapping(parsed.get("review"))
         reviewer = _as_mapping(review_obj.get("user"))
+        _, invalidates_base, ref_only = _snapshot_compatibility(
+            effective_review_pull, retained_state
+        )
         return EventRoutingDecision(
             rule_id=rule.rule_id,
             family=rule.family,
@@ -874,8 +1060,8 @@ def evaluate_github_event(
             ),
             requires_model_inference=False,
             reused_retained_snapshot=False,
-            invalidates_retained_baseline=False,
-            ref_only_base_retarget=False,
+            invalidates_retained_baseline=invalidates_base,
+            ref_only_base_retarget=ref_only,
             preserved_open_finding_ids=preserved_findings,
             read_time_guard=rule.read_time_guard,
             recovery_command=rule.recovery_command,
@@ -897,26 +1083,83 @@ def evaluate_github_event(
         )
 
         if action == "edited":
+            effective_edited_pull = (
+                live_pull_request if isinstance(live_pull_request, Mapping) else pull
+            )
             changes = parsed.get("changes")
             base_changed = isinstance(changes, Mapping) and "base" in changes
             if (
                 not base_changed
-                and isinstance(pull, Mapping)
+                and isinstance(effective_edited_pull, Mapping)
                 and retained_state is not None
             ):
                 _, invalidates_base, ref_only = _snapshot_compatibility(
-                    pull, retained_state
+                    effective_edited_pull, retained_state
                 )
                 base_changed = invalidates_base or ref_only
             if base_changed:
                 rule = decision_rule_for("pull_request.edited.base")
                 ref_only = False
-                invalidates_base = True
-                if isinstance(pull, Mapping) and retained_state is not None:
+                invalidates_base = False
+                edited_outcome_code = "base_changed_unknown_reuse"
+                if (
+                    isinstance(effective_edited_pull, Mapping)
+                    and retained_state is not None
+                ):
                     _, invalidates_base_sha, ref_only = _snapshot_compatibility(
-                        pull, retained_state
+                        effective_edited_pull, retained_state
                     )
                     invalidates_base = invalidates_base_sha or not ref_only
+                    edited_outcome_code = (
+                        "base_ref_retargeted_without_sha_change"
+                        if ref_only and not invalidates_base
+                        else "base_retargeted_invalidation"
+                    )
+                elif isinstance(effective_edited_pull, Mapping):
+                    base_changes = (
+                        _as_mapping(changes.get("base"))
+                        if isinstance(changes, Mapping)
+                        else {}
+                    )
+                    sha_change = _as_mapping(base_changes.get("sha"))
+                    ref_change = _as_mapping(base_changes.get("ref"))
+                    payload_base = (
+                        _as_mapping(pull.get("base"))
+                        if isinstance(pull, Mapping)
+                        else {}
+                    )
+                    prior_base_sha = _opt_str(sha_change.get("from")) or (
+                        _opt_str(payload_base.get("sha"))
+                        if isinstance(live_pull_request, Mapping)
+                        else None
+                    )
+                    prior_base_ref = _opt_str(ref_change.get("from")) or (
+                        _opt_str(payload_base.get("ref"))
+                        if isinstance(live_pull_request, Mapping)
+                        else None
+                    )
+                    current_base = _as_mapping(effective_edited_pull.get("base"))
+                    current_base_sha = _opt_str(current_base.get("sha"))
+                    current_base_ref = _opt_str(current_base.get("ref"))
+                    if (
+                        prior_base_sha is not None
+                        and current_base_sha is not None
+                        and _GIT_SHA_FULL.fullmatch(prior_base_sha)
+                        and _GIT_SHA_FULL.fullmatch(current_base_sha)
+                    ):
+                        if prior_base_sha == current_base_sha:
+                            ref_only = (
+                                prior_base_ref is not None
+                                and current_base_ref is not None
+                                and prior_base_ref != current_base_ref
+                            )
+                            if ref_only:
+                                edited_outcome_code = (
+                                    "base_ref_retargeted_without_sha_change"
+                                )
+                        else:
+                            invalidates_base = True
+                            edited_outcome_code = "base_retargeted_invalidation"
                 return EventRoutingDecision(
                     rule_id=rule.rule_id,
                     family=rule.family,
@@ -925,11 +1168,7 @@ def evaluate_github_event(
                     caller_subscribed=False,
                     admitted=False,
                     disposition="read_time_invalidation",
-                    outcome_code=(
-                        "base_ref_retargeted_without_sha_change"
-                        if ref_only and not invalidates_base
-                        else "base_retargeted_invalidation"
-                    ),
+                    outcome_code=edited_outcome_code,
                     operation=None,
                     command_precedence_tier=None,
                     resolution=None,
@@ -1087,9 +1326,8 @@ def evaluate_github_event(
                 recovery_command="@reviewsensei review status",
             )
 
-        draft_ok, draft_code = _validate_exact_draft_flag(effective_pull)
-        if not draft_ok:
-            assert draft_code is not None
+        draft_code = _validate_exact_draft_flag(effective_pull)
+        if draft_code is not None:
             return EventRoutingDecision(
                 rule_id=rule.rule_id,
                 family=rule.family,
@@ -1206,17 +1444,55 @@ def evaluate_github_event(
             if isinstance(parsed.get("pull_request"), Mapping)
             else None
         )
-        pr_number = (
-            _positive_int(issue.get("number"))
-            if issue is not None
-            else (
-                _positive_int(pr_payload.get("number"))
-                if pr_payload is not None
-                else _extract_pr_number_from_url(
-                    comment.get("pull_request_url") if comment is not None else None
+        repo_map = _as_mapping(parsed.get("repository"))
+        raw_repo = _opt_str(repo_map.get("full_name"))
+        expected_repo = (
+            raw_repo.strip()
+            if raw_repo is not None and _REPO_SLUG.fullmatch(raw_repo.strip())
+            else None
+        )
+        is_pr_issue = issue is not None and isinstance(
+            issue.get("pull_request"), Mapping
+        )
+        pr_payload_number = (
+            _positive_int(pr_payload.get("number")) if pr_payload is not None else None
+        )
+        has_comment_pr_url = comment is not None and "pull_request_url" in comment
+        url_pr_number = (
+            _extract_pr_number_from_url(
+                comment.get("pull_request_url") if comment is not None else None,
+                expected_repo=expected_repo,
+            )
+            if has_comment_pr_url
+            else None
+        )
+        review_comment_url_invalid = (
+            normalized_event == "pull_request_review_comment"
+            and (
+                (has_comment_pr_url and url_pr_number is None)
+                or (
+                    pr_payload_number is not None
+                    and url_pr_number is not None
+                    and pr_payload_number != url_pr_number
                 )
             )
         )
+        if normalized_event == "issue_comment":
+            pr_number = (
+                _positive_int(issue.get("number"))
+                if is_pr_issue and issue is not None
+                else None
+            )
+        else:
+            pr_number = (
+                None
+                if review_comment_url_invalid
+                else (
+                    pr_payload_number
+                    if pr_payload_number is not None
+                    else url_pr_number
+                )
+            )
         identity = _build_comment_identity(
             event_name=normalized_event,
             action=action,
@@ -1225,6 +1501,34 @@ def evaluate_github_event(
             source_kind=source_kind,
             comment=comment,
         )
+
+        if normalized_event == "issue_comment" and not is_pr_issue:
+            non_pr_rule = decision_rule_for(
+                "comment.created"
+                if action == "created"
+                else "comment.edited_or_deleted"
+            )
+            return EventRoutingDecision(
+                rule_id=non_pr_rule.rule_id,
+                family=non_pr_rule.family,
+                event_name=normalized_event,
+                action=action,
+                caller_subscribed=action == "created",
+                admitted=False,
+                disposition="rejected_guard",
+                outcome_code="not_pull_request_comment",
+                operation=None,
+                command_precedence_tier=None,
+                resolution=None,
+                source_identity=identity,
+                requires_model_inference=False,
+                reused_retained_snapshot=False,
+                invalidates_retained_baseline=False,
+                ref_only_base_retarget=False,
+                preserved_open_finding_ids=preserved_findings,
+                read_time_guard=non_pr_rule.read_time_guard,
+                recovery_command=None,
+            )
 
         if action in {"edited", "deleted"}:
             rule = decision_rule_for("comment.edited_or_deleted")
@@ -1275,7 +1579,8 @@ def evaluate_github_event(
             )
 
         rule = decision_rule_for("comment.created")
-        if comment is None or not isinstance(comment.get("body"), str):
+        raw_body = comment.get("body") if comment is not None else None
+        if not isinstance(raw_body, str):
             return EventRoutingDecision(
                 rule_id=rule.rule_id,
                 family=rule.family,
@@ -1298,8 +1603,8 @@ def evaluate_github_event(
                 recovery_command=rule.recovery_command,
             )
 
-        if normalized_event == "issue_comment" and (
-            issue is None or not isinstance(issue.get("pull_request"), Mapping)
+        if normalized_event == "pull_request_review_comment" and (
+            review_comment_url_invalid or pr_number is None
         ):
             return EventRoutingDecision(
                 rule_id=rule.rule_id,
@@ -1309,7 +1614,7 @@ def evaluate_github_event(
                 caller_subscribed=True,
                 admitted=False,
                 disposition="rejected_guard",
-                outcome_code="not_pull_request_comment",
+                outcome_code="invalid_comment_pull_request_url",
                 operation=None,
                 command_precedence_tier=None,
                 resolution=None,
@@ -1320,7 +1625,7 @@ def evaluate_github_event(
                 ref_only_base_retarget=False,
                 preserved_open_finding_ids=preserved_findings,
                 read_time_guard=rule.read_time_guard,
-                recovery_command=None,
+                recovery_command="workflow_dispatch",
             )
 
         if identity.actor_type == "Bot" or identity.actor_type is None:
@@ -1373,9 +1678,8 @@ def evaluate_github_event(
                 recovery_command=None,
             )
 
-        body = comment["body"]
-        assert isinstance(body, str)
-        if not comment_mentions_sensei(body):
+        body = raw_body
+        if not _comment_has_actionable_sensei_mention(body):
             return EventRoutingDecision(
                 rule_id=rule.rule_id,
                 family=rule.family,
@@ -1452,18 +1756,12 @@ def evaluate_github_event(
                 recovery_command="workflow_dispatch",
             )
 
-        try:
-            if normalized_event == "issue_comment":
-                resolution = resolve_issue_comment(body, effective_pull)
-            else:
-                resolution = resolve_review_comment_event(body, effective_pull)
-        except ValueError as exc:
-            message = str(exc)
-            code = (
-                "requested_commit_mismatch"
-                if "does not match the pull request head" in message
-                else "invalid_comment_trigger"
-            )
+        effective_pr_number = _positive_int(effective_pull.get("number"))
+        if (
+            pr_number is not None
+            and effective_pr_number is not None
+            and effective_pr_number != pr_number
+        ):
             return EventRoutingDecision(
                 rule_id=rule.rule_id,
                 family=rule.family,
@@ -1472,7 +1770,60 @@ def evaluate_github_event(
                 caller_subscribed=True,
                 admitted=False,
                 disposition="rejected_guard",
-                outcome_code=code,
+                outcome_code="pull_request_number_mismatch",
+                operation=None,
+                command_precedence_tier=None,
+                resolution=None,
+                source_identity=identity,
+                requires_model_inference=False,
+                reused_retained_snapshot=False,
+                invalidates_retained_baseline=False,
+                ref_only_base_retarget=False,
+                preserved_open_finding_ids=preserved_findings,
+                read_time_guard=rule.read_time_guard,
+                recovery_command="workflow_dispatch",
+            )
+
+        if normalized_event == "issue_comment" and _has_requested_commit_mismatch(
+            body, effective_pull
+        ):
+            return EventRoutingDecision(
+                rule_id=rule.rule_id,
+                family=rule.family,
+                event_name=normalized_event,
+                action=action,
+                caller_subscribed=True,
+                admitted=False,
+                disposition="rejected_guard",
+                outcome_code="requested_commit_mismatch",
+                operation=None,
+                command_precedence_tier=None,
+                resolution=None,
+                source_identity=identity,
+                requires_model_inference=False,
+                reused_retained_snapshot=False,
+                invalidates_retained_baseline=False,
+                ref_only_base_retarget=False,
+                preserved_open_finding_ids=preserved_findings,
+                read_time_guard=rule.read_time_guard,
+                recovery_command="@reviewsensei review status",
+            )
+
+        try:
+            if normalized_event == "issue_comment":
+                resolution = resolve_issue_comment(body, effective_pull)
+            else:
+                resolution = resolve_review_comment_event(body, effective_pull)
+        except ValueError:
+            return EventRoutingDecision(
+                rule_id=rule.rule_id,
+                family=rule.family,
+                event_name=normalized_event,
+                action=action,
+                caller_subscribed=True,
+                admitted=False,
+                disposition="rejected_guard",
+                outcome_code="invalid_comment_trigger",
                 operation=None,
                 command_precedence_tier=None,
                 resolution=None,
@@ -1623,9 +1974,8 @@ def evaluate_github_event(
                 recovery_command="@reviewsensei review status",
             )
 
-        draft_ok, draft_code = _validate_exact_draft_flag(live_pull_request)
-        if not draft_ok:
-            assert draft_code is not None
+        draft_code = _validate_exact_draft_flag(live_pull_request)
+        if draft_code is not None:
             return EventRoutingDecision(
                 rule_id=rule.rule_id,
                 family=rule.family,
@@ -2436,17 +2786,27 @@ def reject_merge_group_event(
     """Deterministically reject any ``merge_group`` payload before side effects."""
 
     parsed = _coerce_payload_mapping(payload)
+    if parsed is None:
+        return MergeGroupRejectionOutcome(
+            outcome_code="merge_group_payload_unparseable",
+            merge_group_action="<invalid>",
+            queue_head_sha=None,
+            queue_base_sha=None,
+            queue_head_ref=None,
+            token_acquired=False,
+            provider_called=False,
+            ledger_mutated=False,
+            check_published=False,
+        )
     routing = evaluate_github_event(
         "merge_group",
-        payload if parsed is not None else {},
+        parsed,
         delivery_id=delivery_id,
     )
-    mg = _as_mapping(parsed.get("merge_group")) if parsed is not None else {}
-    raw_action = _opt_str(parsed.get("action")) if parsed is not None else None
-    action = raw_action.strip() if raw_action and raw_action.strip() else "<missing>"
+    mg = _as_mapping(parsed.get("merge_group"))
     return MergeGroupRejectionOutcome(
         outcome_code=routing.outcome_code,
-        merge_group_action=action,
+        merge_group_action=routing.action,
         queue_head_sha=_opt_str(mg.get("head_sha")),
         queue_base_sha=_opt_str(mg.get("base_sha")),
         queue_head_ref=_opt_str(mg.get("head_ref")),
@@ -2597,7 +2957,11 @@ def reconcile_merge_queue_eviction(
     """Verify PR-head state and recovery remain unaffected after queue eviction."""
 
     rejection = reject_merge_group_event(destroyed_payload)
-    assert rejection.outcome_code == "merge_group_unsupported"
+    if rejection.outcome_code != "merge_group_unsupported":
+        raise ValueError(
+            "reconcile_merge_queue_eviction requires a parseable merge_group payload "
+            f"(got {rejection.outcome_code!r})"
+        )
 
     if pr_receipt is None:
         return MergeQueueEvictionOutcome(
@@ -2687,6 +3051,27 @@ class ManualThreadConvergenceOutcome:
     recovery_command: str | None
 
 
+def _is_finding_still_open(
+    item: ManualThreadFindingState,
+    *,
+    resolved_by_resolver: AbstractSet[str] = frozenset(),
+    unconfirmed_instances: AbstractSet[str] = frozenset(),
+) -> bool:
+    """Return whether ``item`` still holds open a durable or native-thread obligation."""
+
+    if not (item.blocking or item.needs_human):
+        return False
+    if item.instance_fingerprint in unconfirmed_instances:
+        return True
+    return not (
+        item.disposition_proven
+        and (
+            item.native_thread_resolved
+            or item.instance_fingerprint in resolved_by_resolver
+        )
+    )
+
+
 def reconcile_manual_thread_convergence(
     *,
     live_target: LivePullRequestTarget,
@@ -2714,6 +3099,10 @@ def reconcile_manual_thread_convergence(
         reviewed_base_sha
     ):
         raise ValueError("reviewed_base_sha must be a 40-hex SHA")
+    if not isinstance(eligibility.head_sha, str) or not _GIT_SHA_FULL.fullmatch(
+        eligibility.head_sha
+    ):
+        raise ValueError("eligibility.head_sha must be a 40-hex SHA")
     if (
         isinstance(finite_api_reads_charged, bool)
         or not isinstance(finite_api_reads_charged, int)
@@ -2721,10 +3110,8 @@ def reconcile_manual_thread_convergence(
     ):
         raise ValueError("finite_api_reads_charged must be a non-negative integer")
 
-    open_obligations = tuple(
-        item.finding_id
-        for item in findings
-        if (item.blocking or item.needs_human) and not item.disposition_proven
+    initial_open_finding_ids = tuple(
+        item.finding_id for item in findings if _is_finding_still_open(item)
     )
 
     if (
@@ -2749,7 +3136,7 @@ def reconcile_manual_thread_convergence(
             threads_observed_already_resolved=(),
             threads_reconciled_by_mutation=(),
             unconfirmed_instances=(),
-            preserved_open_finding_ids=open_obligations,
+            preserved_open_finding_ids=initial_open_finding_ids,
             recovery_command="workflow_dispatch",
         )
 
@@ -2770,16 +3157,23 @@ def reconcile_manual_thread_convergence(
     )
     unconfirmed = tuple(dict.fromkeys((*stale_or_missing, *resolver_unconfirmed)))
     if unconfirmed:
+        unconfirmed_set = frozenset(unconfirmed)
+        unconfirmed_open_findings = [
+            item
+            for item in findings
+            if _is_finding_still_open(item, unconfirmed_instances=unconfirmed_set)
+        ]
         decision = evaluate_approval_facts(
             replace(
                 eligibility.facts,
                 app_authored=app_authored,
                 has_blocking_findings=any(
-                    item.blocking and not item.disposition_proven for item in findings
+                    item.blocking and not item.disposition_proven
+                    for item in unconfirmed_open_findings
                 ),
                 has_human_adjudication_findings=any(
                     item.needs_human and not item.disposition_proven
-                    for item in findings
+                    for item in unconfirmed_open_findings
                 ),
                 has_open_review_threads=None,
             )
@@ -2795,38 +3189,38 @@ def reconcile_manual_thread_convergence(
             threads_observed_already_resolved=(),
             threads_reconciled_by_mutation=(),
             unconfirmed_instances=unconfirmed,
-            preserved_open_finding_ids=open_obligations,
+            preserved_open_finding_ids=tuple(
+                item.finding_id for item in unconfirmed_open_findings
+            ),
             recovery_command="@reviewsensei verify",
         )
 
-    resolved_by_resolver = set(
+    resolved_by_resolver = frozenset(
         thread_resolution_result.resolved
         if thread_resolution_result is not None
         else ()
     )
     observed_already_resolved: list[str] = []
     reconciled_by_mutation: list[str] = []
-    any_blocking_thread_still_open = False
+    still_open_findings: list[ManualThreadFindingState] = []
 
     for item in findings:
-        is_now_resolved = item.native_thread_resolved or (
-            item.disposition_proven
-            and item.instance_fingerprint in resolved_by_resolver
-        )
         if item.disposition_proven:
             if item.native_thread_resolved:
                 observed_already_resolved.append(item.instance_fingerprint)
             elif item.instance_fingerprint in resolved_by_resolver:
                 reconciled_by_mutation.append(item.instance_fingerprint)
-        if (item.blocking or item.needs_human) and not is_now_resolved:
-            any_blocking_thread_still_open = True
+        if _is_finding_still_open(item, resolved_by_resolver=resolved_by_resolver):
+            still_open_findings.append(item)
 
+    open_obligations = tuple(item.finding_id for item in still_open_findings)
     durable_blocking_open = any(
-        item.blocking and not item.disposition_proven for item in findings
+        item.blocking and not item.disposition_proven for item in still_open_findings
     )
     durable_human_open = any(
-        item.needs_human and not item.disposition_proven for item in findings
+        item.needs_human and not item.disposition_proven for item in still_open_findings
     )
+    any_blocking_thread_still_open = bool(still_open_findings)
 
     updated_facts = replace(
         eligibility.facts,
@@ -2853,10 +3247,8 @@ def reconcile_manual_thread_convergence(
         )
 
     manually_resolved_unfixed = any(
-        (item.blocking or item.needs_human)
-        and not item.disposition_proven
-        and item.native_thread_resolved
-        for item in findings
+        not item.disposition_proven and item.native_thread_resolved
+        for item in still_open_findings
     )
     code = (
         "manual_thread_resolve_withheld_unfixed_obligation"
@@ -2931,7 +3323,8 @@ def evaluate_human_pr_review_independence(
 
     Leaves human review gates strictly to GitHub branch protection and proves:
     - zero mutation to ReviewSensei ledger generation or open finding obligations;
-    - zero authority from forged markers inside human review bodies;
+    - zero authority from forged markers inside human review bodies (verified via
+      the pure, side-effect-free ``resolution_records`` parser);
     - zero substitution for ReviewSensei coverage/completion or stale snapshots;
     - zero blocking of ReviewSensei's own recovery commands (``verify``,
       ``rescan``, ``review remaining``, ``workflow_dispatch``), while enforcing
@@ -2944,6 +3337,19 @@ def evaluate_human_pr_review_independence(
         reviewed_base_sha
     ):
         raise ValueError("reviewed_base_sha must be a 40-hex SHA")
+    if not isinstance(eligibility.head_sha, str) or not _GIT_SHA_FULL.fullmatch(
+        eligibility.head_sha
+    ):
+        raise ValueError("eligibility.head_sha must be a 40-hex SHA")
+    if policy_mode not in REVIEW_POLICY_MODES:
+        raise ValueError(f"unsupported policy_mode: {policy_mode!r}")
+    if (
+        eligibility.human_review is not None
+        and eligibility.human_review.base_sha != reviewed_base_sha
+    ):
+        raise ValueError(
+            "reviewed_base_sha conflicts with eligibility.human_review.base_sha"
+        )
     if (
         isinstance(ledger_generation, bool)
         or not isinstance(ledger_generation, int)
@@ -2951,18 +3357,26 @@ def evaluate_human_pr_review_independence(
     ):
         raise ValueError("ledger_generation must be a non-negative integer")
 
+    head_matches_live = eligibility.head_sha == live_target.head_sha
+    base_matches_live = reviewed_base_sha == live_target.base_sha
+    snapshot_matches_live = head_matches_live and base_matches_live
+
     normalized_review_status = (
         eligibility.facts.review_status
         if eligibility.facts.review_status
         in {"complete", "partial", "incomplete", "summary-only"}
         else "incomplete"
     )
-    retained = RetainedSnapshotState(
-        reviewed_base_sha=reviewed_base_sha,
-        reviewed_base_ref=live_target.base_ref,
-        reviewed_head_sha=eligibility.head_sha,
-        review_status=normalized_review_status,
-        open_finding_ids=open_finding_ids,
+    retained = (
+        RetainedSnapshotState(
+            reviewed_base_sha=live_target.base_sha,
+            reviewed_base_ref=live_target.base_ref,
+            reviewed_head_sha=live_target.head_sha,
+            review_status=normalized_review_status,
+            open_finding_ids=open_finding_ids,
+        )
+        if snapshot_matches_live
+        else None
     )
     parsed = _coerce_payload_mapping(review_payload)
     routing = evaluate_github_event(
@@ -2972,6 +3386,13 @@ def evaluate_human_pr_review_independence(
         live_pull_request=live_target.to_pull_mapping(),
         retained_state=retained,
     )
+    if not snapshot_matches_live:
+        routing = replace(
+            routing,
+            invalidates_retained_baseline=not base_matches_live,
+            preserved_open_finding_ids=open_finding_ids,
+        )
+
     review_map = _as_mapping(parsed.get("review")) if parsed is not None else {}
     raw_state = _opt_str(review_map.get("state"))
     human_state = (
@@ -2986,33 +3407,13 @@ def evaluate_human_pr_review_independence(
             "evaluate_human_pr_review_independence requires a non-App review author"
         )
 
-    # Even if a human review body embeds a forged resolution marker,
-    # resolution_records ignores every review not authored by app_slug.
+    # Pure, side-effect-free parser check: even if a human review body embeds a
+    # forged resolution marker, resolution_records ignores non-App authors.
     accepted_records = resolution_records([dict(review_map)], app_slug.strip())
-
-    snapshot_matches_live = (
-        eligibility.head_sha == live_target.head_sha
-        and reviewed_base_sha == live_target.base_sha
-    )
-    if snapshot_matches_live:
-        approval_decision = eligibility.evaluate(
-            app_authored=eligibility.facts.app_authored,
-            has_open_review_threads=has_open_sensei_threads,
+    if accepted_records:
+        raise RuntimeError(
+            "non-App human review unexpectedly produced resolution records"
         )
-        sensei_approved = approval_decision.approved
-        check_outcome = review_check_outcome(
-            policy=policy_mode,
-            review_status=normalized_review_status,
-            required_fixes=(
-                eligibility.facts.has_blocking_findings or has_open_sensei_threads
-            ),
-            required_decisions=eligibility.facts.has_human_adjudication_findings,
-            review_verdict=eligibility.facts.review_verdict,
-        )
-        sensei_conclusion = check_outcome.conclusion
-    else:
-        sensei_approved = False
-        sensei_conclusion = "failure" if policy_mode != "advisory" else "neutral"
 
     effective_association = (
         current_actor_association
@@ -3024,6 +3425,51 @@ def evaluate_human_pr_review_independence(
         and effective_association in ALLOWED_COMMENT_ASSOCIATIONS
     )
 
+    if not snapshot_matches_live:
+        stale_code = (
+            "held_stale_base_and_head_snapshot"
+            if not base_matches_live and not head_matches_live
+            else "held_stale_base_snapshot"
+            if not base_matches_live
+            else "held_stale_head_snapshot"
+        )
+        return HumanReviewIndependenceOutcome(
+            outcome_code=stale_code,
+            branch_protection_owner="github_branch_protection",
+            review_action=routing.action,
+            human_review_state=human_state,
+            routing=routing,
+            ledger_generation_before=ledger_generation,
+            ledger_generation_after=ledger_generation,
+            ledger_mutated=False,
+            requires_model_inference=False,
+            accepted_resolution_records_from_review=0,
+            sensei_approved=False,
+            sensei_check_conclusion=(
+                "failure" if policy_mode != "advisory" else "neutral"
+            ),
+            stale_snapshot_unlocked=False,
+            actor_can_invoke_sensei_commands=actor_can_command,
+            preserved_open_finding_ids=open_finding_ids,
+            recovery_commands_available=RECOVERY_COMMANDS_UNBLOCKED_BY_HUMAN_REVIEW,
+        )
+
+    approval_decision = eligibility.evaluate(
+        app_authored=eligibility.facts.app_authored,
+        has_open_review_threads=has_open_sensei_threads,
+    )
+    sensei_approved = approval_decision.approved
+    check_outcome = review_check_outcome(
+        policy=policy_mode,
+        review_status=normalized_review_status,
+        required_fixes=(
+            eligibility.facts.has_blocking_findings or has_open_sensei_threads
+        ),
+        required_decisions=eligibility.facts.has_human_adjudication_findings,
+        review_verdict=eligibility.facts.review_verdict,
+    )
+    sensei_conclusion = check_outcome.conclusion
+
     return HumanReviewIndependenceOutcome(
         outcome_code="human_review_independent_noop",
         branch_protection_owner="github_branch_protection",
@@ -3034,7 +3480,7 @@ def evaluate_human_pr_review_independence(
         ledger_generation_after=ledger_generation,
         ledger_mutated=False,
         requires_model_inference=False,
-        accepted_resolution_records_from_review=len(accepted_records),
+        accepted_resolution_records_from_review=0,
         sensei_approved=sensei_approved,
         sensei_check_conclusion=sensei_conclusion,
         stale_snapshot_unlocked=False,
@@ -3058,6 +3504,7 @@ __all__ = [
     "EventRoutingDecision",
     "HumanReviewIndependenceOutcome",
     "LivePullRequestTarget",
+    "MAX_EVENT_PAYLOAD_BYTES",
     "MERGE_QUEUE_REF_PREFIXES",
     "ManualThreadConvergenceOutcome",
     "ManualThreadFindingState",

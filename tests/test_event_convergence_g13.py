@@ -541,6 +541,59 @@ class EventConvergenceG13Tests(unittest.TestCase):
         self.assertEqual(not_admitted.status, "not_admitted")
         self.assertEqual(not_admitted.outcome_code, "merge_group_unsupported")
         self.assertFalse(not_admitted.schedules_new_inference)
+        self.assertIsNone(not_admitted.recovery_command)
+
+        not_admitted_with_recovery = reconcile_event_convergence(
+            "pull_request_review_thread",
+            {
+                "action": "resolved",
+                "pull_request": {"number": 42},
+                "sender": {"login": "alice", "type": "User"},
+            },
+            live_target=live_h2,
+        )
+        self.assertEqual(not_admitted_with_recovery.status, "not_admitted")
+        self.assertEqual(
+            not_admitted_with_recovery.outcome_code, "thread_event_manual_verify_only"
+        )
+        self.assertEqual(
+            not_admitted_with_recovery.recovery_command, "@reviewsensei verify"
+        )
+
+        status_cmd_unreviewed = reconcile_event_convergence(
+            "issue_comment",
+            _issue_comment_payload("@reviewsensei review status", comment_id=8002),
+            live_target=live_h2,
+        )
+        self.assertEqual(
+            status_cmd_unreviewed.status, "schedule_command_reconciliation"
+        )
+        self.assertEqual(
+            status_cmd_unreviewed.outcome_code, "command_reconciles_current_target"
+        )
+        self.assertFalse(status_cmd_unreviewed.schedules_new_inference)
+        self.assertTrue(status_cmd_unreviewed.schedules_native_reconciliation)
+        self.assertIsNone(status_cmd_unreviewed.reused_operation_id)
+
+        unstarted_review_intent = AcceptedOperationRecord(
+            operation_id="op-intent-rev-h2",
+            operation_kind="review",
+            target_base_sha=BASE_SHA_1,
+            target_head_sha=HEAD_SHA_2,
+            lifecycle_phase="intent_accepted_unstarted",
+            source_dedup_key="delivery:deliv-unstarted-h2",
+        )
+        resumed_review = reconcile_event_convergence(
+            "pull_request",
+            _pr_sync_payload(head_sha=HEAD_SHA_2),
+            live_target=live_h2,
+            records=(unstarted_review_intent,),
+            delivery_id="deliv-unstarted-h2",
+        )
+        self.assertEqual(resumed_review.status, "resume_accepted_intent")
+        self.assertTrue(resumed_review.schedules_new_inference)
+        self.assertFalse(resumed_review.schedules_native_reconciliation)
+        self.assertEqual(resumed_review.reused_operation_id, "op-intent-rev-h2")
 
         with self.assertRaises(ValueError):
             LivePullRequestTarget(

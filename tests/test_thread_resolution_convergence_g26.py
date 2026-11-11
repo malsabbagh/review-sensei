@@ -65,6 +65,8 @@ class _FakeThreadHttp:
         source_id: int,
         source_body: str,
         source_updated: str,
+        repository: str = "owner/repo",
+        pull_request: int = 42,
         app_slug: str = "reviewsensei[bot]",
     ) -> None:
         self.thread_id = thread_id
@@ -74,6 +76,8 @@ class _FakeThreadHttp:
         self.source_id = source_id
         self.source_body = source_body
         self.source_updated = source_updated
+        self.repository = repository
+        self.pull_request = pull_request
         self.app_slug = app_slug
         self.graphql_queries = 0
         self.graphql_mutations = 0
@@ -92,10 +96,17 @@ class _FakeThreadHttp:
         body: dict[str, Any] | None = None,
     ) -> tuple[int, Any]:
         assert token
+        expected_owner, _, expected_name = self.repository.partition("/")
         if method == "POST" and path == "/graphql":
             assert body is not None
             op_name = body.get("operationName")
+            variables = body.get("variables")
+            assert isinstance(variables, dict)
             if op_name == "FindingResolutionThreads":
+                assert variables.get("owner") == expected_owner
+                assert variables.get("name") == expected_name
+                assert variables.get("number") == self.pull_request
+                assert variables.get("after") is None
                 self.graphql_queries += 1
                 return (
                     200,
@@ -133,6 +144,7 @@ class _FakeThreadHttp:
                     },
                 )
             if op_name == "ResolveReviewThread":
+                assert variables.get("input") == {"threadId": self.thread_id}
                 self.graphql_mutations += 1
                 self.is_resolved = True
                 return (
@@ -148,31 +160,34 @@ class _FakeThreadHttp:
                         }
                     },
                 )
-        if (
-            method == "GET"
-            and path == f"/repos/owner/repo/pulls/comments/{self.root_id}"
-        ):
+        root_comment_path = self.repository_path(
+            self.repository, f"/pulls/comments/{self.root_id}"
+        )
+        source_comment_path = self.repository_path(
+            self.repository, f"/pulls/comments/{self.source_id}"
+        )
+        pr_api_url = (
+            f"https://api.github.com/repos/{self.repository}/pulls/{self.pull_request}"
+        )
+        if method == "GET" and path == root_comment_path:
             self.rest_reads += 1
             return (
                 200,
                 {
                     "id": self.root_id,
                     "body": self.root_body,
-                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/42",
+                    "pull_request_url": pr_api_url,
                     "user": {"login": self.app_slug, "type": "Bot"},
                 },
             )
-        if (
-            method == "GET"
-            and path == f"/repos/owner/repo/pulls/comments/{self.source_id}"
-        ):
+        if method == "GET" and path == source_comment_path:
             self.rest_reads += 1
             return (
                 200,
                 {
                     "id": self.source_id,
                     "in_reply_to_id": self.root_id,
-                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/42",
+                    "pull_request_url": pr_api_url,
                     "updated_at": self.source_updated,
                     "body": self.source_body,
                     "author_association": "MEMBER",
@@ -292,6 +307,71 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
         self.assertEqual(human_outcome.withheld_diagnostic, "human_adjudication_open")
         self.assertEqual(human_outcome.preserved_open_finding_ids, ("RS-100002",))
 
+        # Unified open-obligation predicate preserves BOTH natively-resolved-unproven
+        # findings and reopened-decided findings while excluding fully converged and
+        # non-blocking advisory items.
+        mixed_findings = (
+            ManualThreadFindingState(
+                finding_id="RS-100010",
+                instance_fingerprint="1" * 64,
+                blocking=True,
+                needs_human=False,
+                disposition_proven=False,
+                thread_id="PRRT_10",
+                thread_base_sha=BASE_SHA,
+                thread_head_sha=HEAD_SHA_1,
+                native_thread_resolved=True,
+            ),
+            ManualThreadFindingState(
+                finding_id="RS-100011",
+                instance_fingerprint="2" * 64,
+                blocking=True,
+                needs_human=False,
+                disposition_proven=True,
+                thread_id="PRRT_11",
+                thread_base_sha=BASE_SHA,
+                thread_head_sha=HEAD_SHA_1,
+                native_thread_resolved=False,
+            ),
+            ManualThreadFindingState(
+                finding_id="RS-100012",
+                instance_fingerprint="3" * 64,
+                blocking=True,
+                needs_human=False,
+                disposition_proven=True,
+                thread_id="PRRT_12",
+                thread_base_sha=BASE_SHA,
+                thread_head_sha=HEAD_SHA_1,
+                native_thread_resolved=True,
+            ),
+            ManualThreadFindingState(
+                finding_id="RS-100013",
+                instance_fingerprint="4" * 64,
+                blocking=False,
+                needs_human=False,
+                disposition_proven=False,
+                thread_id="PRRT_13",
+                thread_base_sha=BASE_SHA,
+                thread_head_sha=HEAD_SHA_1,
+                native_thread_resolved=False,
+            ),
+        )
+        mixed_outcome = reconcile_manual_thread_convergence(
+            live_target=_live_target(),
+            eligibility=_make_eligibility(has_blocking=True),
+            reviewed_base_sha=BASE_SHA,
+            findings=mixed_findings,
+        )
+        self.assertFalse(mixed_outcome.approved)
+        self.assertEqual(
+            mixed_outcome.outcome_code,
+            "manual_thread_resolve_withheld_unfixed_obligation",
+        )
+        self.assertEqual(
+            mixed_outcome.preserved_open_finding_ids,
+            ("RS-100010", "RS-100011"),
+        )
+
     def test_manual_reopen_reconciles_via_bounded_verify_and_converges_idempotently(
         self,
     ) -> None:
@@ -304,8 +384,11 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
                 "sender": {"login": "reviewer", "type": "User"},
             },
         )
+        self.assertFalse(reopen_event.caller_subscribed)
         self.assertFalse(reopen_event.admitted)
         self.assertFalse(reopen_event.requires_model_inference)
+        self.assertEqual(reopen_event.outcome_code, "thread_event_manual_verify_only")
+        self.assertEqual(reopen_event.recovery_command, "@reviewsensei verify")
 
         # Maintainer legitimately overrode RS-100001, then someone manually clicked "Unresolve".
         reopened_finding = ManualThreadFindingState(
@@ -320,7 +403,7 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
             native_thread_resolved=False,
         )
 
-        # Before resolver executes, open thread still withholds approval.
+        # Before resolver executes, open thread still withholds approval and preserves ID.
         pre_resolve = reconcile_manual_thread_convergence(
             live_target=_live_target(),
             eligibility=_make_eligibility(has_blocking=False),
@@ -333,6 +416,7 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
             "reopened_decided_thread_requires_verify_resolution",
         )
         self.assertIn("review-threads-open", pre_resolve.approval_decision.blockers)
+        self.assertEqual(pre_resolve.preserved_open_finding_ids, ("RS-100001",))
 
         # Run real FindingThreadResolver under `@reviewsensei verify` with finite budget.
         source_body = (
@@ -399,7 +483,9 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
         self.assertEqual(first_res.resolved, (INSTANCE_HEX,))
         self.assertEqual(first_res.unconfirmed, ())
         self.assertEqual(cleanup_token_calls, 1)
+        self.assertEqual(fake_http.graphql_queries, 1)
         self.assertEqual(fake_http.graphql_mutations, 1)
+        self.assertEqual(fake_http.rest_reads, 4)
 
         first_verify = reconcile_manual_thread_convergence(
             live_target=_live_target(),
@@ -415,10 +501,21 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
         self.assertFalse(first_verify.requires_model_inference)
         self.assertEqual(first_verify.threads_reconciled_by_mutation, (INSTANCE_HEX,))
         self.assertEqual(first_verify.preserved_open_finding_ids, ())
-        self.assertGreater(first_verify.finite_api_reads_charged, 0)
+        self.assertEqual(first_verify.finite_api_reads_charged, 5)
 
-        # Second `@reviewsensei verify` is strictly idempotent: 0 mutations, 0 cleanup tokens.
-        second_res = resolver.resolve(
+        # Second `@reviewsensei verify` against a fresh already-resolved server snapshot:
+        # 1 discovery query, 0 REST reads, 0 mutations, 0 cleanup tokens.
+        second_fake_http = _FakeThreadHttp(
+            thread_id="PRRT_1",
+            is_resolved=True,
+            root_id=3001,
+            root_body=_app_root_body(),
+            source_id=3002,
+            source_body=source_body,
+            source_updated=source_updated,
+        )
+        second_resolver = FindingThreadResolver(second_fake_http)  # type: ignore[arg-type]
+        second_res = second_resolver.resolve(
             token="read-token",
             repository="owner/repo",
             repository_id=101,
@@ -434,7 +531,9 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
         )
         self.assertEqual(second_res.resolved, (INSTANCE_HEX,))
         self.assertEqual(cleanup_token_calls, 1)  # unchanged!
-        self.assertEqual(fake_http.graphql_mutations, 1)  # unchanged!
+        self.assertEqual(second_fake_http.graphql_queries, 1)
+        self.assertEqual(second_fake_http.graphql_mutations, 0)
+        self.assertEqual(second_fake_http.rest_reads, 0)
 
         already_resolved_finding = ManualThreadFindingState(
             finding_id="RS-100001",

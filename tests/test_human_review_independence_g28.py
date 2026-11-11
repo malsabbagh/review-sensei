@@ -22,6 +22,7 @@ from review_sensei_github.event_routing_contract import (
 from review_sensei_github.thread_resolution import digest, resolution_marker
 
 from review_sensei.context import MAX_REVIEW_DOCUMENT_BYTES, RepositoryContextStore
+from review_sensei.human_assessment import PendingHumanReview
 from review_sensei.stages import ContextDocumentSource
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -306,6 +307,8 @@ class HumanReviewIndependenceG28Tests(unittest.TestCase):
             reviewed_base_sha=BASE_SHA_1,
             policy_mode="auto-approve",
         )
+        self.assertEqual(stale_head_outcome.outcome_code, "held_stale_head_snapshot")
+        self.assertFalse(stale_head_outcome.routing.invalidates_retained_baseline)
         self.assertFalse(stale_head_outcome.stale_snapshot_unlocked)
         self.assertFalse(stale_head_outcome.sensei_approved)
         self.assertEqual(stale_head_outcome.sensei_check_conclusion, "failure")
@@ -319,9 +322,26 @@ class HumanReviewIndependenceG28Tests(unittest.TestCase):
             reviewed_base_sha=BASE_SHA_1,
             policy_mode="advisory",
         )
+        self.assertEqual(stale_base_advisory.outcome_code, "held_stale_base_snapshot")
+        self.assertTrue(stale_base_advisory.routing.invalidates_retained_baseline)
         self.assertFalse(stale_base_advisory.stale_snapshot_unlocked)
         self.assertFalse(stale_base_advisory.sensei_approved)
         self.assertEqual(stale_base_advisory.sensei_check_conclusion, "neutral")
+
+        # Both base and head drifted -> held_stale_base_and_head_snapshot with preserved obligations.
+        stale_both = evaluate_human_pr_review_independence(
+            _review_payload(action="submitted", state="APPROVED"),
+            live_target=_live_target(head_sha=HEAD_SHA_2, base_sha=BASE_SHA_2),
+            app_slug=APP_SLUG,
+            eligibility=_make_eligibility(head_sha=HEAD_SHA_1, has_blocking=False),
+            reviewed_base_sha=BASE_SHA_1,
+            open_finding_ids=("RS-280099",),
+        )
+        self.assertEqual(stale_both.outcome_code, "held_stale_base_and_head_snapshot")
+        self.assertTrue(stale_both.routing.invalidates_retained_baseline)
+        self.assertFalse(stale_both.sensei_approved)
+        self.assertFalse(stale_both.stale_snapshot_unlocked)
+        self.assertEqual(stale_both.preserved_open_finding_ids, ("RS-280099",))
 
     def test_reviewer_privilege_loss_blocks_commands_while_preserving_ledger_history(
         self,
@@ -445,6 +465,33 @@ class HumanReviewIndependenceG28Tests(unittest.TestCase):
                 eligibility=_make_eligibility(),
                 reviewed_base_sha=BASE_SHA_1,
                 ledger_generation=-1,
+            )
+        with self.assertRaises(ValueError):
+            evaluate_human_pr_review_independence(
+                _review_payload(),
+                live_target=_live_target(),
+                app_slug=APP_SLUG,
+                eligibility=_make_eligibility(head_sha="bad-head-sha"),
+                reviewed_base_sha=BASE_SHA_1,
+            )
+        with self.assertRaises(ValueError):
+            evaluate_human_pr_review_independence(
+                _review_payload(),
+                live_target=_live_target(),
+                app_slug=APP_SLUG,
+                eligibility=_make_eligibility(),
+                reviewed_base_sha=BASE_SHA_1,
+                policy_mode="invalid-policy",
+            )
+        with self.assertRaises(ValueError):
+            evaluate_human_pr_review_independence(
+                _review_payload(),
+                live_target=_live_target(),
+                app_slug=APP_SLUG,
+                eligibility=_make_eligibility().with_fresh_human_review(
+                    PendingHumanReview(base_sha=BASE_SHA_2, findings=())
+                ),
+                reviewed_base_sha=BASE_SHA_1,
             )
 
     def test_adr_0136_and_event_routing_docs_completeness_and_g22_alignment(
