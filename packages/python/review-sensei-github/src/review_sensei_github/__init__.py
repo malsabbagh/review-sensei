@@ -56,6 +56,7 @@ from .errors import (
     GitHubHTTPTransientError,
     GitHubLearningProposalError,
     GitHubLearningProposalTransientError,
+    GitHubMergeGroupUnsupportedError,
     GitHubOIDCAudienceError,
     GitHubOIDCClaimsError,
     GitHubOIDCError,
@@ -190,4 +191,5 @@ __all__ = [
     "verify_oidc_token",
     "GitHubWebhookError",
     "GitHubWebhookSignatureError",
+    "GitHubMergeGroupUnsupportedError",
 ]
