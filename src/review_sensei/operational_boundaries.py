@@ -8,6 +8,7 @@ approved resource budgets.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -20,10 +21,13 @@ from .errors import ReviewInputError
 from .models import ReviewRequest, ReviewResult
 from .planning import LargeChangePlan, ReviewWorkPlan
 from .validation import (
+    DEFAULT_REVIEW_LIMITS,
     utf8_size,
     validate_bounded_text,
     validate_repository_path,
 )
+
+_HEX_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 INDIVISIBLE_UNIT_KINDS = frozenset(
     {
@@ -699,13 +703,355 @@ def classify_work_plan_unprocessed(
     return tuple(classified)
 
 
+TITLE_LIFECYCLE_PHASES = frozenset(
+    {
+        "before_admission",
+        "during_inference",
+        "before_publication",
+        "after_publication",
+        "during_partial_continuation",
+    }
+)
+
+TITLE_FRESHNESS_OUTCOMES = frozenset(
+    {
+        "adopt_live_title",
+        "refuse_conflicting_cli_title",
+        "preserve_captured_snapshot_title",
+        "retain_incremental_baseline_without_reinference",
+        "refuse_mixed_title_partial_continuation",
+    }
+)
+
+
+def _validate_sha(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or _HEX_SHA_RE.fullmatch(value) is None:
+        raise ReviewInputError(f"{label} must be a 40-character lowercase hex SHA")
+    return value
+
+
+@dataclass(frozen=True)
+class TitleAttributionRecord:
+    """Truthful attribution for a published review across post-capture title edits."""
+
+    evaluated_title: str
+    live_title: str
+    base_sha: str
+    head_sha: str
+    evaluates_live_title: bool
+    invalidates_settled_approval: bool
+    attribution_note: str
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.evaluated_title,
+            DEFAULT_REVIEW_LIMITS.max_title_bytes,
+            label="evaluated_title",
+        )
+        validate_bounded_text(
+            self.live_title,
+            DEFAULT_REVIEW_LIMITS.max_title_bytes,
+            label="live_title",
+        )
+        _validate_sha(self.base_sha, label="base_sha")
+        _validate_sha(self.head_sha, label="head_sha")
+        if not isinstance(self.evaluates_live_title, bool) or not isinstance(
+            self.invalidates_settled_approval, bool
+        ):
+            raise ReviewInputError("title attribution boolean flags must be booleans")
+        if self.evaluates_live_title != (self.evaluated_title == self.live_title):
+            raise ReviewInputError(
+                "published review must never claim to have evaluated a changed live title"
+            )
+        if self.invalidates_settled_approval:
+            raise ReviewInputError(
+                "cosmetic title edits alone must not invalidate settled code approvals"
+            )
+        validate_bounded_text(
+            self.attribution_note,
+            2048,
+            label="attribution_note",
+            allow_empty=False,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "evaluated_title": self.evaluated_title,
+            "live_title": self.live_title,
+            "base_sha": self.base_sha,
+            "head_sha": self.head_sha,
+            "evaluates_live_title": self.evaluates_live_title,
+            "invalidates_settled_approval": self.invalidates_settled_approval,
+            "attribution_note": self.attribution_note,
+        }
+
+
+@dataclass(frozen=True)
+class TitleFreshnessDecision:
+    """G19 decision for PR title edits across the five review lifecycle phases."""
+
+    phase: str
+    outcome: str
+    admitted: bool
+    effective_title: str | None
+    live_title: str
+    captured_title: str | None
+    incremental_cache_valid: bool
+    invalidates_settled_approval: bool
+    requires_paid_reinference: bool
+    recovery_route: str | None
+    diagnostic: str
+
+    def __post_init__(self) -> None:
+        if self.phase not in TITLE_LIFECYCLE_PHASES:
+            raise ReviewInputError("title lifecycle phase is unsupported")
+        if self.outcome not in TITLE_FRESHNESS_OUTCOMES:
+            raise ReviewInputError("title freshness outcome is unsupported")
+        for flag_name, flag_val in (
+            ("admitted", self.admitted),
+            ("incremental_cache_valid", self.incremental_cache_valid),
+            ("invalidates_settled_approval", self.invalidates_settled_approval),
+            ("requires_paid_reinference", self.requires_paid_reinference),
+        ):
+            if not isinstance(flag_val, bool):
+                raise ReviewInputError(f"{flag_name} must be a boolean")
+        validate_bounded_text(
+            self.live_title,
+            DEFAULT_REVIEW_LIMITS.max_title_bytes,
+            label="live_title",
+        )
+        if self.captured_title is not None:
+            validate_bounded_text(
+                self.captured_title,
+                DEFAULT_REVIEW_LIMITS.max_title_bytes,
+                label="captured_title",
+            )
+        if self.effective_title is not None:
+            validate_bounded_text(
+                self.effective_title,
+                DEFAULT_REVIEW_LIMITS.max_title_bytes,
+                label="effective_title",
+            )
+        if self.admitted and self.effective_title is None:
+            raise ReviewInputError("admitted title decision requires effective_title")
+        if not self.admitted and self.effective_title is not None:
+            raise ReviewInputError(
+                "refused title decision must not expose effective_title"
+            )
+        if self.invalidates_settled_approval:
+            raise ReviewInputError(
+                "title-only edits must never invalidate settled code approvals"
+            )
+        validate_bounded_text(
+            self.diagnostic,
+            2048,
+            label="title freshness diagnostic",
+            allow_empty=False,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "phase": self.phase,
+            "outcome": self.outcome,
+            "admitted": self.admitted,
+            "effective_title": self.effective_title,
+            "live_title": self.live_title,
+            "captured_title": self.captured_title,
+            "incremental_cache_valid": self.incremental_cache_valid,
+            "invalidates_settled_approval": self.invalidates_settled_approval,
+            "requires_paid_reinference": self.requires_paid_reinference,
+            "recovery_route": self.recovery_route,
+            "diagnostic": self.diagnostic,
+        }
+
+
+def evaluate_title_freshness(
+    *,
+    phase: str,
+    live_title: str,
+    captured_title: str | None = None,
+    explicit_cli_title: str | None = None,
+) -> TitleFreshnessDecision:
+    """Evaluate PR title freshness across the five G19 lifecycle timing points."""
+
+    if phase not in TITLE_LIFECYCLE_PHASES:
+        raise ReviewInputError("title lifecycle phase is unsupported")
+    validate_bounded_text(
+        live_title,
+        DEFAULT_REVIEW_LIMITS.max_title_bytes,
+        label="live_title",
+    )
+    if explicit_cli_title is not None:
+        validate_bounded_text(
+            explicit_cli_title,
+            DEFAULT_REVIEW_LIMITS.max_title_bytes,
+            label="explicit_cli_title",
+        )
+    if phase == "before_admission":
+        if explicit_cli_title not in {None, "", live_title}:
+            return TitleFreshnessDecision(
+                phase=phase,
+                outcome="refuse_conflicting_cli_title",
+                admitted=False,
+                effective_title=None,
+                live_title=live_title,
+                captured_title=captured_title,
+                incremental_cache_valid=True,
+                invalidates_settled_approval=False,
+                requires_paid_reinference=False,
+                recovery_route="omit conflicting --title or pass the live PR title",
+                diagnostic=(
+                    "Explicit --title conflicts with the live authenticated PR title "
+                    "at bootstrap; refusing before authority or provider spend."
+                ),
+            )
+        return TitleFreshnessDecision(
+            phase=phase,
+            outcome="adopt_live_title",
+            admitted=True,
+            effective_title=live_title,
+            live_title=live_title,
+            captured_title=live_title,
+            incremental_cache_valid=True,
+            invalidates_settled_approval=False,
+            requires_paid_reinference=False,
+            recovery_route=None,
+            diagnostic=(
+                "Admission binds the live authenticated PR title before provider work."
+            ),
+        )
+
+    if captured_title is None:
+        raise ReviewInputError(f"captured_title is required during phase {phase}")
+    validate_bounded_text(
+        captured_title,
+        DEFAULT_REVIEW_LIMITS.max_title_bytes,
+        label="captured_title",
+    )
+
+    if phase in {"during_inference", "before_publication"}:
+        changed = captured_title != live_title
+        detail = (
+            "In-flight snapshot completes truthfully against the admission-captured "
+            "title without claiming the post-capture live title was analyzed."
+            if changed
+            else "Bound snapshot title remains current through publication."
+        )
+        return TitleFreshnessDecision(
+            phase=phase,
+            outcome="preserve_captured_snapshot_title",
+            admitted=True,
+            effective_title=captured_title,
+            live_title=live_title,
+            captured_title=captured_title,
+            incremental_cache_valid=True,
+            invalidates_settled_approval=False,
+            requires_paid_reinference=False,
+            recovery_route="@reviewsensei rescan" if changed else None,
+            diagnostic=detail,
+        )
+
+    if phase == "after_publication":
+        changed = captured_title != live_title
+        return TitleFreshnessDecision(
+            phase=phase,
+            outcome="retain_incremental_baseline_without_reinference",
+            admitted=True,
+            effective_title=captured_title,
+            live_title=live_title,
+            captured_title=captured_title,
+            incremental_cache_valid=True,
+            invalidates_settled_approval=False,
+            requires_paid_reinference=False,
+            recovery_route="@reviewsensei rescan" if changed else None,
+            diagnostic=(
+                "PR title is descriptive context in incremental cache keys: "
+                "post-publication title edits do not trigger duplicate paid inference "
+                "or invalidate settled approvals, and earlier reviews never claim to "
+                "have evaluated the later title."
+            ),
+        )
+
+    # phase == "during_partial_continuation"
+    if captured_title != live_title:
+        return TitleFreshnessDecision(
+            phase=phase,
+            outcome="refuse_mixed_title_partial_continuation",
+            admitted=False,
+            effective_title=None,
+            live_title=live_title,
+            captured_title=captured_title,
+            incremental_cache_valid=True,
+            invalidates_settled_approval=False,
+            requires_paid_reinference=False,
+            recovery_route="@reviewsensei rescan",
+            diagnostic=(
+                "Partial continuation (@reviewsensei review remaining) binds the exact "
+                "original request scope including title; mixed-title continuation is "
+                "refused before provider spend. Run @reviewsensei rescan to review "
+                "cleanly under the updated PR title."
+            ),
+        )
+    return TitleFreshnessDecision(
+        phase=phase,
+        outcome="preserve_captured_snapshot_title",
+        admitted=True,
+        effective_title=captured_title,
+        live_title=live_title,
+        captured_title=captured_title,
+        incremental_cache_valid=True,
+        invalidates_settled_approval=False,
+        requires_paid_reinference=False,
+        recovery_route=None,
+        diagnostic=(
+            "Partial continuation matches the original request scope and title."
+        ),
+    )
+
+
+def verify_published_title_attribution(
+    *,
+    evaluated_title: str,
+    live_title: str,
+    base_sha: str,
+    head_sha: str,
+) -> TitleAttributionRecord:
+    """Construct truthful title attribution for an already-captured/published review."""
+
+    matches = evaluated_title == live_title
+    note = (
+        f"Review evaluated snapshot {base_sha[:12]}..{head_sha[:12]} with current PR title."
+        if matches
+        else (
+            f"Review evaluated snapshot {base_sha[:12]}..{head_sha[:12]} under the "
+            "earlier captured PR title; later PR title edits were not analyzed by "
+            "that run, while settled code approvals remain intact."
+        )
+    )
+    return TitleAttributionRecord(
+        evaluated_title=evaluated_title,
+        live_title=live_title,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        evaluates_live_title=matches,
+        invalidates_settled_approval=False,
+        attribution_note=note,
+    )
+
+
 __all__ = [
     "INDIVISIBLE_UNIT_KINDS",
     "PERMITTED_RECOVERY_ROUTES",
     "RECOVERY_COMMAND_TEMPLATES",
+    "TITLE_FRESHNESS_OUTCOMES",
+    "TITLE_LIFECYCLE_PHASES",
     "IndivisibleWorkReport",
     "IndivisibleWorkUnit",
+    "TitleAttributionRecord",
+    "TitleFreshnessDecision",
     "classify_change_coverage",
     "classify_mandatory_prompt_overflow",
     "classify_work_plan_unprocessed",
+    "evaluate_title_freshness",
+    "verify_published_title_attribution",
 ]
