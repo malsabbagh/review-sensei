@@ -102,6 +102,26 @@ Dirty or conflicting GitHub mergeability metadata (`mergeable=False`,
 `mergeable_state="dirty"`) continues to review the exact three-dot
 `base_sha...head_sha` diff whenever a valid merge-base exists (`G04` control).
 
+### Hosted Ancestry Boundary and Retry Continuity (`07179c0f` Confirmation)
+
+- **Hosted checkout path (`ReviewRun` $\to$ `prepare_diff`):** When a pull
+  request force-pushes to an unrelated root commit with no common ancestor,
+  `prepare_diff` refuses before provider inference (`0` model calls) while
+  leaving previously persisted session obligations intact.
+- **Clone-free hosted boundary:** Callers without a local Git checkout supply
+  `GitAncestryEvidence.unavailable()`, which fails closed to `unrelated_history`
+  (`preserves_newer_session_obligations=True`,
+  `reuses_superseded_approval_without_verification=False`) without issuing
+  unrequested GitHub REST compare calls; authenticated REST compare/commit
+  hydration remains an explicit opt-in extension point.
+- **Delayed old-head / stale-base effects and retry journeys:** After a rebase
+  or force-push, delayed old-head review, approval-finalizer, and mention-reply
+  attempts skip with `skipped_stale_head` (and stale-base writes on the new head
+  skip with `skipped_stale_base`), while transient pre-publication read errors
+  on the rebased or force-pushed snapshot recover on `attempt=2` from retained
+  analysis with **zero** duplicate model inference and preserve source-bound
+  session obligations (`G11` tracks live consumer deployment versions).
+
 ---
 
 ## 4. Draft and Close Transitions During Active Work (`G23`)

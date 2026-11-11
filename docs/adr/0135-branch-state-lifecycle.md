@@ -133,12 +133,15 @@ shared distribution manifests remain unchanged.
   approval / mention-reply effects after close and changed-SHA reopen, and live
   publisher/finalizer write gates (live consumer deployment telemetry remains
   tracked separately under `G11`).
-- `tests/test_force_push_ancestry_g06.py`: 7 end-to-end, reconciliation-matrix,
+- `tests/test_force_push_ancestry_g06.py`: 9 end-to-end, reconciliation-matrix,
   and real-Git ancestry tests covering commit-graph and combined head+base-ref
   retarget transitions, `H1 -> H2 -> H1` obligation preservation and
   `supersedes_prior_clean_review` control flow, identical-tree/diff force-pushes,
-  same-SHA `base_ref` retarget zero-inference recovery, post-`COMMENT` rewrite
-  fencing, and `G04` dirty mergeability controls.
+  same-SHA `base_ref` retarget zero-inference recovery, hosted `ReviewRun`
+  unrelated-history pre-inference refusal and clone-free `unavailable()`
+  confirmation, rebase/force-push delayed old-effect fencing plus `attempt=2`
+  zero-inference retained retry journeys, post-`COMMENT` rewrite fencing, and
+  `G04` dirty mergeability controls.
 - `tests/test_active_draft_close_g23.py`: 6 comprehensive tests covering
   `draft=True` and `state="closed"` across all 5 active-work phases on review
   and reply routes, including lost-response `stored` vs. `unconfirmed`
@@ -157,7 +160,13 @@ persisted session-ledger comments.
 
 ## Follow-up work
 
-- When hosted GitHub App workflows without a local Git checkout need commit-graph
-  classification directly, populate `GitAncestryEvidence` from GitHub's
-  authenticated compare/commit REST endpoints rather than `inspect_git_ancestry`,
-  keeping `classify_source_identity_transition` unchanged.
+- Confirmed at `07179c0f`: hosted GitHub Actions `review-run` checkouts refuse
+  unrelated histories pre-inference via `prepare_diff` while preserving session
+  obligations, and clone-free hosted paths fail closed via
+  `GitAncestryEvidence.unavailable()` without unrequested REST calls. When
+  clone-free GitHub App workflows need commit-graph classification directly,
+  populate `GitAncestryEvidence` from GitHub's authenticated compare/commit REST
+  endpoints rather than `inspect_git_ancestry`, keeping
+  `classify_source_identity_transition` unchanged.
+- Live installed-consumer workflow pins and deployed runtime version telemetry
+  remain tracked separately under `G11`.

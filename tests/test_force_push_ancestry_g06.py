@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
+import socket
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -1309,6 +1312,354 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
                     current_head_sha="d" * 40,
                     ancestry=missing_tree_ancestry,
                 )
+
+    def test_hosted_unrelated_history_refuses_before_inference_and_confirms_clone_free_boundary(
+        self,
+    ) -> None:
+        """G06 exact-scope: hosted ReviewRun unrelated-history refusal + clone-free boundary."""
+
+        from review_sensei_github import cli as hosted_cli
+
+        from review_sensei import workflow
+
+        with tempfile.TemporaryDirectory() as tmp:
+            g04 = G04MergeFixture(Path(tmp))
+            # 1. Seed an active unresolved obligation on (common, original_head) via normal run.
+            code_seed = g04.invoke(human=True)
+            self.assertEqual(code_seed, 0, g04.error)
+            self.assertEqual(g04.provider_calls, 1)
+            assert g04.comment is not None
+            seeded_record = parse_session_comment(
+                g04.comment["body"], identity=IDENTITY
+            )
+            self.assertTrue(session_has_unresolved_obligations(seeded_record))
+            seeded_generation = seeded_record.generation
+
+            # 2. Construct a rootless orphan commit (zero parents -> no merge-base with common)
+            # without disturbing the policy checkout HEAD.
+            blob_oid = git(
+                g04.root,
+                "hash-object",
+                "-w",
+                "--stdin",
+                input="orphan = True\n",
+            ).stdout.strip()
+            orphan_tree = git(
+                g04.root,
+                "mktree",
+                input=f"100644 blob {blob_oid}\torphan.py\n",
+            ).stdout.strip()
+            orphan_head = git(
+                g04.root,
+                "commit-tree",
+                orphan_tree,
+                input="Unrelated synthetic root commit\n",
+            ).stdout.strip()
+
+            anc_orphan = inspect_git_ancestry(
+                g04.root,
+                previous_base_sha=g04.common,
+                previous_head_sha=g04.original_head,
+                current_base_sha=g04.common,
+                current_head_sha=orphan_head,
+            )
+            self.assertIsNone(anc_orphan.merge_base_sha)
+            dec_orphan = classify_source_identity_transition(
+                previous_base_ref="main",
+                previous_base_sha=g04.common,
+                previous_head_sha=g04.original_head,
+                current_base_ref="main",
+                current_base_sha=g04.common,
+                current_head_sha=orphan_head,
+                ancestry=anc_orphan,
+                previously_reviewed_head_shas={g04.original_head},
+            )
+            self.assertEqual(dec_orphan.transition_kind, "unrelated_history")
+            self.assertTrue(dec_orphan.preserves_newer_session_obligations)
+            self.assertFalse(dec_orphan.reuses_superseded_approval_without_verification)
+
+            # 3. Execute real hosted `review-run` acquisition (`--diff` omitted so ReviewRun
+            # invokes production `prepare_diff` against `g04.root`): must fail closed before
+            # provider inference and leave the seeded obligation intact.
+            g04.run_id += 1
+            g04.live_base = g04.requested_base = g04.common
+            g04.live_head = g04.requested_head = orphan_head
+            g04.trace.clear()
+            g04.transports.clear()
+            g04.worker_observations.clear()
+            original_main = hosted_cli.main
+
+            def strip_prebuilt_diff(argv):
+                args = list(argv)
+                idx = args.index("--diff")
+                del args[idx : idx + 2]
+                return original_main(args)
+
+            with (
+                patch.object(
+                    socket,
+                    "create_connection",
+                    side_effect=AssertionError("live socket forbidden"),
+                ),
+                patch.object(workflow, "_fetch_ref", lambda *_a, **_kw: None),
+                patch.object(hosted_cli, "main", strip_prebuilt_diff),
+            ):
+                code_orphan = g04.invoke(human=False)
+
+            self.assertEqual(code_orphan, 1)
+            self.assertEqual(g04.provider_calls, 1)
+            self.assertIn("base and head commits do not share a merge base", g04.error)
+            self.assertEqual(len(g04.review_payloads), 1)
+            after_orphan = parse_session_comment(g04.comment["body"], identity=IDENTITY)
+            assert after_orphan is not None
+            self.assertTrue(session_has_unresolved_obligations(after_orphan))
+            self.assertGreaterEqual(after_orphan.generation, seeded_generation)
+
+            # 4. Clone-free hosted follow-up boundary confirmation at 07179c0f:
+            # When no local checkout exists, `GitAncestryEvidence.unavailable()` fails closed
+            # to `unrelated_history` while preserving session obligations without unrequested
+            # network compare calls.
+            clone_free_dec = classify_source_identity_transition(
+                previous_base_ref="main",
+                previous_base_sha=g04.common,
+                previous_head_sha=g04.original_head,
+                current_base_ref="main",
+                current_base_sha=g04.common,
+                current_head_sha=orphan_head,
+                ancestry=GitAncestryEvidence.unavailable(),
+                previously_reviewed_head_shas={g04.original_head},
+            )
+            self.assertEqual(clone_free_dec.transition_kind, "unrelated_history")
+            self.assertFalse(clone_free_dec.baseline_cache_compatible)
+            self.assertTrue(clone_free_dec.preserves_newer_session_obligations)
+            self.assertEqual(
+                clone_free_dec.recovery_mode,
+                "refuse_prepare_diff_retarget_or_rescan",
+            )
+
+    def test_rebase_and_force_push_delayed_old_effects_and_zero_inference_retry_preserve_obligations(
+        self,
+    ) -> None:
+        """G06 exact-scope: rebase vs ref-retarget, delayed old effects, and attempt=2 retry."""
+
+        class _TransientReadRetryFixture(LifecycleEntryFixture):
+            fail_next_pull_get = False
+
+            def __init__(self, directory: Path) -> None:
+                super().__init__(directory)
+                self.run_attempts: dict[int, int] = {}
+
+            def external(self, request, timeout):
+                self.run_attempts[self.run_id] = max(
+                    self.attempt, self.run_attempts.get(self.run_id, 1)
+                )
+                path = urlsplit(request.full_url).path
+                if (
+                    self.fail_next_pull_get
+                    and request.get_method() == "GET"
+                    and path.endswith("/pulls/7")
+                ):
+                    self.fail_next_pull_get = False
+                    self.trace.append((self.attempt, "GET", path))
+                    raise urllib.error.HTTPError(
+                        request.full_url,
+                        502,
+                        "Bad Gateway",
+                        {},  # type: ignore[arg-type]
+                        io.BytesIO(b'{"message":"Bad Gateway"}'),
+                    )
+                resp = super().external(request, timeout)
+                if (
+                    request.get_method() == "GET"
+                    and "/actions/runs/" in path
+                    and not path.endswith("/jobs")
+                ):
+                    queried_run = int(path.split("/actions/runs/")[1].split("/")[0])
+                    if queried_run != self.run_id and queried_run in self.run_attempts:
+                        body = json.loads(resp.read(524288))
+                        body["run_attempt"] = self.run_attempts[queried_run]
+                        return json_response(body)
+                return resp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "review").mkdir()
+            (root / "reply").mkdir()
+
+            fx = _TransientReadRetryFixture(root / "review")
+            b1 = fx.live_base
+            b2 = "c" * 40
+            h1 = fx.live_head
+            h1_rebased = "d" * 40
+            h2_force_push = "e" * 40
+
+            # 1. Seed source-bound obligation on (main@B1, H1).
+            code_h1, out_h1 = fx.run_and_read(human=True)
+            self.assertEqual(code_h1, 0, fx.error)
+            assert out_h1 is not None
+            self.assertEqual(out_h1["status"], "published")
+            self.assertEqual([r["event"] for r in fx.review_posts], ["COMMENT"])
+            rec_h1 = parse_session_comment(fx.comment["body"], identity=IDENTITY)
+            self.assertTrue(session_has_unresolved_obligations(rec_h1))
+
+            # 2. Rebase PR #7 from (main@B1, H1) onto (main@B2, H1_rebased), explicitly
+            # preserving the distinction between `same_sha_base_ref_retarget` and `base_sha` drift.
+            fx.live_base = fx.requested_base = b2
+            fx.live_head = fx.requested_head = h1_rebased
+
+            # Delayed old-head (H1) review, finalizer, and mention-reply writes skip as
+            # `skipped_stale_head`; delayed stale-base-SHA write on H1_rebased skips as
+            # `skipped_stale_base` (`reason="stale_base_sha"`).
+            pub = ReviewPublisher(http=fx.http)
+            fin = ReviewApprovalFinalizer(http=fx.http)
+            stale_head_pub = pub.publish(
+                token="installation-token",
+                repository="owner/repo",
+                repository_id=123,
+                pull_request=7,
+                head_sha=h1,
+                base_branch="main",
+                base_sha=b1,
+                diff=SAMPLE_DIFF,
+                result=ReviewResult(
+                    summary="Delayed H1 review after rebase.",
+                    comments=(),
+                    provider="ollama",
+                    review_status="complete",
+                ),
+                auto_approve=True,
+                app_slug="reviewsensei[bot]",
+            )
+            self.assertEqual(stale_head_pub.status, "skipped_stale_head")
+            stale_base_pub = pub.publish(
+                token="installation-token",
+                repository="owner/repo",
+                repository_id=123,
+                pull_request=7,
+                head_sha=h1_rebased,
+                base_branch="main",
+                base_sha=b1,
+                diff=SAMPLE_DIFF,
+                result=ReviewResult(
+                    summary="Delayed B1 base-SHA review on H1_rebased.",
+                    comments=(),
+                    provider="ollama",
+                    review_status="complete",
+                ),
+                auto_approve=True,
+                app_slug="reviewsensei[bot]",
+            )
+            self.assertEqual(stale_base_pub.status, "skipped_stale_base")
+            stale_fin = fin._preflight(
+                token="installation-token",
+                repository="owner/repo",
+                pull_request=7,
+                head_sha=h1,
+                app_slug="reviewsensei[bot]",
+            )
+            assert stale_fin.result is not None
+            self.assertEqual(stale_fin.result.status, "skipped_stale_head")
+            self.assertEqual([r["event"] for r in fx.review_posts], ["COMMENT"])
+
+            reply_fx = FreshnessReplyFixture(root / "reply")
+            reply_fx.initialize_freshness()
+            orig_reply_pub = ConversationPublisher._publish
+
+            def rebase_before_reply(conv_pub, **kwargs):
+                reply_fx.live_base = b2
+                reply_fx.live_head = h1_rebased
+                return orig_reply_pub(conv_pub, **kwargs)
+
+            with patch.object(ConversationPublisher, "_publish", rebase_before_reply):
+                code_reply = reply_fx.invoke_reply()
+            self.assertEqual(code_reply, 1)
+            self.assertEqual(reply_fx.reply_posts, 0)
+            self.assertEqual(
+                getattr(reply_fx.last_result, "status", None), "skipped_stale_head"
+            )
+
+            # 3. Rebased run on (B2, H1_rebased): attempt 1 encounters transient HTTP 502
+            # on the post-staging pre-mutation read AFTER retaining analysis; attempt 2
+            # replays retained analysis with ZERO additional model inference while
+            # preserving H1's unresolved obligation and withholding APPROVE!
+            orig_preflight = ReviewPublisher._preflight_pr
+
+            def run_with_final_preflight_502() -> tuple[int, dict[str, object] | None]:
+                before_inv = sum(
+                    "default-human-inventory" in str(item.get("body", ""))
+                    for item in fx.extra_comments.values()
+                )
+                armed = False
+
+                def arm_final_preflight(publisher, **kwargs):
+                    nonlocal armed
+                    now_inv = sum(
+                        "default-human-inventory" in str(item.get("body", ""))
+                        for item in fx.extra_comments.values()
+                    )
+                    if not armed and now_inv > before_inv:
+                        armed = True
+                        fx.fail_next_pull_get = True
+                    return orig_preflight(publisher, **kwargs)
+
+                with patch.object(
+                    ReviewPublisher, "_preflight_pr", arm_final_preflight
+                ):
+                    return fx.run_and_read(human=False)
+
+            fx.run_id += 1
+            fx.attempt = 1
+            fx.trace.clear()
+            fx.transports.clear()
+            fx.worker_observations.clear()
+            code_rb_1, out_rb_1 = run_with_final_preflight_502()
+            self.assertEqual(code_rb_1, 1)
+            self.assertIsNone(out_rb_1)
+            self.assertEqual(fx.provider_calls, 2)
+            self.assertEqual([r["event"] for r in fx.review_posts], ["COMMENT"])
+
+            fx.attempt = 2
+            fx.trace.clear()
+            fx.transports.clear()
+            fx.worker_observations.clear()
+            code_rb_2, out_rb_2 = fx.run_and_read(human=False)
+            self.assertEqual(code_rb_2, 0, fx.error)
+            assert out_rb_2 is not None
+            self.assertEqual(out_rb_2["status"], "published")
+            self.assertTrue(out_rb_2["accounting_terminal"])
+            self.assertEqual(fx.provider_calls, 2)
+            self.assertEqual(
+                [r["event"] for r in fx.review_posts], ["COMMENT", "COMMENT"]
+            )
+            self.assertEqual(fx.review_posts[-1]["commit_id"], h1_rebased)
+            rec_rebased = parse_session_comment(fx.comment["body"], identity=IDENTITY)
+            self.assertTrue(session_has_unresolved_obligations(rec_rebased))
+
+            # 4. Non-fast-forward force-push (B2, H1_rebased) -> (B2, H2_force_push) with
+            # transient pre-mutation read error on attempt 1 + zero-inference retry on attempt 2.
+            fx.attempt = 1
+            fx.advance_run_to_head(h2_force_push)
+            code_fp_1, _ = run_with_final_preflight_502()
+            self.assertEqual(code_fp_1, 1)
+            self.assertEqual(fx.provider_calls, 3)
+
+            fx.attempt = 2
+            fx.trace.clear()
+            fx.transports.clear()
+            fx.worker_observations.clear()
+            code_fp_2, out_fp_2 = fx.run_and_read(human=False)
+            self.assertEqual(code_fp_2, 0, fx.error)
+            assert out_fp_2 is not None
+            self.assertEqual(out_fp_2["status"], "published")
+            self.assertTrue(out_fp_2["accounting_terminal"])
+            self.assertEqual(fx.provider_calls, 3)
+            self.assertEqual(
+                [r["event"] for r in fx.review_posts],
+                ["COMMENT", "COMMENT", "COMMENT"],
+            )
+            self.assertEqual(fx.review_posts[-1]["commit_id"], h2_force_push)
+            rec_fp = parse_session_comment(fx.comment["body"], identity=IDENTITY)
+            self.assertTrue(session_has_unresolved_obligations(rec_fp))
 
 
 if __name__ == "__main__":
