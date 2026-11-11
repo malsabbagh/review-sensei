@@ -430,3 +430,22 @@ def authenticate_historical_publication(
         key=lambda item: str(item["instance"]),
     )
     return _complete_selection(selection, effects, assessments)
+
+
+# Backward-compatible advisory re-exports (`authority=False`); core historical
+# publication authentication above never depends on `recovery_route_advisor`.
+from .recovery_route_advisor import (  # noqa: E402
+    RecoveryClassification,
+    classify_live_ledger_recovery,
+    classify_recovery_state,
+)
+
+__all__ = [
+    "HistoricalPublicationCompletion",
+    "HistoricalReadSelection",
+    "HistoricalSnapshotLedger",
+    "RecoveryClassification",
+    "authenticate_historical_publication",
+    "classify_live_ledger_recovery",
+    "classify_recovery_state",
+]

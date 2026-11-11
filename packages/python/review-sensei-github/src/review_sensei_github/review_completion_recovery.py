@@ -619,3 +619,23 @@ def _confirm_native_effects(
         "check_conclusion": check["conclusion"],
         "target_inventory_sha256": _digest(targets),
     }
+
+
+# Backward-compatible advisory re-exports (`authority=False`).
+from .recovery_route_advisor import (  # noqa: E402
+    MISSING_WITNESSES,
+    RECOVERY_STATES,
+    SUPPORTED_RECOVERY_ROUTES,
+    RecoveryClassification,
+    classify_live_ledger_recovery,
+    classify_recovery_state,
+)
+
+__all__ = [
+    "MISSING_WITNESSES",
+    "RECOVERY_STATES",
+    "SUPPORTED_RECOVERY_ROUTES",
+    "RecoveryClassification",
+    "classify_live_ledger_recovery",
+    "classify_recovery_state",
+]
