@@ -9,7 +9,7 @@ approved resource budgets.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .context import PromptContextOverflow
@@ -1264,23 +1264,272 @@ def evaluate_title_byte_limit(
     )
 
 
+POLICY_DRIFT_KINDS = frozenset(
+    {
+        "admitted",
+        "unrelated_default_branch_advance",
+        "policy_content_changed",
+        "malformed_policy_ref",
+    }
+)
+
+
+@dataclass(frozen=True)
+class PolicyDriftClassification:
+    """G21 pre-admission classification for frozen policy commit P vs live P_live."""
+
+    drift_kind: str
+    admitted: bool
+    frozen_policy_commit: str
+    live_policy_commit: str | None
+    reviewed_base_sha: str
+    reviewed_head_sha: str
+    policy_distinct_from_reviewed_base: bool
+    policy_content_identical: bool | None
+    refuses_before_enrollment: bool
+    zero_ledger_mutation: bool
+    zero_provider_spend: bool
+    rebinds_prior_accounting: bool
+    recovery_policy_commit: str | None
+    recovery_instruction: str | None
+    diagnostic: str
+
+    def __post_init__(self) -> None:
+        if self.drift_kind not in POLICY_DRIFT_KINDS:
+            raise ReviewInputError("policy drift_kind is unsupported")
+        _validate_sha(self.frozen_policy_commit, label="frozen_policy_commit")
+        if self.live_policy_commit is not None:
+            _validate_sha(self.live_policy_commit, label="live_policy_commit")
+        _validate_sha(self.reviewed_base_sha, label="reviewed_base_sha")
+        _validate_sha(self.reviewed_head_sha, label="reviewed_head_sha")
+        if self.recovery_policy_commit is not None:
+            _validate_sha(self.recovery_policy_commit, label="recovery_policy_commit")
+        for flag_name, flag_val in (
+            ("admitted", self.admitted),
+            (
+                "policy_distinct_from_reviewed_base",
+                self.policy_distinct_from_reviewed_base,
+            ),
+            ("refuses_before_enrollment", self.refuses_before_enrollment),
+            ("zero_ledger_mutation", self.zero_ledger_mutation),
+            ("zero_provider_spend", self.zero_provider_spend),
+            ("rebinds_prior_accounting", self.rebinds_prior_accounting),
+        ):
+            if not isinstance(flag_val, bool):
+                raise ReviewInputError(f"{flag_name} must be a boolean")
+        if self.policy_content_identical is not None and not isinstance(
+            self.policy_content_identical, bool
+        ):
+            raise ReviewInputError("policy_content_identical must be a boolean or None")
+        if self.rebinds_prior_accounting:
+            raise ReviewInputError(
+                "prior session accounting must never be rebound to a changed policy commit"
+            )
+        if self.policy_distinct_from_reviewed_base != (
+            self.frozen_policy_commit != self.reviewed_base_sha
+        ):
+            raise ReviewInputError(
+                "policy_distinct_from_reviewed_base does not match P != B"
+            )
+        if not self.admitted:
+            if not (
+                self.refuses_before_enrollment
+                and self.zero_ledger_mutation
+                and self.zero_provider_spend
+            ):
+                raise ReviewInputError(
+                    "refused policy drift must fail closed before enrollment and provider spend"
+                )
+            if not self.recovery_instruction:
+                raise ReviewInputError(
+                    "refused policy drift requires an explicit recovery_instruction"
+                )
+        validate_bounded_text(
+            self.diagnostic,
+            2048,
+            label="policy drift diagnostic",
+            allow_empty=False,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "drift_kind": self.drift_kind,
+            "admitted": self.admitted,
+            "frozen_policy_commit": self.frozen_policy_commit,
+            "live_policy_commit": self.live_policy_commit,
+            "reviewed_base_sha": self.reviewed_base_sha,
+            "reviewed_head_sha": self.reviewed_head_sha,
+            "policy_distinct_from_reviewed_base": (
+                self.policy_distinct_from_reviewed_base
+            ),
+            "policy_content_identical": self.policy_content_identical,
+            "refuses_before_enrollment": self.refuses_before_enrollment,
+            "zero_ledger_mutation": self.zero_ledger_mutation,
+            "zero_provider_spend": self.zero_provider_spend,
+            "rebinds_prior_accounting": self.rebinds_prior_accounting,
+            "recovery_policy_commit": self.recovery_policy_commit,
+            "recovery_instruction": self.recovery_instruction,
+            "diagnostic": self.diagnostic,
+        }
+
+
+def classify_policy_commit_drift(
+    *,
+    frozen_policy_commit: str,
+    default_ref_object: object,
+    reviewed_base_sha: str,
+    reviewed_head_sha: str,
+    frozen_policy_bytes: bytes | None = None,
+    live_policy_bytes: bytes | None = None,
+) -> PolicyDriftClassification:
+    """Classify default-branch policy commit drift (P vs P_live) distinct from B and H."""
+
+    _validate_sha(frozen_policy_commit, label="frozen_policy_commit")
+    _validate_sha(reviewed_base_sha, label="reviewed_base_sha")
+    _validate_sha(reviewed_head_sha, label="reviewed_head_sha")
+    for bytes_label, bytes_val in (
+        ("frozen_policy_bytes", frozen_policy_bytes),
+        ("live_policy_bytes", live_policy_bytes),
+    ):
+        if bytes_val is not None and not isinstance(bytes_val, bytes):
+            raise ReviewInputError(f"{bytes_label} must be bytes when supplied")
+
+    distinct_from_base = frozen_policy_commit != reviewed_base_sha
+    if (
+        not isinstance(default_ref_object, Mapping)
+        or default_ref_object.get("type") != "commit"
+        or not isinstance(default_ref_object.get("sha"), str)
+        or _HEX_SHA_RE.fullmatch(default_ref_object["sha"]) is None
+    ):
+        return PolicyDriftClassification(
+            drift_kind="malformed_policy_ref",
+            admitted=False,
+            frozen_policy_commit=frozen_policy_commit,
+            live_policy_commit=None,
+            reviewed_base_sha=reviewed_base_sha,
+            reviewed_head_sha=reviewed_head_sha,
+            policy_distinct_from_reviewed_base=distinct_from_base,
+            policy_content_identical=None,
+            refuses_before_enrollment=True,
+            zero_ledger_mutation=True,
+            zero_provider_spend=True,
+            rebinds_prior_accounting=False,
+            recovery_policy_commit=None,
+            recovery_instruction=(
+                "Ensure the repository default branch resolves to a valid commit "
+                "object and re-dispatch a fresh run."
+            ),
+            diagnostic=(
+                "Repository default-branch ref object is missing or is not a commit "
+                "object; refusing before policy load, session enrollment, or provider spend."
+            ),
+        )
+
+    live_sha: str = default_ref_object["sha"]
+    if live_sha == frozen_policy_commit:
+        return PolicyDriftClassification(
+            drift_kind="admitted",
+            admitted=True,
+            frozen_policy_commit=frozen_policy_commit,
+            live_policy_commit=live_sha,
+            reviewed_base_sha=reviewed_base_sha,
+            reviewed_head_sha=reviewed_head_sha,
+            policy_distinct_from_reviewed_base=distinct_from_base,
+            policy_content_identical=True,
+            refuses_before_enrollment=False,
+            zero_ledger_mutation=False,
+            zero_provider_spend=False,
+            rebinds_prior_accounting=False,
+            recovery_policy_commit=None,
+            recovery_instruction=None,
+            diagnostic=(
+                f"Frozen policy commit {frozen_policy_commit[:12]} matches live "
+                "default-branch commit (evaluated independently of reviewed base/head)."
+            ),
+        )
+
+    if (
+        frozen_policy_bytes is not None
+        and live_policy_bytes is not None
+        and frozen_policy_bytes == live_policy_bytes
+    ):
+        return PolicyDriftClassification(
+            drift_kind="unrelated_default_branch_advance",
+            admitted=False,
+            frozen_policy_commit=frozen_policy_commit,
+            live_policy_commit=live_sha,
+            reviewed_base_sha=reviewed_base_sha,
+            reviewed_head_sha=reviewed_head_sha,
+            policy_distinct_from_reviewed_base=distinct_from_base,
+            policy_content_identical=True,
+            refuses_before_enrollment=True,
+            zero_ledger_mutation=True,
+            zero_provider_spend=True,
+            rebinds_prior_accounting=False,
+            recovery_policy_commit=live_sha,
+            recovery_instruction=(
+                "Re-dispatch or trigger the next event against the current "
+                f"default-branch policy commit {live_sha}."
+            ),
+            diagnostic=(
+                f"Default branch advanced from {frozen_policy_commit[:12]} to "
+                f"{live_sha[:12]} before admission (with byte-identical "
+                ".reviewsensei.yml); strict commit-identity guard refuses before "
+                "enrollment or provider spend."
+            ),
+        )
+
+    content_identical = (
+        False
+        if frozen_policy_bytes is not None and live_policy_bytes is not None
+        else None
+    )
+    return PolicyDriftClassification(
+        drift_kind="policy_content_changed",
+        admitted=False,
+        frozen_policy_commit=frozen_policy_commit,
+        live_policy_commit=live_sha,
+        reviewed_base_sha=reviewed_base_sha,
+        reviewed_head_sha=reviewed_head_sha,
+        policy_distinct_from_reviewed_base=distinct_from_base,
+        policy_content_identical=content_identical,
+        refuses_before_enrollment=True,
+        zero_ledger_mutation=True,
+        zero_provider_spend=True,
+        rebinds_prior_accounting=False,
+        recovery_policy_commit=live_sha,
+        recovery_instruction=(
+            "Re-dispatch or trigger a fresh run pinned to the updated "
+            f"default-branch policy commit {live_sha}."
+        ),
+        diagnostic=(
+            f"Default-branch policy commit drifted from {frozen_policy_commit[:12]} "
+            f"to {live_sha[:12]} with modified or unverified policy content; "
+            "refusing before enrollment or provider spend without rebinding prior accounting."
+        ),
+    )
+
+
 __all__ = [
     "DIRECT_CORE_MAX_TITLE_BYTES",
     "HOSTED_BOOTSTRAP_MAX_TITLE_BYTES",
     "HOSTED_ENTRY_PURPOSES",
     "INDIVISIBLE_UNIT_KINDS",
     "PERMITTED_RECOVERY_ROUTES",
+    "POLICY_DRIFT_KINDS",
     "RECOVERY_COMMAND_TEMPLATES",
     "TITLE_ENTRY_SURFACES",
     "TITLE_FRESHNESS_OUTCOMES",
     "TITLE_LIFECYCLE_PHASES",
     "IndivisibleWorkReport",
     "IndivisibleWorkUnit",
+    "PolicyDriftClassification",
     "TitleAttributionRecord",
     "TitleByteLimitEvaluation",
     "TitleFreshnessDecision",
     "classify_change_coverage",
     "classify_mandatory_prompt_overflow",
+    "classify_policy_commit_drift",
     "classify_work_plan_unprocessed",
     "evaluate_title_byte_limit",
     "evaluate_title_freshness",
