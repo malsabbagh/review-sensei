@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from .errors import (
+    GitHubMergeGroupUnsupportedError,
     GitHubWebhookError,
     GitHubWebhookSignatureError,
 )
@@ -203,6 +204,10 @@ class WebhookVerifier:
         if self.ledger.is_known(app_id=self.app_id, delivery_id=delivery_id):
             raise GitHubWebhookError("GitHub webhook delivery was already processed")
         if event not in SUPPORTED_WEBHOOK_EVENTS:
+            if event.strip() == "merge_group":
+                raise GitHubMergeGroupUnsupportedError(
+                    "GitHub merge_group webhook event is unsupported"
+                )
             raise GitHubWebhookError("GitHub webhook event is not supported")
         self.ledger.record(app_id=self.app_id, delivery_id=delivery_id)
         try:

@@ -48,6 +48,13 @@ class GitHubWebhookSignatureError(GitHubWebhookError):
     error_category = "github_webhook_signature"
 
 
+class GitHubMergeGroupUnsupportedError(GitHubWebhookError):
+    """Raised when a merge_group webhook event is rejected at the queue boundary."""
+
+    error_category = "github_webhook"
+    outcome_code = "merge_group_unsupported"
+
+
 class GitHubSetupError(ReviewSenseiError):
     """Base class for GitHub App setup bootstrap failures."""
 

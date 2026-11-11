@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from .checks import REVIEW_CHECK_NAME
 from .trigger import (
     TriggerResolution,
     comment_mentions_sensei,
@@ -2389,11 +2390,259 @@ def reconcile_event_convergence(
     )
 
 
+MERGE_QUEUE_REF_PREFIXES: tuple[str, ...] = (
+    "gh-readonly-queue/",
+    "refs/heads/gh-readonly-queue/",
+)
+
+
+def is_merge_queue_ref(ref: object) -> bool:
+    """Return whether ``ref`` names a GitHub merge-queue temporary branch."""
+
+    if not isinstance(ref, str):
+        return False
+    normalized = ref.strip()
+    return any(normalized.startswith(prefix) for prefix in MERGE_QUEUE_REF_PREFIXES)
+
+
+@dataclass(frozen=True)
+class MergeGroupRejectionOutcome:
+    """Typed, zero-side-effect refusal record for unsupported ``merge_group`` events."""
+
+    outcome_code: str
+    merge_group_action: str
+    queue_head_sha: str | None
+    queue_base_sha: str | None
+    queue_head_ref: str | None
+    token_acquired: bool = False
+    provider_called: bool = False
+    ledger_mutated: bool = False
+    check_published: bool = False
+
+
+def reject_merge_group_event(
+    payload: Mapping[str, Any] | bytes | bytearray | str | object,
+    *,
+    delivery_id: str | None = None,
+) -> MergeGroupRejectionOutcome:
+    """Deterministically reject any ``merge_group`` payload before side effects."""
+
+    parsed = _coerce_payload_mapping(payload)
+    routing = evaluate_github_event(
+        "merge_group",
+        payload if parsed is not None else {},
+        delivery_id=delivery_id,
+    )
+    mg = _as_mapping(parsed.get("merge_group")) if parsed is not None else {}
+    raw_action = _opt_str(parsed.get("action")) if parsed is not None else None
+    action = raw_action.strip() if raw_action and raw_action.strip() else "<missing>"
+    return MergeGroupRejectionOutcome(
+        outcome_code=routing.outcome_code,
+        merge_group_action=action,
+        queue_head_sha=_opt_str(mg.get("head_sha")),
+        queue_base_sha=_opt_str(mg.get("base_sha")),
+        queue_head_ref=_opt_str(mg.get("head_ref")),
+        token_acquired=False,
+        provider_called=False,
+        ledger_mutated=False,
+        check_published=False,
+    )
+
+
+@dataclass(frozen=True)
+class ReviewCertificationReceipt:
+    """Authoritative PR-bound check/approval receipt for one exact snapshot."""
+
+    repository_id: int
+    pull_request_number: int
+    reviewed_base_sha: str
+    reviewed_head_sha: str
+    result_digest: str
+    approved: bool
+    check_conclusion: str
+    check_name: str = REVIEW_CHECK_NAME
+
+    def __post_init__(self) -> None:
+        if _positive_int(self.repository_id) is None:
+            raise ValueError("repository_id must be a positive integer")
+        if _positive_int(self.pull_request_number) is None:
+            raise ValueError("pull_request_number must be a positive integer")
+        if not isinstance(self.reviewed_base_sha, str) or not _GIT_SHA_FULL.fullmatch(
+            self.reviewed_base_sha
+        ):
+            raise ValueError("reviewed_base_sha must be a 40-hex SHA")
+        if not isinstance(self.reviewed_head_sha, str) or not _GIT_SHA_FULL.fullmatch(
+            self.reviewed_head_sha
+        ):
+            raise ValueError("reviewed_head_sha must be a 40-hex SHA")
+        if (
+            not isinstance(self.result_digest, str)
+            or re.fullmatch(r"[a-f0-9]{64}", self.result_digest) is None
+        ):
+            raise ValueError("result_digest must be a 64-hex SHA-256 digest")
+
+
+@dataclass(frozen=True)
+class CertificationCandidate:
+    """Candidate commit/group asking whether a ReviewSensei PR receipt certifies it."""
+
+    repository_id: int
+    base_sha: str
+    head_sha: str
+    head_ref: str
+    pull_request_numbers: tuple[int, ...]
+    is_merge_group: bool = False
+
+
+@dataclass(frozen=True)
+class SnapshotCertificationVerdict:
+    """Verdict proving whether ``receipt`` certifies ``candidate``."""
+
+    certified: bool
+    outcome_code: str
+    check_name: str
+    reason: str
+
+
+def verify_snapshot_certification(
+    receipt: ReviewCertificationReceipt,
+    candidate: CertificationCandidate,
+) -> SnapshotCertificationVerdict:
+    """Bind certification strictly to one PR's exact ``(base_sha, head_sha)`` pair.
+
+    Ordinary PR-head approvals and ``ReviewSensei`` check runs NEVER certify a
+    synthetic merge-queue commit SHA, a ``gh-readonly-queue/*`` ref, an advanced
+    queue base SHA, or a multi-PR merge group.
+    """
+
+    if candidate.is_merge_group or is_merge_queue_ref(candidate.head_ref):
+        return SnapshotCertificationVerdict(
+            certified=False,
+            outcome_code="merge_group_unsupported",
+            check_name=receipt.check_name,
+            reason="ordinary pull-request receipts cannot certify merge-queue refs or merge_group commits",
+        )
+    if candidate.repository_id != receipt.repository_id:
+        return SnapshotCertificationVerdict(
+            certified=False,
+            outcome_code="repository_mismatch",
+            check_name=receipt.check_name,
+            reason="candidate repository_id does not match certified receipt",
+        )
+    if (
+        len(candidate.pull_request_numbers) != 1
+        or candidate.pull_request_numbers[0] != receipt.pull_request_number
+    ):
+        return SnapshotCertificationVerdict(
+            certified=False,
+            outcome_code="multi_pr_or_mismatched_pr_unauthenticated",
+            check_name=receipt.check_name,
+            reason="certification applies to exactly one matching pull_request_number",
+        )
+    if candidate.head_sha != receipt.reviewed_head_sha:
+        return SnapshotCertificationVerdict(
+            certified=False,
+            outcome_code="head_sha_mismatch_uncertified",
+            check_name=receipt.check_name,
+            reason="candidate head_sha differs from reviewed_head_sha",
+        )
+    if candidate.base_sha != receipt.reviewed_base_sha:
+        return SnapshotCertificationVerdict(
+            certified=False,
+            outcome_code="base_sha_mismatch_uncertified",
+            check_name=receipt.check_name,
+            reason="candidate base_sha differs from reviewed_base_sha",
+        )
+    if not receipt.approved or receipt.check_conclusion != "success":
+        return SnapshotCertificationVerdict(
+            certified=False,
+            outcome_code="receipt_not_certifying",
+            check_name=receipt.check_name,
+            reason="receipt did not grant approval and passing check conclusion",
+        )
+    return SnapshotCertificationVerdict(
+        certified=True,
+        outcome_code="exact_pr_snapshot_certified",
+        check_name=receipt.check_name,
+        reason="exact repository, pull_request_number, base_sha, and head_sha match",
+    )
+
+
+@dataclass(frozen=True)
+class MergeQueueEvictionOutcome:
+    """State of the underlying PR after removal/eviction from a GitHub merge queue."""
+
+    outcome_code: str
+    pr_certification_intact: bool
+    requires_new_review: bool
+    preserved_open_finding_ids: tuple[str, ...]
+    recovery_command: str | None
+
+
+def reconcile_merge_queue_eviction(
+    *,
+    destroyed_payload: Mapping[str, Any] | bytes | bytearray | str | object,
+    live_pr_target: LivePullRequestTarget,
+    pr_receipt: ReviewCertificationReceipt | None,
+    open_finding_ids: tuple[str, ...] = (),
+) -> MergeQueueEvictionOutcome:
+    """Verify PR-head state and recovery remain unaffected after queue eviction."""
+
+    rejection = reject_merge_group_event(destroyed_payload)
+    assert rejection.outcome_code == "merge_group_unsupported"
+
+    if pr_receipt is None:
+        return MergeQueueEvictionOutcome(
+            outcome_code="pr_unreviewed_after_queue_eviction",
+            pr_certification_intact=False,
+            requires_new_review=True,
+            preserved_open_finding_ids=open_finding_ids,
+            recovery_command="workflow_dispatch",
+        )
+
+    pr_candidate = CertificationCandidate(
+        repository_id=live_pr_target.repository_id,
+        base_sha=live_pr_target.base_sha,
+        head_sha=live_pr_target.head_sha,
+        head_ref=live_pr_target.head_ref,
+        pull_request_numbers=(live_pr_target.pull_request_number,),
+        is_merge_group=False,
+    )
+    verdict = verify_snapshot_certification(pr_receipt, pr_candidate)
+    if verdict.certified and not open_finding_ids:
+        return MergeQueueEvictionOutcome(
+            outcome_code="pr_head_certification_intact_after_queue_eviction",
+            pr_certification_intact=True,
+            requires_new_review=False,
+            preserved_open_finding_ids=(),
+            recovery_command=None,
+        )
+    if (
+        live_pr_target.base_sha == pr_receipt.reviewed_base_sha
+        and live_pr_target.head_sha == pr_receipt.reviewed_head_sha
+    ):
+        return MergeQueueEvictionOutcome(
+            outcome_code="pr_head_obligations_preserved_after_queue_eviction",
+            pr_certification_intact=False,
+            requires_new_review=False,
+            preserved_open_finding_ids=open_finding_ids,
+            recovery_command="@reviewsensei verify",
+        )
+    return MergeQueueEvictionOutcome(
+        outcome_code="pr_head_advanced_after_queue_eviction_requires_review",
+        pr_certification_intact=False,
+        requires_new_review=True,
+        preserved_open_finding_ids=open_finding_ids,
+        recovery_command="workflow_dispatch",
+    )
+
+
 __all__ = [
     "ALLOWED_COMMENT_ASSOCIATIONS",
     "AcceptedOperationRecord",
     "CALLER_SUBSCRIBED_EVENTS",
     "CallerSubscriptionReport",
+    "CertificationCandidate",
     "ConcurrencySimulationResult",
     "ConvergenceDecision",
     "EVENT_DECISION_BY_ID",
@@ -2401,15 +2650,24 @@ __all__ = [
     "EventDecisionRule",
     "EventRoutingDecision",
     "LivePullRequestTarget",
+    "MERGE_QUEUE_REF_PREFIXES",
+    "MergeGroupRejectionOutcome",
+    "MergeQueueEvictionOutcome",
     "OPERATION_LIFECYCLE_PHASES",
     "QueuedRunCandidate",
     "REQUIRED_EVENT_FAMILIES",
     "ReplacedQueueNotice",
     "RetainedSnapshotState",
+    "ReviewCertificationReceipt",
+    "SnapshotCertificationVerdict",
     "SourceEventIdentity",
     "decision_rule_for",
     "evaluate_github_event",
     "inspect_caller_subscription_contract",
+    "is_merge_queue_ref",
     "reconcile_event_convergence",
+    "reconcile_merge_queue_eviction",
+    "reject_merge_group_event",
     "simulate_actions_concurrency_queue",
+    "verify_snapshot_certification",
 ]
