@@ -1,9 +1,9 @@
-"""Explicit GitHub event routing decision table and admission guards (G01).
+"""Explicit GitHub event routing decision table, convergence, and guards (G01, G13).
 
-Separates caller workflow subscriptions from runtime admission guards so every
-subscribed, unsubscribed, malformed, or duplicate GitHub event resolves to an
-explicit, bounded, zero-surprise outcome without adding background polling or
-unapproved automatic model spend.
+Separates caller workflow subscriptions from runtime admission guards and models
+per-source identity plus current-state target convergence so missed, delayed,
+out-of-order, or Actions-concurrency-replaced runs converge deterministically
+without duplicate model inference or silent disappearance of accepted commands.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .trigger import (
     TriggerResolution,
@@ -1771,18 +1771,645 @@ def evaluate_github_event(
     )
 
 
+OPERATION_LIFECYCLE_PHASES: frozenset[str] = frozenset(
+    {
+        "intent_accepted_unstarted",
+        "execution_started",
+        "uncertain_dispatch",
+        "result_retained_publication_pending",
+        "completed",
+        "queued_replaced_before_admission",
+    }
+)
+
+
+@dataclass(frozen=True)
+class LivePullRequestTarget:
+    """Authenticated live pull-request target state (never a webhook FIFO)."""
+
+    repository_id: int
+    pull_request_number: int
+    base_sha: str
+    base_ref: str
+    head_sha: str
+    head_ref: str
+    state: str = "open"
+    draft: bool = False
+
+    def __post_init__(self) -> None:
+        if _positive_int(self.repository_id) is None:
+            raise ValueError("repository_id must be a positive integer")
+        if _positive_int(self.pull_request_number) is None:
+            raise ValueError("pull_request_number must be a positive integer")
+        if not isinstance(self.base_sha, str) or not _GIT_SHA_FULL.fullmatch(
+            self.base_sha
+        ):
+            raise ValueError("base_sha must be a 40-hex SHA")
+        if not isinstance(self.head_sha, str) or not _GIT_SHA_FULL.fullmatch(
+            self.head_sha
+        ):
+            raise ValueError("head_sha must be a 40-hex SHA")
+        if not isinstance(self.base_ref, str) or not _GIT_REF.fullmatch(self.base_ref):
+            raise ValueError("base_ref must be a valid git ref")
+        if not isinstance(self.head_ref, str) or not _GIT_REF.fullmatch(self.head_ref):
+            raise ValueError("head_ref must be a valid git ref")
+        if type(self.draft) is not bool:
+            raise ValueError("draft must be an exact boolean")
+
+    def to_pull_mapping(self) -> dict[str, Any]:
+        return {
+            "number": self.pull_request_number,
+            "state": self.state,
+            "draft": self.draft,
+            "head": {"sha": self.head_sha, "ref": self.head_ref},
+            "base": {"sha": self.base_sha, "ref": self.base_ref},
+        }
+
+
+@dataclass(frozen=True)
+class AcceptedOperationRecord:
+    """Ledger-visible operation record inspected before scheduling new work."""
+
+    operation_id: str
+    operation_kind: str
+    target_base_sha: str
+    target_head_sha: str
+    lifecycle_phase: str
+    target_base_ref: str = "main"
+    source_dedup_key: str | None = None
+    command_text: str | None = None
+    open_finding_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.operation_id, str) or not self.operation_id.strip():
+            raise ValueError("operation_id must be non-empty")
+        if self.operation_kind not in {"review", "command", "reply"}:
+            raise ValueError("operation_kind must be review, command, or reply")
+        if self.lifecycle_phase not in OPERATION_LIFECYCLE_PHASES:
+            raise ValueError(f"unsupported lifecycle_phase: {self.lifecycle_phase!r}")
+        if not isinstance(self.target_base_sha, str) or not _GIT_SHA_FULL.fullmatch(
+            self.target_base_sha
+        ):
+            raise ValueError("target_base_sha must be a 40-hex SHA")
+        if not isinstance(self.target_head_sha, str) or not _GIT_SHA_FULL.fullmatch(
+            self.target_head_sha
+        ):
+            raise ValueError("target_head_sha must be a 40-hex SHA")
+
+
+@dataclass(frozen=True)
+class QueuedRunCandidate:
+    """One candidate Actions run arriving at the per-PR business concurrency group."""
+
+    run_id: str
+    event_name: str
+    operation_kind: str
+    target_head_sha: str
+    source_dedup_key: str | None = None
+    command_text: str | None = None
+    accepted_before_queue: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.run_id, str) or not self.run_id.strip():
+            raise ValueError("run_id must be non-empty")
+        if self.operation_kind not in {"review", "command", "reply"}:
+            raise ValueError("operation_kind must be review, command, or reply")
+        if not isinstance(self.target_head_sha, str) or not _GIT_SHA_FULL.fullmatch(
+            self.target_head_sha
+        ):
+            raise ValueError("target_head_sha must be a 40-hex SHA")
+
+
+@dataclass(frozen=True)
+class ReplacedQueueNotice:
+    """Explicit operator-visible diagnostic when Actions concurrency evicts a pending run."""
+
+    replaced_run_id: str
+    replaced_by_run_id: str
+    operation_kind: str
+    outcome_code: str
+    accepted_before_queue: bool
+    recovery_command: str
+
+
+@dataclass(frozen=True)
+class ConcurrencySimulationResult:
+    """Deterministic trace of per-PR GitHub Actions concurrency slot behavior."""
+
+    concurrency_group: str
+    active_run: QueuedRunCandidate | None
+    pending_run: QueuedRunCandidate | None
+    completed_run_ids: tuple[str, ...]
+    replaced_notices: tuple[ReplacedQueueNotice, ...]
+
+
+def simulate_actions_concurrency_queue(
+    *,
+    repository: str,
+    pull_request_number: int,
+    events: Sequence[tuple[str, QueuedRunCandidate | None]],
+) -> ConcurrencySimulationResult:
+    """Simulate ``reviewsensei-provider-review-<repo>-<pr>`` (``cancel-in-progress: false``).
+
+    Each item in ``events`` is either ``("enqueue", candidate)`` or
+    ``("finish_active", None)``. At most one active run and one pending run
+    occupy the group; a second arrival while active is running replaces the
+    pending slot and emits a ``ReplacedQueueNotice`` with an explicit recovery
+    command instead of silently dropping the displaced run.
+    """
+
+    if not isinstance(repository, str) or "/" not in repository.strip("/"):
+        raise ValueError("repository must be an owner/repo slug")
+    if _positive_int(pull_request_number) is None:
+        raise ValueError("pull_request_number must be a positive integer")
+
+    group = f"reviewsensei-provider-review-{repository}-{pull_request_number}"
+    active: QueuedRunCandidate | None = None
+    pending: QueuedRunCandidate | None = None
+    completed: list[str] = []
+    notices: list[ReplacedQueueNotice] = []
+
+    for kind, candidate in events:
+        if kind == "enqueue":
+            if candidate is None:
+                raise ValueError("enqueue event requires a QueuedRunCandidate")
+            if active is None:
+                active = candidate
+            elif pending is None:
+                pending = candidate
+            else:
+                displaced = pending
+                pending = candidate
+                if displaced.operation_kind == "command":
+                    code = "queued_command_replaced"
+                    recovery = (
+                        displaced.command_text.strip()
+                        if isinstance(displaced.command_text, str)
+                        and displaced.command_text.strip()
+                        else "@reviewsensei verify"
+                    )
+                elif displaced.operation_kind == "reply":
+                    code = "queued_reply_replaced"
+                    recovery = "workflow_dispatch"
+                else:
+                    code = "queued_review_superseded"
+                    recovery = (
+                        "workflow_dispatch"
+                        if displaced.target_head_sha != candidate.target_head_sha
+                        else "@reviewsensei review status"
+                    )
+                notices.append(
+                    ReplacedQueueNotice(
+                        replaced_run_id=displaced.run_id,
+                        replaced_by_run_id=candidate.run_id,
+                        operation_kind=displaced.operation_kind,
+                        outcome_code=code,
+                        accepted_before_queue=displaced.accepted_before_queue,
+                        recovery_command=recovery,
+                    )
+                )
+        elif kind == "finish_active":
+            if active is not None:
+                completed.append(active.run_id)
+                active = pending
+                pending = None
+        else:
+            raise ValueError(f"unknown queue simulation step: {kind!r}")
+
+    return ConcurrencySimulationResult(
+        concurrency_group=group,
+        active_run=active,
+        pending_run=pending,
+        completed_run_ids=tuple(completed),
+        replaced_notices=tuple(notices),
+    )
+
+
+@dataclass(frozen=True)
+class ConvergenceDecision:
+    """Current-state reconciliation verdict for missed, delayed, or replaced events."""
+
+    status: str
+    outcome_code: str
+    target_base_sha: str
+    target_head_sha: str
+    routing: EventRoutingDecision
+    schedules_new_inference: bool
+    schedules_native_reconciliation: bool
+    reused_operation_id: str | None
+    preserved_open_finding_ids: tuple[str, ...]
+    recovery_command: str | None
+
+
+def _collect_open_findings(
+    records: Sequence[AcceptedOperationRecord],
+) -> tuple[str, ...]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        for finding_id in record.open_finding_ids:
+            if finding_id not in seen:
+                seen.add(finding_id)
+                ordered.append(finding_id)
+    return tuple(ordered)
+
+
+def _is_verify_only_command(body: object) -> bool:
+    if not isinstance(body, str):
+        return False
+    return (
+        re.fullmatch(
+            r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+(?i:verify)[ \t\r\n]*\Z",
+            body,
+        )
+        is not None
+    )
+
+
+def reconcile_event_convergence(
+    event_name: str,
+    payload: Mapping[str, Any] | bytes | bytearray | str | object,
+    *,
+    live_target: LivePullRequestTarget,
+    records: Sequence[AcceptedOperationRecord] = (),
+    delivery_id: str | None = None,
+    was_queued_replaced: bool = False,
+) -> ConvergenceDecision:
+    """Converge an event or manual recovery action onto ``live_target``.
+
+    Enforces G13 invariants:
+    - Reconciles against authenticated current PR state rather than arrival order.
+    - Inspects existing accepted intents, retained results, and uncertain
+      dispatches BEFORE scheduling any new model inference.
+    - Reuses compatible retained work with zero duplicate inference.
+    - Surfaces explicit held/superseded diagnostics and bounded recovery commands
+      when queued runs were replaced in GitHub Actions concurrency.
+    """
+
+    preserved = _collect_open_findings(records)
+    live_mapping = live_target.to_pull_mapping()
+
+    completed_for_live: AcceptedOperationRecord | None = None
+    retained_pending_for_live: AcceptedOperationRecord | None = None
+    latest_completed: AcceptedOperationRecord | None = None
+    accepted_keys: set[str] = set()
+
+    for record in records:
+        if record.source_dedup_key and record.lifecycle_phase == "completed":
+            accepted_keys.add(record.source_dedup_key)
+        if record.lifecycle_phase == "completed":
+            latest_completed = record
+            if (
+                record.operation_kind == "review"
+                and record.target_base_sha == live_target.base_sha
+                and record.target_head_sha == live_target.head_sha
+            ):
+                completed_for_live = record
+        elif (
+            record.lifecycle_phase == "result_retained_publication_pending"
+            and record.operation_kind == "review"
+            and record.target_base_sha == live_target.base_sha
+            and record.target_head_sha == live_target.head_sha
+        ):
+            retained_pending_for_live = record
+
+    retained_state: RetainedSnapshotState | None = None
+    if completed_for_live is not None:
+        retained_state = RetainedSnapshotState(
+            reviewed_base_sha=completed_for_live.target_base_sha,
+            reviewed_base_ref=completed_for_live.target_base_ref,
+            reviewed_head_sha=completed_for_live.target_head_sha,
+            review_status="complete",
+            open_finding_ids=preserved,
+            accepted_source_keys=frozenset(accepted_keys),
+        )
+    elif latest_completed is not None:
+        retained_state = RetainedSnapshotState(
+            reviewed_base_sha=latest_completed.target_base_sha,
+            reviewed_base_ref=latest_completed.target_base_ref,
+            reviewed_head_sha=latest_completed.target_head_sha,
+            review_status="complete",
+            open_finding_ids=preserved,
+            accepted_source_keys=frozenset(accepted_keys),
+        )
+    elif preserved or accepted_keys:
+        retained_state = RetainedSnapshotState(
+            reviewed_base_sha=live_target.base_sha,
+            reviewed_base_ref=live_target.base_ref,
+            reviewed_head_sha=live_target.head_sha,
+            review_status="incomplete",
+            open_finding_ids=preserved,
+            accepted_source_keys=frozenset(accepted_keys),
+        )
+
+    parsed = _coerce_payload_mapping(payload)
+    routing = evaluate_github_event(
+        event_name,
+        payload,
+        delivery_id=delivery_id,
+        live_pull_request=live_mapping,
+        retained_state=retained_state,
+    )
+
+    if was_queued_replaced:
+        is_cmd = routing.operation == "command"
+        comment_map = _as_mapping(parsed.get("comment")) if parsed is not None else {}
+        cmd_body = _opt_str(comment_map.get("body"))
+        recovery = (
+            cmd_body.strip()
+            if is_cmd and cmd_body and cmd_body.strip()
+            else ("@reviewsensei verify" if is_cmd else "workflow_dispatch")
+        )
+        return ConvergenceDecision(
+            status="held_queued_replaced",
+            outcome_code=(
+                "queued_command_replaced"
+                if is_cmd
+                else "queued_run_superseded_before_admission"
+            ),
+            target_base_sha=live_target.base_sha,
+            target_head_sha=live_target.head_sha,
+            routing=routing,
+            schedules_new_inference=False,
+            schedules_native_reconciliation=False,
+            reused_operation_id=None,
+            preserved_open_finding_ids=preserved,
+            recovery_command=recovery,
+        )
+
+    for record in records:
+        if record.lifecycle_phase == "uncertain_dispatch":
+            return ConvergenceDecision(
+                status="held_uncertain_operation",
+                outcome_code="uncertain_dispatch_reconciliation_required",
+                target_base_sha=live_target.base_sha,
+                target_head_sha=live_target.head_sha,
+                routing=routing,
+                schedules_new_inference=False,
+                schedules_native_reconciliation=False,
+                reused_operation_id=record.operation_id,
+                preserved_open_finding_ids=preserved,
+                recovery_command="@reviewsensei review status",
+            )
+
+    if event_name.strip() == "pull_request" and parsed is not None:
+        event_pull = _as_mapping(parsed.get("pull_request"))
+        event_head = _as_mapping(event_pull.get("head"))
+        event_base = _as_mapping(event_pull.get("base"))
+        payload_head_sha = _opt_str(event_head.get("sha"))
+        payload_base_sha = _opt_str(event_base.get("sha"))
+        if (
+            payload_head_sha is not None
+            and _GIT_SHA_FULL.fullmatch(payload_head_sha)
+            and payload_head_sha != live_target.head_sha
+        ) or (
+            payload_base_sha is not None
+            and _GIT_SHA_FULL.fullmatch(payload_base_sha)
+            and payload_base_sha != live_target.base_sha
+        ):
+            return ConvergenceDecision(
+                status="ignored_stale_event",
+                outcome_code="delayed_out_of_order_head_superseded",
+                target_base_sha=live_target.base_sha,
+                target_head_sha=live_target.head_sha,
+                routing=routing,
+                schedules_new_inference=False,
+                schedules_native_reconciliation=False,
+                reused_operation_id=(
+                    completed_for_live.operation_id
+                    if completed_for_live is not None
+                    else None
+                ),
+                preserved_open_finding_ids=preserved,
+                recovery_command=(
+                    None if completed_for_live is not None else "workflow_dispatch"
+                ),
+            )
+
+    incoming_key = routing.source_identity.source_dedup_key
+    if incoming_key is not None:
+        for record in records:
+            if record.source_dedup_key != incoming_key:
+                continue
+            if record.lifecycle_phase == "completed":
+                return ConvergenceDecision(
+                    status="converged_reused",
+                    outcome_code="duplicate_delivery_reused",
+                    target_base_sha=live_target.base_sha,
+                    target_head_sha=live_target.head_sha,
+                    routing=routing,
+                    schedules_new_inference=False,
+                    schedules_native_reconciliation=False,
+                    reused_operation_id=record.operation_id,
+                    preserved_open_finding_ids=preserved,
+                    recovery_command=None,
+                )
+            if record.lifecycle_phase == "result_retained_publication_pending":
+                return ConvergenceDecision(
+                    status="reconcile_retained_publication",
+                    outcome_code="retained_result_reused_without_inference",
+                    target_base_sha=live_target.base_sha,
+                    target_head_sha=live_target.head_sha,
+                    routing=routing,
+                    schedules_new_inference=False,
+                    schedules_native_reconciliation=True,
+                    reused_operation_id=record.operation_id,
+                    preserved_open_finding_ids=preserved,
+                    recovery_command=None,
+                )
+            if record.lifecycle_phase == "intent_accepted_unstarted":
+                if (
+                    record.target_base_sha == live_target.base_sha
+                    and record.target_head_sha == live_target.head_sha
+                ):
+                    needs_inf = record.operation_kind in {"review", "reply"}
+                    return ConvergenceDecision(
+                        status="resume_accepted_intent",
+                        outcome_code="unstarted_accepted_intent_resumed",
+                        target_base_sha=live_target.base_sha,
+                        target_head_sha=live_target.head_sha,
+                        routing=routing,
+                        schedules_new_inference=needs_inf,
+                        schedules_native_reconciliation=not needs_inf,
+                        reused_operation_id=record.operation_id,
+                        preserved_open_finding_ids=preserved,
+                        recovery_command=None,
+                    )
+                return ConvergenceDecision(
+                    status="held_intent_superseded",
+                    outcome_code="accepted_intent_head_drifted",
+                    target_base_sha=live_target.base_sha,
+                    target_head_sha=live_target.head_sha,
+                    routing=routing,
+                    schedules_new_inference=False,
+                    schedules_native_reconciliation=False,
+                    reused_operation_id=record.operation_id,
+                    preserved_open_finding_ids=preserved,
+                    recovery_command=(
+                        record.command_text.strip()
+                        if isinstance(record.command_text, str)
+                        and record.command_text.strip()
+                        else "workflow_dispatch"
+                    ),
+                )
+
+    for record in records:
+        if (
+            record.lifecycle_phase == "execution_started"
+            and record.target_base_sha == live_target.base_sha
+            and record.target_head_sha == live_target.head_sha
+        ):
+            return ConvergenceDecision(
+                status="held_active_writer",
+                outcome_code="active_operation_in_progress",
+                target_base_sha=live_target.base_sha,
+                target_head_sha=live_target.head_sha,
+                routing=routing,
+                schedules_new_inference=False,
+                schedules_native_reconciliation=False,
+                reused_operation_id=record.operation_id,
+                preserved_open_finding_ids=preserved,
+                recovery_command="@reviewsensei review status",
+            )
+
+    if retained_pending_for_live is not None and (
+        routing.admitted or routing.reused_retained_snapshot
+    ):
+        return ConvergenceDecision(
+            status="reconcile_retained_publication",
+            outcome_code="retained_result_reused_without_inference",
+            target_base_sha=live_target.base_sha,
+            target_head_sha=live_target.head_sha,
+            routing=routing,
+            schedules_new_inference=False,
+            schedules_native_reconciliation=True,
+            reused_operation_id=retained_pending_for_live.operation_id,
+            preserved_open_finding_ids=preserved,
+            recovery_command=None,
+        )
+
+    if routing.reused_retained_snapshot:
+        return ConvergenceDecision(
+            status="converged_reused",
+            outcome_code=routing.outcome_code,
+            target_base_sha=live_target.base_sha,
+            target_head_sha=live_target.head_sha,
+            routing=routing,
+            schedules_new_inference=False,
+            schedules_native_reconciliation=False,
+            reused_operation_id=(
+                completed_for_live.operation_id
+                if completed_for_live is not None
+                else None
+            ),
+            preserved_open_finding_ids=preserved,
+            recovery_command=routing.recovery_command,
+        )
+
+    if routing.admitted and routing.operation == "command":
+        comment_map = _as_mapping(parsed.get("comment")) if parsed is not None else {}
+        body_str = _opt_str(comment_map.get("body"))
+        if _is_verify_only_command(body_str) and completed_for_live is None:
+            return ConvergenceDecision(
+                status="held_unreviewed_live_head",
+                outcome_code="verify_requires_reviewed_live_snapshot",
+                target_base_sha=live_target.base_sha,
+                target_head_sha=live_target.head_sha,
+                routing=routing,
+                schedules_new_inference=False,
+                schedules_native_reconciliation=False,
+                reused_operation_id=None,
+                preserved_open_finding_ids=preserved,
+                recovery_command="workflow_dispatch",
+            )
+        return ConvergenceDecision(
+            status="schedule_command_reconciliation",
+            outcome_code="command_reconciles_current_target",
+            target_base_sha=live_target.base_sha,
+            target_head_sha=live_target.head_sha,
+            routing=routing,
+            schedules_new_inference=False,
+            schedules_native_reconciliation=True,
+            reused_operation_id=(
+                completed_for_live.operation_id
+                if completed_for_live is not None
+                else None
+            ),
+            preserved_open_finding_ids=preserved,
+            recovery_command=None,
+        )
+
+    if routing.admitted and routing.operation == "review":
+        had_prior_different_head = (
+            latest_completed is not None
+            and latest_completed.target_head_sha != live_target.head_sha
+        )
+        return ConvergenceDecision(
+            status="schedule_current_target_review",
+            outcome_code=(
+                "missed_or_advanced_head_converged"
+                if had_prior_different_head
+                else routing.outcome_code
+            ),
+            target_base_sha=live_target.base_sha,
+            target_head_sha=live_target.head_sha,
+            routing=routing,
+            schedules_new_inference=True,
+            schedules_native_reconciliation=False,
+            reused_operation_id=None,
+            preserved_open_finding_ids=preserved,
+            recovery_command=None,
+        )
+
+    if routing.admitted and routing.operation == "reply":
+        return ConvergenceDecision(
+            status="schedule_reply",
+            outcome_code=routing.outcome_code,
+            target_base_sha=live_target.base_sha,
+            target_head_sha=live_target.head_sha,
+            routing=routing,
+            schedules_new_inference=True,
+            schedules_native_reconciliation=False,
+            reused_operation_id=None,
+            preserved_open_finding_ids=preserved,
+            recovery_command=None,
+        )
+
+    return ConvergenceDecision(
+        status="not_admitted",
+        outcome_code=routing.outcome_code,
+        target_base_sha=live_target.base_sha,
+        target_head_sha=live_target.head_sha,
+        routing=routing,
+        schedules_new_inference=False,
+        schedules_native_reconciliation=False,
+        reused_operation_id=None,
+        preserved_open_finding_ids=preserved,
+        recovery_command=routing.recovery_command,
+    )
+
+
 __all__ = [
     "ALLOWED_COMMENT_ASSOCIATIONS",
+    "AcceptedOperationRecord",
     "CALLER_SUBSCRIBED_EVENTS",
     "CallerSubscriptionReport",
+    "ConcurrencySimulationResult",
+    "ConvergenceDecision",
     "EVENT_DECISION_BY_ID",
     "EVENT_DECISION_TABLE",
     "EventDecisionRule",
     "EventRoutingDecision",
+    "LivePullRequestTarget",
+    "OPERATION_LIFECYCLE_PHASES",
+    "QueuedRunCandidate",
     "REQUIRED_EVENT_FAMILIES",
+    "ReplacedQueueNotice",
     "RetainedSnapshotState",
     "SourceEventIdentity",
     "decision_rule_for",
     "evaluate_github_event",
     "inspect_caller_subscription_contract",
+    "reconcile_event_convergence",
+    "simulate_actions_concurrency_queue",
 ]
