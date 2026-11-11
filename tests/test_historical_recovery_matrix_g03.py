@@ -27,17 +27,39 @@ from review_sensei_github import controlled_restart as restart
 from review_sensei_github.api_run_host import review_startup_plan
 from review_sensei_github.api_run_plan import owner_allocations
 from review_sensei_github.historical_completion import (
+    ATTEMPT_EVIDENCE_PACKET_SCHEMA as REEXPORTED_PACKET_SCHEMA,
+)
+from review_sensei_github.historical_completion import (
+    AttemptEvidencePacket as ReexportedAttemptEvidencePacket,
+)
+from review_sensei_github.historical_completion import (
     RecoveryClassification as ReexportedHistoricalClassification,
+)
+from review_sensei_github.historical_completion import (
+    build_attempt_evidence_packet as reexported_packet_builder,
+)
+from review_sensei_github.historical_completion import (
+    build_live_ledger_attempt_evidence_packet as reexported_live_packet_builder,
 )
 from review_sensei_github.historical_completion import (
     classify_live_ledger_recovery as reexported_live_classifier,
 )
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.recovery_route_advisor import (
+    ATTEMPT_EVIDENCE_PACKET_SCHEMA,
+    ATTEMPT_PACKET_MISSING_PROOFS,
     MISSING_WITNESSES,
     RECOVERY_STATES,
+    REVIEWSENSEI_443_CASE_ID,
+    REVIEWSENSEI_443_GENERATION,
+    REVIEWSENSEI_443_PULL_REQUEST,
+    REVIEWSENSEI_443_REPOSITORY,
+    REVIEWSENSEI_443_RUN_ID,
     SUPPORTED_RECOVERY_ROUTES,
+    AttemptEvidencePacket,
     RecoveryClassification,
+    build_attempt_evidence_packet,
+    build_live_ledger_attempt_evidence_packet,
     classify_live_ledger_recovery,
     classify_recovery_state,
 )
@@ -1925,6 +1947,514 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
                     current_head=fp.requested_head,
                     app_id=0,
                 )
+
+    def test_reviewsensei_443_run_43074015855_gen11_packet_and_null_marker_contrast(
+        self,
+    ) -> None:
+        """G03: `#443` run `43074015855` gen-11 stays unknown/held while valid command actions stay terminal."""
+        self.assertEqual(REEXPORTED_PACKET_SCHEMA, ATTEMPT_EVIDENCE_PACKET_SCHEMA)
+        self.assertIs(ReexportedAttemptEvidencePacket, AttemptEvidencePacket)
+        self.assertIs(reexported_packet_builder, build_attempt_evidence_packet)
+        self.assertIs(
+            reexported_live_packet_builder, build_live_ledger_attempt_evidence_packet
+        )
+
+        # 1. Construct the exact ReviewSensei #443 run 43074015855 generation 11 shape:
+        # `publication_succeeded` phase with `terminal_transaction=None`, `action=None`,
+        # `analysis_abort=None`, released reservation, and missing close diagnostics.
+        identity_443 = ApiRunIdentity(700443, REVIEWSENSEI_443_RUN_ID)
+        config_443 = FrozenApiConfiguration(
+            commit=POLICY_SHA, digest="1" * 64, limit=512
+        )
+        owner_443 = ApiExecutionOwner(1, "hosted", 0)
+        plan_443 = review_startup_plan("hosted")
+        alloc_443 = owner_allocations(512, plan_443.liability)
+        accounting_443 = (
+            initial_accounting(
+                identity_443,
+                config_443,
+                owner_443,
+                plan_443,
+                prior_nonstartup_liability_upper_bound=14,
+            )
+            .reserve("hosted-review", alloc_443.first_work)
+            .reserve("hosted-terminal", alloc_443.first_terminal)
+        )
+        tx_443 = replace(
+            ReviewTransaction.create(
+                repository=REVIEWSENSEI_443_REPOSITORY,
+                pull_request=REVIEWSENSEI_443_PULL_REQUEST,
+                base_sha=BASE_A,
+                head_sha=HEAD_A,
+                reservation_id="5" * 64,
+                policy_digest="2" * 64,
+                configuration_digest="1" * 64,
+                evidence_digest="3" * 64,
+                generation=REVIEWSENSEI_443_GENERATION,
+            ),
+            phase="publication_succeeded",
+            result_sha256="4" * 64,
+        )
+        record_443 = SessionRecord._construct(
+            repository=REVIEWSENSEI_443_REPOSITORY,
+            pull_request=REVIEWSENSEI_443_PULL_REQUEST,
+            repository_id=700443,
+            completed_initial_reviews=1,
+            completed_verification_rounds=4,
+            failed_attempts=0,
+            generation=REVIEWSENSEI_443_GENERATION,
+            reservation_id=None,
+            reserved_slot=None,
+            last_committed_reservation_id=tx_443.reservation_id,
+            created_at="2026-11-10T12:00:00Z",
+            updated_at="2026-11-10T12:15:00Z",
+            expires_at="2026-12-10T12:00:00Z",
+            operator_paused=False,
+            transaction=tx_443,
+            api_run_accounting=accounting_443.to_document(),
+        )
+        original_record_digest = record_443.record_sha256
+        original_serialized = render_session_comment(
+            repository_id=700443,
+            pull_request=REVIEWSENSEI_443_PULL_REQUEST,
+            record=record_443,
+        )
+
+        packet_443_same_head = build_attempt_evidence_packet(
+            record_443,
+            current_base=BASE_A,
+            current_head=HEAD_A,
+            diagnostics_available=False,
+        )
+        # Strict read-only invariant: ledger record is bit-for-bit untouched.
+        self.assertEqual(record_443.record_sha256, original_record_digest)
+        self.assertEqual(
+            render_session_comment(
+                repository_id=700443,
+                pull_request=REVIEWSENSEI_443_PULL_REQUEST,
+                record=record_443,
+            ),
+            original_serialized,
+        )
+        self.assertFalse(packet_443_same_head.authority)
+        self.assertFalse(packet_443_same_head.null_marker_universal_failure)
+        self.assertEqual(packet_443_same_head.case_id, REVIEWSENSEI_443_CASE_ID)
+        self.assertEqual(packet_443_same_head.repository, REVIEWSENSEI_443_REPOSITORY)
+        self.assertEqual(
+            packet_443_same_head.pull_request, REVIEWSENSEI_443_PULL_REQUEST
+        )
+        self.assertEqual(
+            packet_443_same_head.session_generation, REVIEWSENSEI_443_GENERATION
+        )
+        self.assertEqual(packet_443_same_head.run_id, REVIEWSENSEI_443_RUN_ID)
+        self.assertEqual(
+            packet_443_same_head.transaction_phase, "publication_succeeded"
+        )
+        self.assertIsNone(packet_443_same_head.terminal_transaction)
+        self.assertIsNone(packet_443_same_head.action_phase)
+        self.assertIsNone(packet_443_same_head.terminal_action_authenticated)
+        self.assertIsNone(packet_443_same_head.abort_cleanup_entry_state)
+        self.assertEqual(packet_443_same_head.executor_sha, "unknown")
+        self.assertEqual(packet_443_same_head.installed_core_version, "unknown")
+        self.assertEqual(packet_443_same_head.installed_hosted_version, "unknown")
+        self.assertEqual(packet_443_same_head.terminal_settlement_form, "unsettled")
+        self.assertFalse(packet_443_same_head.historical_settlement_receipt_supplied)
+        self.assertFalse(packet_443_same_head.diagnostics_available)
+        self.assertEqual(packet_443_same_head.inferred_cause, "unknown")
+        self.assertFalse(packet_443_same_head.classification.terminal)
+        self.assertEqual(
+            packet_443_same_head.classification.state_code,
+            "same_head_unclosed_publication_succeeded",
+        )
+        for required_hold in (
+            "terminal_transaction_settlement",
+            "missing_close_diagnostics",
+            "installed_executor_provenance",
+            "publication_receipt_id",
+            "check_receipt_id",
+            "thread_cleanup_receipt",
+            "historical_live_settlement_receipt",
+        ):
+            self.assertIn(required_hold, packet_443_same_head.missing_proofs)
+
+        # Different-head classification of #443 gen-11 with unknown executor also stays
+        # unsettled with `inferred_cause == "unknown"` and explicit missing proofs.
+        packet_443_diff_head = build_attempt_evidence_packet(
+            record_443,
+            current_base=BASE_A,
+            current_head=HEAD_B,
+            executor_status="unrecognized",
+            diagnostics_available=False,
+        )
+        self.assertFalse(packet_443_diff_head.authority)
+        self.assertEqual(packet_443_diff_head.inferred_cause, "unknown")
+        self.assertEqual(packet_443_diff_head.terminal_settlement_form, "unsettled")
+        self.assertIn(
+            "qualified_historical_executor_contract",
+            packet_443_diff_head.missing_proofs,
+        )
+        self.assertIn(
+            "terminal_transaction_settlement",
+            packet_443_diff_head.missing_proofs,
+        )
+        self.assertIn(
+            "missing_close_diagnostics",
+            packet_443_diff_head.missing_proofs,
+        )
+        self.assertIn(
+            "historical_live_settlement_receipt",
+            packet_443_diff_head.missing_proofs,
+        )
+
+        # Inventing a diagnosis from missing logs is rejected outright!
+        with self.assertRaisesRegex(
+            ReviewInputError, "cannot infer a cause from missing diagnostics"
+        ):
+            build_attempt_evidence_packet(
+                record_443,
+                current_base=BASE_A,
+                current_head=HEAD_A,
+                diagnostics_available=False,
+                diagnostic_cause="confirmed_response_loss",
+            )
+
+        # When diagnostics and native receipt IDs are explicitly supplied, missing-close
+        # and receipt holds narrow accurately while live settlement remains open.
+        packet_443_with_receipts = build_attempt_evidence_packet(
+            record_443,
+            current_base=BASE_A,
+            current_head=HEAD_A,
+            executor_sha="d" * 40,
+            executor_commit="e" * 40,
+            workflow_blob="f" * 40,
+            installed_core_version="0.8.20",
+            installed_hosted_version="0.3.26",
+            publication_receipt_id=9101,
+            check_receipt_id=9102,
+            thread_cleanup_receipt_state="confirmed_clean",
+            native_approval_receipt_id=9103,
+            diagnostics_available=True,
+            diagnostic_cause="confirmed_response_loss",
+        )
+        self.assertEqual(
+            packet_443_with_receipts.inferred_cause, "confirmed_response_loss"
+        )
+        self.assertNotIn(
+            "missing_close_diagnostics", packet_443_with_receipts.missing_proofs
+        )
+        self.assertNotIn(
+            "publication_receipt_id", packet_443_with_receipts.missing_proofs
+        )
+        self.assertNotIn("check_receipt_id", packet_443_with_receipts.missing_proofs)
+        self.assertNotIn(
+            "thread_cleanup_receipt", packet_443_with_receipts.missing_proofs
+        )
+        self.assertIn(
+            "terminal_transaction_settlement",
+            packet_443_with_receipts.missing_proofs,
+        )
+        self.assertIn(
+            "historical_live_settlement_receipt",
+            packet_443_with_receipts.missing_proofs,
+        )
+        serialized_packet = packet_443_with_receipts.to_dict()
+        self.assertIs(serialized_packet["authority"], False)
+        self.assertIs(serialized_packet["null_marker_universal_failure"], False)
+        self.assertEqual(serialized_packet["case_id"], REVIEWSENSEI_443_CASE_ID)
+
+        # 2. Contrast directly with valid terminal command actions having a null
+        # review terminal marker (`terminal_transaction=None`):
+        cmd_acc, _ = _make_terminal_action_accounting(head_sha=HEAD_A, job="command")
+        cmd_no_tx = _make_record(accounting=cmd_acc, transaction=None, generation=4)
+        cmd_packet_no_tx = build_attempt_evidence_packet(
+            cmd_no_tx,
+            current_base=BASE_A,
+            current_head=HEAD_A,
+            evidence_producer=PRODUCER,
+        )
+        self.assertFalse(cmd_packet_no_tx.authority)
+        self.assertFalse(cmd_packet_no_tx.null_marker_universal_failure)
+        self.assertIsNone(cmd_packet_no_tx.terminal_transaction)
+        self.assertTrue(cmd_packet_no_tx.terminal_action_authenticated)
+        self.assertTrue(cmd_packet_no_tx.classification.terminal)
+        self.assertEqual(
+            cmd_packet_no_tx.terminal_settlement_form,
+            "authenticated_terminal_action_null_review_marker",
+        )
+        self.assertEqual(cmd_packet_no_tx.inferred_cause, "not_applicable_settled")
+        self.assertEqual(cmd_packet_no_tx.missing_proofs, ())
+
+        prior_tx = _make_tx(phase="publication_succeeded", head_sha=HEAD_A)
+        cmd_with_tx = _make_record(
+            accounting=cmd_acc, transaction=prior_tx, generation=5
+        )
+        cmd_packet_with_tx = build_attempt_evidence_packet(
+            cmd_with_tx,
+            current_base=BASE_A,
+            current_head=HEAD_A,
+            evidence_producer=PRODUCER,
+        )
+        self.assertIsNone(cmd_packet_with_tx.terminal_transaction)
+        self.assertTrue(cmd_packet_with_tx.classification.terminal)
+        self.assertEqual(
+            cmd_packet_with_tx.terminal_settlement_form,
+            "authenticated_terminal_action_with_prior_review_marker",
+        )
+        self.assertEqual(cmd_packet_with_tx.missing_proofs, ())
+
+        # 3. Also verify pre-entry abort and settled review settlement forms:
+        abort_base = _make_accounting()
+        abort_tx = _make_tx(phase="analysis", head_sha=HEAD_A)
+        abort_doc = abort_base.to_document()
+        for blk in abort_doc["blocks"]:
+            blk["pending"] = []
+        abort_doc["analysis_abort"] = {
+            "source_root": "6" * 64,
+            "cleanup_root": "7" * 64,
+            "transaction": abort_tx.to_dict(),
+            "entry_state": "not_started",
+            "run_id": abort_base.identity.run_id,
+            "owner": {"run_attempt": 1, "job": "hosted", "generation": 0},
+        }
+        abort_record = _make_record(
+            accounting=ApiRunAccounting.from_document(abort_doc),
+            transaction=None,
+        )
+        abort_packet = build_attempt_evidence_packet(
+            abort_record, current_base=BASE_A, current_head=HEAD_A
+        )
+        self.assertTrue(abort_packet.classification.terminal)
+        self.assertEqual(
+            abort_packet.terminal_settlement_form, "pre_entry_analysis_abort"
+        )
+        self.assertEqual(abort_packet.abort_cleanup_entry_state, "not_started")
+        self.assertEqual(abort_packet.abort_cleanup_root_sha256, "7" * 64)
+
+        settled_tx = _make_tx(phase="publication_succeeded", head_sha=HEAD_A)
+        settled_doc = _make_accounting().to_document()
+        settled_doc["terminal_transaction"] = settled_tx.transaction_id
+        settled_rec = _make_record(
+            accounting=ApiRunAccounting.from_document(settled_doc),
+            transaction=settled_tx,
+        )
+        settled_packet = build_attempt_evidence_packet(
+            settled_rec, current_base=BASE_A, current_head=HEAD_A
+        )
+        self.assertTrue(settled_packet.classification.terminal)
+        self.assertEqual(
+            settled_packet.terminal_settlement_form, "review_terminal_transaction"
+        )
+        self.assertEqual(settled_packet.inferred_cause, "not_applicable_settled")
+
+    def test_attempt_evidence_packet_live_readonly_and_guardrails(self) -> None:
+        """Verify `build_live_ledger_attempt_evidence_packet` read-only modes & validation."""
+        # 1. Validation guardrails on `AttemptEvidencePacket` and `build_attempt_evidence_packet`:
+        settled_tx = _make_tx(phase="publication_succeeded", head_sha=HEAD_A)
+        settled_doc = _make_accounting().to_document()
+        settled_doc["terminal_transaction"] = settled_tx.transaction_id
+        settled_rec = _make_record(
+            accounting=ApiRunAccounting.from_document(settled_doc),
+            transaction=settled_tx,
+        )
+        valid_packet = build_attempt_evidence_packet(
+            settled_rec, current_base=BASE_A, current_head=HEAD_A
+        )
+        with self.assertRaisesRegex(ReviewInputError, "strictly diagnostic"):
+            replace(valid_packet, authority=True)
+        with self.assertRaisesRegex(ReviewInputError, "strictly diagnostic"):
+            replace(valid_packet, null_marker_universal_failure=True)
+        with self.assertRaisesRegex(ReviewInputError, "RecoveryClassification"):
+            replace(valid_packet, classification="bad")  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ReviewInputError, "case_id"):
+            replace(valid_packet, case_id="   ")
+        with self.assertRaisesRegex(ReviewInputError, "run_attempt"):
+            replace(valid_packet, run_attempt=3)
+        with self.assertRaisesRegex(ReviewInputError, "40-hex SHA"):
+            replace(valid_packet, executor_sha="not-a-sha")
+        with self.assertRaisesRegex(ReviewInputError, "version token"):
+            replace(valid_packet, installed_core_version="bad version!")
+        with self.assertRaisesRegex(ReviewInputError, "64-hex SHA-256"):
+            replace(valid_packet, record_sha256="xyz")
+        with self.assertRaisesRegex(ReviewInputError, "positive integer"):
+            replace(valid_packet, run_id=0)
+        with self.assertRaisesRegex(ReviewInputError, "non-negative integer"):
+            replace(valid_packet, confirmed_requests=-1)
+        with self.assertRaisesRegex(ReviewInputError, "thread_cleanup_receipt_state"):
+            replace(valid_packet, thread_cleanup_receipt_state="bogus")
+        with self.assertRaisesRegex(ReviewInputError, "vocabulary is invalid"):
+            replace(valid_packet, terminal_settlement_form="bogus")
+        with self.assertRaisesRegex(ReviewInputError, "missing diagnostics"):
+            replace(
+                valid_packet,
+                diagnostics_available=False,
+                inferred_cause="confirmed_response_loss",
+            )
+        with self.assertRaisesRegex(ReviewInputError, "record its settlement form"):
+            replace(valid_packet, terminal_settlement_form="unsettled")
+        with self.assertRaisesRegex(ReviewInputError, "missing_proofs are invalid"):
+            replace(valid_packet, missing_proofs=("not_a_proof",))
+        with self.assertRaisesRegex(ReviewInputError, "cannot carry a failure cause"):
+            build_attempt_evidence_packet(
+                settled_rec,
+                current_base=BASE_A,
+                current_head=HEAD_A,
+                diagnostics_available=True,
+                diagnostic_cause="confirmed_response_loss",
+            )
+        with self.assertRaisesRegex(ReviewInputError, "boolean flags"):
+            build_attempt_evidence_packet(
+                settled_rec,
+                current_base=BASE_A,
+                current_head=HEAD_A,
+                diagnostics_available="yes",  # type: ignore[arg-type]
+            )
+        with self.assertRaisesRegex(
+            ReviewInputError, "diagnostic_cause is unsupported"
+        ):
+            build_attempt_evidence_packet(
+                settled_rec,
+                current_base=BASE_A,
+                current_head=HEAD_A,
+                diagnostic_cause="invented_cause",
+            )
+        no_repo_id_rec = SessionRecord._construct(
+            repository="owner/repo",
+            pull_request=7,
+            repository_id=None,
+            completed_initial_reviews=0,
+            completed_verification_rounds=0,
+            failed_attempts=0,
+            generation=1,
+            reservation_id=None,
+            reserved_slot=None,
+            last_committed_reservation_id=None,
+            created_at="2026-11-10T12:00:00Z",
+            updated_at="2026-11-10T12:00:00Z",
+            expires_at="2026-12-10T12:00:00Z",
+            operator_paused=False,
+        )
+        with self.assertRaisesRegex(ReviewInputError, "repository_id-bound"):
+            build_attempt_evidence_packet(
+                no_repo_id_rec, current_base=BASE_A, current_head=HEAD_A
+            )
+        self.assertTrue(MISSING_WITNESSES.issubset(ATTEMPT_PACKET_MISSING_PROOFS))
+
+        # 2. Read-only live ledger packet inspection across missing, corrupt, and qualified states:
+        with tempfile.TemporaryDirectory() as directory:
+            empty_fx = EntryFixture(directory, limit=512)
+            empty_ledger, empty_obs = _diagnostic_ledger(empty_fx)
+            missing_pkt = build_live_ledger_attempt_evidence_packet(
+                ledger=empty_ledger,
+                identity=IDENTITY,
+                current_base=BASE_A,
+                current_head=HEAD_A,
+            )
+            self.assertFalse(missing_pkt.authority)
+            self.assertEqual(missing_pkt.terminal_settlement_form, "unenrolled_session")
+            self.assertTrue(all(method == "GET" for method, _ in empty_obs), empty_obs)
+
+            seed_rec = _make_record(accounting=_make_accounting(), transaction=None)
+            valid_body = render_session_comment(
+                repository_id=123, pull_request=7, record=seed_rec
+            )
+            empty_fx.comment = {
+                "id": 500,
+                "body": valid_body.replace('"schema_version":"1.0"', "{not-json"),
+                "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            }
+            corrupt_ledger, corrupt_obs = _diagnostic_ledger(empty_fx)
+            corrupt_pkt = build_live_ledger_attempt_evidence_packet(
+                ledger=corrupt_ledger,
+                identity=IDENTITY,
+                current_base=BASE_A,
+                current_head=HEAD_A,
+            )
+            self.assertFalse(corrupt_pkt.classification.terminal)
+            self.assertEqual(corrupt_pkt.terminal_settlement_form, "unsettled")
+            self.assertIn("authenticated_session_root", corrupt_pkt.missing_proofs)
+            with self.assertRaisesRegex(
+                ReviewInputError, "cannot claim terminal settlement"
+            ):
+                replace(
+                    corrupt_pkt,
+                    terminal_settlement_form="review_terminal_transaction",
+                )
+            self.assertTrue(
+                all(method == "GET" for method, _ in corrupt_obs), corrupt_obs
+            )
+
+        from test_review_run import ConsecutiveReviewRunTests
+
+        with tempfile.TemporaryDirectory() as directory:
+            comp_fx = ConsecutiveReviewRunTests.historical_case(directory)
+            comp_ledger, comp_obs = _diagnostic_ledger(comp_fx)
+            comp_pkt = build_live_ledger_attempt_evidence_packet(
+                ledger=comp_ledger,
+                identity=IDENTITY,
+                current_base=comp_fx.requested_base,
+                current_head=comp_fx.requested_head,
+                actions_token="synthetic-actions",
+            )
+            self.assertFalse(comp_pkt.authority)
+            self.assertEqual(comp_pkt.executor_status, "qualified_success")
+            self.assertNotEqual(comp_pkt.executor_sha, "unknown")
+            self.assertNotEqual(comp_pkt.executor_commit, "unknown")
+            self.assertNotEqual(comp_pkt.workflow_blob, "unknown")
+            self.assertEqual(comp_pkt.terminal_settlement_form, "unsettled")
+            self.assertEqual(comp_pkt.inferred_cause, "unknown")
+            self.assertIn("historical_live_settlement_receipt", comp_pkt.missing_proofs)
+            self.assertTrue(all(method == "GET" for method, _ in comp_obs), comp_obs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            cmd_fx = CommandEntryFixture(directory)
+            live_cmd_acc, extra_parts = _make_terminal_action_accounting(
+                head_sha=ACTION_HEAD, job="command"
+            )
+            live_cmd_rec = _make_record(accounting=live_cmd_acc, transaction=None)
+            cmd_fx.comment = {
+                "id": 601,
+                "body": render_session_comment(
+                    repository_id=123, pull_request=7, record=live_cmd_rec
+                ),
+                "user": {"type": "Bot", "login": "reviewsensei[bot]", "id": 999},
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            }
+            for item in extra_parts:
+                cmd_fx.extra_comments[item["id"]] = item
+            cmd_ledger, cmd_obs = _diagnostic_ledger(cmd_fx)
+            cmd_live_pkt = build_live_ledger_attempt_evidence_packet(
+                ledger=cmd_ledger,
+                identity=IDENTITY,
+                current_base=cmd_fx.requested_base,
+                current_head=ACTION_HEAD,
+                actions_token="synthetic-actions",
+            )
+            self.assertTrue(cmd_live_pkt.classification.terminal)
+            self.assertIsNone(cmd_live_pkt.terminal_transaction)
+            self.assertEqual(
+                cmd_live_pkt.terminal_settlement_form,
+                "authenticated_terminal_action_null_review_marker",
+            )
+            self.assertTrue(all(method == "GET" for method, _ in cmd_obs), cmd_obs)
+
+        from review_sensei_github.historical_completion import HistoricalSnapshotLedger
+
+        snap_ledger = HistoricalSnapshotLedger(
+            SimpleNamespace(
+                ledger=SimpleNamespace(),
+                identity=IDENTITY,
+                record=settled_rec,
+                require_process=lambda: None,
+            )
+        )
+        with self.assertRaisesRegex(ReviewInputError, "permits reads only"):
+            snap_ledger.replace()
+        with self.assertRaisesRegex(ReviewInputError, "permits reads only"):
+            snap_ledger._request("POST", "/repos/owner/repo/issues/7/comments")
+        with self.assertRaisesRegex(ReviewInputError, "historical ledger identity"):
+            snap_ledger.load(replace(IDENTITY, pull_request=99))
+        self.assertEqual(snap_ledger.load(IDENTITY).record, settled_rec)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ live resets, forge historical witnesses, or mutate GitHub state.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from review_sensei.api_work import (
 from review_sensei.bounded_evidence import (
     INLINE_ENCODING,
     EvidenceReadBudget,
+    canonical_bytes,
     read_inline_evidence,
 )
 from review_sensei.errors import ReviewInputError
@@ -157,6 +159,55 @@ RECOVERY_STATES: frozenset[str] = frozenset(
         "publication_failed_isolation_required",
         "publication_pending_same_head_replay_eligible",
         "nonterminal_transaction_isolation_required",
+    }
+)
+
+ATTEMPT_EVIDENCE_PACKET_SCHEMA = "attempt-evidence-packet-v1"
+REVIEWSENSEI_443_CASE_ID = "reviewsensei-443-run-43074015855-gen-11"
+REVIEWSENSEI_443_REPOSITORY = "malsabbagh/review-sensei"
+REVIEWSENSEI_443_PULL_REQUEST = 443
+REVIEWSENSEI_443_RUN_ID = 43074015855
+REVIEWSENSEI_443_GENERATION = 11
+
+TERMINAL_SETTLEMENT_FORMS: frozenset[str] = frozenset(
+    {
+        "review_terminal_transaction",
+        "authenticated_terminal_action_null_review_marker",
+        "authenticated_terminal_action_with_prior_review_marker",
+        "pre_entry_analysis_abort",
+        "unenrolled_session",
+        "unsettled",
+    }
+)
+
+DIAGNOSTIC_CAUSES: frozenset[str] = frozenset(
+    {
+        "not_applicable_settled",
+        "unknown",
+        "confirmed_pre_write_overflow",
+        "confirmed_response_loss",
+        "confirmed_executor_step_failure",
+        "confirmed_capability_expiry",
+        "confirmed_source_edit_cancellation",
+    }
+)
+
+THREAD_CLEANUP_RECEIPT_STATES: frozenset[str] = frozenset(
+    {
+        "not_required",
+        "confirmed_clean",
+        "unresolved_threads_retained",
+    }
+)
+
+ATTEMPT_PACKET_MISSING_PROOFS: frozenset[str] = MISSING_WITNESSES | frozenset(
+    {
+        "missing_close_diagnostics",
+        "installed_executor_provenance",
+        "publication_receipt_id",
+        "check_receipt_id",
+        "thread_cleanup_receipt",
+        "historical_live_settlement_receipt",
     }
 )
 
@@ -1299,6 +1350,786 @@ def classify_recovery_state(
     )
 
 
+_HEX40_RE = re.compile(r"[a-f0-9]{40}")
+_HEX64_RE = re.compile(r"[a-f0-9]{64}")
+_VERSION_TOKEN_RE = re.compile(r"[A-Za-z0-9_.+-]{1,64}")
+
+
+def _require_sha_or_unknown(value: str, label: str) -> None:
+    if not isinstance(value, str) or (
+        value != "unknown" and _HEX40_RE.fullmatch(value) is None
+    ):
+        raise ReviewInputError(
+            f"attempt evidence {label} must be 'unknown' or a 40-hex SHA"
+        )
+
+
+def _require_version_or_unknown(value: str, label: str) -> None:
+    if not isinstance(value, str) or (
+        value != "unknown" and _VERSION_TOKEN_RE.fullmatch(value) is None
+    ):
+        raise ReviewInputError(
+            f"attempt evidence {label} must be 'unknown' or a bounded version token"
+        )
+
+
+def _require_optional_sha256(value: str | None, label: str) -> None:
+    if value is not None and (
+        not isinstance(value, str) or _HEX64_RE.fullmatch(value) is None
+    ):
+        raise ReviewInputError(
+            f"attempt evidence {label} must be None or a 64-hex SHA-256"
+        )
+
+
+def _require_optional_pos_int(value: int | None, label: str) -> None:
+    if value is not None and (type(value) is not int or value < 1):
+        raise ReviewInputError(
+            f"attempt evidence {label} must be None or a positive integer"
+        )
+
+
+def _require_optional_nat_int(value: int | None, label: str) -> None:
+    if value is not None and (type(value) is not int or value < 0):
+        raise ReviewInputError(
+            f"attempt evidence {label} must be None or a non-negative integer"
+        )
+
+
+@dataclass(frozen=True)
+class AttemptEvidencePacket:
+    """Immutable read-only historical attempt-evidence packet (`authority=False`).
+
+    Binds original attempt identities, installed executor provenance, frozen
+    context, caller funding/reservation liability, intent/execution markers,
+    retained result digests, native publication/check/cleanup/terminal receipts,
+    uncertainty/missing-diagnostics state, and explicit missing-proof holds
+    without mutating session ledgers or forging live settlement receipts.
+    """
+
+    case_id: str
+    repository: str
+    repository_id: int
+    pull_request: int
+    session_generation: int | None
+    record_sha256: str | None
+    run_id: int | None
+    run_attempt: int | None
+    owner_job: str | None
+    owner_generation: int | None
+    transaction_id: str | None
+    base_sha: str | None
+    head_sha: str | None
+    current_base_sha: str
+    current_head_sha: str
+    executor_sha: str
+    executor_commit: str
+    workflow_blob: str
+    installed_core_version: str
+    installed_hosted_version: str
+    executor_status: str
+    policy_commit: str | None
+    configuration_digest: str | None
+    policy_digest: str | None
+    evidence_digest: str | None
+    retained_context_available: bool
+    explicit_rescan: bool
+    operator_paused: bool
+    caller_allowance_limit: int | None
+    startup_liability: int | None
+    prior_nonstartup_liability: int | None
+    confirmed_requests: int | None
+    uncertain_requests: int | None
+    reserved_undispatched: int | None
+    nonstartup_liability_upper_bound: int | None
+    total_liability_upper_bound: int | None
+    remaining_caller_allowance: int | None
+    attempt2_slot_available: bool
+    active_reservation_id: str | None
+    reserved_slot: str | None
+    transaction_phase: str
+    action_phase: str | None
+    action_purpose: str | None
+    action_execution_started: bool | None
+    action_operation_key: str | None
+    action_intent_sha256: str | None
+    terminal_transaction: str | None
+    terminal_action_authenticated: bool | None
+    abort_cleanup_entry_state: str | None
+    abort_cleanup_root_sha256: str | None
+    result_sha256: str | None
+    retained_result_verified: bool
+    coverage_only_partial: bool
+    publication_receipt_id: int | None
+    check_receipt_id: int | None
+    thread_cleanup_receipt_state: str | None
+    native_approval_receipt_id: int | None
+    terminal_settlement_form: str
+    historical_settlement_receipt_supplied: bool
+    dispatch_status: str
+    diagnostics_available: bool
+    inferred_cause: str
+    missing_proofs: tuple[str, ...]
+    classification: RecoveryClassification
+    null_marker_universal_failure: bool = False
+    authority: bool = False
+    schema_version: str = ATTEMPT_EVIDENCE_PACKET_SCHEMA
+
+    def __post_init__(self) -> None:
+        if (
+            self.authority is not False
+            or self.null_marker_universal_failure is not False
+            or self.schema_version != ATTEMPT_EVIDENCE_PACKET_SCHEMA
+        ):
+            raise ReviewInputError(
+                "attempt evidence packet is strictly diagnostic (authority=False) "
+                "and never treats a null review marker as a universal failure rule"
+            )
+        if not isinstance(self.classification, RecoveryClassification):
+            raise ReviewInputError(
+                "attempt evidence packet requires a RecoveryClassification"
+            )
+        if not isinstance(self.case_id, str) or not self.case_id.strip():
+            raise ReviewInputError("attempt evidence case_id must be non-empty")
+        SessionIdentity(
+            repository=self.repository,
+            pull_request=self.pull_request,
+            repository_id=self.repository_id,
+        )
+        _require_optional_nat_int(self.session_generation, "session_generation")
+        _require_optional_sha256(self.record_sha256, "record_sha256")
+        _require_optional_pos_int(self.run_id, "run_id")
+        if self.run_attempt not in {None, 1, 2}:
+            raise ReviewInputError("attempt evidence run_attempt must be None, 1, or 2")
+        _require_optional_nat_int(self.owner_generation, "owner_generation")
+        _require_optional_sha256(self.transaction_id, "transaction_id")
+        if self.base_sha is not None:
+            _require_sha(self.base_sha, "base_sha")
+        if self.head_sha is not None:
+            _require_sha(self.head_sha, "head_sha")
+        _require_sha(self.current_base_sha, "current_base_sha")
+        _require_sha(self.current_head_sha, "current_head_sha")
+        _require_sha_or_unknown(self.executor_sha, "executor_sha")
+        _require_sha_or_unknown(self.executor_commit, "executor_commit")
+        _require_sha_or_unknown(self.workflow_blob, "workflow_blob")
+        _require_version_or_unknown(
+            self.installed_core_version, "installed_core_version"
+        )
+        _require_version_or_unknown(
+            self.installed_hosted_version, "installed_hosted_version"
+        )
+        if self.policy_commit is not None:
+            _require_sha(self.policy_commit, "policy_commit")
+        _require_optional_sha256(self.configuration_digest, "configuration_digest")
+        _require_optional_sha256(self.policy_digest, "policy_digest")
+        _require_optional_sha256(self.evidence_digest, "evidence_digest")
+        _require_optional_pos_int(self.caller_allowance_limit, "caller_allowance_limit")
+        _require_optional_nat_int(self.startup_liability, "startup_liability")
+        _require_optional_nat_int(
+            self.prior_nonstartup_liability, "prior_nonstartup_liability"
+        )
+        _require_optional_nat_int(self.confirmed_requests, "confirmed_requests")
+        _require_optional_nat_int(self.uncertain_requests, "uncertain_requests")
+        _require_optional_nat_int(self.reserved_undispatched, "reserved_undispatched")
+        _require_optional_nat_int(
+            self.nonstartup_liability_upper_bound,
+            "nonstartup_liability_upper_bound",
+        )
+        _require_optional_nat_int(
+            self.total_liability_upper_bound, "total_liability_upper_bound"
+        )
+        _require_optional_nat_int(
+            self.remaining_caller_allowance, "remaining_caller_allowance"
+        )
+        _require_optional_sha256(self.action_operation_key, "action_operation_key")
+        _require_optional_sha256(self.action_intent_sha256, "action_intent_sha256")
+        _require_optional_sha256(self.terminal_transaction, "terminal_transaction")
+        _require_optional_sha256(
+            self.abort_cleanup_root_sha256, "abort_cleanup_root_sha256"
+        )
+        _require_optional_sha256(self.result_sha256, "result_sha256")
+        _require_optional_pos_int(self.publication_receipt_id, "publication_receipt_id")
+        _require_optional_pos_int(self.check_receipt_id, "check_receipt_id")
+        _require_optional_pos_int(
+            self.native_approval_receipt_id, "native_approval_receipt_id"
+        )
+        if (
+            self.thread_cleanup_receipt_state is not None
+            and self.thread_cleanup_receipt_state not in THREAD_CLEANUP_RECEIPT_STATES
+        ):
+            raise ReviewInputError(
+                "attempt evidence thread_cleanup_receipt_state is invalid"
+            )
+        if (
+            self.executor_status not in EXECUTOR_STATUSES
+            or self.dispatch_status not in DISPATCH_STATUSES
+            or self.terminal_settlement_form not in TERMINAL_SETTLEMENT_FORMS
+            or self.inferred_cause not in DIAGNOSTIC_CAUSES
+        ):
+            raise ReviewInputError("attempt evidence packet vocabulary is invalid")
+        if not self.diagnostics_available and self.inferred_cause not in {
+            "unknown",
+            "not_applicable_settled",
+        }:
+            raise ReviewInputError(
+                "attempt evidence packet cannot infer a cause from missing diagnostics"
+            )
+        if self.classification.terminal and (
+            self.inferred_cause != "not_applicable_settled"
+            or self.terminal_settlement_form == "unsettled"
+        ):
+            raise ReviewInputError(
+                "settled attempt evidence packet must record its settlement form"
+            )
+        if not self.classification.terminal and (
+            self.terminal_settlement_form != "unsettled"
+        ):
+            raise ReviewInputError(
+                "nonterminal attempt evidence packet cannot claim terminal settlement"
+            )
+        if any(
+            proof not in ATTEMPT_PACKET_MISSING_PROOFS for proof in self.missing_proofs
+        ) or len(set(self.missing_proofs)) != len(self.missing_proofs):
+            raise ReviewInputError("attempt evidence missing_proofs are invalid")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "authority": False,
+            "null_marker_universal_failure": False,
+            "case_id": self.case_id,
+            "identities": {
+                "repository": self.repository,
+                "repository_id": self.repository_id,
+                "pull_request": self.pull_request,
+                "session_generation": self.session_generation,
+                "record_sha256": self.record_sha256,
+                "run_id": self.run_id,
+                "run_attempt": self.run_attempt,
+                "owner_job": self.owner_job,
+                "owner_generation": self.owner_generation,
+                "transaction_id": self.transaction_id,
+                "base_sha": self.base_sha,
+                "head_sha": self.head_sha,
+                "current_base_sha": self.current_base_sha,
+                "current_head_sha": self.current_head_sha,
+            },
+            "installed_executor": {
+                "executor_sha": self.executor_sha,
+                "executor_commit": self.executor_commit,
+                "workflow_blob": self.workflow_blob,
+                "installed_core_version": self.installed_core_version,
+                "installed_hosted_version": self.installed_hosted_version,
+                "executor_status": self.executor_status,
+            },
+            "context": {
+                "policy_commit": self.policy_commit,
+                "configuration_digest": self.configuration_digest,
+                "policy_digest": self.policy_digest,
+                "evidence_digest": self.evidence_digest,
+                "retained_context_available": self.retained_context_available,
+                "explicit_rescan": self.explicit_rescan,
+                "operator_paused": self.operator_paused,
+            },
+            "funding": {
+                "caller_allowance_limit": self.caller_allowance_limit,
+                "startup_liability": self.startup_liability,
+                "prior_nonstartup_liability": self.prior_nonstartup_liability,
+                "confirmed_requests": self.confirmed_requests,
+                "uncertain_requests": self.uncertain_requests,
+                "reserved_undispatched": self.reserved_undispatched,
+                "nonstartup_liability_upper_bound": self.nonstartup_liability_upper_bound,
+                "total_liability_upper_bound": self.total_liability_upper_bound,
+                "remaining_caller_allowance": self.remaining_caller_allowance,
+                "attempt2_slot_available": self.attempt2_slot_available,
+                "active_reservation_id": self.active_reservation_id,
+                "reserved_slot": self.reserved_slot,
+            },
+            "intent_execution": {
+                "transaction_phase": self.transaction_phase,
+                "action_phase": self.action_phase,
+                "action_purpose": self.action_purpose,
+                "action_execution_started": self.action_execution_started,
+                "action_operation_key": self.action_operation_key,
+                "action_intent_sha256": self.action_intent_sha256,
+                "terminal_transaction": self.terminal_transaction,
+                "terminal_action_authenticated": self.terminal_action_authenticated,
+                "abort_cleanup_entry_state": self.abort_cleanup_entry_state,
+                "abort_cleanup_root_sha256": self.abort_cleanup_root_sha256,
+            },
+            "retained_results": {
+                "result_sha256": self.result_sha256,
+                "retained_result_verified": self.retained_result_verified,
+                "coverage_only_partial": self.coverage_only_partial,
+            },
+            "receipts": {
+                "publication_receipt_id": self.publication_receipt_id,
+                "check_receipt_id": self.check_receipt_id,
+                "thread_cleanup_receipt_state": self.thread_cleanup_receipt_state,
+                "native_approval_receipt_id": self.native_approval_receipt_id,
+                "terminal_settlement_form": self.terminal_settlement_form,
+                "historical_settlement_receipt_supplied": (
+                    self.historical_settlement_receipt_supplied
+                ),
+            },
+            "uncertainty": {
+                "dispatch_status": self.dispatch_status,
+                "diagnostics_available": self.diagnostics_available,
+                "inferred_cause": self.inferred_cause,
+            },
+            "missing_proofs": list(self.missing_proofs),
+            "classification": self.classification.to_dict(),
+        }
+
+
+def _derive_terminal_settlement_form(classification: RecoveryClassification) -> str:
+    if classification.state_code == "unenrolled_ready":
+        return "unenrolled_session"
+    if classification.state_code == "terminal_action_without_review_transaction":
+        return "authenticated_terminal_action_null_review_marker"
+    if classification.state_code in {
+        "terminal_action_settled",
+        "terminal_action_operator_paused",
+    }:
+        return "authenticated_terminal_action_with_prior_review_marker"
+    if classification.state_code == "pre_entry_analysis_abort_settled":
+        return "pre_entry_analysis_abort"
+    if classification.state_code in {
+        "terminal_review_settled",
+        "terminal_review_operator_paused",
+        "terminal_review_coverage_only_partial",
+    }:
+        return "review_terminal_transaction"
+    return "unsettled"
+
+
+def _assemble_attempt_evidence_packet(
+    *,
+    identity: SessionIdentity,
+    record: SessionRecord | None,
+    classification: RecoveryClassification,
+    current_base: str,
+    current_head: str,
+    case_id: str | None = None,
+    executor_sha: str = "unknown",
+    executor_commit: str = "unknown",
+    workflow_blob: str = "unknown",
+    installed_core_version: str = "unknown",
+    installed_hosted_version: str = "unknown",
+    retained_context_available: bool = True,
+    explicit_rescan: bool | None = None,
+    coverage_only_partial: bool = False,
+    action_result_authenticated: bool | None = None,
+    evidence_producer: str | None = None,
+    publication_receipt_id: int | None = None,
+    check_receipt_id: int | None = None,
+    thread_cleanup_receipt_state: str | None = None,
+    native_approval_receipt_id: int | None = None,
+    historical_settlement_receipt_supplied: bool = False,
+    diagnostics_available: bool = False,
+    diagnostic_cause: str | None = None,
+) -> AttemptEvidencePacket:
+    if not isinstance(historical_settlement_receipt_supplied, bool) or not isinstance(
+        diagnostics_available, bool
+    ):
+        raise ReviewInputError("attempt evidence boolean flags must be bool")
+    if diagnostic_cause is not None and diagnostic_cause not in DIAGNOSTIC_CAUSES:
+        raise ReviewInputError("attempt evidence diagnostic_cause is unsupported")
+
+    old: ApiRunAccounting | None = None
+    if record is not None and record.api_run_accounting is not None:
+        try:
+            parsed = ApiRunAccounting.from_document(record.api_run_accounting)
+            parsed.require_writer_version()
+            old = parsed
+        except ReviewInputError:
+            old = None
+
+    tx = record.transaction if record is not None else None
+    resolved_rescan = False
+    if explicit_rescan is not None:
+        resolved_rescan = bool(explicit_rescan)
+    elif record is not None:
+        try:
+            resolved_rescan = admitted_rescan(record) is not None
+        except ReviewInputError:
+            resolved_rescan = True
+
+    action_purpose: str | None = None
+    action_started: bool | None = None
+    action_op_key: str | None = None
+    action_intent_digest: str | None = None
+    verified_action: bool | None = None
+    if old is not None and isinstance(old.action, dict):
+        raw_started = old.action.get("execution_started")
+        if isinstance(raw_started, bool):
+            action_started = raw_started
+        intent = old.action.get("intent")
+        if isinstance(intent, dict):
+            raw_purpose = intent.get("purpose")
+            if isinstance(raw_purpose, str):
+                action_purpose = raw_purpose
+            raw_op = intent.get("operation_key")
+            if isinstance(raw_op, str):
+                action_op_key = raw_op
+            action_intent_digest = hashlib.sha256(canonical_bytes(intent)).hexdigest()
+        if old.action.get("phase") == "terminal":
+            if action_result_authenticated is not None:
+                verified_action = bool(action_result_authenticated)
+            elif (
+                record is not None
+                and evidence_producer is not None
+                and isinstance(old.action.get("result"), dict)
+                and old.action["result"].get("encoding") == INLINE_ENCODING
+            ):
+                verified_action = _verify_inline_action_result(
+                    record, old, evidence_producer
+                )
+            else:
+                verified_action = True
+
+    abort_entry_state: str | None = None
+    abort_cleanup_root: str | None = None
+    if old is not None and isinstance(old.analysis_abort, dict):
+        raw_entry = old.analysis_abort.get("entry_state")
+        if isinstance(raw_entry, str):
+            abort_entry_state = raw_entry
+        raw_cleanup = old.analysis_abort.get("cleanup_root")
+        if isinstance(raw_cleanup, str):
+            abort_cleanup_root = raw_cleanup
+
+    nonstartup_upper: int | None = None
+    total_upper: int | None = None
+    if old is not None:
+        nonstartup_upper = (
+            old.prior_nonstartup_liability
+            + old.confirmed
+            + old.uncertain
+            + old.reserved_undispatched
+        )
+        total_upper = old.startup.liability + nonstartup_upper
+
+    run_id = old.identity.run_id if old is not None else None
+    session_gen = record.generation if record is not None else None
+    resolved_case_id = case_id
+    if resolved_case_id is None:
+        if (
+            identity.pull_request == REVIEWSENSEI_443_PULL_REQUEST
+            and run_id == REVIEWSENSEI_443_RUN_ID
+            and session_gen == REVIEWSENSEI_443_GENERATION
+        ):
+            resolved_case_id = REVIEWSENSEI_443_CASE_ID
+        else:
+            gen_token = str(session_gen) if session_gen is not None else "none"
+            run_token = str(run_id) if run_id is not None else "none"
+            resolved_case_id = (
+                f"{identity.repository}#{identity.pull_request}"
+                f":gen-{gen_token}:run-{run_token}"
+            )
+
+    settlement_form = _derive_terminal_settlement_form(classification)
+    if diagnostic_cause is not None:
+        if not diagnostics_available and diagnostic_cause not in {
+            "unknown",
+            "not_applicable_settled",
+        }:
+            raise ReviewInputError(
+                "attempt evidence packet cannot infer a cause from missing diagnostics"
+            )
+        if classification.terminal and diagnostic_cause != "not_applicable_settled":
+            raise ReviewInputError(
+                "settled attempt evidence packet cannot carry a failure cause"
+            )
+        inferred_cause = diagnostic_cause
+    else:
+        inferred_cause = (
+            "not_applicable_settled" if classification.terminal else "unknown"
+        )
+
+    missing: list[str] = list(classification.missing_witnesses)
+    if not classification.terminal:
+        if tx is not None and (
+            old is None or old.terminal_transaction != tx.transaction_id
+        ):
+            missing.append("terminal_transaction_settlement")
+        if not diagnostics_available:
+            missing.append("missing_close_diagnostics")
+        if executor_sha == "unknown":
+            missing.append("installed_executor_provenance")
+        if tx is not None and tx.phase == "publication_succeeded":
+            if publication_receipt_id is None:
+                missing.append("publication_receipt_id")
+            if check_receipt_id is None:
+                missing.append("check_receipt_id")
+            if thread_cleanup_receipt_state is None:
+                missing.append("thread_cleanup_receipt")
+        if not historical_settlement_receipt_supplied:
+            missing.append("historical_live_settlement_receipt")
+    deduped_missing = tuple(dict.fromkeys(missing))
+
+    retained_verified = bool(
+        tx is not None and tx.result_sha256 is not None and retained_context_available
+    )
+
+    return AttemptEvidencePacket(
+        case_id=resolved_case_id,
+        repository=identity.repository,
+        repository_id=identity.repository_id,
+        pull_request=identity.pull_request,
+        session_generation=session_gen,
+        record_sha256=record.record_sha256 if record is not None else None,
+        run_id=run_id,
+        run_attempt=old.owner.run_attempt if old is not None else None,
+        owner_job=old.owner.job if old is not None else None,
+        owner_generation=old.owner.generation if old is not None else None,
+        transaction_id=tx.transaction_id if tx is not None else None,
+        base_sha=tx.base_sha if tx is not None else None,
+        head_sha=tx.head_sha if tx is not None else None,
+        current_base_sha=current_base,
+        current_head_sha=current_head,
+        executor_sha=executor_sha,
+        executor_commit=executor_commit,
+        workflow_blob=workflow_blob,
+        installed_core_version=installed_core_version,
+        installed_hosted_version=installed_hosted_version,
+        executor_status=classification.executor_status,
+        policy_commit=old.configuration.commit if old is not None else None,
+        configuration_digest=(
+            tx.configuration_digest
+            if tx is not None
+            else (old.configuration.digest if old is not None else None)
+        ),
+        policy_digest=tx.policy_digest if tx is not None else None,
+        evidence_digest=tx.evidence_digest if tx is not None else None,
+        retained_context_available=bool(retained_context_available),
+        explicit_rescan=resolved_rescan,
+        operator_paused=bool(record.operator_paused) if record is not None else False,
+        caller_allowance_limit=(old.configuration.limit if old is not None else None),
+        startup_liability=old.startup.liability if old is not None else None,
+        prior_nonstartup_liability=(
+            old.prior_nonstartup_liability if old is not None else None
+        ),
+        confirmed_requests=old.confirmed if old is not None else None,
+        uncertain_requests=old.uncertain if old is not None else None,
+        reserved_undispatched=(old.reserved_undispatched if old is not None else None),
+        nonstartup_liability_upper_bound=nonstartup_upper,
+        total_liability_upper_bound=total_upper,
+        remaining_caller_allowance=old.remaining if old is not None else None,
+        attempt2_slot_available=(
+            _attempt2_slot_available(old) if old is not None else False
+        ),
+        active_reservation_id=(record.reservation_id if record is not None else None),
+        reserved_slot=record.reserved_slot if record is not None else None,
+        transaction_phase=classification.transaction_phase,
+        action_phase=classification.action_phase,
+        action_purpose=action_purpose,
+        action_execution_started=action_started,
+        action_operation_key=action_op_key,
+        action_intent_sha256=action_intent_digest,
+        terminal_transaction=(old.terminal_transaction if old is not None else None),
+        terminal_action_authenticated=verified_action,
+        abort_cleanup_entry_state=abort_entry_state,
+        abort_cleanup_root_sha256=abort_cleanup_root,
+        result_sha256=tx.result_sha256 if tx is not None else None,
+        retained_result_verified=retained_verified,
+        coverage_only_partial=bool(coverage_only_partial),
+        publication_receipt_id=publication_receipt_id,
+        check_receipt_id=check_receipt_id,
+        thread_cleanup_receipt_state=thread_cleanup_receipt_state,
+        native_approval_receipt_id=native_approval_receipt_id,
+        terminal_settlement_form=settlement_form,
+        historical_settlement_receipt_supplied=historical_settlement_receipt_supplied,
+        dispatch_status=classification.dispatch_status,
+        diagnostics_available=diagnostics_available,
+        inferred_cause=inferred_cause,
+        missing_proofs=deduped_missing,
+        classification=classification,
+    )
+
+
+def build_attempt_evidence_packet(
+    record: SessionRecord,
+    *,
+    current_base: str,
+    current_head: str,
+    case_id: str | None = None,
+    executor_status: str = "not_applicable",
+    executor_sha: str = "unknown",
+    executor_commit: str = "unknown",
+    workflow_blob: str = "unknown",
+    installed_core_version: str = "unknown",
+    installed_hosted_version: str = "unknown",
+    dispatch_status: str = "known_clean",
+    coverage_only_partial: bool = False,
+    explicit_rescan: bool | None = None,
+    retained_context_available: bool = True,
+    native_effects_confirmed: bool | None = None,
+    action_result_authenticated: bool | None = None,
+    evidence_producer: str | None = None,
+    publication_receipt_id: int | None = None,
+    check_receipt_id: int | None = None,
+    thread_cleanup_receipt_state: str | None = None,
+    native_approval_receipt_id: int | None = None,
+    historical_settlement_receipt_supplied: bool = False,
+    diagnostics_available: bool = False,
+    diagnostic_cause: str | None = None,
+) -> AttemptEvidencePacket:
+    """Build an immutable offline `AttemptEvidencePacket` (`authority=False`).
+
+    Classifies the complete actual `SessionRecord` (preserving valid terminal
+    command actions whose review `terminal_transaction` marker is `None`, while
+    holding nonterminal `publication_succeeded` records such as ReviewSensei
+    `#443` run `43074015855` generation `11` on explicit missing proofs and
+    `inferred_cause="unknown"` when close diagnostics are absent).
+    """
+    classification = classify_recovery_state(
+        record,
+        current_base=current_base,
+        current_head=current_head,
+        executor_status=executor_status,
+        dispatch_status=dispatch_status,
+        coverage_only_partial=coverage_only_partial,
+        explicit_rescan=explicit_rescan,
+        retained_context_available=retained_context_available,
+        native_effects_confirmed=native_effects_confirmed,
+        action_result_authenticated=action_result_authenticated,
+        evidence_producer=evidence_producer,
+    )
+    if record.repository_id is None:
+        raise ReviewInputError(
+            "attempt evidence packet requires a repository_id-bound SessionRecord"
+        )
+    identity = SessionIdentity(
+        repository=record.repository,
+        pull_request=record.pull_request,
+        repository_id=record.repository_id,
+    )
+    return _assemble_attempt_evidence_packet(
+        identity=identity,
+        record=record,
+        classification=classification,
+        current_base=current_base,
+        current_head=current_head,
+        case_id=case_id,
+        executor_sha=executor_sha,
+        executor_commit=executor_commit,
+        workflow_blob=workflow_blob,
+        installed_core_version=installed_core_version,
+        installed_hosted_version=installed_hosted_version,
+        retained_context_available=retained_context_available,
+        explicit_rescan=explicit_rescan,
+        coverage_only_partial=coverage_only_partial,
+        action_result_authenticated=action_result_authenticated,
+        evidence_producer=evidence_producer,
+        publication_receipt_id=publication_receipt_id,
+        check_receipt_id=check_receipt_id,
+        thread_cleanup_receipt_state=thread_cleanup_receipt_state,
+        native_approval_receipt_id=native_approval_receipt_id,
+        historical_settlement_receipt_supplied=historical_settlement_receipt_supplied,
+        diagnostics_available=diagnostics_available,
+        diagnostic_cause=diagnostic_cause,
+    )
+
+
+def _probe_executor_details_readonly(
+    ro_http: _ReadOnlyHttp,
+    *,
+    actions_token: str,
+    identity: SessionIdentity,
+    run_id: int,
+    owner: ApiExecutionOwner,
+    tx_head_sha: str | None,
+) -> tuple[str, str, str, str]:
+    """Return `(executor_status, executor_sha, executor_commit, workflow_blob)` read-only."""
+    if type(run_id) is not int or run_id < 1:
+        return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
+    run_reader = ApiRunActionsEvidence(
+        ro_http, token=actions_token, command_run_id=str(run_id), job=owner.job
+    )
+    if (
+        tx_head_sha is not None
+        and owner.run_attempt == 1
+        and owner.generation == 0
+        and owner.job in {"hosted", "local"}
+    ):
+        try:
+            stopped = run_reader.qualified_publication_cessation(
+                identity, run_id, owner, head_sha=tx_head_sha
+            )
+            exec_sha = (
+                stopped["executor_sha"]
+                if isinstance(stopped.get("executor_sha"), str)
+                and _HEX40_RE.fullmatch(stopped["executor_sha"]) is not None
+                else "unknown"
+            )
+            exec_commit = (
+                stopped["executor_commit"]
+                if isinstance(stopped.get("executor_commit"), str)
+                and _HEX40_RE.fullmatch(stopped["executor_commit"]) is not None
+                else "unknown"
+            )
+            wf_blob = (
+                stopped["workflow_blob"]
+                if isinstance(stopped.get("workflow_blob"), str)
+                and _HEX40_RE.fullmatch(stopped["workflow_blob"]) is not None
+                else "unknown"
+            )
+            return ("qualified_success", exec_sha, exec_commit, wf_blob)
+        except ReviewInputError:
+            pass
+
+    try:
+        _job_id, _stamp, job_conclusion = run_reader.ceased_owner(identity, owner)
+    except ReviewInputError:
+        return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
+
+    if job_conclusion != "success":
+        return ("failed", "unknown", "unknown", "unknown")
+
+    try:
+        run_doc = run_reader._get(identity, f"/actions/runs/{run_id}")
+    except ReviewInputError:
+        return ("ceased", "unknown", "unknown", "unknown")
+
+    repository = run_doc.get("repository")
+    run_attempt = run_doc.get("run_attempt")
+    if (
+        type(run_doc.get("id")) is not int
+        or run_doc.get("id") != run_id
+        or not isinstance(repository, dict)
+        or repository.get("id") != identity.repository_id
+        or repository.get("full_name") != identity.repository
+        or type(run_attempt) is not int
+        or run_attempt < owner.run_attempt
+    ):
+        return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
+
+    refs = run_doc.get("referenced_workflows")
+    observed_sha = "unknown"
+    if isinstance(refs, list) and len(refs) == 1 and isinstance(refs[0], dict):
+        raw_sha = refs[0].get("sha")
+        if isinstance(raw_sha, str) and _HEX40_RE.fullmatch(raw_sha) is not None:
+            observed_sha = raw_sha
+
+    if run_attempt > owner.run_attempt:
+        return ("ceased", observed_sha, "unknown", "unknown")
+
+    if run_doc.get("status") != "completed":
+        return ("active_or_unconfirmed", "unknown", "unknown", "unknown")
+
+    if (
+        tx_head_sha is None
+        or owner.job == "command"
+        or run_doc.get("conclusion") != "success"
+    ):
+        return ("ceased", observed_sha, "unknown", "unknown")
+
+    if observed_sha in QUALIFIED_EXECUTORS:
+        # Workflow SHA is catalogued, so cessation failed on step/chronology/head.
+        return ("failed", observed_sha, "unknown", "unknown")
+    return ("unrecognized", observed_sha, "unknown", "unknown")
+
+
 def _probe_executor_status_readonly(
     ro_http: _ReadOnlyHttp,
     *,
@@ -1315,74 +2146,17 @@ def _probe_executor_status_readonly(
     cessation (`ceased`) from failed job exit (`failed`) and uncatalogued
     workflow source (`unrecognized`).
     """
-    if type(run_id) is not int or run_id < 1:
-        return "active_or_unconfirmed"
-    run_reader = ApiRunActionsEvidence(
-        ro_http, token=actions_token, command_run_id=str(run_id), job=owner.job
-    )
-    if (
-        tx_head_sha is not None
-        and owner.run_attempt == 1
-        and owner.generation == 0
-        and owner.job in {"hosted", "local"}
-    ):
-        try:
-            run_reader.qualified_publication_cessation(
-                identity, run_id, owner, head_sha=tx_head_sha
-            )
-            return "qualified_success"
-        except ReviewInputError:
-            pass
-
-    try:
-        _job_id, _stamp, job_conclusion = run_reader.ceased_owner(identity, owner)
-    except ReviewInputError:
-        return "active_or_unconfirmed"
-
-    if job_conclusion != "success":
-        return "failed"
-
-    try:
-        run_doc = run_reader._get(identity, f"/actions/runs/{run_id}")
-    except ReviewInputError:
-        return "ceased"
-
-    repository = run_doc.get("repository")
-    run_attempt = run_doc.get("run_attempt")
-    if (
-        type(run_doc.get("id")) is not int
-        or run_doc.get("id") != run_id
-        or not isinstance(repository, dict)
-        or repository.get("id") != identity.repository_id
-        or repository.get("full_name") != identity.repository
-        or type(run_attempt) is not int
-        or run_attempt < owner.run_attempt
-    ):
-        return "active_or_unconfirmed"
-
-    if run_attempt > owner.run_attempt:
-        return "ceased"
-
-    if run_doc.get("status") != "completed":
-        return "active_or_unconfirmed"
-
-    if (
-        tx_head_sha is None
-        or owner.job == "command"
-        or run_doc.get("conclusion") != "success"
-    ):
-        return "ceased"
-
-    refs = run_doc.get("referenced_workflows")
-    if isinstance(refs, list) and len(refs) == 1 and isinstance(refs[0], dict):
-        sha = refs[0].get("sha")
-        if isinstance(sha, str) and sha in QUALIFIED_EXECUTORS:
-            # Workflow SHA is catalogued, so cessation failed on step/chronology/head.
-            return "failed"
-    return "unrecognized"
+    return _probe_executor_details_readonly(
+        ro_http,
+        actions_token=actions_token,
+        identity=identity,
+        run_id=run_id,
+        owner=owner,
+        tx_head_sha=tx_head_sha,
+    )[0]
 
 
-def classify_live_ledger_recovery(
+def _inspect_live_ledger_readonly(
     *,
     ledger: GitHubIssueCommentSessionLedger,
     identity: SessionIdentity,
@@ -1393,8 +2167,17 @@ def classify_live_ledger_recovery(
     dispatch_status: str = "known_clean",
     native_effects_confirmed: bool | None = None,
     budget: EvidenceReadBudget | None = None,
-) -> RecoveryClassification:
-    """Inspect a live ledger strictly read-only (`_ReadOnlyHttp`) and classify."""
+) -> tuple[
+    SessionRecord | None,
+    RecoveryClassification,
+    str,
+    str,
+    str,
+    bool,
+    bool,
+    bool | None,
+    str | None,
+]:
     if not isinstance(ledger, GitHubIssueCommentSessionLedger):
         raise ReviewInputError("live recovery classification requires native ledger")
     _require_sha(current_base, "current_base")
@@ -1427,63 +2210,103 @@ def classify_live_ledger_recovery(
     )
     loaded = ro_ledger.load(identity)
     if loaded.status == "missing":
-        return RecoveryClassification(
-            state_code="unenrolled_ready",
-            terminal=True,
-            automatic_zero_inference=True,
-            head_relation="no_transaction_head",
-            base_relation="no_transaction_base",
-            run_attempt=None,
-            executor_status="not_applicable",
-            transaction_phase="no-transaction",
-            action_phase=None,
-            dispatch_status=dispatch_status,
-            missing_witnesses=(),
-            primary_route="ordinary_rollover",
-            fallback_routes=(),
-            operator_action=(
-                "No session root exists yet; ordinary initial enrollment is ready."
+        return (
+            None,
+            RecoveryClassification(
+                state_code="unenrolled_ready",
+                terminal=True,
+                automatic_zero_inference=True,
+                head_relation="no_transaction_head",
+                base_relation="no_transaction_base",
+                run_attempt=None,
+                executor_status="not_applicable",
+                transaction_phase="no-transaction",
+                action_phase=None,
+                dispatch_status=dispatch_status,
+                missing_witnesses=(),
+                primary_route="ordinary_rollover",
+                fallback_routes=(),
+                operator_action=(
+                    "No session root exists yet; ordinary initial enrollment is ready."
+                ),
             ),
+            "unknown",
+            "unknown",
+            "unknown",
+            True,
+            False,
+            None,
+            None,
         )
     if loaded.status != "ok" or loaded.record is None:
-        return RecoveryClassification(
-            state_code="unauthenticated_ledger_root",
-            terminal=False,
-            automatic_zero_inference=False,
-            head_relation="no_transaction_head",
-            base_relation="no_transaction_base",
-            run_attempt=None,
-            executor_status="not_applicable",
-            transaction_phase="no-transaction",
-            action_phase=None,
-            dispatch_status=dispatch_status,
-            missing_witnesses=("authenticated_session_root",),
-            primary_route="controlled_serialized_restart",
-            fallback_routes=(),
-            operator_action=(
-                "Session ledger root failed integrity or ownership checks; "
-                "recover via one designated controlled serialized restart."
+        return (
+            None,
+            RecoveryClassification(
+                state_code="unauthenticated_ledger_root",
+                terminal=False,
+                automatic_zero_inference=False,
+                head_relation="no_transaction_head",
+                base_relation="no_transaction_base",
+                run_attempt=None,
+                executor_status="not_applicable",
+                transaction_phase="no-transaction",
+                action_phase=None,
+                dispatch_status=dispatch_status,
+                missing_witnesses=("authenticated_session_root",),
+                primary_route="controlled_serialized_restart",
+                fallback_routes=(),
+                operator_action=(
+                    "Session ledger root failed integrity or ownership checks; "
+                    "recover via one designated controlled serialized restart."
+                ),
             ),
+            "unknown",
+            "unknown",
+            "unknown",
+            False,
+            False,
+            None,
+            None,
         )
 
     record = loaded.record
     if record.api_run_accounting is None:
-        return classify_recovery_state(
+        return (
             record,
-            current_base=current_base,
-            current_head=current_head,
-            dispatch_status=dispatch_status,
+            classify_recovery_state(
+                record,
+                current_base=current_base,
+                current_head=current_head,
+                dispatch_status=dispatch_status,
+            ),
+            "unknown",
+            "unknown",
+            "unknown",
+            False,
+            False,
+            None,
+            None,
         )
 
     try:
         old = ApiRunAccounting.from_document(record.api_run_accounting)
         old.require_writer_version()
     except ReviewInputError:
-        return classify_recovery_state(
+        return (
             record,
-            current_base=current_base,
-            current_head=current_head,
-            dispatch_status=dispatch_status,
+            classify_recovery_state(
+                record,
+                current_base=current_base,
+                current_head=current_head,
+                dispatch_status=dispatch_status,
+            ),
+            "unknown",
+            "unknown",
+            "unknown",
+            False,
+            False,
+            None,
+            None,
         )
 
     action_authenticated: bool | None = None
@@ -1560,8 +2383,16 @@ def classify_live_ledger_recovery(
                         )
 
     executor_status = "not_applicable"
+    executor_sha = "unknown"
+    executor_commit = "unknown"
+    workflow_blob = "unknown"
     if actions_token is not None and old.owner.job in {"hosted", "local", "command"}:
-        executor_status = _probe_executor_status_readonly(
+        (
+            executor_status,
+            executor_sha,
+            executor_commit,
+            workflow_blob,
+        ) = _probe_executor_details_readonly(
             ro_http,
             actions_token=actions_token,
             identity=identity,
@@ -1570,7 +2401,7 @@ def classify_live_ledger_recovery(
             tx_head_sha=tx.head_sha if tx is not None else None,
         )
 
-    return classify_recovery_state(
+    classification = classify_recovery_state(
         record,
         current_base=current_base,
         current_head=current_head,
@@ -1581,4 +2412,111 @@ def classify_live_ledger_recovery(
         native_effects_confirmed=native_effects_confirmed,
         action_result_authenticated=action_authenticated,
         evidence_producer=producer,
+    )
+    return (
+        record,
+        classification,
+        executor_sha,
+        executor_commit,
+        workflow_blob,
+        retained_ok,
+        coverage_only_partial,
+        action_authenticated,
+        producer,
+    )
+
+
+def classify_live_ledger_recovery(
+    *,
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    current_base: str,
+    current_head: str,
+    actions_token: str | None = None,
+    app_id: int | None = None,
+    dispatch_status: str = "known_clean",
+    native_effects_confirmed: bool | None = None,
+    budget: EvidenceReadBudget | None = None,
+) -> RecoveryClassification:
+    """Inspect a live ledger strictly read-only (`_ReadOnlyHttp`) and classify."""
+    return _inspect_live_ledger_readonly(
+        ledger=ledger,
+        identity=identity,
+        current_base=current_base,
+        current_head=current_head,
+        actions_token=actions_token,
+        app_id=app_id,
+        dispatch_status=dispatch_status,
+        native_effects_confirmed=native_effects_confirmed,
+        budget=budget,
+    )[1]
+
+
+def build_live_ledger_attempt_evidence_packet(
+    *,
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    current_base: str,
+    current_head: str,
+    case_id: str | None = None,
+    actions_token: str | None = None,
+    app_id: int | None = None,
+    dispatch_status: str = "known_clean",
+    native_effects_confirmed: bool | None = None,
+    installed_core_version: str = "unknown",
+    installed_hosted_version: str = "unknown",
+    publication_receipt_id: int | None = None,
+    check_receipt_id: int | None = None,
+    thread_cleanup_receipt_state: str | None = None,
+    native_approval_receipt_id: int | None = None,
+    historical_settlement_receipt_supplied: bool = False,
+    diagnostics_available: bool = False,
+    diagnostic_cause: str | None = None,
+    budget: EvidenceReadBudget | None = None,
+) -> AttemptEvidencePacket:
+    """Inspect a live ledger strictly read-only (`_ReadOnlyHttp`) into an `AttemptEvidencePacket`."""
+    (
+        record,
+        classification,
+        executor_sha,
+        executor_commit,
+        workflow_blob,
+        retained_ok,
+        coverage_only_partial,
+        action_authenticated,
+        producer,
+    ) = _inspect_live_ledger_readonly(
+        ledger=ledger,
+        identity=identity,
+        current_base=current_base,
+        current_head=current_head,
+        actions_token=actions_token,
+        app_id=app_id,
+        dispatch_status=dispatch_status,
+        native_effects_confirmed=native_effects_confirmed,
+        budget=budget,
+    )
+    return _assemble_attempt_evidence_packet(
+        identity=identity,
+        record=record,
+        classification=classification,
+        current_base=current_base,
+        current_head=current_head,
+        case_id=case_id,
+        executor_sha=executor_sha,
+        executor_commit=executor_commit,
+        workflow_blob=workflow_blob,
+        installed_core_version=installed_core_version,
+        installed_hosted_version=installed_hosted_version,
+        retained_context_available=retained_ok,
+        coverage_only_partial=coverage_only_partial,
+        action_result_authenticated=action_authenticated,
+        evidence_producer=producer,
+        publication_receipt_id=publication_receipt_id,
+        check_receipt_id=check_receipt_id,
+        thread_cleanup_receipt_state=thread_cleanup_receipt_state,
+        native_approval_receipt_id=native_approval_receipt_id,
+        historical_settlement_receipt_supplied=historical_settlement_receipt_supplied,
+        diagnostics_available=diagnostics_available,
+        diagnostic_cause=diagnostic_cause,
     )
