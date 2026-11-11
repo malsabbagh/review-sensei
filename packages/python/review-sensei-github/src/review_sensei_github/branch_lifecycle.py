@@ -24,7 +24,10 @@ around close/reopen transitions and deleted/recreated head branches:
 from __future__ import annotations
 
 import re
+import subprocess
+from collections.abc import Collection
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from review_sensei.session import (
@@ -523,4 +526,304 @@ def classify_reopen_branch_transition(
         prior_approval_valid=False,
         revokes_in_flight_dispatches=False,
         recovery_action="rebind_obligations_and_verify_new_snapshot",
+    )
+
+
+SourceIdentityTransitionKind = Literal[
+    "unchanged_snapshot",
+    "fast_forward_head_advance",
+    "rebase_with_base_sha_drift",
+    "unrelated_history",
+    "force_push_revert_to_prior_sha",
+    "force_push_identical_tree_new_sha",
+    "force_push_changed_content",
+    "base_sha_advance_constant_head",
+    "same_sha_base_ref_retarget",
+]
+
+SourceRecoveryMode = Literal[
+    "exact_snapshot_replay",
+    "incremental_verify",
+    "fallback_full_review",
+    "refuse_prepare_diff_retarget_or_rescan",
+    "verify_against_latest_obligations",
+    "rebind_base_ref_without_base_sha_invalidation",
+]
+
+
+@dataclass(frozen=True)
+class GitAncestryEvidence:
+    """Bounded local Git commit-graph facts between two PR snapshots (G06)."""
+
+    merge_base_sha: str | None
+    prior_head_is_ancestor_of_new_head: bool
+    prior_base_is_ancestor_of_new_base: bool
+    prior_head_tree_sha: str | None = None
+    new_head_tree_sha: str | None = None
+    diff_bytes_identical: bool = False
+
+
+def _validate_sha(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or _GIT_SHA_HEX.fullmatch(value) is None:
+        raise GitHubPublicationError(f"{label} must be a 40-hex commit SHA")
+    return value
+
+
+def _validate_ref(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise GitHubPublicationError(f"{label} must be a non-empty ref name")
+    return value
+
+
+def _git_query(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["git", "-C", str(repo_root), "-c", "core.hooksPath=/dev/null", *args],
+        capture_output=True,
+        check=False,
+    )
+
+
+def inspect_git_ancestry(
+    repo_root: Path,
+    *,
+    previous_base_sha: str,
+    previous_head_sha: str,
+    current_base_sha: str,
+    current_head_sha: str,
+) -> GitAncestryEvidence:
+    """Inspect local Git ancestry, merge-base, tree SHAs, and three-dot diff parity."""
+
+    if not isinstance(repo_root, Path) or not repo_root.is_dir():
+        raise GitHubPublicationError("repository root must be an existing directory")
+    prev_base = _validate_sha(previous_base_sha, label="previous_base_sha")
+    prev_head = _validate_sha(previous_head_sha, label="previous_head_sha")
+    curr_base = _validate_sha(current_base_sha, label="current_base_sha")
+    curr_head = _validate_sha(current_head_sha, label="current_head_sha")
+
+    mb = _git_query(repo_root, ["merge-base", curr_base, curr_head])
+    merge_base_text = mb.stdout.decode("utf-8", errors="replace").strip()
+    merge_base_sha = (
+        merge_base_text
+        if mb.returncode == 0 and _GIT_SHA_HEX.fullmatch(merge_base_text) is not None
+        else None
+    )
+
+    head_anc = _git_query(
+        repo_root, ["merge-base", "--is-ancestor", prev_head, curr_head]
+    )
+    base_anc = _git_query(
+        repo_root, ["merge-base", "--is-ancestor", prev_base, curr_base]
+    )
+
+    prev_tree_proc = _git_query(repo_root, ["rev-parse", f"{prev_head}^{{tree}}"])
+    curr_tree_proc = _git_query(repo_root, ["rev-parse", f"{curr_head}^{{tree}}"])
+    prev_tree_text = prev_tree_proc.stdout.decode("utf-8", errors="replace").strip()
+    curr_tree_text = curr_tree_proc.stdout.decode("utf-8", errors="replace").strip()
+    prev_tree = (
+        prev_tree_text
+        if prev_tree_proc.returncode == 0
+        and _GIT_SHA_HEX.fullmatch(prev_tree_text) is not None
+        else None
+    )
+    curr_tree = (
+        curr_tree_text
+        if curr_tree_proc.returncode == 0
+        and _GIT_SHA_HEX.fullmatch(curr_tree_text) is not None
+        else None
+    )
+
+    diff_identical = False
+    prev_mb = _git_query(repo_root, ["merge-base", prev_base, prev_head])
+    if merge_base_sha is not None and prev_mb.returncode == 0:
+        old_diff = _git_query(repo_root, ["diff", f"{prev_base}...{prev_head}"])
+        new_diff = _git_query(repo_root, ["diff", f"{curr_base}...{curr_head}"])
+        diff_identical = (
+            old_diff.returncode == 0
+            and new_diff.returncode == 0
+            and old_diff.stdout == new_diff.stdout
+        )
+
+    return GitAncestryEvidence(
+        merge_base_sha=merge_base_sha,
+        prior_head_is_ancestor_of_new_head=head_anc.returncode == 0,
+        prior_base_is_ancestor_of_new_base=base_anc.returncode == 0,
+        prior_head_tree_sha=prev_tree,
+        new_head_tree_sha=curr_tree,
+        diff_bytes_identical=diff_identical,
+    )
+
+
+@dataclass(frozen=True)
+class SourceIdentityTransitionDecision:
+    """Classification of PR head/base history rewrites and ref retargets (G06).
+
+    Explicitly separates ``same_sha_base_ref_retarget`` (where ``base_ref``
+    changes while ``base_sha`` is unchanged, keeping ``ReviewContextCacheKey``
+    compatible while gating mid-flight review/reply writes as
+    ``skipped_stale_base``) from ``base_sha`` drift invalidation
+    (``rebase-or-base-change``).
+    """
+
+    transition_kind: SourceIdentityTransitionKind
+    baseline_cache_compatible: bool
+    baseline_invalidation_reason: str | None
+    in_flight_publication_skip_status: str | None
+    in_flight_reply_skip_status: str | None
+    preserves_newer_session_obligations: bool
+    reuses_superseded_approval_without_verification: bool
+    revokes_post_dispatch_effects: bool
+    recovery_mode: SourceRecoveryMode
+
+
+def classify_source_identity_transition(
+    *,
+    previous_base_ref: str,
+    previous_base_sha: str,
+    previous_head_sha: str,
+    current_base_ref: str,
+    current_base_sha: str,
+    current_head_sha: str,
+    ancestry: GitAncestryEvidence,
+    previously_reviewed_head_shas: Collection[str] = (),
+) -> SourceIdentityTransitionDecision:
+    """Classify all 7 G06 head/base ancestry and ref-retarget transitions."""
+
+    prev_ref = _validate_ref(previous_base_ref, label="previous_base_ref")
+    curr_ref = _validate_ref(current_base_ref, label="current_base_ref")
+    prev_base = _validate_sha(previous_base_sha, label="previous_base_sha")
+    prev_head = _validate_sha(previous_head_sha, label="previous_head_sha")
+    curr_base = _validate_sha(current_base_sha, label="current_base_sha")
+    curr_head = _validate_sha(current_head_sha, label="current_head_sha")
+
+    head_changed = curr_head != prev_head
+    base_sha_changed = curr_base != prev_base
+    base_ref_changed = curr_ref != prev_ref
+
+    if head_changed:
+        in_flight_skip: str | None = "skipped_stale_head"
+    elif base_sha_changed or base_ref_changed:
+        in_flight_skip = "skipped_stale_base"
+    else:
+        in_flight_skip = None
+
+    if ancestry.merge_base_sha is None:
+        return SourceIdentityTransitionDecision(
+            transition_kind="unrelated_history",
+            baseline_cache_compatible=False,
+            baseline_invalidation_reason="unrelated-history",
+            in_flight_publication_skip_status=in_flight_skip,
+            in_flight_reply_skip_status=in_flight_skip,
+            preserves_newer_session_obligations=True,
+            reuses_superseded_approval_without_verification=False,
+            revokes_post_dispatch_effects=False,
+            recovery_mode="refuse_prepare_diff_retarget_or_rescan",
+        )
+
+    if not head_changed and not base_sha_changed and not base_ref_changed:
+        return SourceIdentityTransitionDecision(
+            transition_kind="unchanged_snapshot",
+            baseline_cache_compatible=True,
+            baseline_invalidation_reason=None,
+            in_flight_publication_skip_status=None,
+            in_flight_reply_skip_status=None,
+            preserves_newer_session_obligations=True,
+            reuses_superseded_approval_without_verification=False,
+            revokes_post_dispatch_effects=False,
+            recovery_mode="exact_snapshot_replay",
+        )
+
+    if not head_changed and not base_sha_changed and base_ref_changed:
+        return SourceIdentityTransitionDecision(
+            transition_kind="same_sha_base_ref_retarget",
+            baseline_cache_compatible=True,
+            baseline_invalidation_reason=None,
+            in_flight_publication_skip_status="skipped_stale_base",
+            in_flight_reply_skip_status="skipped_stale_base",
+            preserves_newer_session_obligations=True,
+            reuses_superseded_approval_without_verification=False,
+            revokes_post_dispatch_effects=False,
+            recovery_mode="rebind_base_ref_without_base_sha_invalidation",
+        )
+
+    if not head_changed and base_sha_changed:
+        return SourceIdentityTransitionDecision(
+            transition_kind="base_sha_advance_constant_head",
+            baseline_cache_compatible=False,
+            baseline_invalidation_reason="rebase-or-base-change",
+            in_flight_publication_skip_status="skipped_stale_base",
+            in_flight_reply_skip_status="skipped_stale_base",
+            preserves_newer_session_obligations=True,
+            reuses_superseded_approval_without_verification=False,
+            revokes_post_dispatch_effects=False,
+            recovery_mode="fallback_full_review",
+        )
+
+    if head_changed and base_sha_changed:
+        return SourceIdentityTransitionDecision(
+            transition_kind="rebase_with_base_sha_drift",
+            baseline_cache_compatible=False,
+            baseline_invalidation_reason="rebase-or-base-change",
+            in_flight_publication_skip_status="skipped_stale_head",
+            in_flight_reply_skip_status="skipped_stale_head",
+            preserves_newer_session_obligations=True,
+            reuses_superseded_approval_without_verification=False,
+            revokes_post_dispatch_effects=False,
+            recovery_mode="fallback_full_review",
+        )
+
+    if ancestry.prior_head_is_ancestor_of_new_head:
+        return SourceIdentityTransitionDecision(
+            transition_kind="fast_forward_head_advance",
+            baseline_cache_compatible=True,
+            baseline_invalidation_reason=None,
+            in_flight_publication_skip_status="skipped_stale_head",
+            in_flight_reply_skip_status="skipped_stale_head",
+            preserves_newer_session_obligations=True,
+            reuses_superseded_approval_without_verification=False,
+            revokes_post_dispatch_effects=False,
+            recovery_mode="incremental_verify",
+        )
+
+    if not ancestry.prior_head_is_ancestor_of_new_head and (
+        curr_head in previously_reviewed_head_shas
+    ):
+        return SourceIdentityTransitionDecision(
+            transition_kind="force_push_revert_to_prior_sha",
+            baseline_cache_compatible=True,
+            baseline_invalidation_reason=None,
+            in_flight_publication_skip_status="skipped_stale_head",
+            in_flight_reply_skip_status="skipped_stale_head",
+            preserves_newer_session_obligations=True,
+            reuses_superseded_approval_without_verification=False,
+            revokes_post_dispatch_effects=False,
+            recovery_mode="verify_against_latest_obligations",
+        )
+
+    identical_tree_or_diff = (
+        ancestry.prior_head_tree_sha is not None
+        and ancestry.prior_head_tree_sha == ancestry.new_head_tree_sha
+    ) or ancestry.diff_bytes_identical
+    if not ancestry.prior_head_is_ancestor_of_new_head and identical_tree_or_diff:
+        return SourceIdentityTransitionDecision(
+            transition_kind="force_push_identical_tree_new_sha",
+            baseline_cache_compatible=True,
+            baseline_invalidation_reason=None,
+            in_flight_publication_skip_status="skipped_stale_head",
+            in_flight_reply_skip_status="skipped_stale_head",
+            preserves_newer_session_obligations=True,
+            reuses_superseded_approval_without_verification=False,
+            revokes_post_dispatch_effects=False,
+            recovery_mode="incremental_verify",
+        )
+
+    return SourceIdentityTransitionDecision(
+        transition_kind="force_push_changed_content",
+        baseline_cache_compatible=True,
+        baseline_invalidation_reason=None,
+        in_flight_publication_skip_status="skipped_stale_head",
+        in_flight_reply_skip_status="skipped_stale_head",
+        preserves_newer_session_obligations=True,
+        reuses_superseded_approval_without_verification=False,
+        revokes_post_dispatch_effects=False,
+        recovery_mode="incremental_verify",
     )

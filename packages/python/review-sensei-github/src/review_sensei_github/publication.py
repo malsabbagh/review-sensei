@@ -5846,12 +5846,23 @@ class ReviewPublisher:
                     self._pending_thread_cleanup = lambda: (
                         "thread_resolution_unconfirmed"
                     )
+            supersedes_prior_clean_review = (
+                not approval_eligible
+                or prospective_eligibility.facts.has_human_adjudication_findings
+            ) and (
+                persisted_eligibility is not None
+                and persisted_eligibility.facts.review_status == "complete"
+                and persisted_eligibility.facts.coverage_blocker in {None, "reviewed"}
+                and not persisted_eligibility.facts.has_blocking_findings
+                and not persisted_eligibility.facts.has_human_adjudication_findings
+            )
             if (
                 complete_inventory
                 and identity_states
                 and not result_states
                 and not explicit_reanalysis
                 and not has_blocking_findings(result)
+                and not supersedes_prior_clean_review
             ):
                 raise GitHubPublicationError(
                     "existing review does not prove complete publication of this result"
@@ -5922,8 +5933,8 @@ class ReviewPublisher:
                             persisted_eligibility=persisted_eligibility,
                         )
                     return PublicationResult(status="already_published")
-            else:
-                if "APPROVED" in identity_states:
+            elif not supersedes_prior_clean_review or result_states:
+                if "APPROVED" in identity_states and not supersedes_prior_clean_review:
                     return PublicationResult(status="already_published")
                 if identity_states & {"COMMENTED", "CHANGES_REQUESTED"}:
                     if not preflight.app_authored:

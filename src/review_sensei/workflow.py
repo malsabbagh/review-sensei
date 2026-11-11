@@ -648,7 +648,11 @@ def prepare_diff(
         check=False,
     )
     if merge_base.returncode != 0:
-        raise _invalid("base and head commits do not share a merge base")
+        raise _invalid(
+            "base and head commits do not share a merge base; "
+            "retarget the pull request to a related base branch or rebase onto "
+            "the target base before rerunning review or '@reviewsensei rescan'"
+        )
 
     _stream_diff_to_patch(
         root,
