@@ -32,12 +32,15 @@ MAX_SAFE_TEXT_LENGTH = 200
 MAX_SAFE_STEPS = 8
 MAX_UNCERTAIN_DISPATCHES = 64
 MAX_COUNTER_VALUE = 9_007_199_254_740_991
+MAX_VALIDATED_STRING_LENGTH = 1_024
+INSTALLED_DISTRIBUTION_NAMES = ("review-sensei", "review-sensei-github")
 
 _GIT_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _SEMVER_RE = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
-    r"(?:[-+][A-Za-z0-9.-]{1,64})?$"
+    r"(?:-[0-9A-Za-z-]{1,32}(?:\.[0-9A-Za-z-]{1,32}){0,15})?"
+    r"(?:\+[0-9A-Za-z-]{1,32}(?:\.[0-9A-Za-z-]{1,32}){0,15})?$"
 )
 _SAFE_REPO_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
@@ -47,7 +50,9 @@ _SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
 _WORKER_REVISION_RE = re.compile(
     r"^(?:[a-f0-9]{40}"
     r"|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}"
-    r"|v?(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$"
+    r"|v?(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z-]{1,32}(?:\.[0-9A-Za-z-]{1,32}){0,15})?"
+    r"(?:\+[0-9A-Za-z-]{1,32}(?:\.[0-9A-Za-z-]{1,32}){0,15})?)$"
 )
 _EXECUTOR_ID_RE = re.compile(r"^[A-Za-z0-9._:@/-]{1,160}$")
 _SECRET_LIKE_RE = re.compile(
@@ -137,6 +142,8 @@ KNOWN_MISSING_INPUT_LABELS = frozenset(
 
 
 def _reject_secret_or_control(value: str, *, field: str) -> None:
+    if len(value) > MAX_VALIDATED_STRING_LENGTH:
+        raise ReviewInputError(f"{field} exceeds maximum bounded length")
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
         raise ReviewInputError(f"{field} contains control characters")
     if _SECRET_LIKE_RE.search(value) is not None:
@@ -166,8 +173,6 @@ def _positive_int_or_unknown(value: object, *, field: str) -> int | str:
         return UNKNOWN_PROVENANCE
     if type(value) is int and 1 <= value <= MAX_COUNTER_VALUE:
         return value
-    if isinstance(value, str):
-        _reject_secret_or_control(value, field=field)
     raise ReviewInputError(f"{field} must be a positive integer or 'unknown'")
 
 
@@ -176,8 +181,6 @@ def _non_negative_int_or_unknown(value: object, *, field: str) -> int | str:
         return UNKNOWN_PROVENANCE
     if type(value) is int and 0 <= value <= MAX_COUNTER_VALUE:
         return value
-    if isinstance(value, str):
-        _reject_secret_or_control(value, field=field)
     raise ReviewInputError(f"{field} must be a non-negative integer or 'unknown'")
 
 
@@ -233,7 +236,7 @@ def _revision_token_or_unknown(value: object, *, field: str) -> str:
 def _semver_or_unknown(value: object, *, field: str) -> str:
     if value is None or value == UNKNOWN_PROVENANCE:
         return UNKNOWN_PROVENANCE
-    if not isinstance(value, str):
+    if not isinstance(value, str) or len(value) > 128:
         raise ReviewInputError(f"{field} must be a semantic version or 'unknown'")
     _reject_secret_or_control(value, field=field)
     if _SEMVER_RE.fullmatch(value) is None:
@@ -437,7 +440,27 @@ class GateObservations:
             self.authenticated_live_validation in {"failed", "unknown", "not_run"}
         )
 
-    def all_required_gates_confirmed(self, *, require_broker: bool = True) -> bool:
+    def all_required_gates_confirmed(
+        self,
+        *,
+        require_broker: bool = True,
+        require_routing: bool | None = None,
+    ) -> bool:
+        """Return True only when required routing, live, and broker gates passed.
+
+        Hosted workflows (``require_broker=True``) require ``routing_preflight ==
+        "passed"`` by default; local CLI flows (``require_broker=False``) default
+        to ``require_routing=False`` while still rejecting an explicit
+        ``routing_preflight == "failed"``.
+        """
+
+        if self.routing_preflight == "failed":
+            return False
+        effective_require_routing = (
+            require_broker if require_routing is None else require_routing
+        )
+        if effective_require_routing and self.routing_preflight != "passed":
+            return False
         if self.authenticated_live_validation != "passed":
             return False
         if require_broker and self.broker_enforcement != "passed":
@@ -658,6 +681,13 @@ class ProvenanceManifest:
 
     @property
     def has_complete_runtime_identity(self) -> bool:
+        """Return True when all required runtime identity fields are known.
+
+        Observational repository/policy checksums (``main_sha``, ``source_event``,
+        ``reusable_workflow_tag_object``, ``frozen_policy_sha256``, ``gates``) may
+        remain ``"unknown"`` when uncollected without invalidating runtime identity.
+        """
+
         required_runtime = (
             self.repository,
             self.repository_id,
@@ -674,9 +704,11 @@ class ProvenanceManifest:
         )
         if any(item == UNKNOWN_PROVENANCE for item in required_runtime):
             return False
-        if self.broker_route not in {"none", UNKNOWN_PROVENANCE}:
-            return self.broker_revision != UNKNOWN_PROVENANCE
-        return self.broker_route == "none"
+        if self.broker_route == UNKNOWN_PROVENANCE:
+            return False
+        if self.broker_route == "none":
+            return True
+        return self.broker_revision != UNKNOWN_PROVENANCE
 
     def _body_dict(self) -> dict[str, Any]:
         return {
@@ -715,7 +747,9 @@ class ProvenanceManifest:
         return payload
 
     @classmethod
-    def from_dict(cls, data: object) -> ProvenanceManifest:
+    def from_dict(
+        cls, data: object, *, require_digest: bool = False
+    ) -> ProvenanceManifest:
         mapping = _require_mapping_keys(
             data,
             required=frozenset(
@@ -748,6 +782,10 @@ class ProvenanceManifest:
             optional=frozenset({"manifest_sha256"}),
             label="provenance_manifest",
         )
+        if require_digest and "manifest_sha256" not in mapping:
+            raise ReviewInputError(
+                "provenance_manifest missing required field: manifest_sha256"
+            )
         if mapping["schema_version"] != PROVENANCE_MANIFEST_SCHEMA_VERSION:
             raise ReviewInputError("unsupported provenance manifest schema_version")
         if mapping["main_sha_is_runtime_proof"] is not False:
@@ -892,7 +930,12 @@ def prescribe_recovery(
     ledger_expired: bool = False,
     only_convergence_pending: bool = False,
 ) -> RecoveryPrescription:
-    """Select a deterministic, bounded recovery path for any classified state."""
+    """Select a deterministic, bounded recovery path for any classified state.
+
+    Precedence: unresolved ``has_uncertain_dispatches`` always takes priority over
+    ``ledger_expired`` so in-flight writes are reconciled via owned readback
+    before any controlled reenrollment is attempted.
+    """
 
     outcome = _closed_choice(
         classifier_outcome, CLASSIFIER_OUTCOMES, field="classifier_outcome"
@@ -1108,6 +1151,34 @@ def classify_provenance_compatibility(
             mismatches.append(field_name)
 
     if compatibility_manifest is not None:
+        if (
+            expected_peeled_commit is not None
+            and expected_peeled_commit != compatibility_manifest.workflow_commit
+        ):
+            raise ReviewInputError(
+                "expected_peeled_commit conflicts with compatibility_manifest.workflow_commit"
+            )
+        if (
+            expected_core_version is not None
+            and expected_core_version != compatibility_manifest.python.version
+        ):
+            raise ReviewInputError(
+                "expected_core_version conflicts with compatibility_manifest.python.version"
+            )
+        if expected_broker_revision is not None:
+            normalized_expected_broker = expected_broker_revision.removeprefix("v")
+            if _SEMVER_RE.fullmatch(normalized_expected_broker) is not None:
+                base_expected_broker = normalized_expected_broker.split("-", 1)[
+                    0
+                ].split("+", 1)[0]
+                if not _range_contains(
+                    base_expected_broker,
+                    compatibility_manifest.compatible_worker_range,
+                ):
+                    raise ReviewInputError(
+                        "expected_broker_revision conflicts with compatibility_manifest.compatible_worker_range"
+                    )
+
         if manifest.reusable_workflow_peeled_commit == UNKNOWN_PROVENANCE:
             if "reusable_workflow_peeled_commit" not in missing:
                 missing.append("reusable_workflow_peeled_commit")
@@ -1140,11 +1211,15 @@ def classify_provenance_compatibility(
                     ):
                         if "broker_revision" not in mismatches:
                             mismatches.append("broker_revision")
-                elif (
-                    manifest.broker_revision != compatibility_manifest.worker.version
-                    and "broker_revision" not in mismatches
-                ):
+                else:
                     notes.append("broker_revision_is_opaque_deployment_uuid_or_sha")
+                    if (
+                        expected_broker_revision is None
+                        and manifest.broker_revision
+                        != compatibility_manifest.worker.version
+                        and "broker_revision" not in mismatches
+                    ):
+                        mismatches.append("broker_revision")
 
     if mismatches:
         status = "mismatch"
@@ -1524,7 +1599,19 @@ class NoDuplicateWorkAssertion:
 
     @property
     def holds(self) -> bool:
+        """Return True when zero duplicate business effects and zero unreconciled retries occurred."""
+
         return self.duplicate_business_effects == 0 and self.unreconciled_retries == 0
+
+    @property
+    def zero_dispatch_replay(self) -> bool:
+        """Return True when replay/inspection also issued zero provider or physical API calls."""
+
+        return (
+            self.holds
+            and self.provider_calls == 0
+            and self.physical_api_dispatches == 0
+        )
 
     def to_dict(self) -> dict[str, int | bool]:
         return {
@@ -1627,6 +1714,19 @@ class AttemptEvidencePacket:
                     "every dispatch item must be an UncertainDispatchRecord"
                 )
         object.__setattr__(self, "dispatches", normalized_dispatches)
+        if self.receipts.retained_result_parts == "confirmed" and (
+            self.original_bindings.accepted_result_sha256
+            in {UNKNOWN_PROVENANCE, MISSING_BINDING}
+        ):
+            raise ReviewInputError(
+                "retained_result_parts cannot be 'confirmed' without accepted_result_sha256"
+            )
+        if any(item.is_unresolved for item in normalized_dispatches) and (
+            self.no_duplicate_work.holds
+        ):
+            raise ReviewInputError(
+                "no_duplicate_work.holds cannot be True while unresolved dispatches remain"
+            )
         serialized = _canonical_json_bytes(self._body_dict())
         if len(serialized) > MAX_PROVENANCE_PACKET_BYTES:
             raise ReviewInputError("attempt evidence packet exceeds byte ceiling")
@@ -1659,6 +1759,12 @@ class AttemptEvidencePacket:
     def to_public_summary(self) -> dict[str, Any]:
         """Return a user-safe, closed-vocabulary summary bounded to 4,096 bytes."""
 
+        recovery_action = _closed_choice(
+            self.recovery.action, RECOVERY_ACTIONS, field="recovery.action"
+        )
+        recovery_command = _closed_choice(
+            self.recovery.command, RECOVERY_COMMANDS, field="recovery.command"
+        )
         summary = {
             "schema_version": ATTEMPT_EVIDENCE_SCHEMA_VERSION,
             "manifest_sha256": self.provenance.manifest_sha256,
@@ -1676,9 +1782,13 @@ class AttemptEvidencePacket:
             "unresolved_dispatch_count": sum(
                 1 for item in self.dispatches if item.is_unresolved
             ),
-            "classifier_outcome": self.classifier_outcome,
-            "recovery_action": self.recovery.action,
-            "recovery_command": self.recovery.command,
+            "classifier_outcome": _closed_choice(
+                self.classifier_outcome,
+                CLASSIFIER_OUTCOMES,
+                field="classifier_outcome",
+            ),
+            "recovery_action": recovery_action,
+            "recovery_command": recovery_command,
             "no_duplicate_work_holds": self.no_duplicate_work.holds,
             "authority": False,
         }
@@ -1688,7 +1798,9 @@ class AttemptEvidencePacket:
         return summary
 
     @classmethod
-    def from_dict(cls, data: object) -> AttemptEvidencePacket:
+    def from_dict(
+        cls, data: object, *, require_digest: bool = False
+    ) -> AttemptEvidencePacket:
         mapping = _require_mapping_keys(
             data,
             required=frozenset(
@@ -1710,6 +1822,10 @@ class AttemptEvidencePacket:
             optional=frozenset({"packet_sha256"}),
             label="attempt_evidence_packet",
         )
+        if require_digest and "packet_sha256" not in mapping:
+            raise ReviewInputError(
+                "attempt_evidence_packet missing required field: packet_sha256"
+            )
         if mapping["schema_version"] != ATTEMPT_EVIDENCE_SCHEMA_VERSION:
             raise ReviewInputError("unsupported attempt evidence packet schema_version")
         _exact_false_authority(mapping["authority"], field="authority")
@@ -1717,7 +1833,9 @@ class AttemptEvidencePacket:
         if not isinstance(raw_dispatches, list):
             raise ReviewInputError("dispatches must be a JSON array")
         packet = cls(
-            provenance=ProvenanceManifest.from_dict(mapping["provenance"]),
+            provenance=ProvenanceManifest.from_dict(
+                mapping["provenance"], require_digest=require_digest
+            ),
             current_base_ref=mapping["current_base_ref"],
             current_base_sha=mapping["current_base_sha"],
             original_bindings=OriginalInputBindings.from_dict(
@@ -1756,14 +1874,19 @@ def inspect_installed_package_versions(
 
     lookup = version_lookup or importlib.metadata.version
     resolved: list[str] = []
-    for dist_name in ("review-sensei", "review-sensei-github"):
+    for dist_name in INSTALLED_DISTRIBUTION_NAMES:
         try:
             raw = lookup(dist_name)
-        except importlib.metadata.PackageNotFoundError:
+        except (importlib.metadata.PackageNotFoundError, LookupError, ValueError):
             resolved.append(UNKNOWN_PROVENANCE)
             continue
-        if isinstance(raw, str) and _SEMVER_RE.fullmatch(raw.strip()) is not None:
-            resolved.append(raw.strip())
+        if (
+            isinstance(raw, str)
+            and len(raw) <= 128
+            and raw == raw.strip()
+            and _SEMVER_RE.fullmatch(raw) is not None
+        ):
+            resolved.append(raw)
         else:
             resolved.append(UNKNOWN_PROVENANCE)
     return resolved[0], resolved[1]
@@ -1789,7 +1912,8 @@ def build_attempt_evidence_packet(
     effective_budget = budget or AttemptBudgetSummary()
     effective_receipts = receipts or LifecycleReceipts()
     normalized_dispatches = tuple(dispatches)
-    has_unresolved_dispatch = any(item.is_unresolved for item in normalized_dispatches)
+    unresolved_count = sum(1 for item in normalized_dispatches if item.is_unresolved)
+    has_unresolved_dispatch = unresolved_count > 0
     has_retained_result = (
         bindings.accepted_result_sha256 not in {UNKNOWN_PROVENANCE, MISSING_BINDING}
         and effective_receipts.retained_result_parts == "confirmed"
@@ -1813,8 +1937,13 @@ def build_attempt_evidence_packet(
         elif (
             has_retained_result
             and effective_receipts.terminal_accounting != "confirmed"
-        ):
+        ) or only_convergence:
             selected_outcome = "eligible_recovery_awaiting_authorization"
+        elif effective_receipts.publication_settled_without_terminal_accounting() or (
+            effective_receipts.check == "confirmed"
+            and effective_receipts.terminal_accounting != "confirmed"
+        ):
+            selected_outcome = "explicit_human_decision_required"
         else:
             selected_outcome = "supported_read_only_observation"
     else:
@@ -1828,7 +1957,9 @@ def build_attempt_evidence_packet(
         ledger_expired=ledger_expired,
         only_convergence_pending=only_convergence,
     )
-    assertion = no_duplicate_work or NoDuplicateWorkAssertion()
+    assertion = no_duplicate_work or NoDuplicateWorkAssertion(
+        unreconciled_retries=unresolved_count
+    )
     return AttemptEvidencePacket(
         provenance=provenance,
         original_bindings=bindings,

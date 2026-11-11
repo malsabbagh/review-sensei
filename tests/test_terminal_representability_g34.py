@@ -1151,6 +1151,334 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                     staged_manifest,
                     expected_binding={**part_binding, "generation": 99},
                 )
+            with self.assertRaisesRegex(
+                ReviewInputError, "unsupported preview partition purpose"
+            ):
+                preview_ledger.stage_evidence(
+                    IDENTITY,
+                    binding={**part_binding, "purpose": "results"},
+                    document=large_doc,
+                    item_count=60,
+                    max_manifest_bytes=8192,
+                )
+
+    def test_review_findings_regressions_parity_binding_reserve_and_pre_receipt_guard(
+        self,
+    ) -> None:
+        from review_sensei_github.action_representability import (
+            _command_pricing,
+            require_action_settlement_representable,
+        )
+        from review_sensei_github.api_run_host import review_startup_plan
+        from review_sensei_github.session_ledger import render_session_comment
+
+        from review_sensei.api_work import (
+            ApiExecutionOwner,
+            ApiRunIdentity,
+            FrozenApiConfiguration,
+            initial_accounting,
+        )
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.session import SessionIdentity
+        from tests.test_quarantine_lineage import lineage_value
+
+        # RS-B946F3: lockstep byte-for-byte parity with production render_session_comment (v1 + v2 + grants).
+        v1_rec = SessionRecord.create(IDENTITY)
+        v2_id = SessionIdentity("owner/repo", 7, repository_id=123)
+        v2_state = initial_accounting(
+            ApiRunIdentity(123, 900),
+            FrozenApiConfiguration("c" * 40, "d" * 64, 512),
+            ApiExecutionOwner(1, "hosted", 0),
+            review_startup_plan("hosted"),
+            prior_nonstartup_liability_upper_bound=0,
+        )
+        v2_rec = SessionRecord.create(
+            v2_id,
+            generation=10,
+            api_run_accounting=v2_state.to_document(),
+            quarantine_lineage=lineage_value(),
+        )
+        grants = ("1" * 64, "2" * 64, "3" * 64)
+        for rec_id, rec in ((IDENTITY, v1_rec), (v2_id, v2_rec)):
+            for grant_tuple in ((), grants):
+                rendered = render_session_comment(
+                    repository_id=rec_id.repository_id or 1,
+                    pull_request=rec_id.pull_request,
+                    record=rec,
+                    consumed_grants=grant_tuple,
+                )
+                self.assertEqual(
+                    estimate_session_comment_bytes(
+                        rec,
+                        repository_id=rec_id.repository_id or 1,
+                        pull_request=rec_id.pull_request,
+                        consumed_grants=grant_tuple,
+                    ),
+                    len(rendered.encode("utf-8")),
+                )
+
+        # RS-768225 & RS-0C90BC: carrier fits 8192B alone, yet outer inline_manifest (with binding) exceeds 8192B!
+        import base64
+        import hashlib
+
+        binding = self._default_binding()
+        near_carrier_summary = base64.b64encode(
+            b"".join(
+                hashlib.sha256(f"blk-{idx}".encode("ascii")).digest()
+                for idx in range(178)
+            )
+        ).decode("ascii")
+        near_report = evaluate_terminal_action_representability(
+            identity=IDENTITY,
+            intent_sha256="1" * 64,
+            outcome={"kind": "applied", "reason": None},
+            result_document={"summary": near_carrier_summary},
+            binding=binding,
+            current_record=v1_rec,
+        )
+        self.assertLessEqual(near_report.carrier_bytes, 8192)
+        self.assertIsNone(near_report.manifest_bytes)
+        self.assertFalse(near_report.representable)
+        self.assertEqual(near_report.refusal_code, "carrier_inline_bound_exceeded")
+
+        # RS-2217B7 & RS-BDA89A: non-matching ReviewInputError (even containing 'disposition' and 'limit') propagates!
+        with patch(
+            "review_sensei.terminal_representability.apply_session_command",
+            side_effect=ReviewInputError("maintainer disposition reason limit invalid"),
+        ):
+            with self.assertRaisesRegex(
+                ReviewInputError, "maintainer disposition reason limit invalid"
+            ):
+                preview_session_command_representability(
+                    identity=IDENTITY,
+                    current_record=v1_rec,
+                    command=MaintainerCommand(action="pause", actor="alice"),
+                    intent_sha256="1" * 64,
+                    binding=binding,
+                )
+
+        # RS-C6F5B8: null preview_result fails closed.
+        with patch(
+            "review_sensei.terminal_representability.apply_session_command",
+            return_value=(v1_rec, None),
+        ):
+            with self.assertRaisesRegex(
+                ReviewInputError, "preview session command returned no result"
+            ):
+                preview_session_command_representability(
+                    identity=IDENTITY,
+                    current_record=v1_rec,
+                    command=MaintainerCommand(action="pause", actor="alice"),
+                    intent_sha256="1" * 64,
+                    binding=binding,
+                )
+
+        # RS-28E4D8 & RS-BDA89A: replacement disposition_snapshot and reenroll do NOT double-count existing_snapshot_bytes!
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from review_sensei.disposition import FindingDisposition, FindingIdentity
+        from review_sensei.models import ReviewTransaction
+
+        head_sha = "b" * 40
+        tx_id = ReviewTransaction.derive_id(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+            policy_digest="c" * 64,
+            configuration_digest="d" * 64,
+            evidence_digest="e" * 64,
+            reservation_id="2" * 64,
+        )
+        tx = ReviewTransaction(
+            transaction_id=tx_id,
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+            policy_digest="c" * 64,
+            configuration_digest="d" * 64,
+            evidence_digest="e" * 64,
+            generation=1,
+            reservation_id="2" * 64,
+            phase="publication_succeeded",
+            result_sha256="f" * 64,
+        )
+        disps_14 = tuple(
+            FindingDisposition(
+                fingerprint=f"{i:064x}",
+                action="accept-risk",
+                reason="x" * 220,
+                actor="alice",
+                head_sha=head_sha,
+                actor_role="OWNER",
+                finding_reference=f"RS-{i:06X}",
+                recorded_at="2026-11-11T00:00:00Z",
+                policy_digest="c" * 64,
+                provenance=f"comment:{i + 1}",
+                target_kind="finding",
+            ).to_dict()
+            for i in range(14)
+        )
+        snap_base = v1_rec.evolve(
+            completed_initial_reviews=1,
+            last_committed_reservation_id="2" * 64,
+            transaction=tx,
+            dispositions=disps_14,
+        )
+        _, snap_rec_1, snap_rep_1 = preview_session_command_representability(
+            identity=IDENTITY,
+            current_record=snap_base,
+            command=MaintainerCommand(
+                action="accept-risk",
+                actor="alice",
+                reason="x" * 220,
+                head_sha=head_sha,
+                finding_references=("RS-000099",),
+            ),
+            intent_sha256="1" * 64,
+            binding=binding,
+            finding_inventory=(
+                FindingIdentity(instance=f"000099{'a' * 58}", needs_human=True),
+            ),
+            actor_role="OWNER",
+            policy_digest="c" * 64,
+            provenance="comment:100",
+            enable_disposition_snapshot_writes=True,
+            evidence_budget=EvidenceReadBudget(),
+        )
+        assert snap_rec_1 is not None and snap_rec_1.disposition_snapshot is not None
+        self.assertEqual(snap_rep_1.future_reserve_bytes, 0)
+
+        # Non-snapshot command on already-snapshotted record keeps existing_snapshot_bytes reserve (> 0):
+        _, pause_rec, pause_rep = preview_session_command_representability(
+            identity=IDENTITY,
+            current_record=snap_rec_1,
+            command=MaintainerCommand(action="pause", actor="alice"),
+            intent_sha256="1" * 64,
+            binding=binding,
+            actor_role="OWNER",
+        )
+        assert pause_rec is not None
+        self.assertGreater(pause_rep.future_reserve_bytes, 0)
+
+        # Command staging a replacement snapshot (> 10,240B) does NOT double-count existing_snapshot_bytes:
+        big_cov = tuple(
+            f"file:{'p' * 220}:{idx:03d}:budget-exhausted" for idx in range(44)
+        )
+        _, snap_rec_2, snap_rep_2 = preview_session_command_representability(
+            identity=IDENTITY,
+            current_record=snap_rec_1,
+            command=MaintainerCommand(
+                action="accept-coverage-uncertainty",
+                actor="alice",
+                reason="ok",
+                head_sha=head_sha,
+            ),
+            intent_sha256="1" * 64,
+            binding=binding,
+            actor_role="OWNER",
+            policy_digest="c" * 64,
+            provenance="comment:101",
+            incomplete_coverage=big_cov,
+            enable_disposition_snapshot_writes=True,
+            evidence_budget=EvidenceReadBudget(),
+        )
+        assert snap_rec_2 is not None and snap_rec_2.disposition_snapshot is not None
+        self.assertEqual(snap_rep_2.future_reserve_bytes, 0)
+
+        # Reenroll on snapshotted record clears snapshot -> reserve is 0 (not inflated by old snapshot):
+        _, reenrolled_rec, reenroll_rep = preview_session_command_representability(
+            identity=IDENTITY,
+            current_record=snap_rec_1,
+            command=MaintainerCommand(action="reenroll", actor="alice"),
+            intent_sha256="1" * 64,
+            binding=binding,
+            actor_role="OWNER",
+        )
+        assert reenrolled_rec is not None
+        self.assertIsNone(reenrolled_rec.disposition_snapshot)
+        self.assertEqual(reenroll_rep.future_reserve_bytes, 0)
+
+        # RS-D8093A: missing caller action intent digest fails closed instead of '0' * 64 placeholder:
+        missing_intent_caller = SimpleNamespace(
+            accounting=SimpleNamespace(
+                version=ACCOUNTING_VERSION,
+                action=None,
+                configuration=SimpleNamespace(
+                    limit=64, commit="a" * 40, digest="d" * 64
+                ),
+                owner=SimpleNamespace(generation=1),
+                blocks=(),
+            ),
+            usable=32,
+            _block="b0",
+            _effect_record=v1_rec,
+            _action_effect_boundary=None,
+            budget_view=None,
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "caller action intent digest is unavailable"
+        ):
+            guard_current_command_representability(
+                current_action=SimpleNamespace(
+                    run=SimpleNamespace(caller=missing_intent_caller)
+                ),
+                ledger=SimpleNamespace(evidence_producer=lambda: "local-ledger"),
+                identity=IDENTITY,
+                command=MaintainerCommand(action="pause", actor="alice"),
+                head_sha=head_sha,
+                writes_enabled=True,
+            )
+
+        # RS-9C295F, RS-38FBAE, RS-F4E30D: receipt pricing on accept-coverage-uncertainty / pause and pre-receipt settlement guard:
+        valid_caller = SimpleNamespace(
+            accounting=SimpleNamespace(
+                version=ACCOUNTING_VERSION,
+                action=None,
+                configuration=SimpleNamespace(
+                    limit=64, commit="a" * 40, digest="d" * 64
+                ),
+                owner=SimpleNamespace(generation=1),
+                blocks=(),
+            ),
+            usable=50,
+            _block="b0",
+            _effect_record=v1_rec,
+            _action_effect_boundary=SimpleNamespace(intent_sha256="3" * 64),
+            budget_view=None,
+        )
+        cov_pricing = _command_pricing(
+            valid_caller, action="accept-coverage-uncertainty", writes_enabled=True
+        )
+        self.assertEqual(cov_pricing.receipt_publication_requests, 2)
+        pause_pricing = _command_pricing(
+            valid_caller, action="pause", writes_enabled=True
+        )
+        self.assertEqual(pause_pricing.receipt_publication_requests, 2)
+
+        fake_run = SimpleNamespace(
+            caller=valid_caller,
+            ledger=SimpleNamespace(evidence_producer=lambda: "local-ledger"),
+            identity=IDENTITY,
+            head_sha=head_sha,
+        )
+        oversized_summary = base64.b64encode(
+            b"".join(
+                hashlib.sha256(f"ov-{idx}".encode("ascii")).digest()
+                for idx in range(260)
+            )
+        ).decode("ascii")
+        with self.assertRaises(TerminalRepresentabilityError) as settle_ctx:
+            require_action_settlement_representable(
+                fake_run,
+                outcome={"kind": "applied", "reason": None},
+                result_document={"summary": oversized_summary},
+                extra_work_requests=2,
+                action_name="accept-coverage-uncertainty",
+            )
+        self.assertEqual(
+            settle_ctx.exception.report.refusal_code, "carrier_inline_bound_exceeded"
+        )
 
 
 if __name__ == "__main__":

@@ -184,6 +184,7 @@ class ProvenanceManifestG11Tests(unittest.TestCase):
             expected_tag_object="a72527097205110337a6841a545f548610c7fbaa",
             expected_hosted_version="0.3.24",
             expected_policy_commit="d" * 40,
+            expected_broker_revision=manifest.broker_revision,
             compatibility_manifest=compat,
         )
         self.assertEqual(clean.status, "compatible")
@@ -193,6 +194,21 @@ class ProvenanceManifestG11Tests(unittest.TestCase):
         self.assertIn("broker_revision_is_opaque_deployment_uuid_or_sha", clean.notes)
         self.assertEqual(clean.recovery.action, "no_action_needed")
         self.assertFalse(clean.authority)
+
+        # Unpinned opaque deployment UUID fails closed against semver worker manifest:
+        unpinned_opaque = classify_provenance_compatibility(
+            manifest,
+            expected_tag_object="a72527097205110337a6841a545f548610c7fbaa",
+            expected_hosted_version="0.3.24",
+            expected_policy_commit="d" * 40,
+            compatibility_manifest=compat,
+        )
+        self.assertEqual(unpinned_opaque.status, "mismatch")
+        self.assertEqual(unpinned_opaque.mismatched_fields, ("broker_revision",))
+        self.assertIn(
+            "broker_revision_is_opaque_deployment_uuid_or_sha",
+            unpinned_opaque.notes,
+        )
 
         # Semver Worker out of range + core/hosted/workflow/policy mismatch.
         drifted = replace(
@@ -579,6 +595,196 @@ class ProvenanceManifestG11Tests(unittest.TestCase):
         packet = build_attempt_evidence_packet(provenance=manifest)
         self.assertFalse(packet.authority)
         self.assertEqual(packet.provenance.frozen_policy_commit, "d" * 40)
+
+    def test_review_findings_regressions_semver_gates_compatibility_and_packets(
+        self,
+    ) -> None:
+        # RS-6FF31F & RS-1DE20B: semver prerelease + build metadata accepted; malformed dot sequences & padded strings rejected.
+        for valid_ver in (
+            "1.0.0-rc.1+build.7",
+            "1.0.0-1.2.3+build.4",
+            "0.8.18+exp.sha.5114f85",
+        ):
+            m = ProvenanceManifest(
+                installed_core_version=valid_ver,
+                broker_revision=f"v{valid_ver}",
+            )
+            self.assertEqual(m.installed_core_version, valid_ver)
+            self.assertEqual(m.broker_revision, f"v{valid_ver}")
+
+        for invalid_ver in (
+            "1.0.0-.",
+            "1.0.0-..",
+            "1.0.0-a..b",
+            "1.0.0+",
+            "1.0.0-+build",
+            "1.0.0-rc." + "a" * 130,
+        ):
+            with self.assertRaises(ReviewInputError):
+                ProvenanceManifest(installed_core_version=invalid_ver)
+
+        core_v, hosted_v = inspect_installed_package_versions(
+            version_lookup=lambda name: (
+                "1.0.0-rc.1+build.7" if name == "review-sensei" else " 0.3.24 "
+            )
+        )
+        self.assertEqual(core_v, "1.0.0-rc.1+build.7")
+        self.assertEqual(hosted_v, UNKNOWN_PROVENANCE)
+        err_core, err_hosted = inspect_installed_package_versions(
+            version_lookup=lambda _name: (_ for _ in ()).throw(
+                ValueError("corrupt metadata")
+            )
+        )
+        self.assertEqual(
+            (err_core, err_hosted), (UNKNOWN_PROVENANCE, UNKNOWN_PROVENANCE)
+        )
+
+        # RS-3A8580: hosted gates require routing_preflight == 'passed'; failed routing always fails.
+        hosted_unrouted = GateObservations(
+            routing_preflight="not_run",
+            authenticated_live_validation="passed",
+            broker_enforcement="passed",
+        )
+        self.assertFalse(
+            hosted_unrouted.all_required_gates_confirmed(require_broker=True)
+        )
+        self.assertTrue(
+            hosted_unrouted.all_required_gates_confirmed(
+                require_broker=True, require_routing=False
+            )
+        )
+        failed_routing_local = GateObservations(
+            routing_preflight="failed",
+            authenticated_live_validation="passed",
+            broker_enforcement="not_run",
+        )
+        self.assertFalse(
+            failed_routing_local.all_required_gates_confirmed(require_broker=False)
+        )
+
+        # RS-A2D7F2: conflicting expected_* kwargs vs compatibility_manifest raise ReviewInputError.
+        manifest = _complete_manifest()
+        compat = _compatibility_manifest()
+        with self.assertRaisesRegex(
+            ReviewInputError, "expected_peeled_commit conflicts"
+        ):
+            classify_provenance_compatibility(
+                manifest, expected_peeled_commit="e" * 40, compatibility_manifest=compat
+            )
+        with self.assertRaisesRegex(
+            ReviewInputError, "expected_core_version conflicts"
+        ):
+            classify_provenance_compatibility(
+                manifest, expected_core_version="9.9.9", compatibility_manifest=compat
+            )
+        with self.assertRaisesRegex(
+            ReviewInputError, "expected_broker_revision conflicts"
+        ):
+            classify_provenance_compatibility(
+                manifest,
+                expected_broker_revision="0.2.0",
+                compatibility_manifest=compat,
+            )
+
+        # RS-1F7199: integer-or-unknown validators reject non-unknown strings directly with type error;
+        # _reject_secret_or_control enforces bounded string length first.
+        with self.assertRaisesRegex(ReviewInputError, "positive integer or 'unknown'"):
+            ProvenanceManifest(repository_id="ghp_1234567890abcdefghijklmnopqrstuv")  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ReviewInputError, "exceeds maximum bounded length"):
+            ProvenanceManifest(caller_workflow="a" * 1025)
+
+        # RS-5FAA27: fallback classifier selects convergence or human decision when accounting/check unsettled.
+        settled_pub_unclosed = build_attempt_evidence_packet(
+            provenance=manifest,
+            receipts=LifecycleReceipts(
+                publication="confirmed",
+                check="confirmed",
+                terminal_accounting="pending",
+            ),
+        )
+        self.assertEqual(
+            settled_pub_unclosed.classifier_outcome,
+            "explicit_human_decision_required",
+        )
+        only_conv_default = build_attempt_evidence_packet(
+            provenance=manifest,
+            receipts=LifecycleReceipts(
+                publication="confirmed",
+                check="pending",
+                terminal_accounting="confirmed",
+            ),
+        )
+        self.assertEqual(
+            only_conv_default.classifier_outcome,
+            "eligible_recovery_awaiting_authorization",
+        )
+        self.assertEqual(only_conv_default.recovery.action, "verify_convergence")
+
+        # RS-5BDA55, RS-3DF0AD, RS-4B0070, RS-6FC6FD, RS-DC440E:
+        zero_replay = NoDuplicateWorkAssertion()
+        self.assertTrue(zero_replay.zero_dispatch_replay)
+        self.assertFalse(
+            NoDuplicateWorkAssertion(physical_api_dispatches=2).zero_dispatch_replay
+        )
+
+        with self.assertRaisesRegex(ReviewInputError, "accepted_result_sha256"):
+            build_attempt_evidence_packet(
+                provenance=manifest,
+                receipts=LifecycleReceipts(retained_result_parts="confirmed"),
+            )
+        with self.assertRaisesRegex(ReviewInputError, "unresolved dispatches"):
+            AttemptEvidencePacket(
+                provenance=manifest,
+                original_bindings=OriginalInputBindings(),
+                budget=AttemptBudgetSummary(),
+                receipts=LifecycleReceipts(),
+                dispatches=(
+                    UncertainDispatchRecord(
+                        operation_key="op:1",
+                        certainty="unknown",
+                        owned_readback_sha256=UNKNOWN_PROVENANCE,
+                    ),
+                ),
+                classifier_outcome="explicit_human_decision_required",
+                recovery=prescribe_recovery(
+                    "explicit_human_decision_required",
+                    has_uncertain_dispatches=True,
+                    ledger_expired=True,
+                ),
+                no_duplicate_work=NoDuplicateWorkAssertion(unreconciled_retries=0),
+            )
+
+        # Uncertain dispatches take precedence over ledger_expired:
+        overlap_rx = prescribe_recovery(
+            "explicit_human_decision_required",
+            has_uncertain_dispatches=True,
+            ledger_expired=True,
+        )
+        self.assertEqual(
+            overlap_rx.action, "reconcile_owned_readback_then_hold_or_dispose"
+        )
+
+        # require_digest=True rejects stripped manifest/packet digests:
+        raw_manifest = manifest.to_dict()
+        del raw_manifest["manifest_sha256"]
+        with self.assertRaisesRegex(ReviewInputError, "manifest_sha256"):
+            ProvenanceManifest.from_dict(raw_manifest, require_digest=True)
+        raw_packet = only_conv_default.to_dict()
+        del raw_packet["packet_sha256"]
+        with self.assertRaisesRegex(ReviewInputError, "packet_sha256"):
+            AttemptEvidencePacket.from_dict(raw_packet, require_digest=True)
+
+        # has_complete_runtime_identity across broker_route states:
+        self.assertTrue(
+            replace(
+                manifest, broker_route="none", broker_revision=UNKNOWN_PROVENANCE
+            ).has_complete_runtime_identity
+        )
+        self.assertFalse(
+            replace(
+                manifest, broker_route=UNKNOWN_PROVENANCE
+            ).has_complete_runtime_identity
+        )
 
 
 if __name__ == "__main__":

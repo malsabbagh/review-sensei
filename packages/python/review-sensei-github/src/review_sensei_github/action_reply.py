@@ -28,6 +28,7 @@ from review_sensei.stages import (
 )
 
 from .action_completion import require_reply_completion
+from .action_representability import require_action_settlement_representable
 from .action_run import application
 from .api_run_budget import CallerRunBudget
 from .api_run_host import policy_bytes
@@ -299,8 +300,6 @@ def execute_reply(run: ReviewRun, args: Any) -> int:
         raise ReviewInputError("reply result is not a confirmed current outcome")
     outcome = _outcome(result, run)
     _configuration(run)
-    from .action_representability import require_action_settlement_representable
-
     require_action_settlement_representable(
         run,
         outcome=outcome,

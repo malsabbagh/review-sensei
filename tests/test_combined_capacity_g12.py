@@ -745,9 +745,71 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 recovery=rx,
             )
 
-        no_handoff_replay = simulate_interruption_and_fresh_replay(valid_scen)
-        self.assertFalse(no_handoff_replay.fresh_process_handoff_verified)
-        self.assertTrue(no_handoff_replay.converged_after_recovery)
+        default_replay = simulate_interruption_and_fresh_replay(valid_scen)
+        self.assertTrue(default_replay.fresh_process_handoff_verified)
+        self.assertTrue(default_replay.converged_after_recovery)
+
+        opt_out_replay = simulate_interruption_and_fresh_replay(
+            valid_scen, verify_fresh_handoff=False
+        )
+        self.assertFalse(opt_out_replay.fresh_process_handoff_verified)
+        self.assertTrue(opt_out_replay.converged_after_recovery)
+
+        with self.assertRaisesRegex(ReviewInputError, "must all be provided together"):
+            simulate_interruption_and_fresh_replay(valid_scen, handoff_key=b"k" * 32)
+
+        # RS-FB3471: accounting_version validated before evidence_candidate early return:
+        from types import SimpleNamespace
+
+        obs_candidate = SimpleNamespace(anchor_document={}, ancestors=())
+        with self.assertRaisesRegex(ReviewInputError, "unsupported accounting_version"):
+            evaluate_combined_capacity(
+                CombinedComponentFootprint(accounting_version="caller-requests-v99"),
+                evidence_candidate=obs_candidate,
+            )
+        v3_before_obs = evaluate_combined_capacity(
+            CombinedComponentFootprint(
+                accounting_version=PARTITIONED_ACTION_ACCOUNTING_VERSION,
+                allow_v3_writer=False,
+            ),
+            evidence_candidate=obs_candidate,
+        )
+        self.assertEqual(v3_before_obs.refusal_code, "unsupported_v3_writer")
+
+        # RS-431704: evaluate_live_session_envelope rejects malformed api_run_accounting:
+        from review_sensei.session import SessionIdentity
+
+        bad_live_record = SessionRecord.create(
+            SessionIdentity("malsabbagh/review-sensei", 448, 101)
+        )
+        object.__setattr__(bad_live_record, "api_run_accounting", {"version": None})
+        with self.assertRaisesRegex(ReviewInputError, "missing a valid version"):
+            evaluate_live_session_envelope(
+                bad_live_record,
+                repository_id=101,
+                pull_request=448,
+            )
+
+        # RS-1378BC: exact ORDINARY_EVIDENCE_READ_LIMIT (60) vs +1 (61) boundary:
+        exact_60 = evaluate_combined_capacity(
+            CombinedComponentFootprint(
+                retained_result_part_reads=30,
+                disposition_snapshot_part_reads=30,
+            )
+        )
+        self.assertTrue(exact_60.combined_envelope_fits)
+        self.assertEqual(
+            exact_60.total_ordinary_part_reads, ORDINARY_EVIDENCE_READ_LIMIT
+        )
+        over_61 = evaluate_combined_capacity(
+            CombinedComponentFootprint(
+                retained_result_part_reads=30,
+                disposition_snapshot_part_reads=30,
+                recovery_context_part_reads=1,
+            )
+        )
+        self.assertFalse(over_61.combined_envelope_fits)
+        self.assertEqual(over_61.refusal_code, "combined_evidence_read_budget_exceeded")
 
 
 if __name__ == "__main__":

@@ -188,8 +188,17 @@ class OriginalRecoveryContextBundleTests(unittest.TestCase):
             "schema_version": "caller-action-result-v1",
             "accounting_version": PARTITIONED_ACTION_ACCOUNTING_VERSION,
         }
-        with self.assertRaisesRegex(ReviewInputError, "unsupported_v3_writer"):
+        with self.assertRaisesRegex(ReviewInputError, "observation_only_not_authority"):
             OriginalRecoveryContextBundle.from_dict(v3_action_doc)
+
+        v3_writer_doc = {
+            "accounting_version": PARTITIONED_ACTION_ACCOUNTING_VERSION,
+        }
+        ensure_not_observation_only_evidence(
+            v3_writer_doc, check_writer_enrollment=False
+        )
+        with self.assertRaisesRegex(ReviewInputError, "unsupported_v3_writer"):
+            OriginalRecoveryContextBundle.from_dict(v3_writer_doc)
 
 
 class PreEffectBudgetAndHandoffStoreTests(unittest.TestCase):
@@ -873,6 +882,342 @@ class EndToEndFreshProcessRecoveryG17Tests(
             self.assertEqual(refusal.refusal_code, "unsupported_v3_writer")
             self.assertEqual(
                 refusal.recovery.action, "reconcile_owned_readback_then_hold_or_dispose"
+            )
+
+    def test_review_findings_regressions_runtime_flags_refusal_codes_and_receipt_copy(
+        self,
+    ) -> None:
+        from review_sensei.models import ReviewResult
+        from review_sensei.review_decision_receipt import canonical_decision_receipt
+
+        # RS-467CD5, RS-05A3ED, RS-5405A3: canonical_decision_receipt returns an unaliased deep copy.
+        nested_candidate = {
+            "candidate_id": "cand_1",
+            "fingerprint": "f" * 64,
+            "action": "continue",
+            "status": "assessed",
+            "assessments": {
+                "kind": "behavioral_defect",
+                "evidence": "supported",
+                "next": "continue",
+                "duplicate": "different_concern",
+            },
+            "suspected_duplicate": False,
+            "verification": "supported",
+        }
+        nested_model = {
+            "provider": "openai",
+            "requested_model": "gpt-5",
+            "actual_model": "gpt-5",
+            "actual_provider": "openai",
+            "input_tokens": 120,
+            "output_tokens": 45,
+        }
+        raw_receipt: dict[str, object] = {
+            "verification_called": True,
+            "status": "complete",
+            "schema_version": "1.0",
+            "provider": "openai",
+            "policy_digest": "1" * 64,
+            "output_reserved": 256,
+            "output_bytes": 128,
+            "models": [nested_model],
+            "model": "gpt-5",
+            "inventory_sha256": "2" * 64,
+            "input_sha256": "3" * 64,
+            "input_bytes": 512,
+            "elapsed_ms": 42,
+            "candidates": [nested_candidate],
+            "calls": 1,
+        }
+        copied_receipt = canonical_decision_receipt(raw_receipt)
+        self.assertEqual(list(copied_receipt.keys()), sorted(copied_receipt.keys()))
+        result = ReviewResult(
+            summary="Reviewed",
+            comments=(),
+            provider="openai",
+            decision_pass=raw_receipt,
+        )
+        digest_before = result.content_digest()
+        nested_candidate["action"] = "optional_suggestion"
+        nested_candidate["assessments"]["kind"] = "clarification"  # type: ignore[index]
+        nested_model["input_tokens"] = 999999
+        raw_receipt["calls"] = 99
+        assert result.decision_pass is not None
+        self.assertEqual(result.decision_pass["calls"], 1)
+        self.assertEqual(result.decision_pass["candidates"][0]["action"], "continue")
+        self.assertEqual(result.content_digest(), digest_before)
+
+        for bad_receipt, expected_msg in (
+            ({**copied_receipt, "schema_version": "2.0"}, "identity is invalid"),
+            ({**copied_receipt, "calls": True}, "accounting is invalid"),
+            ({**copied_receipt, "candidates": "bad"}, "inventory is invalid"),
+            (
+                {**copied_receipt, "candidates": [{"candidate_id": "BAD"}]},
+                "candidate is invalid",
+            ),
+            (
+                {
+                    **copied_receipt,
+                    "candidates": [
+                        {
+                            **copied_receipt["candidates"][0],
+                            "assessments": {"kind": "bad"},
+                        }
+                    ],
+                },
+                "assessment is invalid",
+            ),
+            (
+                {
+                    **copied_receipt,
+                    "candidates": [
+                        {**copied_receipt["candidates"][0], "action": "human_review"}
+                    ],
+                },
+                "completion is invalid",
+            ),
+            ({**copied_receipt, "models": "bad"}, "model inventory is invalid"),
+            (
+                {**copied_receipt, "models": [{"provider": ""}]},
+                "model metadata is invalid",
+            ),
+            (
+                {
+                    **copied_receipt,
+                    "candidates": [
+                        {
+                            **copied_receipt["candidates"][0],
+                            "candidate_id": f"cand_{idx}",
+                            "fingerprint": f"{idx:064x}_" + "a" * 60,
+                        }
+                        for idx in range(220)
+                    ],
+                },
+                "exceeds its byte bound",
+            ),
+        ):
+            with self.assertRaisesRegex(ReviewInputError, expected_msg):
+                canonical_decision_receipt(bad_receipt)
+
+        # RS-C43336: ancestor depth & cycle refusals attach non-None pricing.
+        sample = _sample_bundle()
+        depth_refusal = price_recovery_context_admission(
+            sample,
+            current_run_id=10,
+            ancestor_run_ids=tuple(range(100, 134)),
+        )
+        self.assertEqual(depth_refusal.refusal_code, "ancestor_depth_exceeded")
+        self.assertIsNotNone(depth_refusal.pricing)
+        cycle_refusal = price_recovery_context_admission(
+            sample,
+            current_run_id=10,
+            ancestor_run_ids=(11, 10),
+        )
+        self.assertEqual(cycle_refusal.refusal_code, "circular_ancestor_evidence")
+        self.assertIsNotNone(cycle_refusal.pricing)
+
+        # RS-8DC918, RS-431704, RS-D2EF08, RS-6944DE:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.original_analysis(root)
+            diff_text = (root / "review.patch").read_text(encoding="utf-8")
+            state = _FailedPublication()
+            self.assertEqual(self.invoke(root, state)[0], 1)
+            ledger = LocalSessionLedger(root / "ledger")
+
+            reconstructed, flagged_decision = (
+                reconstruct_or_prescribe_publication_contexts(
+                    source_root=root,
+                    diff=diff_text,
+                    ledger=ledger,
+                    identity=IDENTITY,
+                    base_ref="main",
+                    base_sha=BASE,
+                    head_sha=HEAD,
+                    policy_commit=POLICY_COMMIT,
+                    policy=ReviewConvergencePolicy(),
+                    runtime_only_flags={
+                        "cli_overrides": True,
+                        "has_custom_stages": True,
+                    },
+                )
+            )
+            self.assertIsNotNone(reconstructed)
+            self.assertTrue(flagged_decision.admitted)
+            assert flagged_decision.bundle is not None
+            self.assertFalse(flagged_decision.bundle.reconstructible_from_defaults)
+            self.assertEqual(
+                flagged_decision.bundle.runtime_only_fields,
+                ("cli_overrides", "custom_stages"),
+            )
+
+            # Plain ReviewInputError with misleading "unavailable" / "does not match" words
+            # must classify as truncated_or_corrupt_context rather than matching substrings:
+            with patch(
+                "review_sensei_github.publication_context_recovery.load_configuration",
+                side_effect=ReviewInputError(
+                    "configuration key is unavailable and does not match schema"
+                ),
+            ):
+                _, config_err_decision = reconstruct_or_prescribe_publication_contexts(
+                    source_root=root,
+                    diff=diff_text,
+                    ledger=ledger,
+                    identity=IDENTITY,
+                    base_ref="main",
+                    base_sha=BASE,
+                    head_sha=HEAD,
+                    policy_commit=POLICY_COMMIT,
+                    policy=ReviewConvergencePolicy(),
+                )
+            self.assertFalse(config_err_decision.admitted)
+            self.assertEqual(
+                config_err_decision.refusal_code, "truncated_or_corrupt_context"
+            )
+
+            # Malformed api_run_accounting (missing/non-string version) is rejected instead of defaulting:
+            loaded = ledger.load(IDENTITY)
+            assert loaded.record is not None and reconstructed is not None
+            bad_acc_record = SimpleNamespace(
+                transaction=loaded.record.transaction,
+                api_run_accounting={"version": 123},
+            )
+            with patch.object(
+                ledger,
+                "load",
+                return_value=SimpleNamespace(status="ok", record=bad_acc_record),
+            ):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "missing a valid version"
+                ):
+                    bundle_from_reconstructed_contexts(
+                        reconstructed,
+                        source_root=root,
+                        diff=diff_text,
+                        ledger=ledger,
+                        identity=IDENTITY,
+                        base_ref="main",
+                        policy_commit=POLICY_COMMIT,
+                    )
+
+            for bad_flags, flag_err in (
+                ("not-mapping", "must be a mapping"),
+                ({1: True}, "keys must be strings"),
+                ({"unknown_flag": True}, "unknown runtime_only_flags key"),
+                (
+                    {"cli_overrides": True, "has_cli_overrides": False},
+                    "conflicting runtime_only_flags",
+                ),
+            ):
+                with self.assertRaisesRegex(ReviewInputError, flag_err):
+                    bundle_from_reconstructed_contexts(
+                        reconstructed,
+                        source_root=root,
+                        diff=diff_text,
+                        ledger=ledger,
+                        identity=IDENTITY,
+                        base_ref="main",
+                        policy_commit=POLICY_COMMIT,
+                        runtime_only_flags=bad_flags,  # type: ignore[arg-type]
+                    )
+
+            with self.assertRaisesRegex(ReviewInputError, "source is unavailable"):
+                bundle_from_reconstructed_contexts(
+                    reconstructed,
+                    source_root=root / "missing-dir",
+                    diff=diff_text,
+                    ledger=ledger,
+                    identity=IDENTITY,
+                    base_ref="main",
+                    policy_commit=POLICY_COMMIT,
+                )
+            with patch.object(
+                ledger,
+                "load",
+                return_value=SimpleNamespace(status="missing", record=None),
+            ):
+                with self.assertRaisesRegex(ReviewInputError, "ledger is unavailable"):
+                    bundle_from_reconstructed_contexts(
+                        reconstructed,
+                        source_root=root,
+                        diff=diff_text,
+                        ledger=ledger,
+                        identity=IDENTITY,
+                        base_ref="main",
+                        policy_commit=POLICY_COMMIT,
+                    )
+            with patch.object(
+                ledger,
+                "load",
+                return_value=SimpleNamespace(
+                    status="ok",
+                    record=SimpleNamespace(transaction=None, api_run_accounting=None),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "transaction is unavailable"
+                ):
+                    bundle_from_reconstructed_contexts(
+                        reconstructed,
+                        source_root=root,
+                        diff=diff_text,
+                        ledger=ledger,
+                        identity=IDENTITY,
+                        base_ref="main",
+                        policy_commit=POLICY_COMMIT,
+                    )
+            with patch.object(
+                ledger,
+                "load",
+                return_value=SimpleNamespace(
+                    status="ok",
+                    record=SimpleNamespace(
+                        transaction=loaded.record.transaction,
+                        api_run_accounting="not-mapping",
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(ReviewInputError, "must be a mapping"):
+                    bundle_from_reconstructed_contexts(
+                        reconstructed,
+                        source_root=root,
+                        diff=diff_text,
+                        ledger=ledger,
+                        identity=IDENTITY,
+                        base_ref="main",
+                        policy_commit=POLICY_COMMIT,
+                    )
+            with self.assertRaisesRegex(
+                ReviewInputError, "admission_context is unavailable"
+            ):
+                bundle_from_reconstructed_contexts(
+                    SimpleNamespace(admission_context=None),  # type: ignore[arg-type]
+                    source_root=root,
+                    diff=diff_text,
+                    ledger=ledger,
+                    identity=IDENTITY,
+                    base_ref="main",
+                    policy_commit=POLICY_COMMIT,
+                )
+
+            unfunded_ctx, unfunded_dec = reconstruct_or_prescribe_publication_contexts(
+                source_root=root,
+                diff=diff_text,
+                ledger=ledger,
+                identity=IDENTITY,
+                base_ref="main",
+                base_sha=BASE,
+                head_sha=HEAD,
+                policy_commit=POLICY_COMMIT,
+                policy=ReviewConvergencePolicy(),
+                original_api_limit=8,
+                already_consumed_requests=8,
+            )
+            self.assertIsNone(unfunded_ctx)
+            self.assertFalse(unfunded_dec.admitted)
+            self.assertEqual(
+                unfunded_dec.refusal_code, "budget_exhausted_before_effect"
             )
 
 

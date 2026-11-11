@@ -18,7 +18,9 @@ publication, and terminal stage without conferring runtime authority.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,8 +68,11 @@ from .recovery_context import (
     MAX_RECOVERY_HANDOFF_FILES,
     MAX_RECOVERY_HANDOFF_TOTAL_BYTES,
     MAX_RECOVERY_RESULT_PARTS,
+    OBSERVATION_ONLY_REFUSAL_CODE,
+    UNSUPPORTED_V3_WRITER_REFUSAL_CODE,
     OriginalRecoveryContextBundle,
     RecoveryContextStore,
+    RecoveryRefusalError,
     ensure_not_observation_only_evidence,
 )
 from .session import (
@@ -103,8 +108,8 @@ SUPPORTED_ENVELOPE_WRITER_VERSIONS = frozenset(
 
 COMBINED_REFUSAL_CODES = frozenset(
     {
-        "observation_only_not_authority",
-        "unsupported_v3_writer",
+        OBSERVATION_ONLY_REFUSAL_CODE,
+        UNSUPPORTED_V3_WRITER_REFUSAL_CODE,
         "individual_component_limit_exceeded",
         "combined_session_record_bytes_exceeded",
         "combined_session_comment_bytes_exceeded",
@@ -134,10 +139,18 @@ INTERRUPTION_MODES = (
     "definite_rejection",
 )
 
-PAYLOAD_PROFILES = (
+FITTING_PAYLOAD_PROFILES = (
     "compact",
     "near_individual_limits",
+)
+
+PAYLOAD_PROFILES = (
+    *FITTING_PAYLOAD_PROFILES,
     "combined_overflow",
+)
+
+CHECK_DEFINITE_REJECTION_CASES = frozenset(
+    {("check_publication", "definite_rejection")}
 )
 
 TEXT_ENCODINGS = (
@@ -893,9 +906,9 @@ def _prescribe_combined_recovery(refusal_code: str) -> RecoveryPrescription:
                 "Resume in a fresh bounded run using retained original recovery context or '@reviewsensei review remaining'.",
             ),
         )
-    if refusal_code == "unsupported_v3_writer":
+    if refusal_code == UNSUPPORTED_V3_WRITER_REFUSAL_CODE:
         return prescribe_recovery("unsupported_legacy_state")
-    if refusal_code == "observation_only_not_authority":
+    if refusal_code == OBSERVATION_ONLY_REFUSAL_CODE:
         return prescribe_recovery("missing_evidence")
     return RecoveryPrescription(
         action="verify_convergence",
@@ -915,14 +928,47 @@ def evaluate_combined_capacity(
 ) -> CombinedCapacityEvaluation:
     """Evaluate per-component limits and simultaneous combined envelope capacity."""
 
+    if (
+        footprint.accounting_version not in SUPPORTED_ENVELOPE_WRITER_VERSIONS
+        and footprint.accounting_version != PARTITIONED_ACTION_ACCOUNTING_VERSION
+    ):
+        raise ReviewInputError(
+            f"unsupported accounting_version: {footprint.accounting_version!r}"
+        )
+
+    if (
+        footprint.accounting_version == PARTITIONED_ACTION_ACCOUNTING_VERSION
+        and not footprint.allow_v3_writer
+    ):
+        return CombinedCapacityEvaluation(
+            individual_components_fit=True,
+            combined_envelope_fits=False,
+            refusal_code=UNSUPPORTED_V3_WRITER_REFUSAL_CODE,
+            reason="caller-requests-v3 writer activation is disabled by default",
+            component_violations=(),
+            projected_record_bytes=footprint.projected_record_bytes,
+            projected_comment_bytes=footprint.projected_comment_bytes,
+            projected_review_body_bytes=footprint.projected_review_body_bytes,
+            total_ordinary_part_reads=footprint.total_ordinary_part_reads,
+            total_projected_requests=footprint.total_projected_requests,
+            remaining_api_headroom=(
+                footprint.original_api_limit - footprint.total_projected_requests
+            ),
+            recovery=_prescribe_combined_recovery(UNSUPPORTED_V3_WRITER_REFUSAL_CODE),
+        )
+
     if evidence_candidate is not None:
         try:
-            ensure_not_observation_only_evidence(evidence_candidate)
+            ensure_not_observation_only_evidence(
+                evidence_candidate,
+                check_writer_enrollment=not footprint.allow_v3_writer,
+            )
         except ReviewInputError as exc:
             code = (
-                "unsupported_v3_writer"
-                if "unsupported_v3_writer" in str(exc)
-                else "observation_only_not_authority"
+                exc.refusal_code
+                if isinstance(exc, RecoveryRefusalError)
+                and exc.refusal_code in COMBINED_REFUSAL_CODES
+                else OBSERVATION_ONLY_REFUSAL_CODE
             )
             return CombinedCapacityEvaluation(
                 individual_components_fit=True,
@@ -940,34 +986,6 @@ def evaluate_combined_capacity(
                 ),
                 recovery=_prescribe_combined_recovery(code),
             )
-
-    if (
-        footprint.accounting_version == PARTITIONED_ACTION_ACCOUNTING_VERSION
-        and not footprint.allow_v3_writer
-    ):
-        return CombinedCapacityEvaluation(
-            individual_components_fit=True,
-            combined_envelope_fits=False,
-            refusal_code="unsupported_v3_writer",
-            reason="caller-requests-v3 writer activation is disabled by default",
-            component_violations=(),
-            projected_record_bytes=footprint.projected_record_bytes,
-            projected_comment_bytes=footprint.projected_comment_bytes,
-            projected_review_body_bytes=footprint.projected_review_body_bytes,
-            total_ordinary_part_reads=footprint.total_ordinary_part_reads,
-            total_projected_requests=footprint.total_projected_requests,
-            remaining_api_headroom=(
-                footprint.original_api_limit - footprint.total_projected_requests
-            ),
-            recovery=_prescribe_combined_recovery("unsupported_v3_writer"),
-        )
-    if (
-        footprint.accounting_version not in SUPPORTED_ENVELOPE_WRITER_VERSIONS
-        and footprint.accounting_version != PARTITIONED_ACTION_ACCOUNTING_VERSION
-    ):
-        raise ReviewInputError(
-            f"unsupported accounting_version: {footprint.accounting_version!r}"
-        )
 
     violations: list[str] = []
     component_checks = (
@@ -1234,7 +1252,13 @@ def evaluate_live_session_envelope(
     required_stage_requests: int = 0,
     original_api_limit: int = DEFAULT_API_REQUEST_LIMIT,
 ) -> CombinedCapacityEvaluation:
-    """Evaluate exact UTF-8 byte and request envelopes on a live ``SessionRecord``."""
+    """Evaluate exact UTF-8 byte and request envelopes on a live ``SessionRecord``.
+
+    ``exact_comment_bytes`` measures the rendered GitHub issue comment for the
+    session ledger marker (``SessionRecord`` JSON + consumed-grant headers),
+    whereas ``review_summary_text`` and ``published_finding_count`` are priced on
+    the separate GitHub PR review body surface (``projected_review_body_bytes``).
+    """
 
     summary_metrics = measure_utf8_text(review_summary_text)
     raw_record_bytes = estimate_session_record_bytes(record)
@@ -1246,12 +1270,19 @@ def evaluate_live_session_envelope(
     )
     disp_bytes = disposition_array_bytes(record.dispositions)
     accounting_version = ACCOUNTING_VERSION
-    if isinstance(record.api_run_accounting, Mapping):
+    if record.api_run_accounting is not None:
+        if not isinstance(record.api_run_accounting, Mapping):
+            raise ReviewInputError(
+                "record.api_run_accounting must be a mapping when present"
+            )
         ver = record.api_run_accounting.get(
             "version", record.api_run_accounting.get("schema_version")
         )
-        if isinstance(ver, str):
-            accounting_version = ver
+        if not isinstance(ver, str) or not ver.strip():
+            raise ReviewInputError(
+                "record.api_run_accounting is missing a valid version string"
+            )
+        accounting_version = ver
 
     reserve = _non_negative_int(
         future_root_reserve_bytes, field="future_root_reserve_bytes"
@@ -1551,20 +1582,114 @@ def _footprint_for_scenario(
     )
 
 
+def _default_scenario_recovery_bundle(
+    scenario: InterruptionScenario,
+) -> OriginalRecoveryContextBundle:
+    seed = hashlib.sha256(f"g12:{scenario.scenario_id}".encode("utf-8")).hexdigest()
+    return OriginalRecoveryContextBundle(
+        repository="malsabbagh/review-sensei",
+        repository_id=101,
+        pull_request=448,
+        base_ref="main",
+        base_sha=seed[:40],
+        head_sha=hashlib.sha256(f"head:{seed}".encode("utf-8")).hexdigest()[:40],
+        policy_commit=hashlib.sha256(f"policy:{seed}".encode("utf-8")).hexdigest()[:40],
+        transaction_id=seed,
+        generation=1,
+        reservation_id=f"res:{scenario.scenario_id}",
+        accepted_result_sha256=hashlib.sha256(
+            f"result:{seed}".encode("utf-8")
+        ).hexdigest(),
+        configuration_digest=hashlib.sha256(
+            f"config:{seed}".encode("utf-8")
+        ).hexdigest(),
+        evidence_digest=hashlib.sha256(f"evidence:{seed}".encode("utf-8")).hexdigest(),
+        convergence_policy_digest=hashlib.sha256(
+            f"conv:{seed}".encode("utf-8")
+        ).hexdigest(),
+        work_policy_digest=hashlib.sha256(f"work:{seed}".encode("utf-8")).hexdigest(),
+        decision_policy_digest=hashlib.sha256(
+            f"decision:{seed}".encode("utf-8")
+        ).hexdigest(),
+        provider_identity="openai:gpt-5",
+        selected_context_digest=hashlib.sha256(
+            f"ctx:{seed}".encode("utf-8")
+        ).hexdigest(),
+        learnings_digest=hashlib.sha256(f"learn:{seed}".encode("utf-8")).hexdigest(),
+        baseline_digest=None,
+        diff_sha256=hashlib.sha256(f"diff:{seed}".encode("utf-8")).hexdigest(),
+        placement_mode="complete",
+    )
+
+
+def _execute_fresh_handoff_roundtrip(
+    *,
+    directory: Path,
+    key: bytes,
+    bundle: OriginalRecoveryContextBundle,
+    footprint: CombinedComponentFootprint,
+) -> None:
+    writer_store = RecoveryContextStore(directory, key=key)
+    writer_store.save(bundle)
+    # Fresh-process reader instance shares only private disk + HMAC key:
+    fresh_reader_store = RecoveryContextStore(directory, key=key)
+    decision = fresh_reader_store.load_for_fresh_process(
+        bundle.transaction_id,
+        expected_repository=bundle.repository,
+        expected_pull_request=bundle.pull_request,
+        expected_base_sha=bundle.base_sha,
+        expected_head_sha=bundle.head_sha,
+        expected_policy_commit=bundle.policy_commit,
+        expected_result_sha256=bundle.accepted_result_sha256,
+        current_run_id=bundle.run_id + 1,
+        current_root_bytes=footprint.projected_record_bytes,
+        intermediate_root_bytes=footprint.projected_record_bytes,
+        result_part_count=max(1, footprint.retained_result_part_reads),
+        total_decoded_bytes=max(1_024, footprint.published_review_summary_utf8_bytes),
+        original_api_limit=footprint.original_api_limit,
+        already_consumed_requests=footprint.committed_requests,
+        unknown_usage_requests=footprint.unknown_usage_requests,
+        active_reserved_requests=footprint.active_reserved_requests,
+    )
+    if (
+        not decision.admitted
+        or decision.bundle != bundle
+        or decision.authority is not False
+    ):
+        raise ReviewInputError("fresh-process recovery handoff integrity mismatch")
+
+
 def simulate_interruption_and_fresh_replay(
     scenario: InterruptionScenario,
     *,
     handoff_directory: Path | None = None,
     handoff_key: bytes | None = None,
     recovery_bundle: OriginalRecoveryContextBundle | None = None,
+    verify_fresh_handoff: bool = True,
 ) -> InterruptionReplayResult:
     """Qualify interruption handling and fresh-process replay for one G12 scenario."""
+
+    _exact_bool(verify_fresh_handoff, field="verify_fresh_handoff")
+    explicit_handoff_args = (handoff_directory, handoff_key, recovery_bundle)
+    if any(arg is not None for arg in explicit_handoff_args) and not all(
+        arg is not None for arg in explicit_handoff_args
+    ):
+        raise ReviewInputError(
+            "handoff_directory, handoff_key, and recovery_bundle must all be provided together"
+        )
 
     footprint = _footprint_for_scenario(scenario)
     evaluation = evaluate_combined_capacity(footprint)
 
     # Pre-effect combined overflow refuses cleanly BEFORE dispatching partial writes:
-    if not evaluation.combined_envelope_fits:
+    if (
+        not evaluation.combined_envelope_fits
+        and evaluation.refusal_code in COMBINED_REFUSAL_CODES
+    ):
+        if evaluation.recovery.authority is not False:
+            raise ReviewInputError(
+                "pre-effect refusal prescription cannot grant authority"
+            )
         return InterruptionReplayResult(
             scenario=scenario,
             envelope_evaluation=evaluation,
@@ -1586,37 +1711,27 @@ def simulate_interruption_and_fresh_replay(
         and handoff_key is not None
         and recovery_bundle is not None
     ):
-        writer_store = RecoveryContextStore(handoff_directory, key=handoff_key)
-        writer_store.save(recovery_bundle)
-        # Fresh-process reader instance shares only private disk + HMAC key:
-        fresh_reader_store = RecoveryContextStore(handoff_directory, key=handoff_key)
-        decision = fresh_reader_store.load_for_fresh_process(
-            recovery_bundle.transaction_id,
-            expected_repository=recovery_bundle.repository,
-            expected_pull_request=recovery_bundle.pull_request,
-            expected_base_sha=recovery_bundle.base_sha,
-            expected_head_sha=recovery_bundle.head_sha,
-            expected_policy_commit=recovery_bundle.policy_commit,
-            expected_result_sha256=recovery_bundle.accepted_result_sha256,
-            current_run_id=recovery_bundle.run_id + 1,
-            current_root_bytes=footprint.projected_record_bytes,
-            intermediate_root_bytes=footprint.projected_record_bytes,
-            result_part_count=max(1, footprint.retained_result_part_reads),
-            total_decoded_bytes=max(
-                1_024, footprint.published_review_summary_utf8_bytes
-            ),
-            original_api_limit=footprint.original_api_limit,
-            already_consumed_requests=footprint.committed_requests,
-            unknown_usage_requests=footprint.unknown_usage_requests,
-            active_reserved_requests=footprint.active_reserved_requests,
+        _execute_fresh_handoff_roundtrip(
+            directory=handoff_directory,
+            key=handoff_key,
+            bundle=recovery_bundle,
+            footprint=footprint,
         )
-        if (
-            not decision.admitted
-            or decision.bundle != recovery_bundle
-            or decision.authority is not False
-        ):
-            raise ReviewInputError("fresh-process recovery handoff integrity mismatch")
         handoff_verified = True
+    elif verify_fresh_handoff:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ephemeral_dir = Path(tmp_dir) / "handoff"
+            ephemeral_key = hashlib.sha256(
+                f"g12-handoff-key:{scenario.scenario_id}".encode("utf-8")
+            ).digest()
+            ephemeral_bundle = _default_scenario_recovery_bundle(scenario)
+            _execute_fresh_handoff_roundtrip(
+                directory=ephemeral_dir,
+                key=ephemeral_key,
+                bundle=ephemeral_bundle,
+                footprint=footprint,
+            )
+            handoff_verified = True
 
     unknown_retained = (
         footprint.unknown_usage_requests
@@ -1626,9 +1741,9 @@ def simulate_interruption_and_fresh_replay(
     )
 
     if (
-        scenario.interruption_stage == "check_publication"
-        and scenario.interruption_mode == "definite_rejection"
-    ):
+        scenario.interruption_stage,
+        scenario.interruption_mode,
+    ) in CHECK_DEFINITE_REJECTION_CASES:
         # Per ADR 0130: definite 401/403 check rejection closes fresh accounting
         # honestly while preserving the unsuccessful merge gate.
         rx = prescribe_recovery(
@@ -1638,7 +1753,7 @@ def simulate_interruption_and_fresh_replay(
         return InterruptionReplayResult(
             scenario=scenario,
             envelope_evaluation=evaluation,
-            interrupted_unknown_charges_retained=0,
+            interrupted_unknown_charges_retained=unknown_retained,
             orphan_parts_trusted=False,
             owned_readback_reconciled=True,
             duplicate_side_effects=0,
@@ -1655,7 +1770,7 @@ def simulate_interruption_and_fresh_replay(
         return InterruptionReplayResult(
             scenario=scenario,
             envelope_evaluation=evaluation,
-            interrupted_unknown_charges_retained=0,
+            interrupted_unknown_charges_retained=unknown_retained,
             orphan_parts_trusted=False,
             owned_readback_reconciled=True,
             duplicate_side_effects=0,
@@ -1701,9 +1816,9 @@ def build_supported_scenario_matrix() -> tuple[InterruptionScenario, ...]:
     # 1. Exhaustive stage x interruption_mode coverage across rotating multibyte & history profiles:
     for s_idx, stage in enumerate(INTERRUPTION_STAGES):
         for m_idx, mode in enumerate(INTERRUPTION_MODES):
-            payload = PAYLOAD_PROFILES[
-                (s_idx + m_idx) % 2
-            ]  # compact / near_individual_limits
+            payload = FITTING_PAYLOAD_PROFILES[
+                (s_idx + m_idx) % len(FITTING_PAYLOAD_PROFILES)
+            ]
             encoding = TEXT_ENCODINGS[(s_idx + m_idx) % len(TEXT_ENCODINGS)]
             history = HISTORY_PROFILES[(s_idx + m_idx) % len(HISTORY_PROFILES)]
             index += 1

@@ -54,7 +54,10 @@ from .provenance_manifest import (
     _non_negative_int,
     prescribe_recovery,
 )
-from .recovery_context import ensure_not_observation_only_evidence
+from .recovery_context import (
+    RecoveryRefusalError,
+    ensure_not_observation_only_evidence,
+)
 from .session import (
     MAX_DISPOSITION_BYTES,
     MAX_SESSION_COMMENT_BYTES,
@@ -86,6 +89,19 @@ TERMINAL_REFUSAL_CODES = frozenset(
 )
 
 _SESSION_COMMENT_INTRO = "ReviewSensei session ledger (round counters only; no source)."
+_DISPOSITION_ARRAY_OVERFLOW_MESSAGES = frozenset(
+    {
+        "session disposition limit reached",
+        "session dispositions exceed the configured bound",
+    }
+)
+_SESSION_ROOT_OVERFLOW_MESSAGES = frozenset(
+    {
+        "session record exceeds the configured size limit",
+        "disposition snapshot has no future root capacity",
+        "partition manifest exceeds actual lifecycle allocation",
+    }
+)
 
 
 def _json_clone(value: object) -> Any:
@@ -233,7 +249,14 @@ class ActionSettlementPricing:
 
 @dataclass(frozen=True)
 class TerminalRepresentabilityReport:
-    """Structured pre-effect evaluation of terminal action representability."""
+    """Structured pre-effect evaluation of terminal action representability.
+
+    ``carrier_bytes`` measures the canonical JSON byte length of the
+    ``caller-action-result-v1`` carrier object, whereas ``manifest_bytes``
+    measures the canonical JSON byte length of the outer ``inline_manifest``
+    wrapper (including ``binding``) or ``None`` when the inline manifest
+    exceeds ``MAX_MANIFEST_BYTES`` (``8,192`` bytes).
+    """
 
     representable: bool
     refusal_code: str | None
@@ -411,11 +434,19 @@ def evaluate_terminal_action_representability(
     for candidate in (current_record, result_document, outcome):
         if candidate is not None:
             try:
-                ensure_not_observation_only_evidence(candidate)
+                ensure_not_observation_only_evidence(
+                    candidate, check_writer_enrollment=not v3_enabled
+                )
             except ReviewInputError as exc:
+                candidate_code = (
+                    exc.refusal_code
+                    if isinstance(exc, RecoveryRefusalError)
+                    and exc.refusal_code in TERMINAL_REFUSAL_CODES
+                    else "observation_only_not_authority"
+                )
                 return TerminalRepresentabilityReport(
                     representable=False,
-                    refusal_code="observation_only_not_authority",
+                    refusal_code=candidate_code,
                     reason=str(exc),
                     disposition_entry_count=disposition_entry_count,
                     max_disposition_token_bytes=max_disposition_token_bytes,
@@ -431,7 +462,7 @@ def evaluate_terminal_action_representability(
                     v3_writer_enabled=v3_enabled,
                     pricing=effective_pricing,
                     recovery=_prescribe_terminal_recovery(
-                        "observation_only_not_authority", action_name=action_name
+                        candidate_code, action_name=action_name
                     ),
                 )
 
@@ -490,7 +521,8 @@ def evaluate_terminal_action_representability(
         "payload": payload,
     }
     carrier_bytes = len(canonical_bytes(carrier))
-    manifest = inline_manifest(carrier, binding=dict(binding), item_count=1)
+    normalized_binding = dict(binding)
+    manifest = inline_manifest(carrier, binding=normalized_binding, item_count=1)
     manifest_bytes = len(canonical_bytes(manifest)) if manifest is not None else None
 
     if not effective_pricing.fits():
@@ -525,6 +557,8 @@ def evaluate_terminal_action_representability(
 
     if (
         manifest is None
+        or manifest_bytes is None
+        or manifest_bytes > MAX_MANIFEST_BYTES
         or carrier_bytes > MAX_MANIFEST_BYTES
         or payload_bytes > MAX_MANIFEST_BYTES
     ):
@@ -532,9 +566,10 @@ def evaluate_terminal_action_representability(
             representable=False,
             refusal_code="carrier_inline_bound_exceeded",
             reason=(
-                f"encoded action carrier is {carrier_bytes} bytes "
-                f"(envelope={envelope_bytes}B, disposition={disp_bytes}B), "
-                f"exceeding MAX_MANIFEST_BYTES={MAX_MANIFEST_BYTES}"
+                f"encoded action carrier/inline manifest "
+                f"(carrier={carrier_bytes}B, manifest={manifest_bytes}B, "
+                f"envelope={envelope_bytes}B, disposition={disp_bytes}B) "
+                f"exceeds MAX_MANIFEST_BYTES={MAX_MANIFEST_BYTES}"
             ),
             disposition_entry_count=disposition_entry_count,
             max_disposition_token_bytes=max_disposition_token_bytes,
@@ -556,6 +591,14 @@ def evaluate_terminal_action_representability(
             recovery=_prescribe_terminal_recovery(
                 "carrier_inline_bound_exceeded", action_name=action_name
             ),
+        )
+
+    decoded_carrier = read_inline_evidence(
+        manifest, expected_binding=normalized_binding
+    )
+    if decoded_carrier != carrier:
+        raise ReviewInputError(
+            "inline action result manifest failed binding/carrier round-trip"
         )
 
     projected_record_bytes = 0
@@ -710,13 +753,22 @@ class _InMemoryPreviewLedger:
         item_count: int,
         max_manifest_bytes: int,
     ) -> dict[str, object]:
-        if (
-            not self.enable_disposition_snapshot_writes
-            or binding.get("purpose") != "dispositions"
-        ):
+        if not self.enable_disposition_snapshot_writes:
             raise ReviewInputError(
                 "partition writers require explicit reader-first enablement"
             )
+        if binding.get("purpose") != "dispositions":
+            raise ReviewInputError(
+                f"unsupported preview partition purpose: {binding.get('purpose')!r}"
+            )
+        inlined = inline_manifest(document, binding=binding, item_count=item_count)
+        if (
+            inlined is not None
+            and isinstance(max_manifest_bytes, int)
+            and not isinstance(max_manifest_bytes, bool)
+            and len(canonical_bytes(inlined)) <= max_manifest_bytes
+        ):
+            return inlined
 
         parts = partition_evidence(document, binding=binding, item_count=item_count)
         storage_ids = tuple(
@@ -959,7 +1011,11 @@ def preview_session_command_representability(
         )
     except ReviewInputError as exc:
         text = str(exc)
-        if "disposition" in text and "limit" in text:
+        structured_code = getattr(exc, "refusal_code", None)
+        if (
+            structured_code == "disposition_array_bytes_exceeded"
+            or text in _DISPOSITION_ARRAY_OVERFLOW_MESSAGES
+        ):
             return (
                 None,
                 None,
@@ -990,7 +1046,10 @@ def preview_session_command_representability(
                     ),
                 ),
             )
-        if "session record exceeds" in text:
+        if (
+            structured_code == "session_root_bytes_exceeded"
+            or text in _SESSION_ROOT_OVERFLOW_MESSAGES
+        ):
             return (
                 None,
                 None,
@@ -1018,6 +1077,19 @@ def preview_session_command_representability(
             )
         raise
 
+    if preview_result is None:
+        raise ReviewInputError("preview session command returned no result")
+
+    staged_part_count = len(sandbox_ledger._parts)
+    if (
+        staged_part_count > 0
+        and effective_pricing.part_write_and_readback_requests == 0
+    ):
+        effective_pricing = replace(
+            effective_pricing,
+            part_write_and_readback_requests=staged_part_count * 2,
+        )
+
     outcome = (
         {"kind": "applied", "reason": None}
         if preview_result.applied
@@ -1026,9 +1098,14 @@ def preview_session_command_representability(
             "reason": "status" if command.action == "status" else "no_change",
         }
     )
+    # Strip existing snapshot during dry-run only to avoid reading remote parts;
+    # re-add its root footprint only when the command neither staged a replacement
+    # snapshot (preview_record.disposition_snapshot is not None) nor cleared the
+    # ledger via reenrollment.
     effective_reserve = (
         reserve + existing_snapshot_bytes
         if existing_snapshot_bytes > 0
+        and command.action != "reenroll"
         and preview_record is not None
         and preview_record.disposition_snapshot is None
         else reserve

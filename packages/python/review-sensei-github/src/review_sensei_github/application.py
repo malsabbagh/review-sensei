@@ -65,6 +65,7 @@ from review_sensei.session import (
 )
 from review_sensei.verifier import CandidateFinding, PublishableReview
 
+from .action_representability import guard_current_command_representability
 from .approval import (
     ReviewApprovalEligibility,
     has_blocking_findings,
@@ -2510,8 +2511,6 @@ class GitHubApplication:
                 coverage_source
             )
         if current_action is not None:
-            from .action_representability import guard_current_command_representability
-
             pre_effect_refusal = guard_current_command_representability(
                 current_action=current_action,
                 ledger=ledger,

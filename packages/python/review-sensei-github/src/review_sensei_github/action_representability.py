@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from typing import Any
@@ -11,6 +12,7 @@ from review_sensei.disposition import (
     MaintainerCommand,
     MaintainerCommandResult,
 )
+from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionIdentity, SessionRecord
 from review_sensei.terminal_representability import (
     ActionSettlementPricing,
@@ -45,18 +47,23 @@ def _command_pricing(
         business_reqs = 0
         refinalize_reqs = 0
         receipt_reqs = 0
-    elif action in {"accept-risk", "dismiss", "defer"}:
+    elif action in {
+        "accept-risk",
+        "dismiss",
+        "defer",
+        "accept-coverage-uncertainty",
+    }:
         business_reqs = 3
         refinalize_reqs = 3
         receipt_reqs = 2
-    elif action in {"accept-coverage-uncertainty", "verify"}:
+    elif action == "verify":
         business_reqs = 3
         refinalize_reqs = 3
         receipt_reqs = 0
     else:
         business_reqs = 3
         refinalize_reqs = 0
-        receipt_reqs = 0
+        receipt_reqs = 2
 
     return ActionSettlementPricing(
         cold_census_requests=0,
@@ -93,11 +100,17 @@ def _binding_from_caller(
         effective_head = str(intent_doc.get("head_sha") or head_sha)
     else:
         boundary = getattr(caller, "_action_effect_boundary", None)
-        intent_digest = (
-            str(boundary.intent_sha256)
-            if boundary is not None and hasattr(boundary, "intent_sha256")
-            else "0" * 64
+        raw_digest = (
+            getattr(boundary, "intent_sha256", None) if boundary is not None else None
         )
+        if (
+            not isinstance(raw_digest, str)
+            or re.fullmatch(r"^[a-f0-9]{64}$", raw_digest) is None
+        ):
+            raise ReviewInputError(
+                "caller action intent digest is unavailable; cannot derive terminal binding"
+            )
+        intent_digest = raw_digest
         generation = int(accounting.owner.generation)
         effective_head = head_sha
     binding = build_action_result_binding(

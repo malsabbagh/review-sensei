@@ -42,8 +42,10 @@ from review_sensei.provenance_manifest import prescribe_recovery
 from review_sensei.providers.openrouter import OpenRouterRoutingPolicy
 from review_sensei.providers.registry import ProviderSettings
 from review_sensei.recovery_context import (
+    RUNTIME_ONLY_FIELD_LABELS,
     OriginalRecoveryContextBundle,
     RecoveryContextDecision,
+    RecoveryRefusalError,
     build_bundle_from_context_documents,
     classify_recovery_input_origins,
     price_recovery_context_admission,
@@ -88,7 +90,10 @@ def reconstruct_publication_contexts(
     """
 
     if not source_root.is_dir() or not (source_root / ".reviewsensei.yml").is_file():
-        raise ReviewInputError("original trusted context source is unavailable")
+        raise RecoveryRefusalError(
+            "original trusted context source is unavailable",
+            refusal_code="absent_context",
+        )
     configuration = load_configuration(source_root / ".reviewsensei.yml")
     resolved = resolve_inference(configuration, environ={})
     if resolved.backend == "fixture":
@@ -170,10 +175,16 @@ def reconstruct_publication_contexts(
         else None,
     )
     if key is None:
-        raise ReviewInputError("original admission context is unavailable")
+        raise RecoveryRefusalError(
+            "original admission context is unavailable",
+            refusal_code="absent_context",
+        )
     loaded = ledger.load(identity)
     if loaded.status not in {"ok", "migrated"} or loaded.record is None:
-        raise ReviewInputError("original context ledger is unavailable")
+        raise RecoveryRefusalError(
+            "original context ledger is unavailable",
+            refusal_code="absent_context",
+        )
     record = loaded.record
     transaction = record.transaction
     configuration_digest = ReviewTransaction.compute_configuration_digest(
@@ -234,9 +245,10 @@ def reconstruct_publication_contexts(
             evidence_digest=evidence_digest,
         )
     ):
-        raise ReviewInputError(
+        raise RecoveryRefusalError(
             "reconstructed context does not match the original committed transaction; "
-            "supply the original configuration and admission context documents"
+            "supply the original configuration and admission context documents",
+            refusal_code="snapshot_or_transaction_mismatch",
         )
     baseline = read_session_baseline(ledger, record)
     if quarantine_full_analysis:
@@ -249,8 +261,9 @@ def reconstruct_publication_contexts(
             record.completed_verification_rounds != 0
             or record.completed_initial_reviews != 1
         ):
-            raise ReviewInputError(
-                "original prior baseline is unavailable; supply the original admission context"
+            raise RecoveryRefusalError(
+                "original prior baseline is unavailable; supply the original admission context",
+                refusal_code="overwritten_baseline_or_context",
             )
         baseline = None
     elif baseline is not None and (
@@ -258,12 +271,16 @@ def reconstruct_publication_contexts(
         or baseline.cache_key.pull_request != identity.pull_request
         or baseline.generation >= transaction.generation
     ):
-        raise ReviewInputError("original prior baseline context is unverifiable")
+        raise RecoveryRefusalError(
+            "original prior baseline context is unverifiable",
+            refusal_code="overwritten_baseline_or_context",
+        )
     elif baseline is None and (
         record.completed_initial_reviews or record.completed_verification_rounds
     ):
-        raise ReviewInputError(
-            "original prior baseline is unavailable; supply the original admission context"
+        raise RecoveryRefusalError(
+            "original prior baseline is unavailable; supply the original admission context",
+            refusal_code="overwritten_baseline_or_context",
         )
     return ReconstructedPublicationContexts(
         reconstructed_configuration,
@@ -287,6 +304,27 @@ def reconstruct_publication_contexts(
     )
 
 
+def _normalize_runtime_only_flags(
+    runtime_only_flags: Mapping[str, bool] | None,
+) -> dict[str, bool]:
+    if runtime_only_flags is None:
+        return {}
+    if not isinstance(runtime_only_flags, Mapping):
+        raise ReviewInputError("runtime_only_flags must be a mapping")
+    normalized: dict[str, bool] = {}
+    for raw_key, raw_val in runtime_only_flags.items():
+        if not isinstance(raw_key, str):
+            raise ReviewInputError("runtime_only_flags keys must be strings")
+        label = raw_key.removeprefix("has_")
+        if label not in RUNTIME_ONLY_FIELD_LABELS:
+            raise ReviewInputError(f"unknown runtime_only_flags key: {raw_key}")
+        kwarg_name = f"has_{label}"
+        if kwarg_name in normalized and normalized[kwarg_name] != raw_val:
+            raise ReviewInputError(f"conflicting runtime_only_flags for {label}")
+        normalized[kwarg_name] = raw_val
+    return normalized
+
+
 def bundle_from_reconstructed_contexts(
     reconstructed: ReconstructedPublicationContexts,
     *,
@@ -305,27 +343,48 @@ def bundle_from_reconstructed_contexts(
     """Convert reconstructed publication contexts into a sanitized G17 recovery bundle."""
 
     if not source_root.is_dir() or not (source_root / ".reviewsensei.yml").is_file():
-        raise ReviewInputError("original trusted context source is unavailable")
+        raise RecoveryRefusalError(
+            "original trusted context source is unavailable",
+            refusal_code="absent_context",
+        )
     configuration = load_configuration(source_root / ".reviewsensei.yml")
     loaded = ledger.load(identity)
     if loaded.status not in {"ok", "migrated"} or loaded.record is None:
-        raise ReviewInputError("original context ledger is unavailable")
+        raise RecoveryRefusalError(
+            "original context ledger is unavailable",
+            refusal_code="absent_context",
+        )
     record = loaded.record
     if record.transaction is None:
-        raise ReviewInputError("original context transaction is unavailable")
+        raise RecoveryRefusalError(
+            "original context transaction is unavailable",
+            refusal_code="absent_context",
+        )
     if reconstructed.admission_context is None:
-        raise ReviewInputError("reconstructed admission_context is unavailable")
+        raise RecoveryRefusalError(
+            "reconstructed admission_context is unavailable",
+            refusal_code="absent_context",
+        )
 
     accounting_version = ACCOUNTING_VERSION
-    if isinstance(record.api_run_accounting, Mapping):
+    if record.api_run_accounting is not None:
+        if not isinstance(record.api_run_accounting, Mapping):
+            raise RecoveryRefusalError(
+                "record.api_run_accounting must be a mapping when present",
+                refusal_code="truncated_or_corrupt_context",
+            )
         raw_version = record.api_run_accounting.get(
             "version", record.api_run_accounting.get("schema_version")
         )
-        if isinstance(raw_version, str):
-            accounting_version = raw_version
+        if not isinstance(raw_version, str) or not raw_version.strip():
+            raise RecoveryRefusalError(
+                "record.api_run_accounting is missing a valid version string",
+                refusal_code="truncated_or_corrupt_context",
+            )
+        accounting_version = raw_version
 
     reconstructible, runtime_only_fields = classify_recovery_input_origins(
-        **(dict(runtime_only_flags) if runtime_only_flags is not None else {})
+        **_normalize_runtime_only_flags(runtime_only_flags)
     )
     diff_sha256 = hashlib.sha256(diff.encode("utf-8")).hexdigest()
     return build_bundle_from_context_documents(
@@ -362,6 +421,7 @@ def reconstruct_or_prescribe_publication_contexts(
     producer: str = "local-cli",
     current_run_id: int = 1,
     attempt: int = 1,
+    runtime_only_flags: Mapping[str, bool] | None = None,
     ancestor_record_sha256s: Sequence[str] = (),
     ancestor_run_ids: Sequence[int] = (),
     current_root_bytes: int = 4_096,
@@ -398,32 +458,20 @@ def reconstruct_or_prescribe_publication_contexts(
             producer=producer,
             run_id=current_run_id,
             attempt=attempt,
+            runtime_only_flags=runtime_only_flags,
         )
     except ReviewInputError as exc:
         message = str(exc)
-        if "unsupported_v3_writer" in message:
-            code = "unsupported_v3_writer"
+        code = (
+            exc.refusal_code
+            if isinstance(exc, RecoveryRefusalError)
+            else "truncated_or_corrupt_context"
+        )
+        if code == "unsupported_v3_writer":
             prescription = prescribe_recovery("unsupported_legacy_state")
-        elif "observation_only_not_authority" in message:
-            code = "observation_only_not_authority"
-            prescription = prescribe_recovery(
-                "missing_evidence", ledger_expired=ledger_expired
-            )
-        elif "prior baseline" in message:
-            code = "overwritten_baseline_or_context"
-            prescription = prescribe_recovery(
-                "missing_evidence", ledger_expired=ledger_expired
-            )
-        elif "original committed transaction" in message or "does not match" in message:
-            code = "snapshot_or_transaction_mismatch"
+        elif code == "snapshot_or_transaction_mismatch":
             prescription = prescribe_recovery("provenance_mismatch")
-        elif "unavailable" in message:
-            code = "absent_context"
-            prescription = prescribe_recovery(
-                "missing_evidence", ledger_expired=ledger_expired
-            )
         else:
-            code = "truncated_or_corrupt_context"
             prescription = prescribe_recovery(
                 "missing_evidence", ledger_expired=ledger_expired
             )

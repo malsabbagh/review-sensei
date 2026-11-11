@@ -62,6 +62,9 @@ RUNTIME_ONLY_FIELD_LABELS = frozenset(
         "carried_eligibility_holds",
     }
 )
+OBSERVATION_ONLY_REFUSAL_CODE = "observation_only_not_authority"
+UNSUPPORTED_V3_WRITER_REFUSAL_CODE = "unsupported_v3_writer"
+
 REFUSAL_CODES = frozenset(
     {
         "absent_context",
@@ -74,10 +77,21 @@ REFUSAL_CODES = frozenset(
         "ancestor_depth_exceeded",
         "root_capacity_exceeded",
         "budget_exhausted_before_effect",
-        "unsupported_v3_writer",
-        "observation_only_not_authority",
+        UNSUPPORTED_V3_WRITER_REFUSAL_CODE,
+        OBSERVATION_ONLY_REFUSAL_CODE,
     }
 )
+
+
+class RecoveryRefusalError(ReviewInputError):
+    """Structured ReviewInputError carrying a closed-vocabulary refusal_code."""
+
+    def __init__(self, message: str, *, refusal_code: str) -> None:
+        if refusal_code not in REFUSAL_CODES:
+            raise ReviewInputError(f"invalid refusal_code: {refusal_code}")
+        self.refusal_code = refusal_code
+        super().__init__(message)
+
 
 _HEX40_RE = re.compile(r"^[a-f0-9]{40}$")
 _HEX64_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -172,34 +186,59 @@ def classify_recovery_input_origins(
     return (len(ordered) == 0, ordered)
 
 
-def ensure_not_observation_only_evidence(candidate: object) -> None:
-    """Refuse read-only #431/#436 observations when passed as recovery context."""
+def ensure_supported_writer_accounting(
+    candidate: object, *, allow_v3_writer: bool = False
+) -> None:
+    """Refuse reader-only caller-requests-v3 documents on writer enrollment paths."""
+
+    if allow_v3_writer or not isinstance(candidate, Mapping):
+        return
+    if (
+        candidate.get("accounting_version") == PARTITIONED_ACTION_ACCOUNTING_VERSION
+        or candidate.get("version") == PARTITIONED_ACTION_ACCOUNTING_VERSION
+        or candidate.get("schema_version") == PARTITIONED_ACTION_ACCOUNTING_VERSION
+    ):
+        raise RecoveryRefusalError(
+            "unsupported_v3_writer: caller-requests-v3 is reader-only and cannot enroll recovery writes",
+            refusal_code=UNSUPPORTED_V3_WRITER_REFUSAL_CODE,
+        )
+
+
+def ensure_not_observation_only_evidence(
+    candidate: object, *, check_writer_enrollment: bool = True
+) -> None:
+    """Refuse read-only #431/#436 observations when passed as recovery context.
+
+    Observation-only checks always run first and raise
+    ``observation_only_not_authority``. When ``check_writer_enrollment=True``
+    (default for writer/recovery bundle enrollment), ``caller-requests-v3``
+    documents also raise ``unsupported_v3_writer``; read-side callers pass
+    ``check_writer_enrollment=False`` so valid v3 reader observations are never
+    misclassified as writer refusals.
+    """
 
     if candidate is None:
         return
     if hasattr(candidate, "anchor_document") and hasattr(candidate, "ancestors"):
-        raise ReviewInputError(
-            "observation_only_not_authority: ancestry observation confers no recovery authority"
+        raise RecoveryRefusalError(
+            "observation_only_not_authority: ancestry observation confers no recovery authority",
+            refusal_code=OBSERVATION_ONLY_REFUSAL_CODE,
         )
     if hasattr(candidate, "root_document") and hasattr(candidate, "result_document"):
-        raise ReviewInputError(
-            "observation_only_not_authority: archived action result observation confers no recovery authority"
+        raise RecoveryRefusalError(
+            "observation_only_not_authority: archived action result observation confers no recovery authority",
+            refusal_code=OBSERVATION_ONLY_REFUSAL_CODE,
         )
-    if isinstance(candidate, Mapping) and (
-        candidate.get("schema_version") == "caller-action-result-v1"
-        or candidate.get("accounting_version") == PARTITIONED_ACTION_ACCOUNTING_VERSION
-        or candidate.get("version") == PARTITIONED_ACTION_ACCOUNTING_VERSION
+    if (
+        isinstance(candidate, Mapping)
+        and candidate.get("schema_version") == "caller-action-result-v1"
     ):
-        if (
-            candidate.get("accounting_version") == PARTITIONED_ACTION_ACCOUNTING_VERSION
-            or candidate.get("version") == PARTITIONED_ACTION_ACCOUNTING_VERSION
-        ):
-            raise ReviewInputError(
-                "unsupported_v3_writer: caller-requests-v3 is reader-only and cannot enroll recovery writes"
-            )
-        raise ReviewInputError(
-            "observation_only_not_authority: read-only action result is not original recovery context"
+        raise RecoveryRefusalError(
+            "observation_only_not_authority: read-only action result is not original recovery context",
+            refusal_code=OBSERVATION_ONLY_REFUSAL_CODE,
         )
+    if check_writer_enrollment:
+        ensure_supported_writer_accounting(candidate)
 
 
 @dataclass(frozen=True)
@@ -281,8 +320,9 @@ class OriginalRecoveryContextBundle:
                 f"placement_mode must be one of {sorted(PLACEMENT_MODES)}"
             )
         if self.accounting_version == PARTITIONED_ACTION_ACCOUNTING_VERSION:
-            raise ReviewInputError(
-                "unsupported_v3_writer: caller-requests-v3 is reader-only and cannot enroll recovery writes"
+            raise RecoveryRefusalError(
+                "unsupported_v3_writer: caller-requests-v3 is reader-only and cannot enroll recovery writes",
+                refusal_code=UNSUPPORTED_V3_WRITER_REFUSAL_CODE,
             )
         if self.accounting_version not in SUPPORTED_WRITER_ACCOUNTING_VERSIONS:
             raise ReviewInputError("unsupported accounting_version for recovery bundle")
@@ -308,7 +348,7 @@ class OriginalRecoveryContextBundle:
                 "reconstructible_from_defaults cannot be True when runtime_only_fields is non-empty"
             )
         object.__setattr__(self, "runtime_only_fields", normalized_runtime)
-        if len(_canonical_bytes(self._body_dict())) > MAX_RECOVERY_CONTEXT_BUNDLE_BYTES:
+        if len(_canonical_bytes(self.to_dict())) > MAX_RECOVERY_CONTEXT_BUNDLE_BYTES:
             raise ReviewInputError("recovery context bundle exceeds 8,192-byte ceiling")
 
     def _body_dict(self) -> dict[str, Any]:
@@ -416,8 +456,9 @@ class OriginalRecoveryContextBundle:
         if "bundle_sha256" in data:
             expected = _hex64(data["bundle_sha256"], field="bundle_sha256")
             if expected != bundle.bundle_sha256:
-                raise ReviewInputError(
-                    "tampered_authentication_or_digest: bundle_sha256 mismatch"
+                raise RecoveryRefusalError(
+                    "tampered_authentication_or_digest: bundle_sha256 mismatch",
+                    refusal_code="tampered_authentication_or_digest",
                 )
         return bundle
 
@@ -474,12 +515,14 @@ def build_bundle_from_context_documents(
         dict(resolved_evidence)
     )
     if computed_config_digest != transaction.configuration_digest:
-        raise ReviewInputError(
-            "configuration_context digest does not match committed transaction"
+        raise RecoveryRefusalError(
+            "configuration_context digest does not match committed transaction",
+            refusal_code="snapshot_or_transaction_mismatch",
         )
     if computed_evidence_digest != transaction.evidence_digest:
-        raise ReviewInputError(
-            "admission_context evidence digest does not match committed transaction"
+        raise RecoveryRefusalError(
+            "admission_context evidence digest does not match committed transaction",
+            refusal_code="snapshot_or_transaction_mismatch",
         )
 
     raw_provider = configuration_context.get("provider")
@@ -652,6 +695,8 @@ def _refusal_decision(
         prescription = prescribe_recovery("missing_evidence")
     elif code == "snapshot_or_transaction_mismatch":
         prescription = prescribe_recovery("provenance_mismatch")
+    elif code in {"ancestor_depth_exceeded", "circular_ancestor_evidence"}:
+        prescription = prescribe_recovery("explicit_human_decision_required")
     else:
         prescription = prescribe_recovery("unsupported_legacy_state")
     return RecoveryContextDecision(
@@ -704,35 +749,6 @@ def price_recovery_context_admission(
     ):
         _non_negative_int(num, field=field_name)
 
-    seen_hashes: set[str] = set()
-    if current_root_sha256 is not None:
-        seen_hashes.add(_hex64(current_root_sha256, field="current_root_sha256"))
-
-    if (
-        len(ancestor_record_sha256s) > MAX_RECOVERY_ANCESTOR_DEPTH
-        or len(ancestor_run_ids) > MAX_RECOVERY_ANCESTOR_DEPTH
-    ):
-        return _refusal_decision(
-            "ancestor_depth_exceeded", ("ancestor_depth_exceeds_32",)
-        )
-
-    for anc_hash in ancestor_record_sha256s:
-        validated_hash = _hex64(anc_hash, field="ancestor_record_sha256")
-        if validated_hash in seen_hashes:
-            return _refusal_decision(
-                "circular_ancestor_evidence", ("ancestor_record_sha256_cycle",)
-            )
-        seen_hashes.add(validated_hash)
-
-    seen_runs: set[int] = {current_run_id}
-    for anc_run in ancestor_run_ids:
-        validated_run = _positive_int(anc_run, field="ancestor_run_id")
-        if validated_run in seen_runs:
-            return _refusal_decision(
-                "circular_ancestor_evidence", ("ancestor_run_id_cycle",)
-            )
-        seen_runs.add(validated_run)
-
     pricing = RecoveryBudgetPricing(
         startup_read_requests=startup_read_requests,
         ancestor_read_requests=len(ancestor_record_sha256s),
@@ -750,6 +766,41 @@ def price_recovery_context_admission(
         intermediate_root_bytes=intermediate_root_bytes,
         total_decoded_bytes=total_decoded_bytes,
     )
+
+    seen_hashes: set[str] = set()
+    if current_root_sha256 is not None:
+        seen_hashes.add(_hex64(current_root_sha256, field="current_root_sha256"))
+
+    if (
+        len(ancestor_record_sha256s) > MAX_RECOVERY_ANCESTOR_DEPTH
+        or len(ancestor_run_ids) > MAX_RECOVERY_ANCESTOR_DEPTH
+    ):
+        return _refusal_decision(
+            "ancestor_depth_exceeded",
+            ("ancestor_depth_exceeds_32",),
+            pricing=pricing,
+        )
+
+    for anc_hash in ancestor_record_sha256s:
+        validated_hash = _hex64(anc_hash, field="ancestor_record_sha256")
+        if validated_hash in seen_hashes:
+            return _refusal_decision(
+                "circular_ancestor_evidence",
+                ("ancestor_record_sha256_cycle",),
+                pricing=pricing,
+            )
+        seen_hashes.add(validated_hash)
+
+    seen_runs: set[int] = {current_run_id}
+    for anc_run in ancestor_run_ids:
+        validated_run = _positive_int(anc_run, field="ancestor_run_id")
+        if validated_run in seen_runs:
+            return _refusal_decision(
+                "circular_ancestor_evidence",
+                ("ancestor_run_id_cycle",),
+                pricing=pricing,
+            )
+        seen_runs.add(validated_run)
 
     if (
         result_part_count > MAX_RECOVERY_RESULT_PARTS
@@ -996,20 +1047,17 @@ class RecoveryContextStore:
 
         try:
             bundle = OriginalRecoveryContextBundle.from_dict(document["bundle"])
-        except ReviewInputError as exc:
-            msg = str(exc)
-            if "unsupported_v3_writer" in msg:
-                return _refusal_decision(
-                    "unsupported_v3_writer", ("caller-requests-v3",)
-                )
-            if "observation_only_not_authority" in msg:
-                return _refusal_decision(
-                    "observation_only_not_authority", ("read_only_observation",)
-                )
-            if "tampered_authentication_or_digest" in msg:
-                return _refusal_decision(
-                    "tampered_authentication_or_digest", ("bundle_sha256_mismatch",)
-                )
+        except RecoveryRefusalError as exc:
+            detail_map = {
+                UNSUPPORTED_V3_WRITER_REFUSAL_CODE: "caller-requests-v3",
+                OBSERVATION_ONLY_REFUSAL_CODE: "read_only_observation",
+                "tampered_authentication_or_digest": "bundle_sha256_mismatch",
+            }
+            return _refusal_decision(
+                exc.refusal_code,
+                (detail_map.get(exc.refusal_code, "invalid_bundle_fields"),),
+            )
+        except ReviewInputError:
             return _refusal_decision(
                 "truncated_or_corrupt_context", ("invalid_bundle_fields",)
             )

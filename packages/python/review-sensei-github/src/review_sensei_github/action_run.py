@@ -23,6 +23,7 @@ from review_sensei.disposition import (
 )
 from review_sensei.errors import ReviewInputError
 
+from .action_representability import require_action_settlement_representable
 from .application import GitHubApplication, GitHubWriteOptions
 from .conversation import ConversationPublisher
 from .learning_pr import LearningPRPublisher
@@ -323,8 +324,6 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             "reason": "status" if command.action == "status" else "no_change",
         }
     )
-    from .action_representability import require_action_settlement_representable
-
     require_action_settlement_representable(
         run,
         outcome=outcome,
