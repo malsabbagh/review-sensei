@@ -12,6 +12,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from .api_work import ApiRunAccounting, FrozenApiConfiguration
 from .concurrency import ReviewConcurrencyPlan
 from .context import PromptContextOverflow
 from .coverage import COVERAGE_OUTCOMES, COVERAGE_REASONS, CoverageManifest
@@ -21,6 +22,7 @@ from .document_context import DocumentSelectionReport
 from .errors import ReviewInputError
 from .models import ConversationContext, ReviewRequest, ReviewResult
 from .planning import LargeChangePlan, ReviewWorkPlan
+from .session import SessionRecord
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
     ReviewLimits,
@@ -1742,6 +1744,125 @@ def classify_policy_commit_drift(
     )
 
 
+@dataclass(frozen=True)
+class PolicyFundingPreservationProof:
+    """Proof that consecutive policy-drift refusals preserve original run funding."""
+
+    baseline_record_sha256: str
+    frozen_policy_commit: str
+    frozen_policy_digest: str
+    frozen_request_limit: int
+    startup_liability: int
+    completed_receipt_count: int
+    remaining_allowance: int
+    refusal_count: int
+    zero_funding_mutation: bool
+    zero_receipt_erasure: bool
+    same_run_rebind_refused: bool
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.baseline_record_sha256,
+            64,
+            label="baseline_record_sha256",
+            allow_empty=False,
+        )
+        _validate_sha(self.frozen_policy_commit, label="frozen_policy_commit")
+        validate_bounded_text(
+            self.frozen_policy_digest,
+            64,
+            label="frozen_policy_digest",
+            allow_empty=False,
+        )
+        _positive_int(self.frozen_request_limit, label="frozen_request_limit")
+        _positive_int(
+            self.startup_liability, label="startup_liability", allow_zero=True
+        )
+        _positive_int(
+            self.completed_receipt_count,
+            label="completed_receipt_count",
+            allow_zero=True,
+        )
+        _positive_int(
+            self.remaining_allowance, label="remaining_allowance", allow_zero=True
+        )
+        _positive_int(self.refusal_count, label="refusal_count")
+        for flag_name, flag_val in (
+            ("zero_funding_mutation", self.zero_funding_mutation),
+            ("zero_receipt_erasure", self.zero_receipt_erasure),
+            ("same_run_rebind_refused", self.same_run_rebind_refused),
+        ):
+            if not isinstance(flag_val, bool) or not flag_val:
+                raise ReviewInputError(f"{flag_name} must be verified True")
+
+
+def verify_policy_drift_funding_preservation(
+    baseline_record: SessionRecord,
+    post_refusal_records: Sequence[SessionRecord],
+    *,
+    drifted_configuration: FrozenApiConfiguration,
+) -> PolicyFundingPreservationProof:
+    """Verify original SessionRecord and ApiRunAccounting survive policy-drift races."""
+
+    if not isinstance(baseline_record, SessionRecord):
+        raise ReviewInputError("baseline_record must be a SessionRecord")
+    if baseline_record.api_run_accounting is None:
+        raise ReviewInputError("baseline_record lacks api_run_accounting")
+    if not isinstance(drifted_configuration, FrozenApiConfiguration):
+        raise ReviewInputError("drifted_configuration must be a FrozenApiConfiguration")
+    if not post_refusal_records or any(
+        not isinstance(rec, SessionRecord) for rec in post_refusal_records
+    ):
+        raise ReviewInputError(
+            "post_refusal_records must be a non-empty sequence of SessionRecord"
+        )
+
+    baseline_acc = ApiRunAccounting.from_document(baseline_record.api_run_accounting)
+    if drifted_configuration == baseline_acc.configuration:
+        raise ReviewInputError(
+            "drifted_configuration must differ from baseline FrozenApiConfiguration"
+        )
+
+    for observed in post_refusal_records:
+        if observed.record_sha256 != baseline_record.record_sha256:
+            raise ReviewInputError(
+                "policy-drift refusal mutated durable SessionRecord root"
+            )
+        if observed.api_run_accounting is None:
+            raise ReviewInputError(
+                "policy-drift refusal erased durable api_run_accounting"
+            )
+        observed_acc = ApiRunAccounting.from_document(observed.api_run_accounting)
+        if observed_acc != baseline_acc:
+            raise ReviewInputError(
+                "policy-drift refusal mutated original run funding or receipts"
+            )
+
+    rebind_refused = False
+    try:
+        baseline_acc.require_binding(baseline_acc.identity, drifted_configuration)
+    except ReviewInputError:
+        rebind_refused = True
+    if not rebind_refused:  # pragma: no cover - defensive runtime invariant
+        raise ReviewInputError(
+            "ApiRunAccounting failed to refuse drifted FrozenApiConfiguration rebind"
+        )
+
+    return PolicyFundingPreservationProof(
+        baseline_record_sha256=baseline_record.record_sha256,
+        frozen_policy_commit=baseline_acc.configuration.commit,
+        frozen_policy_digest=baseline_acc.configuration.digest,
+        frozen_request_limit=baseline_acc.configuration.limit,
+        startup_liability=baseline_acc.startup.liability,
+        completed_receipt_count=len(baseline_acc.completed),
+        remaining_allowance=baseline_acc.remaining,
+        refusal_count=len(post_refusal_records),
+        zero_funding_mutation=True,
+        zero_receipt_erasure=True,
+        same_run_rebind_refused=True,
+    )
+
+
 WORKFLOW_PROVIDER_GROUP_PREFIX = "reviewsensei-provider-review"
 QUOTA_OWNERSHIP_SCOPES = frozenset(
     {
@@ -2105,6 +2226,7 @@ __all__ = [
     "IndivisibleWorkReport",
     "IndivisibleWorkUnit",
     "PolicyDriftClassification",
+    "PolicyFundingPreservationProof",
     "QuotaThrottleRecoveryPlan",
     "TitleAttributionRecord",
     "TitleByteLimitEvaluation",
@@ -2119,5 +2241,6 @@ __all__ = [
     "evaluate_title_freshness",
     "inspect_title_constant_contracts",
     "plan_cross_pr_concurrency",
+    "verify_policy_drift_funding_preservation",
     "verify_published_title_attribution",
 ]
