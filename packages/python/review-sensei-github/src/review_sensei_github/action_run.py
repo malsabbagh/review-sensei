@@ -10,9 +10,10 @@ import argparse
 import hashlib
 import json
 import os
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.convergence import resolve_review_convergence_policy
@@ -25,11 +26,17 @@ from review_sensei.errors import ReviewInputError
 
 from .action_representability import require_action_settlement_representable
 from .application import GitHubApplication, GitHubWriteOptions
+from .comment_intent import verify_live_comment_source
 from .conversation import ConversationPublisher
 from .learning_pr import LearningPRPublisher
 from .publication import ReviewPublisher, parse_finding_index
 from .review_run import ActionRunLedger, ReviewRun, bootstrap
 from .run_authority import VerifiedRunAction
+from .source_comment_lifecycle import (
+    SourceLifecycleClassification,
+    admit_event_comment_source,
+    execute_source_lifecycle_route,
+)
 
 
 def event_source(args: Any, *, purpose: str) -> dict[str, object]:
@@ -40,33 +47,40 @@ def event_source(args: Any, *, purpose: str) -> dict[str, object]:
     if len(raw) > 1024 * 1024:
         raise ReviewInputError("action event exceeds its byte bound")
     value = json.loads(raw)
-    comment = value.get("comment") if isinstance(value, dict) else None
-    pull = (
-        value.get("issue") or value.get("pull_request")
-        if isinstance(value, dict)
-        else None
+    return admit_event_comment_source(
+        value,
+        pull_request=args.pull_request,
+        source_comment_id=args.source_comment_id,
+        purpose=purpose,
+        event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
+        expected_body=getattr(args, "comment_body", None),
+        expected_updated_at=getattr(args, "source_updated_at", None),
     )
-    if (
-        not isinstance(comment, dict)
-        or not isinstance(pull, dict)
-        or pull.get("number") != args.pull_request
-        or comment.get("id") != args.source_comment_id
-        or not isinstance(comment.get("body"), str)
-        or not isinstance(comment.get("updated_at"), str)
-    ):
-        raise ReviewInputError("action source does not match the original event")
-    if purpose == "command" and comment["body"] != args.comment_body:
-        raise ReviewInputError("command body differs from the original source")
-    if purpose == "reply" and comment["updated_at"] != args.source_updated_at:
-        raise ReviewInputError("reply source version differs from the original event")
-    return {
-        "kind": "review_comment"
-        if os.environ.get("GITHUB_EVENT_NAME") == "pull_request_review_comment"
-        else "issue_comment",
-        "id": comment["id"],
-        "updated_at": comment["updated_at"],
-        "body_sha256": hashlib.sha256(comment["body"].encode()).hexdigest(),
-    }
+
+
+def reconcile_action_source_lifecycle(
+    run: ReviewRun,
+    *,
+    candidate_source: Mapping[str, Any] | None = None,
+    event_delivery: Mapping[str, Any] | None = None,
+    has_pending_receipt: bool = False,
+    verify_before_intent: bool = False,
+) -> SourceLifecycleClassification | None:
+    """Evaluate and enforce G27 source-comment lifecycle before or across action entry."""
+    if run.caller.accounting.action is None and not verify_before_intent:
+        return None
+    loaded = run.ledger.load(run.identity)
+    record = loaded.record if loaded.status == "ok" else None
+    classification, _ = execute_source_lifecycle_route(
+        caller=run.caller,
+        ledger=run.ledger,
+        identity=run.identity,
+        record=record,
+        candidate_source=candidate_source,
+        event_delivery=event_delivery,
+        has_pending_receipt=has_pending_receipt,
+    )
+    return classification
 
 
 def application(run: ReviewRun) -> GitHubApplication:
@@ -243,7 +257,12 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             # selector/role refusal can finish as a charged explicit no-op;
             # transport/budget uncertainty and stale authority still escape.
             historical_refusal = str(error)
-    authority.fence()
+    fenced_comment = authority.fence()
+    verify_live_comment_source(
+        bound_source=source,
+        live_comment=fenced_comment,
+        phase="unstarted_intent",
+    )
     boundary = caller.begin_action_effect(run.ledger, run.identity, intent)
     explicit_mode = getattr(args, "review_mode", None)
     if (
@@ -349,10 +368,22 @@ def execute_command(run: ReviewRun, args: Any) -> int:
     return command_exit_code(result)
 
 
-def run_action(argv: Sequence[str], *, purpose: str) -> int:
+def run_action(
+    argv: Sequence[str],
+    *,
+    purpose: str,
+    verify_before_intent: bool = False,
+    event_delivery: Mapping[str, Any] | None = None,
+    has_pending_receipt: bool = False,
+) -> int:
     parser = argparse.ArgumentParser(prog="review-sensei-github " + purpose + "-run")
     parser.add_argument("--policy-commit", required=True)
     parser.add_argument("--run-directory", type=Path, required=True)
+    parser.add_argument(
+        "--verify-source-before-intent",
+        action="store_true",
+        default=False,
+    )
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     options = parser.parse_args(list(argv))
     arguments = (
@@ -392,6 +423,17 @@ def run_action(argv: Sequence[str], *, purpose: str) -> int:
         purpose=purpose,
         source=source,
     )
+    lifecycle = reconcile_action_source_lifecycle(
+        run,
+        candidate_source=source,
+        event_delivery=event_delivery,
+        has_pending_receipt=has_pending_receipt,
+        verify_before_intent=(
+            verify_before_intent or options.verify_source_before_intent
+        ),
+    )
+    if lifecycle is not None and lifecycle.route == "preserve_terminal_no_replay":
+        return 0
     if purpose == "command":
         return execute_command(run, args)
     from .action_reply import execute_reply
