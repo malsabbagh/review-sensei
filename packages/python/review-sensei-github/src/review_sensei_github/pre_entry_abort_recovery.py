@@ -94,6 +94,21 @@ NO_TRANSACTION_ROUTES = frozenset(
 )
 
 RECOVERY_CLASSIFIER_ID = "no-transaction-controlled-restart-v1"
+NO_TRANSACTION_ATTEMPT_PACKET_SCHEMA = "no-transaction-attempt-evidence-v1"
+SITEVAULT_142_CASE_ID = "sitevault-142-no-transaction-predecessor"
+SITEVAULT_142_PULL_REQUEST = 142
+SITEVAULT_153_CASE_ID = "sitevault-153-unconfirmed-abort"
+SITEVAULT_153_PULL_REQUEST = 153
+_VERSION_TOKEN_RE = re.compile(r"[A-Za-z0-9_.+-]{1,64}")
+
+NO_TRANSACTION_ENTRY_CLASSIFICATIONS: frozenset[str] = frozenset(
+    {
+        "proven_pre_entry_not_started",
+        "provider_entered",
+        "unproven_or_unknown",
+        "outside_no_transaction_boundary",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -1100,19 +1115,418 @@ def _author_matches_configured_bot(author: Any, ledger: Any) -> bool:
     return True
 
 
-def inspect_live_no_transaction_predecessor(
+@dataclass(frozen=True)
+class NoTransactionAttemptPacket:
+    """Immutable read-only historical evidence packet for G29 `no-transaction` / abort cases.
+
+    Binds original entry, reservation, caller dispatch, execution owner,
+    installed executor provenance, and abort/cleanup evidence for `SiteVault
+    #142` and `SiteVault #153` shapes while keeping `authority=False` and
+    `reenroll_permitted=False`.
+    """
+
+    case_id: str
+    repository: str
+    repository_id: int
+    pull_request: int
+    session_generation: int
+    record_sha256: str
+    session_comment_ref: dict[str, Any] | None
+    entry_classification: str
+    provider_entry_proven_absent: bool
+    missing_transaction_means_no_operation: bool
+    active_reservation_id: str | None
+    reserved_slot: str | None
+    last_committed_reservation_id: str | None
+    reservation_release_confirmed: bool
+    caller_allowance_limit: int
+    startup_liability: int
+    prior_nonstartup_liability: int
+    confirmed_requests: int
+    uncertain_requests: int
+    reserved_undispatched: int
+    dispatch_clean: bool
+    conservative_nonstartup_caller_liability: int
+    conservative_total_caller_liability: int
+    conservative_provider_call_hold: int
+    run_id: int
+    run_attempt: int
+    owner_job: str
+    owner_generation: int
+    owner_ceased: bool
+    executor_sha: str
+    installed_core_version: str
+    installed_hosted_version: str
+    abort_receipt_present: bool
+    abort_receipt_valid: bool
+    abort_entry_state: str | None
+    abort_source_root: str | None
+    abort_cleanup_root: str | None
+    abort_transaction_id: str | None
+    abort_base_sha: str | None
+    abort_head_sha: str | None
+    late_effects_absent: bool
+    prior_finding_obligations_count: int
+    historical_settlement_receipt_supplied: bool
+    diagnostics_available: bool
+    missing_proof_holds: tuple[str, ...]
+    qualification: NoTransactionAbortQualification
+    reenroll_permitted: bool = False
+    authority: bool = False
+    schema_version: str = NO_TRANSACTION_ATTEMPT_PACKET_SCHEMA
+
+    def __post_init__(self) -> None:
+        if (
+            self.authority is not False
+            or self.reenroll_permitted is not False
+            or self.schema_version != NO_TRANSACTION_ATTEMPT_PACKET_SCHEMA
+        ):
+            raise ReviewInputError(
+                "no-transaction attempt packet is strictly diagnostic "
+                "(authority=False, reenroll_permitted=False)"
+            )
+        if not isinstance(self.qualification, NoTransactionAbortQualification):
+            raise ReviewInputError(
+                "no-transaction attempt packet requires a NoTransactionAbortQualification"
+            )
+        if not isinstance(self.case_id, str) or not self.case_id.strip():
+            raise ReviewInputError("no-transaction attempt case_id must be non-empty")
+        SessionIdentity(
+            repository=self.repository,
+            pull_request=self.pull_request,
+            repository_id=self.repository_id,
+        )
+        if _HEX64.fullmatch(self.record_sha256) is None:
+            raise ReviewInputError("no-transaction attempt record_sha256 is invalid")
+        if self.entry_classification not in NO_TRANSACTION_ENTRY_CLASSIFICATIONS:
+            raise ReviewInputError(
+                "no-transaction attempt entry_classification is invalid"
+            )
+        if (
+            self.executor_sha != "unknown"
+            and _HEX40.fullmatch(self.executor_sha) is None
+        ):
+            raise ReviewInputError(
+                "no-transaction attempt executor_sha must be 'unknown' or 40-hex SHA"
+            )
+        for label, ver in (
+            ("installed_core_version", self.installed_core_version),
+            ("installed_hosted_version", self.installed_hosted_version),
+        ):
+            if ver != "unknown" and _VERSION_TOKEN_RE.fullmatch(ver) is None:
+                raise ReviewInputError(f"no-transaction attempt {label} is invalid")
+        for label, digest in (
+            ("abort_source_root", self.abort_source_root),
+            ("abort_cleanup_root", self.abort_cleanup_root),
+            ("abort_transaction_id", self.abort_transaction_id),
+        ):
+            if digest is not None and _HEX64.fullmatch(digest) is None:
+                raise ReviewInputError(f"no-transaction attempt {label} is invalid")
+        for label, commit in (
+            ("abort_base_sha", self.abort_base_sha),
+            ("abort_head_sha", self.abort_head_sha),
+        ):
+            if commit is not None and _HEX40.fullmatch(commit) is None:
+                raise ReviewInputError(f"no-transaction attempt {label} is invalid")
+        if self.qualification.qualifies_rollover and self.missing_proof_holds:
+            raise ReviewInputError(
+                "qualified pre-entry abort packet cannot carry missing_proof_holds"
+            )
+        if (
+            not self.qualification.qualifies_rollover
+            and not self.historical_settlement_receipt_supplied
+            and "historical_live_settlement_receipt" not in self.missing_proof_holds
+        ):
+            raise ReviewInputError(
+                "unsettled no-transaction packet must record historical_live_settlement_receipt hold"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "authority": False,
+            "reenroll_permitted": False,
+            "case_id": self.case_id,
+            "identities": {
+                "repository": self.repository,
+                "repository_id": self.repository_id,
+                "pull_request": self.pull_request,
+                "session_generation": self.session_generation,
+                "record_sha256": self.record_sha256,
+                "session_comment_ref": (
+                    dict(self.session_comment_ref)
+                    if self.session_comment_ref is not None
+                    else None
+                ),
+            },
+            "entry": {
+                "entry_classification": self.entry_classification,
+                "provider_entry_proven_absent": self.provider_entry_proven_absent,
+                "missing_transaction_means_no_operation": (
+                    self.missing_transaction_means_no_operation
+                ),
+            },
+            "reservation": {
+                "active_reservation_id": self.active_reservation_id,
+                "reserved_slot": self.reserved_slot,
+                "last_committed_reservation_id": self.last_committed_reservation_id,
+                "reservation_release_confirmed": self.reservation_release_confirmed,
+            },
+            "dispatch_funding": {
+                "caller_allowance_limit": self.caller_allowance_limit,
+                "startup_liability": self.startup_liability,
+                "prior_nonstartup_liability": self.prior_nonstartup_liability,
+                "confirmed_requests": self.confirmed_requests,
+                "uncertain_requests": self.uncertain_requests,
+                "reserved_undispatched": self.reserved_undispatched,
+                "dispatch_clean": self.dispatch_clean,
+                "conservative_nonstartup_caller_liability": (
+                    self.conservative_nonstartup_caller_liability
+                ),
+                "conservative_total_caller_liability": (
+                    self.conservative_total_caller_liability
+                ),
+                "conservative_provider_call_hold": self.conservative_provider_call_hold,
+            },
+            "owner_executor": {
+                "run_id": self.run_id,
+                "run_attempt": self.run_attempt,
+                "owner_job": self.owner_job,
+                "owner_generation": self.owner_generation,
+                "owner_ceased": self.owner_ceased,
+                "executor_sha": self.executor_sha,
+                "installed_core_version": self.installed_core_version,
+                "installed_hosted_version": self.installed_hosted_version,
+            },
+            "abort_cleanup": {
+                "abort_receipt_present": self.abort_receipt_present,
+                "abort_receipt_valid": self.abort_receipt_valid,
+                "abort_entry_state": self.abort_entry_state,
+                "abort_source_root": self.abort_source_root,
+                "abort_cleanup_root": self.abort_cleanup_root,
+                "abort_transaction_id": self.abort_transaction_id,
+                "abort_base_sha": self.abort_base_sha,
+                "abort_head_sha": self.abort_head_sha,
+                "late_effects_absent": self.late_effects_absent,
+                "prior_finding_obligations_count": self.prior_finding_obligations_count,
+            },
+            "settlement": {
+                "historical_settlement_receipt_supplied": (
+                    self.historical_settlement_receipt_supplied
+                ),
+                "diagnostics_available": self.diagnostics_available,
+            },
+            "missing_proof_holds": list(self.missing_proof_holds),
+            "qualification": self.qualification.to_dict(),
+        }
+
+
+def build_no_transaction_attempt_packet(
+    record: SessionRecord,
+    *,
+    identity: SessionIdentity | None = None,
+    case_id: str | None = None,
+    owner_ceased: bool = True,
+    provider_entry_started: bool | None = None,
+    unreconciled_mutation_present: bool = False,
+    late_native_effects_present: bool = False,
+    session_comment_ref: Mapping[str, Any] | None = None,
+    executor_sha: str = "unknown",
+    installed_core_version: str = "unknown",
+    installed_hosted_version: str = "unknown",
+    historical_settlement_receipt_supplied: bool = False,
+    diagnostics_available: bool = False,
+) -> NoTransactionAttemptPacket:
+    """Build an offline read-only `NoTransactionAttemptPacket` (`authority=False`).
+
+    Separates positive pre-entry proof (`qualified_pre_entry_abort`) from
+    provider-entered (`provider_entry_started=True`) and unknown/unconfirmed
+    predecessors (`SiteVault #142` and `SiteVault #153`), retaining conservative
+    liability holds and forbidding fresh session resets or reenrollment.
+    """
+    qualification = qualify_no_transaction_abort(
+        record,
+        owner_ceased=owner_ceased,
+        provider_entry_started=provider_entry_started,
+        unreconciled_mutation_present=unreconciled_mutation_present,
+        late_native_effects_present=late_native_effects_present,
+    )
+    if identity is None:
+        if record.repository_id is None:
+            raise ReviewInputError(
+                "no-transaction attempt packet requires SessionIdentity or repository_id"
+            )
+        resolved_identity = SessionIdentity(
+            repository=record.repository,
+            pull_request=record.pull_request,
+            repository_id=record.repository_id,
+        )
+    else:
+        if not isinstance(identity, SessionIdentity):
+            raise ReviewInputError(
+                "no-transaction attempt packet identity must be a SessionIdentity"
+            )
+        if (
+            identity.repository != record.repository
+            or identity.pull_request != record.pull_request
+            or (
+                record.repository_id is not None
+                and identity.repository_id != record.repository_id
+            )
+        ):
+            raise ReviewInputError(
+                "no-transaction attempt packet identity conflicts with SessionRecord"
+            )
+        resolved_identity = identity
+
+    assert record.api_run_accounting is not None
+    old = ApiRunAccounting.from_document(record.api_run_accounting)
+    valid_abort, abort_tx, _abort_failures = _validate_analysis_abort_receipt(
+        record, old
+    )
+
+    abort_present = old.analysis_abort is not None
+    abort_entry: str | None = None
+    abort_src: str | None = None
+    abort_clean: str | None = None
+    if isinstance(old.analysis_abort, Mapping):
+        raw_entry = old.analysis_abort.get("entry_state")
+        if isinstance(raw_entry, str):
+            abort_entry = raw_entry
+        raw_src = old.analysis_abort.get("source_root")
+        if isinstance(raw_src, str) and _HEX64.fullmatch(raw_src) is not None:
+            abort_src = raw_src
+        raw_clean = old.analysis_abort.get("cleanup_root")
+        if isinstance(raw_clean, str) and _HEX64.fullmatch(raw_clean) is not None:
+            abort_clean = raw_clean
+
+    if qualification.state_code == "not_no_transaction_boundary":
+        entry_class = "outside_no_transaction_boundary"
+    elif qualification.qualifies_rollover:
+        entry_class = "proven_pre_entry_not_started"
+    elif (
+        provider_entry_started is True
+        or qualification.state_code == "no_transaction_provider_entered"
+    ):
+        entry_class = "provider_entered"
+    else:
+        entry_class = "unproven_or_unknown"
+
+    resolved_case_id = case_id
+    if resolved_case_id is None:
+        repo_lower = resolved_identity.repository.casefold()
+        if (
+            resolved_identity.pull_request == SITEVAULT_142_PULL_REQUEST
+            and "sitevault" in repo_lower
+        ):
+            resolved_case_id = SITEVAULT_142_CASE_ID
+        elif (
+            resolved_identity.pull_request == SITEVAULT_153_PULL_REQUEST
+            and "sitevault" in repo_lower
+        ):
+            resolved_case_id = SITEVAULT_153_CASE_ID
+        else:
+            resolved_case_id = (
+                f"{resolved_identity.repository}#{resolved_identity.pull_request}"
+                f":gen-{record.generation}:run-{old.identity.run_id}"
+            )
+
+    holds: list[str] = list(qualification.missing_predicates)
+    if not qualification.qualifies_rollover:
+        if not diagnostics_available:
+            holds.append("missing_close_diagnostics")
+        if executor_sha == "unknown":
+            holds.append("installed_executor_provenance")
+        if not historical_settlement_receipt_supplied:
+            holds.append("historical_live_settlement_receipt")
+    deduped_holds = tuple(dict.fromkeys(holds))
+
+    normalized_ref: dict[str, Any] | None = None
+    if session_comment_ref is not None:
+        if (
+            not isinstance(session_comment_ref, Mapping)
+            or type(session_comment_ref.get("id")) is not int
+            or session_comment_ref["id"] <= 0
+            or type(session_comment_ref.get("bytes")) is not int
+            or session_comment_ref["bytes"] <= 0
+            or not isinstance(session_comment_ref.get("sha256"), str)
+            or _HEX64.fullmatch(session_comment_ref["sha256"]) is None
+        ):
+            raise ReviewInputError(
+                "no-transaction session_comment_ref must bind id, bytes, and sha256"
+            )
+        normalized_ref = {
+            "id": session_comment_ref["id"],
+            "bytes": session_comment_ref["bytes"],
+            "sha256": session_comment_ref["sha256"],
+        }
+
+    return NoTransactionAttemptPacket(
+        case_id=resolved_case_id,
+        repository=resolved_identity.repository,
+        repository_id=resolved_identity.repository_id,
+        pull_request=resolved_identity.pull_request,
+        session_generation=record.generation,
+        record_sha256=record.record_sha256,
+        session_comment_ref=normalized_ref,
+        entry_classification=entry_class,
+        provider_entry_proven_absent=qualification.provider_entry_proven_absent,
+        missing_transaction_means_no_operation=(
+            qualification.missing_transaction_means_no_operation
+        ),
+        active_reservation_id=record.reservation_id,
+        reserved_slot=record.reserved_slot,
+        last_committed_reservation_id=record.last_committed_reservation_id,
+        reservation_release_confirmed=qualification.reservation_release_confirmed,
+        caller_allowance_limit=old.configuration.limit,
+        startup_liability=old.startup.liability,
+        prior_nonstartup_liability=old.prior_nonstartup_liability,
+        confirmed_requests=old.confirmed,
+        uncertain_requests=old.uncertain,
+        reserved_undispatched=old.reserved_undispatched,
+        dispatch_clean=qualification.dispatch_clean,
+        conservative_nonstartup_caller_liability=(
+            qualification.conservative_nonstartup_caller_liability
+        ),
+        conservative_total_caller_liability=(
+            qualification.conservative_total_caller_liability
+        ),
+        conservative_provider_call_hold=qualification.conservative_provider_call_hold,
+        run_id=old.identity.run_id,
+        run_attempt=old.owner.run_attempt,
+        owner_job=old.owner.job,
+        owner_generation=old.owner.generation,
+        owner_ceased=qualification.owner_ceased,
+        executor_sha=executor_sha,
+        installed_core_version=installed_core_version,
+        installed_hosted_version=installed_hosted_version,
+        abort_receipt_present=abort_present,
+        abort_receipt_valid=valid_abort,
+        abort_entry_state=abort_entry,
+        abort_source_root=abort_src,
+        abort_cleanup_root=abort_clean,
+        abort_transaction_id=(
+            abort_tx.transaction_id if abort_tx is not None else None
+        ),
+        abort_base_sha=abort_tx.base_sha if abort_tx is not None else None,
+        abort_head_sha=abort_tx.head_sha if abort_tx is not None else None,
+        late_effects_absent=qualification.late_effects_absent,
+        prior_finding_obligations_count=_count_prior_obligations(record),
+        historical_settlement_receipt_supplied=bool(
+            historical_settlement_receipt_supplied
+        ),
+        diagnostics_available=bool(diagnostics_available),
+        missing_proof_holds=deduped_holds,
+        qualification=qualification,
+    )
+
+
+def _load_live_no_transaction_context(
     *,
     ledger: Any,
     identity: SessionIdentity,
     actions_token: str | None = None,
-    provider_entry_started: bool | None = None,
-) -> tuple[NoTransactionAbortQualification, dict[str, Any]]:
-    """Read-only inspection of a live `no-transaction` session comment.
-
-    Returns `(qualification, comment_ref)` where `comment_ref` is the exact
-    `{"id", "bytes", "sha256"}` archive reference required by
-    `build_no_transaction_recovery_descriptor`.
-    """
+) -> tuple[SessionRecord, dict[str, Any], bool, bool]:
     http = getattr(ledger, "http", None)
     token = getattr(ledger, "token", None)
     if http is None or not isinstance(token, str) or not token.strip():
@@ -1176,6 +1590,27 @@ def inspect_live_no_transaction_predecessor(
     old = ApiRunAccounting.from_document(matched_record.api_run_accounting)
     ceased = _probe_owner_ceased(ledger, identity, old, actions_token)
     late_effects = _detect_late_native_effects(ledger, identity, matched_record, old)
+    return matched_record, comment_ref, ceased, late_effects
+
+
+def inspect_live_no_transaction_predecessor(
+    *,
+    ledger: Any,
+    identity: SessionIdentity,
+    actions_token: str | None = None,
+    provider_entry_started: bool | None = None,
+) -> tuple[NoTransactionAbortQualification, dict[str, Any]]:
+    """Read-only inspection of a live `no-transaction` session comment.
+
+    Returns `(qualification, comment_ref)` where `comment_ref` is the exact
+    `{"id", "bytes", "sha256"}` archive reference required by
+    `build_no_transaction_recovery_descriptor`.
+    """
+    matched_record, comment_ref, ceased, late_effects = (
+        _load_live_no_transaction_context(
+            ledger=ledger, identity=identity, actions_token=actions_token
+        )
+    )
     qualification = qualify_no_transaction_abort(
         matched_record,
         owner_ceased=ceased,
@@ -1185,13 +1620,57 @@ def inspect_live_no_transaction_predecessor(
     return qualification, comment_ref
 
 
+def inspect_live_no_transaction_attempt_packet(
+    *,
+    ledger: Any,
+    identity: SessionIdentity,
+    case_id: str | None = None,
+    actions_token: str | None = None,
+    provider_entry_started: bool | None = None,
+    executor_sha: str = "unknown",
+    installed_core_version: str = "unknown",
+    installed_hosted_version: str = "unknown",
+    historical_settlement_receipt_supplied: bool = False,
+    diagnostics_available: bool = False,
+) -> NoTransactionAttemptPacket:
+    """Read-only inspection of a live `no-transaction` session into a `NoTransactionAttemptPacket`."""
+    matched_record, comment_ref, ceased, late_effects = (
+        _load_live_no_transaction_context(
+            ledger=ledger, identity=identity, actions_token=actions_token
+        )
+    )
+    return build_no_transaction_attempt_packet(
+        matched_record,
+        identity=identity,
+        case_id=case_id,
+        owner_ceased=ceased,
+        provider_entry_started=provider_entry_started,
+        late_native_effects_present=late_effects,
+        session_comment_ref=comment_ref,
+        executor_sha=executor_sha,
+        installed_core_version=installed_core_version,
+        installed_hosted_version=installed_hosted_version,
+        historical_settlement_receipt_supplied=historical_settlement_receipt_supplied,
+        diagnostics_available=diagnostics_available,
+    )
+
+
 __all__ = [
+    "NO_TRANSACTION_ATTEMPT_PACKET_SCHEMA",
+    "NO_TRANSACTION_ENTRY_CLASSIFICATIONS",
     "NO_TRANSACTION_ROUTES",
     "NO_TRANSACTION_STATES",
     "RECOVERY_CLASSIFIER_ID",
+    "SITEVAULT_142_CASE_ID",
+    "SITEVAULT_142_PULL_REQUEST",
+    "SITEVAULT_153_CASE_ID",
+    "SITEVAULT_153_PULL_REQUEST",
     "NoTransactionAbortQualification",
+    "NoTransactionAttemptPacket",
     "NoTransactionRecoveryDescriptor",
+    "build_no_transaction_attempt_packet",
     "build_no_transaction_recovery_descriptor",
+    "inspect_live_no_transaction_attempt_packet",
     "inspect_live_no_transaction_predecessor",
     "qualify_no_transaction_abort",
     "verify_reenroll_forbidden",
