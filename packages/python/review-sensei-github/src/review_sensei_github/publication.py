@@ -7234,68 +7234,23 @@ class ReviewPublisher:
             raise GitHubPublicationError("review target was not found")
         if status < 200 or status >= 300:
             raise GitHubPublicationError("review preflight failed")
-        if not isinstance(payload, dict):
-            raise GitHubPublicationError("review preflight response was invalid")
-        if type(payload.get("draft")) is not bool:
-            raise GitHubPublicationError("review preflight draft was invalid")
-        if payload.get("state") != "open" or payload.get("draft") is True:
+        from .branch_lifecycle import evaluate_live_pr_write_gate
+
+        decision = evaluate_live_pr_write_gate(
+            payload,
+            repository=repository,
+            repository_id=repository_id,
+            head_sha=head_sha,
+            base_branch=base_branch,
+            base_sha=base_sha,
+            app_slug=app_slug,
+        )
+        if not decision.admitted:
+            assert decision.skip_status is not None
             return _PreflightDecision(
-                result=PublicationResult(status="skipped_pr_state")
+                result=PublicationResult(status=decision.skip_status)
             )
-        head = payload.get("head")
-        if not isinstance(head, dict):
-            raise GitHubPublicationError("review preflight head was invalid")
-        if head.get("sha") != head_sha:
-            return _PreflightDecision(
-                result=PublicationResult(status="skipped_stale_head")
-            )
-        head_repository = head.get("repo")
-        if not isinstance(head_repository, dict):
-            raise GitHubPublicationError("review preflight head repository was invalid")
-        head_fork = head_repository.get("fork")
-        if not isinstance(head_fork, bool):
-            raise GitHubPublicationError("review preflight head repository was invalid")
-        if head_fork or head_repository.get("full_name") != repository:
-            return _PreflightDecision(result=PublicationResult(status="skipped_fork"))
-        base = payload.get("base")
-        if not isinstance(base, dict):
-            raise GitHubPublicationError("review preflight base was invalid")
-        repository_info = base.get("repo")
-        if not isinstance(repository_info, dict):
-            raise GitHubPublicationError("review preflight repository was invalid")
-        base_id = repository_info.get("id")
-        if isinstance(base_id, bool) or not isinstance(base_id, int) or base_id <= 0:
-            raise GitHubPublicationError("review preflight repository was invalid")
-        base_fork = repository_info.get("fork")
-        if not isinstance(base_fork, bool):
-            raise GitHubPublicationError("review preflight repository was invalid")
-        if base_id != repository_id:
-            return _PreflightDecision(
-                result=PublicationResult(status="skipped_repository_mismatch")
-            )
-        if repository_info.get("full_name") != repository:
-            return _PreflightDecision(
-                result=PublicationResult(status="skipped_repository_mismatch")
-            )
-        if base_fork:
-            return _PreflightDecision(result=PublicationResult(status="skipped_fork"))
-        actual_base_branch = base.get("ref")
-        actual_base_sha = base.get("sha")
-        if not isinstance(actual_base_branch, str) or not GIT_SHA_HEX.fullmatch(
-            actual_base_sha if isinstance(actual_base_sha, str) else ""
-        ):
-            raise GitHubPublicationError("review preflight base binding was invalid")
-        if actual_base_branch != base_branch or actual_base_sha != base_sha:
-            return _PreflightDecision(
-                result=PublicationResult(status="skipped_stale_base")
-            )
-        author = payload.get("user")
-        if not isinstance(author, dict):
-            raise GitHubPublicationError("review preflight author was invalid")
-        author_login = author.get("login")
-        if not isinstance(author_login, str) or not author_login.strip():
-            raise GitHubPublicationError("review preflight author was invalid")
-        return _PreflightDecision(app_authored=author_login == app_slug)
+        return _PreflightDecision(app_authored=decision.app_authored)
 
     def _published_state_index(
         self,

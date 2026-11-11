@@ -1238,7 +1238,7 @@ def bootstrap(
         args.base_sha,
         args.head_sha,
         base["ref"],
-        head.get("repo", {}).get("full_name", args.repository),
+        (head.get("repo") or {}).get("full_name", args.repository),
         configuration_path,
         session.attestation,
         session.grant,
