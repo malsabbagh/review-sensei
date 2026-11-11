@@ -229,6 +229,10 @@ def evaluate_finalizer_pr_gate(
     Preserves ``ReviewApprovalFinalizer`` fail-closed diagnostics while sharing
     exact-boolean ``draft`` validation, ``state == "open"`` admission,
     same-repository non-fork checks, and ``head_sha`` freshness fencing.
+    ``base.ref`` is normalized to ``str | None`` rather than rejected here so
+    ``ConversationPublisher``'s G33 ``_reply_base`` fence continues to report its
+    bounded ``reply context base was invalid`` diagnostic while finalization
+    binds ``(base_sha, head_sha)`` against persisted eligibility.
 
     Trust boundary: ``payload`` MUST come from a freshly fetched, authenticated
     GitHub REST ``GET /repos/{owner}/{repo}/pulls/{pull_number}`` response—never
@@ -292,7 +296,6 @@ def evaluate_finalizer_pr_gate(
         or repository_id < 1
         or not isinstance(base_sha, str)
         or _GIT_SHA_HEX.fullmatch(base_sha) is None
-        or (raw_base_ref is not None and not isinstance(raw_base_ref, str))
         or not isinstance(author, dict)
         or not isinstance(author.get("login"), str)
         or not author["login"].strip()
@@ -304,7 +307,7 @@ def evaluate_finalizer_pr_gate(
         reason="admitted",
         repository_id=repository_id,
         base_sha=base_sha,
-        base_ref=raw_base_ref,
+        base_ref=raw_base_ref if isinstance(raw_base_ref, str) else None,
         app_authored=author["login"] == app_slug,
     )
 
@@ -471,7 +474,12 @@ def session_has_unresolved_obligations(
     *,
     ledger: object | None = None,
 ) -> bool:
-    """Return True when the persisted session baseline carries active findings."""
+    """Return True when the persisted session baseline carries active findings.
+
+    ``ReviewBaseline.findings`` returned by ``read_session_baseline`` stores
+    only active unresolved ``BaselineFinding`` obligations; findings resolved or
+    superseded in prior rounds are omitted when projecting the baseline.
+    """
 
     if record is None:
         return False
@@ -483,7 +491,14 @@ def session_has_unresolved_obligations(
 
 @dataclass(frozen=True)
 class ReopenBranchLifecycleDecision:
-    """Lifecycle classification and recovery contract for close/reopen/branch state."""
+    """Lifecycle classification and recovery contract for close/reopen/branch state.
+
+    ``effective_failed_attempts`` is already scoped per ``head_sha`` via
+    ``failed_attempts_for_head``, so an unseen ``head_sha`` naturally starts at
+    ``0`` while ``mints_fresh_failed_attempt_allowance`` stays ``False`` to
+    record that close/reopen/branch transitions never reset or grant extra retry
+    budget for an already-charged commit SHA.
+    """
 
     transition_kind: ReopenTransitionKind
     shares_session_identity: bool
@@ -721,7 +736,7 @@ class GitAncestryEvidence:
     prior_base_is_ancestor_of_new_base: bool
     prior_head_tree_sha: str | None
     new_head_tree_sha: str | None
-    diff_bytes_identical: bool
+    diff_bytes_identical: bool | None
 
     @classmethod
     def unavailable(cls) -> GitAncestryEvidence:
@@ -733,7 +748,7 @@ class GitAncestryEvidence:
             prior_base_is_ancestor_of_new_base=False,
             prior_head_tree_sha=None,
             new_head_tree_sha=None,
-            diff_bytes_identical=False,
+            diff_bytes_identical=None,
         )
 
 
@@ -813,16 +828,18 @@ def inspect_git_ancestry(
         else None
     )
 
-    diff_identical = False
+    diff_identical: bool | None = None
     prev_mb = _git_query(repo_root, ["merge-base", prev_base, prev_head])
-    if merge_base_sha is not None and prev_mb.returncode == 0:
+    prev_mb_text = prev_mb.stdout.decode("utf-8", errors="replace").strip()
+    if (
+        merge_base_sha is not None
+        and prev_mb.returncode == 0
+        and _GIT_SHA_HEX.fullmatch(prev_mb_text) is not None
+    ):
         old_diff = _git_query(repo_root, ["diff", f"{prev_base}...{prev_head}"])
         new_diff = _git_query(repo_root, ["diff", f"{curr_base}...{curr_head}"])
-        diff_identical = (
-            old_diff.returncode == 0
-            and new_diff.returncode == 0
-            and old_diff.stdout == new_diff.stdout
-        )
+        if old_diff.returncode == 0 and new_diff.returncode == 0:
+            diff_identical = old_diff.stdout == new_diff.stdout
 
     return GitAncestryEvidence(
         merge_base_sha=merge_base_sha,
@@ -1008,17 +1025,30 @@ def classify_source_identity_transition(
             recovery_mode="verify_against_latest_obligations",
         )
 
-    if not ancestry.diff_bytes_identical and (
-        ancestry.prior_head_tree_sha is None or ancestry.new_head_tree_sha is None
-    ):
+    if ancestry.prior_head_tree_sha is None or ancestry.new_head_tree_sha is None:
         raise GitHubPublicationError(
             "force-push ancestry classification requires head tree SHA or diff parity evidence"
         )
+    if (
+        ancestry.prior_head_tree_sha != ancestry.new_head_tree_sha
+        and ancestry.diff_bytes_identical is None
+    ):
+        return SourceIdentityTransitionDecision(
+            transition_kind="unrelated_history",
+            baseline_cache_compatible=False,
+            baseline_invalidation_reason="unrelated-history",
+            in_flight_publication_skip_status="skipped_stale_head",
+            in_flight_reply_skip_status="skipped_stale_head",
+            preserves_newer_session_obligations=True,
+            reuses_superseded_approval_without_verification=False,
+            revokes_post_dispatch_effects=False,
+            recovery_mode="refuse_prepare_diff_retarget_or_rescan",
+        )
 
     identical_tree_or_diff = (
-        ancestry.prior_head_tree_sha is not None
-        and ancestry.prior_head_tree_sha == ancestry.new_head_tree_sha
-    ) or ancestry.diff_bytes_identical
+        ancestry.prior_head_tree_sha == ancestry.new_head_tree_sha
+        or ancestry.diff_bytes_identical is True
+    )
     if not ancestry.prior_head_is_ancestor_of_new_head and identical_tree_or_diff:
         return SourceIdentityTransitionDecision(
             transition_kind="force_push_identical_tree_new_sha",

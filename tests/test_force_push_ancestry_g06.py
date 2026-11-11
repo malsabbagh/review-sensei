@@ -284,6 +284,30 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             self.assertEqual(
                 dec_3.recovery_mode, "refuse_prepare_diff_retarget_or_rescan"
             )
+            anc_3_from_orphan = inspect_git_ancestry(
+                repo,
+                previous_base_sha=shas["b1"],
+                previous_head_sha=shas["h_orphan"],
+                current_base_sha=shas["b1"],
+                current_head_sha=shas["h_rewritten"],
+            )
+            self.assertEqual(anc_3_from_orphan.merge_base_sha, shas["b1"])
+            self.assertIsNone(anc_3_from_orphan.diff_bytes_identical)
+            dec_3_from_orphan = classify_source_identity_transition(
+                previous_base_ref="main-b1",
+                previous_base_sha=shas["b1"],
+                previous_head_sha=shas["h_orphan"],
+                current_base_ref="main-b1",
+                current_base_sha=shas["b1"],
+                current_head_sha=shas["h_rewritten"],
+                ancestry=anc_3_from_orphan,
+            )
+            self.assertEqual(dec_3_from_orphan.transition_kind, "unrelated_history")
+            self.assertFalse(dec_3_from_orphan.baseline_cache_compatible)
+            self.assertEqual(
+                dec_3_from_orphan.recovery_mode,
+                "refuse_prepare_diff_retarget_or_rescan",
+            )
             with self.assertRaises(ReviewInputError) as unrelated_err:
                 prepare_diff(
                     base_ref="main-b1",
@@ -978,7 +1002,15 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
                     }
                     created = {
                         "id": rid,
-                        "state": "APPROVED" if event == "APPROVE" else "COMMENTED",
+                        "state": (
+                            "APPROVED"
+                            if event == "APPROVE"
+                            else (
+                                "CHANGES_REQUESTED"
+                                if event == "REQUEST_CHANGES"
+                                else "COMMENTED"
+                            )
+                        ),
                         "body": payload.get("body", ""),
                         "commit_id": payload.get("commit_id", head),
                         "submitted_at": "2026-11-11T00:00:00Z",
@@ -1148,6 +1180,41 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
                 run_pub(pub, partial_res_2, auto_approve=True)
             self.assertEqual(events, [])
 
+        # 5. {inline-blocking persisted, idempotent replay OR different non-clean prospective}:
+        # inline blockers set `facts.has_blocking_findings=False` (not body-placed),
+        # yet MUST replay as `already_published` and MUST NOT be misclassified as clean!
+        inline_blocker_res = ReviewResult(
+            summary="Review with an inline blocking defect.",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=2,
+                    body="Null dereference on return value.",
+                    severity="high",
+                    category="correctness",
+                    effective_blocking=True,
+                    needs_human=False,
+                ),
+            ),
+            provider="ollama",
+            review_status="complete",
+        )
+        with self.subTest(case="inline_blocking_replay_and_non_supersession"):
+            pub, _stored, _rcomments, events = make_harness()
+            self.assertEqual(
+                run_pub(pub, inline_blocker_res, auto_approve=True).status, "published"
+            )
+            events.clear()
+            replay_blocker = run_pub(pub, inline_blocker_res, auto_approve=True)
+            self.assertEqual(replay_blocker.status, "already_published")
+            self.assertEqual(events, [])
+            with self.assertRaisesRegex(
+                GitHubPublicationError,
+                "existing review does not prove complete publication of this result",
+            ):
+                run_pub(pub, human_res, auto_approve=True)
+            self.assertEqual(events, [])
+
     def test_ancestry_and_source_classifier_input_validation(self) -> None:
         with self.assertRaisesRegex(
             GitHubPublicationError, "repository root must be an existing directory"
@@ -1191,6 +1258,9 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             )
 
         # `GitAncestryEvidence.unavailable()` fails closed to `unrelated_history`.
+        unavail_ev = GitAncestryEvidence.unavailable()
+        self.assertIsNone(unavail_ev.merge_base_sha)
+        self.assertIsNone(unavail_ev.diff_bytes_identical)
         unavail = classify_source_identity_transition(
             previous_base_ref="main",
             previous_base_sha="a" * 40,
@@ -1198,7 +1268,7 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             current_base_ref="main",
             current_base_sha="a" * 40,
             current_head_sha="d" * 40,
-            ancestry=GitAncestryEvidence.unavailable(),
+            ancestry=unavail_ev,
         )
         self.assertEqual(unavail.transition_kind, "unrelated_history")
         self.assertFalse(unavail.baseline_cache_compatible)
@@ -1206,27 +1276,39 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             unavail.recovery_mode, "refuse_prepare_diff_retarget_or_rescan"
         )
 
-        # Force-push classification fails closed when tree SHA and diff parity evidence are missing.
-        with self.assertRaisesRegex(
-            GitHubPublicationError,
-            "force-push ancestry classification requires head tree SHA or diff parity evidence",
+        # Force-push classification fails closed when either tree SHA is missing,
+        # even if diff_bytes_identical is True (RS-A0F9EA).
+        for missing_tree_ancestry in (
+            GitAncestryEvidence(
+                merge_base_sha="a" * 40,
+                prior_head_is_ancestor_of_new_head=False,
+                prior_base_is_ancestor_of_new_base=True,
+                prior_head_tree_sha=None,
+                new_head_tree_sha=None,
+                diff_bytes_identical=False,
+            ),
+            GitAncestryEvidence(
+                merge_base_sha="a" * 40,
+                prior_head_is_ancestor_of_new_head=False,
+                prior_base_is_ancestor_of_new_base=True,
+                prior_head_tree_sha=None,
+                new_head_tree_sha="c" * 40,
+                diff_bytes_identical=True,
+            ),
         ):
-            classify_source_identity_transition(
-                previous_base_ref="main",
-                previous_base_sha="a" * 40,
-                previous_head_sha="b" * 40,
-                current_base_ref="main",
-                current_base_sha="a" * 40,
-                current_head_sha="d" * 40,
-                ancestry=GitAncestryEvidence(
-                    merge_base_sha="a" * 40,
-                    prior_head_is_ancestor_of_new_head=False,
-                    prior_base_is_ancestor_of_new_base=True,
-                    prior_head_tree_sha=None,
-                    new_head_tree_sha=None,
-                    diff_bytes_identical=False,
-                ),
-            )
+            with self.assertRaisesRegex(
+                GitHubPublicationError,
+                "force-push ancestry classification requires head tree SHA or diff parity evidence",
+            ):
+                classify_source_identity_transition(
+                    previous_base_ref="main",
+                    previous_base_sha="a" * 40,
+                    previous_head_sha="b" * 40,
+                    current_base_ref="main",
+                    current_base_sha="a" * 40,
+                    current_head_sha="d" * 40,
+                    ancestry=missing_tree_ancestry,
+                )
 
 
 if __name__ == "__main__":

@@ -4583,6 +4583,7 @@ class ReviewPublisher:
         self._pending_thread_cleanup: Callable[[], str | None] | None = None
         self._confirmed_review_id: int | None = None
         self._confirmed_check: tuple[str, str, int] | None = None
+        self._persisted_index_has_blocking: bool = False
 
     def _native_group_host(self, *, result, assembled, store, capacity):
         from review_sensei.session import SessionIdentity
@@ -5184,6 +5185,7 @@ class ReviewPublisher:
         self._pending_thread_cleanup = None
         self._confirmed_review_id = None
         self._confirmed_check = None
+        self._persisted_index_has_blocking = False
         self._check_accounting_failure = None
         self._check_accounting_approval: PublicationResult | None = None
         self._check_accounting_review_id: int | None = None
@@ -5782,6 +5784,7 @@ class ReviewPublisher:
                     result_marker=marker,
                     app_slug=app_slug,
                     repository_id=repository_id if complete_inventory else None,
+                    lookup_repository_id=repository_id,
                     complete_review=complete_review,
                     base_sha=base_sha,
                     result_digest=review_result_digest(result),
@@ -5795,8 +5798,61 @@ class ReviewPublisher:
                     "confirmed publication complete native review is unavailable; "
                     "cleanup cannot recreate it"
                 )
+            # Determine whether this run supersedes a previously clean, complete
+            # review on ``head_sha`` (for example, a force-push revert carrying
+            # newer session baseline obligations). Inline blockers keep
+            # ``facts.has_blocking_findings=False`` because only body-placed
+            # blockers set that flag, so ``persisted_is_clean_complete`` also
+            # excludes ``CHANGES_REQUESTED``, persisted ``FindingIndex`` blockers,
+            # and same-digest replays of non-eligible results. When
+            # ``supersedes_prior_clean_review`` is True, reconciliation falls
+            # through both ``has_blocking_findings`` and non-blocking arms to
+            # ``write_preflight`` below so the superseding review is published.
+            current_result_digest = review_result_digest(result)
+            persisted_is_clean_complete = (
+                persisted_eligibility is not None
+                and persisted_eligibility.head_sha == head_sha
+                and not (
+                    persisted_eligibility.result_digest == current_result_digest
+                    and not _approval_eligible(result)
+                )
+                and "CHANGES_REQUESTED" not in identity_states
+                and not self._persisted_index_has_blocking
+                and persisted_eligibility.facts.review_status == "complete"
+                and persisted_eligibility.facts.coverage_blocker in {None, "reviewed"}
+                and evaluate_approval_facts(
+                    replace(
+                        persisted_eligibility.facts,
+                        enabled=True,
+                        app_authored=False,
+                        qualification="not-required",
+                        has_open_review_threads=bool(
+                            persisted_eligibility.facts.has_open_review_threads
+                        ),
+                    )
+                ).approved
+            )
+            prospective_has_non_clean_obligation = (
+                not approval_eligible
+                or has_blocking_findings(result)
+                or not evaluate_approval_facts(
+                    replace(
+                        prospective_eligibility.facts,
+                        enabled=True,
+                        app_authored=False,
+                        qualification="not-required",
+                        has_open_review_threads=bool(
+                            prospective_eligibility.facts.has_open_review_threads
+                        ),
+                    )
+                ).approved
+            )
+            supersedes_prior_clean_review = (
+                prospective_has_non_clean_obligation and persisted_is_clean_complete
+            )
             if (
                 result_states
+                and not supersedes_prior_clean_review
                 and complete_review is not None
                 and persisted_eligibility is not None
                 and self._confirmed_review_id is not None
@@ -5813,47 +5869,12 @@ class ReviewPublisher:
                     replacements=complete_review.inline_comments,
                     review_id=self._confirmed_review_id,
                 )
-                if persisted_eligibility.result_digest != review_result_digest(result):
+                if persisted_eligibility.result_digest != current_result_digest:
                     # A newer same-head result cannot lend this older report
                     # authority to mutate threads, even when its own index is valid.
                     self._pending_thread_cleanup = lambda: (
                         "thread_resolution_unconfirmed"
                     )
-            # ``ApprovalFacts.from_dict`` requires ``coverage_blocker`` as a
-            # mandatory persisted key: ``None`` represents a complete review
-            # without a ``CoverageManifest``, ``"reviewed"`` represents full
-            # manifest coverage, and partial/incomplete/unknown coverage stores
-            # ``"partial"``/``"incomplete"``/``"unknown"``. Evaluating through
-            # ``evaluate_approval_facts`` ensures ``persisted_is_clean_complete``
-            # holds only when the latest persisted review on ``head_sha`` was
-            # complete, coverage-clean, and free of blocking, human-adjudication,
-            # or review-verdict obligations. When a force-push reverts back to a
-            # previously clean ``head_sha`` while carrying newer obligations
-            # (``supersedes_prior_clean_review``), reconciliation must neither
-            # fail closed on the prior clean review nor short-circuit via
-            # ``already_published``/``_finalize_published_result``; instead it
-            # falls through to ``write_preflight`` below to emit the superseding
-            # non-approving review.
-            persisted_is_clean_complete = (
-                persisted_eligibility is not None
-                and evaluate_approval_facts(
-                    replace(
-                        persisted_eligibility.facts,
-                        enabled=True,
-                        app_authored=False,
-                        qualification="not-required",
-                        has_open_review_threads=False,
-                    )
-                ).approved
-            )
-            prospective_has_non_clean_obligation = (
-                not approval_eligible
-                or prospective_eligibility.facts.has_blocking_findings
-                or prospective_eligibility.facts.has_human_adjudication_findings
-            )
-            supersedes_prior_clean_review = (
-                prospective_has_non_clean_obligation and persisted_is_clean_complete
-            )
             if (
                 complete_inventory
                 and identity_states
@@ -7271,11 +7292,13 @@ class ReviewPublisher:
         result_marker: str,
         app_slug: str,
         repository_id: int | None = None,
+        lookup_repository_id: int | None = None,
         complete_review: AssembledReview | None = None,
         base_sha: str | None = None,
         result_digest: str | None = None,
         native_host=None,
     ) -> tuple[frozenset[str], frozenset[str], ReviewApprovalEligibility | None]:
+        self._persisted_index_has_blocking = False
         if native_host is not None:
             reader = self.finalizer.quarantine_reader(
                 token=token,
@@ -7398,7 +7421,7 @@ class ReviewPublisher:
             # A complete-inventory replay must validate the retained inventory
             # before the already-published path updates checks or finalizes.
             try:
-                self.finalizer.finding_index_from_reviews(
+                persisted_index = self.finalizer.finding_index_from_reviews(
                     payload,
                     repository_id=repository_id,
                     pull_request=pull_request,
@@ -7412,6 +7435,26 @@ class ReviewPublisher:
                 ) from None
             except GitHubPublicationError as exc:
                 raise _NativeReplayAuthorityError(str(exc)) from exc
+            self._persisted_index_has_blocking = bool(
+                persisted_index is not None
+                and any(entry.blocking for entry in persisted_index.entries)
+            )
+        elif lookup_repository_id is not None and eligibility is not None:
+            try:
+                persisted_index = self.finalizer.finding_index_from_reviews(
+                    payload,
+                    repository_id=lookup_repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    eligibility=eligibility,
+                )
+            except (ReviewInputError, GitHubPublicationError):
+                persisted_index = None
+            self._persisted_index_has_blocking = bool(
+                persisted_index is not None
+                and any(entry.blocking for entry in persisted_index.entries)
+            )
         return frozenset(identity_states), frozenset(result_states), eligibility
 
     def _verify_complete_review(

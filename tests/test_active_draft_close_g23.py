@@ -363,6 +363,10 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
                 if kind == "closed":
                     self.assertIsNone(out)
                     self.assertIsNone(record.transaction)
+                    assert isinstance(record.api_run_accounting, dict)
+                    self.assertIsNone(
+                        record.api_run_accounting.get("terminal_transaction")
+                    )
                     self.assertIn(
                         "retention current pull request identity mismatches", fx.error
                     )
@@ -693,6 +697,14 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
                             "review publication failed temporarily", ufx.error
                         )
                         self.assertEqual(ufx.review_posts, [])
+                        assert ufx.comment is not None
+                        record_u = parse_session_comment(
+                            ufx.comment["body"], identity=IDENTITY
+                        )
+                        assert isinstance(record_u.api_run_accounting, dict)
+                        self.assertIsNone(
+                            record_u.api_run_accounting.get("terminal_transaction")
+                        )
 
 
 if __name__ == "__main__":

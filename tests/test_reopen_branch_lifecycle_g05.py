@@ -561,6 +561,8 @@ class ReopenBranchLifecycleG05Tests(unittest.TestCase):
             self.assertEqual(
                 decision.recovery_action, "isolated_new_pull_request_session"
             )
+            self.assertEqual(pr7_closed.session_identity.pull_request, 7)
+            self.assertEqual(pr8_opened.session_identity.pull_request, 8)
             self.assertNotEqual(
                 pr7_closed.session_identity, pr8_opened.session_identity
             )
