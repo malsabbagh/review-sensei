@@ -1195,6 +1195,346 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
         )
         self.assertEqual(self.coordinator.max_concurrent_writers, 1)
 
+    def test_case_g_real_api_run_owner_cancel_in_progress_false_and_non_fifo_delivery(
+        self,
+    ) -> None:
+        """Exercise real ApiRunActionsEvidence across cancel-in-progress=false, overlap, and non-FIFO run IDs."""
+        workflow_path = (
+            Path(__file__).resolve().parents[1]
+            / ".github/workflows/review-sensei-run.yml"
+        )
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        # Provider jobs (command, hosted, local) enforce cancel-in-progress: false on the PR slot.
+        self.assertGreaterEqual(
+            workflow_text.count("cancel-in-progress: false"),
+            3,
+        )
+        self.assertIn(
+            "reviewsensei-provider-review-${{ github.repository }}-",
+            workflow_text,
+        )
+
+        runs: dict[int, dict[str, object]] = {
+            250: {
+                "id": 250,
+                "run_attempt": 1,
+                "status": "completed",
+                "conclusion": "success",
+                "event": "issue_comment",
+                "repository": {"id": 123, "full_name": "owner/repo"},
+            },
+            249: {
+                "id": 249,
+                "run_attempt": 1,
+                "status": "in_progress",
+                "conclusion": None,
+                "event": "issue_comment",
+                "repository": {"id": 123, "full_name": "owner/repo"},
+            },
+        }
+        jobs_by_run: dict[int, list[dict[str, object]]] = {
+            250: [
+                {
+                    "id": 2501,
+                    "run_id": 250,
+                    "run_attempt": 1,
+                    "name": "ReviewSensei / command",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "completed_at": "2026-10-25T14:00:00Z",
+                },
+                {
+                    "id": 2502,
+                    "run_id": 250,
+                    "run_attempt": 1,
+                    "name": "ReviewSensei / hosted",
+                    "status": "completed",
+                    "conclusion": "skipped",
+                    "completed_at": "2026-10-25T13:59:00Z",
+                },
+            ],
+            249: [
+                {
+                    "id": 2491,
+                    "run_id": 249,
+                    "run_attempt": 1,
+                    "name": "ReviewSensei / command",
+                    "status": "in_progress",
+                    "conclusion": None,
+                },
+            ],
+        }
+
+        def actions_api(req: Request):
+            path = urlsplit(req.full_url).path
+            for rid in (249, 250):
+                if path == f"/repos/owner/repo/actions/runs/{rid}":
+                    return json_response(runs[rid])
+                if path == f"/repos/owner/repo/actions/runs/{rid}/attempts/1/jobs":
+                    rows = jobs_by_run[rid]
+                    return json_response({"total_count": len(rows), "jobs": rows})
+                if (
+                    rid == 249
+                    and path == "/repos/owner/repo/actions/runs/249/attempts/2/jobs"
+                ):
+                    rows = [
+                        {
+                            "id": 2499,
+                            "run_id": 249,
+                            "run_attempt": 2,
+                            "name": "ReviewSensei / command",
+                            "status": "in_progress",
+                            "conclusion": None,
+                        }
+                    ]
+                    return json_response({"total_count": len(rows), "jobs": rows})
+            raise AssertionError(path)
+
+        http = GitHubHttp(
+            api_url="https://api.github.test",
+            opener=lambda req, timeout=5.0: actions_api(req),
+        )
+        ev_delayed = ApiRunActionsEvidence(
+            http, token="actions-tok", command_run_id="249", job="command"
+        )
+        # Non-FIFO delivery: Run 250 completed BEFORE delayed Run 249 started (250 > 249).
+        posture_non_fifo = ev_delayed.inspect_concurrency_posture(
+            IDENTITY,
+            attempt=1,
+            event="issue_comment",
+            previous_run_id=250,
+            predecessor=ApiExecutionOwner(1, "command", 0),
+        )
+        self.assertTrue(posture_non_fifo.non_fifo_run_order)
+        self.assertTrue(posture_non_fifo.exclusive_active_owner)
+        self.assertFalse(posture_non_fifo.overlapping_active_writers)
+        self.assertTrue(posture_non_fifo.predecessor_ceased)
+        self.assertIsNone(posture_non_fifo.refusal_reason)
+
+        # If predecessor 250 has a queued/waiting sibling writer under cancel-in-progress=false,
+        # cessation is refused fail-closed.
+        jobs_by_run[250][1] = {
+            "id": 2502,
+            "run_id": 250,
+            "run_attempt": 1,
+            "name": "ReviewSensei / hosted",
+            "status": "waiting",
+            "conclusion": None,
+        }
+        posture_waiting = ev_delayed.inspect_concurrency_posture(
+            IDENTITY,
+            attempt=1,
+            event="issue_comment",
+            previous_run_id=250,
+            predecessor=ApiExecutionOwner(1, "command", 0),
+        )
+        self.assertFalse(posture_waiting.predecessor_ceased)
+        self.assertIn("incomplete writer jobs", posture_waiting.refusal_reason or "")
+
+        # Overlapping active writers inside the same run (command + hosted both in_progress)
+        # are refused fail-closed before admission.
+        jobs_by_run[249].append(
+            {
+                "id": 2492,
+                "run_id": 249,
+                "run_attempt": 1,
+                "name": "ReviewSensei / hosted",
+                "status": "in_progress",
+                "conclusion": None,
+            }
+        )
+        posture_overlap = ev_delayed.inspect_concurrency_posture(
+            IDENTITY,
+            attempt=1,
+            event="issue_comment",
+        )
+        self.assertTrue(posture_overlap.overlapping_active_writers)
+        self.assertFalse(posture_overlap.exclusive_active_owner)
+        self.assertIn("ambiguous or overlapping", posture_overlap.refusal_reason or "")
+
+        # Same-run predecessor cessation check when attempt=2 inspects attempt=1.
+        jobs_by_run[249] = [
+            {
+                "id": 2491,
+                "run_id": 249,
+                "run_attempt": 1,
+                "name": "ReviewSensei / command",
+                "status": "completed",
+                "conclusion": "cancelled",
+                "completed_at": "2026-10-25T14:05:00Z",
+            }
+        ]
+        runs[249]["run_attempt"] = 2
+        posture_same_run = ev_delayed.inspect_concurrency_posture(
+            IDENTITY,
+            attempt=2,
+            predecessor=ApiExecutionOwner(1, "command", 0),
+        )
+        self.assertTrue(posture_same_run.predecessor_ceased)
+
+    def test_case_h_duplicate_admission_unknown_commit_and_action_guard_fencing(
+        self,
+    ) -> None:
+        """Exercise real CallerRunRequests duplicate admission, startup slot lock, and live head-fence refusal."""
+        from review_sensei_github.action_run import ActionRunLedger
+
+        f, ledger = self._start_initial_run(self.dir / "case-h-init")
+
+        # 1. Duplicate same-slot startup claim in the same run directory refuses immediately.
+        with self.assertRaisesRegex(
+            ReviewInputError, "API startup slot is consumed or unavailable"
+        ):
+            claim_review_startup(
+                Path(self.dir / "case-h-init"),
+                ApiRunIdentity(123, 456),
+                1,
+                "hosted",
+            )
+
+        # 2. Action admission conflicts with an active review reservation or unfinished review transaction.
+        unfinished_tx = ReviewTransaction.create(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha=BASE,
+            head_sha=HEAD,
+            policy_digest="2" * 64,
+            configuration_digest=f.accounted.accounting.configuration.digest,
+            evidence_digest="4" * 64,
+            reservation_id="7" * 64,
+            generation=1,
+        )
+        ledger.replace(
+            IDENTITY,
+            lambda rec: rec.evolve(
+                generation=rec.generation + 1,
+                reservation_id=unfinished_tx.reservation_id,
+                reserved_slot="initial",
+                transaction=unfinished_tx,
+            ),
+        )
+        source_doc = {
+            "kind": "issue_comment",
+            "id": 301,
+            "updated_at": "2026-10-25T15:00:00Z",
+            "body_sha256": hashlib.sha256(b"@reviewsensei status").hexdigest(),
+        }
+        with self.assertRaisesRegex(
+            ReviewInputError, "conflicts with a review reservation"
+        ):
+            f.accounted.admit_action(
+                ledger,
+                IDENTITY,
+                purpose="command",
+                source=source_doc,
+                head_sha=HEAD,
+                operation_key="8" * 64,
+            )
+
+        # Clear reservation but leave unfinished publication_pending review transaction -> still refused!
+        pending_pub_tx = replace(
+            unfinished_tx,
+            phase="publication_pending",
+            result_sha256="6" * 64,
+        )
+        ledger.replace(
+            IDENTITY,
+            lambda rec: rec.evolve(
+                generation=rec.generation + 1,
+                reservation_id=None,
+                reserved_slot=None,
+                transaction=pending_pub_tx,
+                last_committed_reservation_id=unfinished_tx.reservation_id,
+            ),
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "conflicts with an unfinished review"
+        ):
+            f.accounted.admit_action(
+                ledger,
+                IDENTITY,
+                purpose="command",
+                source=source_doc,
+                head_sha=HEAD,
+                operation_key="8" * 64,
+            )
+
+        # Clear transaction and admit action through ActionRunLedger.
+        ledger.replace(
+            IDENTITY,
+            lambda rec: rec.evolve(
+                generation=rec.generation + 1,
+                transaction=None,
+                last_committed_reservation_id=None,
+            ),
+        )
+        action_ledger = ActionRunLedger(f.ledger, f.accounted, IDENTITY)
+        intent = f.accounted.admit_action(
+            action_ledger,
+            IDENTITY,
+            purpose="command",
+            source=source_doc,
+            head_sha=HEAD,
+            operation_key="8" * 64,
+        )
+        # Idempotent re-admission with identical unstarted intent returns the exact intent.
+        self.assertEqual(
+            f.accounted.admit_action(
+                action_ledger,
+                IDENTITY,
+                purpose="command",
+                source=source_doc,
+                head_sha=HEAD,
+                operation_key="8" * 64,
+            ),
+            intent,
+        )
+        # Duplicate admission with an unknown/drifted head_sha refuses with zero mutation.
+        before_traces = len(f.trace)
+        with self.assertRaisesRegex(
+            ReviewInputError, "caller action source or operation conflicts"
+        ):
+            f.accounted.admit_action(
+                action_ledger,
+                IDENTITY,
+                purpose="command",
+                source=source_doc,
+                head_sha="9" * 40,
+                operation_key="8" * 64,
+            )
+        self.assertEqual(len(f.trace), before_traces)
+
+        # Begin action effect; duplicate admission after effect entry is refused.
+        f.accounted.begin_action_effect(action_ledger, IDENTITY, intent)
+        with self.assertRaisesRegex(
+            ReviewInputError,
+            "caller action is complete or requires exact result recovery",
+        ):
+            f.accounted.admit_action(
+                action_ledger,
+                IDENTITY,
+                purpose="command",
+                source=source_doc,
+                head_sha=HEAD,
+                operation_key="8" * 64,
+            )
+
+        # ActionRunLedger.business_guard fences mutation when PR head advances to an unknown SHA.
+        def head_drifted_fence() -> None:
+            raise ReviewInputError("live action head changed during execution")
+
+        action_ledger.business_guard = head_drifted_fence
+        before_guard_traces = len(f.trace)
+        with self.assertRaisesRegex(
+            ReviewInputError, "live action head changed during execution"
+        ):
+            action_ledger.replace(
+                IDENTITY,
+                lambda rec: rec.evolve(
+                    generation=rec.generation + 1, operator_paused=True
+                ),
+            )
+        self.assertEqual(len(f.trace), before_guard_traces)
+
 
 if __name__ == "__main__":
     unittest.main()

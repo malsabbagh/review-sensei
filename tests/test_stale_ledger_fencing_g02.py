@@ -38,11 +38,15 @@ from review_sensei.writer_containment import (
     BYPASS_WRITER_ROUTES,
     CONTAINED_WRITER_ROUTES,
     LIVE_CANONICAL_CUTOVER_ENABLED,
+    WRITER_CREDENTIAL_ROUTE_INVENTORY,
     ContainedForwardingCoordinator,
     IssuedWriterToken,
     WireDispatchOutcome,
     WriterContainmentPosture,
+    evaluate_physical_budget_guarantees,
+    evaluate_side_coordinator_fencing_proof,
     extract_unsettled_dispatches,
+    inspect_writer_credential_inventory,
 )
 
 try:
@@ -1339,6 +1343,525 @@ coord.candidate.forward(tok, coord.candidate.snapshot(tok), req)
         with closing(sqlite3.connect(override_coord.frontier_path)) as db:
             with self.assertRaises(sqlite3.IntegrityError):
                 db.execute("UPDATE scope_epochs SET legacy_locked=1, legacy_blob=NULL")
+
+    def test_route_inventory_credential_containment_proof_and_external_epoch_floor(
+        self,
+    ) -> None:
+        """Trace every real writer/token route, prove side-coordinator limits, and guard external epoch rollback."""
+        import importlib
+
+        self.assertFalse(LIVE_CANONICAL_CUTOVER_ENABLED)
+        inventory = inspect_writer_credential_inventory()
+        self.assertFalse(inventory["live_cutover_enabled"])
+        self.assertFalse(inventory["repository_default_cutover_enabled"])
+        self.assertFalse(inventory["exclusive_cutover_ready_in_default_runtime"])
+        self.assertEqual(
+            frozenset(inventory["contained_route_keys"]),
+            CONTAINED_WRITER_ROUTES,
+        )
+        self.assertEqual(
+            frozenset(inventory["bypass_route_keys"]),
+            BYPASS_WRITER_ROUTES,
+        )
+        route_map = {
+            entry.route_id: entry for entry in WRITER_CREDENTIAL_ROUTE_INVENTORY
+        }
+        for expected_route in (
+            "actions_hosted",
+            "actions_local",
+            "actions_command",
+            "actions_reply",
+            "manual_cli_local_ledger",
+            "manual_cli_direct_github",
+            "broker_raw_token",
+            "pre_cancellation_inflight",
+        ):
+            self.assertIn(expected_route, route_map)
+            entry = route_map[expected_route]
+            self.assertTrue(entry.entry_modules)
+            for mod_name in entry.entry_modules:
+                self.assertIsNotNone(importlib.import_module(mod_name))
+
+        # Local-only CLI has no GitHub write surface and no raw token bypass risk;
+        # every network-writing route pre-cutover carries unrestricted_token_bypass_risk.
+        self.assertFalse(
+            route_map["manual_cli_local_ledger"].unrestricted_token_bypass_risk
+        )
+        self.assertEqual(route_map["manual_cli_local_ledger"].github_write_surfaces, ())
+        for raw_route in (
+            "actions_hosted",
+            "actions_local",
+            "actions_command",
+            "actions_reply",
+            "manual_cli_direct_github",
+            "broker_raw_token",
+            "pre_cancellation_inflight",
+        ):
+            self.assertTrue(route_map[raw_route].unrestricted_token_bypass_risk)
+
+        with self.assertRaisesRegex(
+            AuthorityRefusal, "live_cutover_enabled must be a boolean"
+        ):
+            inspect_writer_credential_inventory(live_cutover_enabled="false")  # type: ignore[arg-type]
+
+        # Prove structurally why a side coordinator cannot fence a writer holding a raw GitHub token.
+        unfenced_raw = evaluate_side_coordinator_fencing_proof(
+            holds_unrestricted_github_token=True,
+            coordinator_epoch_advanced=True,
+            uses_contained_forwarding=True,
+        )
+        self.assertFalse(unfenced_raw.can_fence_delayed_writer)
+        self.assertTrue(unfenced_raw.residual_clobber_possible)
+
+        unmediated = evaluate_side_coordinator_fencing_proof(
+            holds_unrestricted_github_token=False,
+            coordinator_epoch_advanced=True,
+            uses_contained_forwarding=False,
+        )
+        self.assertFalse(unmediated.can_fence_delayed_writer)
+        self.assertTrue(unmediated.residual_clobber_possible)
+
+        not_advanced = evaluate_side_coordinator_fencing_proof(
+            holds_unrestricted_github_token=False,
+            coordinator_epoch_advanced=False,
+            uses_contained_forwarding=True,
+        )
+        self.assertFalse(not_advanced.can_fence_delayed_writer)
+        self.assertTrue(not_advanced.residual_clobber_possible)
+
+        fenced = evaluate_side_coordinator_fencing_proof(
+            holds_unrestricted_github_token=False,
+            coordinator_epoch_advanced=True,
+            uses_contained_forwarding=True,
+        )
+        self.assertTrue(fenced.can_fence_delayed_writer)
+        self.assertFalse(fenced.residual_clobber_possible)
+
+        with self.assertRaisesRegex(AuthorityRefusal, "must be a boolean"):
+            evaluate_side_coordinator_fencing_proof(
+                holds_unrestricted_github_token=1,  # type: ignore[arg-type]
+                coordinator_epoch_advanced=True,
+                uses_contained_forwarding=True,
+            )
+
+        # Verify external epoch floor blocks simultaneous frontier+authority backup rollback.
+        floor_coord = ContainedForwardingCoordinator(
+            self.dir / "external-floor",
+            posture=WriterContainmentPosture.fully_contained(),
+            wire_forwarder=lambda *_: WireDispatchOutcome(200, b"{}"),
+            synthetic_qualification=True,
+        )
+        with self.assertRaisesRegex(
+            AuthorityRefusal, "PR writer scope is not enrolled"
+        ):
+            floor_coord.verify_external_epoch_floor(
+                base_store_id="a" * 64,
+                repository_id=123,
+                pull_request=7,
+                observed_external_epoch=1,
+            )
+        t1, _ = floor_coord.enroll_initial_writer(
+            base_access=_make_access(run_id=201, caller_tag="1"),
+            writer_route="actions_hosted",
+        )
+        self.assertEqual(
+            floor_coord.verify_external_epoch_floor(
+                base_store_id="a" * 64,
+                repository_id=123,
+                pull_request=7,
+                observed_external_epoch=1,
+            ),
+            1,
+        )
+        with self.assertRaisesRegex(
+            AuthorityRefusal,
+            "durable frontier regressed behind externally observed epoch",
+        ):
+            floor_coord.verify_external_epoch_floor(
+                base_store_id="a" * 64,
+                repository_id=123,
+                pull_request=7,
+                observed_external_epoch=2,
+            )
+        with self.assertRaisesRegex(
+            AuthorityRefusal, "observed external epoch floor must be a positive integer"
+        ):
+            floor_coord.verify_external_epoch_floor(
+                base_store_id="a" * 64,
+                repository_id=123,
+                pull_request=7,
+                observed_external_epoch=0,
+            )
+        floor_coord.advance_epoch(
+            predecessor_token=t1,
+            successor_access=_make_access(run_id=202, caller_tag="2"),
+            writer_route="actions_hosted",
+            predecessor_ceased=True,
+        )
+        self.assertEqual(
+            floor_coord.verify_external_epoch_floor(
+                base_store_id="a" * 64,
+                repository_id=123,
+                pull_request=7,
+                observed_external_epoch=2,
+            ),
+            2,
+        )
+
+    def test_real_api_run_owner_and_requests_fencing_budget_uncertain_and_legacy_refusal(
+        self,
+    ) -> None:
+        """Exercise real ApiRunActionsEvidence, ApiRunRequestTransport, and ApiRunSessionLedger routes."""
+        from urllib.request import Request
+
+        from review_sensei_github.action_run import ActionRunLedger
+        from review_sensei_github.api_run_owner import ApiRunActionsEvidence
+        from review_sensei_github.api_run_requests import (
+            ApiRunRequestTransport,
+            ApiRunSessionLedger,
+        )
+        from review_sensei_github.http import GitHubHttp
+        from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
+        from test_api_work_lifecycle import LifecycleFixture
+        from test_api_work_persistence import BASE, HEAD, IDENTITY
+
+        from review_sensei.api_work import (
+            PARTITIONED_ACTION_ACCOUNTING_VERSION,
+            ApiExecutionOwner,
+            ApiRunAccounting,
+            ApiRunIdentity,
+        )
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewTransaction
+
+        try:
+            from fake_github_http import json_response
+        except ModuleNotFoundError:
+            from tests.fake_github_http import json_response
+
+        # 1. Real ApiRunRequestTransport + ApiRunSessionLedger: delayed old writer vs successor rollover.
+        run1_dir = self.dir / "real-transport-run1"
+        run1_dir.mkdir(parents=True, exist_ok=True)
+        fixture = LifecycleFixture(str(run1_dir), limit=1024)
+        native1, config, _evidence1, owner1 = fixture.prelude()
+        pre_snap = fixture.accounted.containment_and_budget_snapshot()
+        self.assertFalse(pre_snap.is_activated)
+        self.assertFalse(pre_snap.live_cutover_enabled)
+        self.assertTrue(pre_snap.conservation_holds)
+
+        fixture.accounted.initialize_and_activate(native1, IDENTITY, config, owner1)
+        ledger1 = ApiRunSessionLedger(native1, fixture.accounted, IDENTITY)
+        act_snap = fixture.accounted.containment_and_budget_snapshot()
+        self.assertTrue(act_snap.is_activated)
+        self.assertFalse(act_snap.live_cutover_enabled)
+        self.assertTrue(act_snap.legacy_accounting_overlap_refused)
+        self.assertTrue(act_snap.conservation_holds)
+        self.assertEqual(act_snap.configured_limit, 1024)
+
+        tx_active = ReviewTransaction.create(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha=BASE,
+            head_sha=HEAD,
+            policy_digest="2" * 64,
+            configuration_digest=config.digest,
+            evidence_digest="4" * 64,
+            reservation_id="1" * 64,
+            generation=1,
+        )
+        ledger1.replace(
+            IDENTITY,
+            lambda rec: rec.evolve(
+                generation=rec.generation + 1,
+                reservation_id=tx_active.reservation_id,
+                reserved_slot="initial",
+                transaction=tx_active,
+            ),
+        )
+        tx1 = replace(
+            tx_active,
+            phase="publication_succeeded",
+            result_sha256="5" * 64,
+        )
+        ledger1.claim_publication_completion(IDENTITY, tx1, published=True)
+        ledger1.replace(
+            IDENTITY,
+            lambda rec: rec.evolve(
+                generation=rec.generation + 1,
+                reservation_id=None,
+                reserved_slot=None,
+                transaction=tx1,
+                last_committed_reservation_id=tx_active.reservation_id,
+            ),
+        )
+        closed_root = fixture.accounted.finish_review_run(ledger1, IDENTITY, tx1)
+        self.assertEqual(
+            ApiRunAccounting.from_document(
+                closed_root.api_run_accounting
+            ).terminal_transaction,
+            tx1.transaction_id,
+        )
+
+        # Successor Run 457 rolls over after Run 456 completed.
+        run1_trace = list(fixture.trace)
+        fixture.trace.clear()
+        run2_dir = self.dir / "real-transport-run2"
+        run2_dir.mkdir(parents=True, exist_ok=True)
+        caller2 = ApiRunRequestTransport(
+            directory=run2_dir,
+            run=ApiRunIdentity(123, 457),
+            plan=fixture.plan,
+            attempt=1,
+            job="hosted",
+            opener=fixture._external_open,
+        )
+        fixture.accounted = caller2
+        http2 = GitHubHttp(api_url="https://api.github.test", opener=caller2.open)
+        native2 = GitHubIssueCommentSessionLedger(
+            http2, token="synthetic", app_slug="reviewsensei[bot]"
+        )
+        native2.load(IDENTITY)
+        caller2.rollover_and_activate(
+            native2,
+            IDENTITY,
+            config,
+            ApiExecutionOwner(1, "hosted", 0),
+            closed_root,
+            lambda: None,
+        )
+        ledger2 = ApiRunSessionLedger(native2, caller2, IDENTITY)
+        run2_root = ledger2.load(IDENTITY).record
+        assert run2_root is not None
+        run2_trace = list(fixture.trace)
+
+        # Delayed old writer from Run 456 attempting replace_checkpoint through its
+        # ApiRunSessionLedger is rejected on optimistic root_sha256 mismatch.
+        fixture.trace[:] = run1_trace
+        fixture.accounted = ledger1.caller
+        with self.assertRaisesRegex(
+            ReviewInputError, "caller checkpoint root changed|caller terminal"
+        ):
+            ledger1.replace(
+                IDENTITY,
+                lambda rec: rec.evolve(
+                    generation=rec.generation + 1, operator_paused=True
+                ),
+            )
+        fixture.trace[:] = run2_trace
+        fixture.accounted = caller2
+        self.assertEqual(
+            ledger2.load(IDENTITY).record.record_sha256,
+            run2_root.record_sha256,
+        )
+
+        # 2. Uncertain mutation permanently debits physical budget and blocks terminal close + rollover.
+        unc_dir = self.dir / "real-transport-uncertain"
+        unc_dir.mkdir(parents=True, exist_ok=True)
+        unc_fixture = LifecycleFixture(str(unc_dir), limit=1024)
+        unc_native, unc_cfg, _, unc_owner = unc_fixture.prelude()
+        unc_fixture.accounted.initialize_and_activate(
+            unc_native, IDENTITY, unc_cfg, unc_owner
+        )
+        unc_ledger = ActionRunLedger(unc_native, unc_fixture.accounted, IDENTITY)
+        intent = unc_fixture.accounted.admit_action(
+            unc_ledger,
+            IDENTITY,
+            purpose="command",
+            source={
+                "kind": "issue_comment",
+                "id": 88,
+                "updated_at": "2026-10-25T12:00:00Z",
+                "body_sha256": "f" * 64,
+            },
+            head_sha=HEAD,
+            operation_key="e" * 64,
+        )
+        boundary = unc_fixture.accounted.begin_action_effect(
+            unc_ledger, IDENTITY, intent
+        )
+        unc_fixture.fault = "unknown-absent"
+        with self.assertRaises(TimeoutError):
+            unc_fixture.accounted.open(
+                Request(
+                    "https://api.github.test/repos/owner/repo/issues/comments/1000000",
+                    data=json.dumps({"body": unc_fixture.comment["body"]}).encode(),
+                    method="PATCH",
+                ),
+                timeout=5,
+            )
+        unc_snap = unc_fixture.accounted.containment_and_budget_snapshot()
+        self.assertGreaterEqual(unc_snap.uncertain_requests, 1)
+        self.assertGreaterEqual(unc_snap.unresolved_mutation_count, 1)
+        self.assertTrue(unc_snap.conservation_holds)
+        with self.assertRaisesRegex(ReviewInputError, "confirmed outcome"):
+            unc_fixture.accounted.settle_action_effect(
+                unc_ledger,
+                IDENTITY,
+                boundary,
+                outcome={"kind": "applied", "reason": None},
+                result_document={"applied": True},
+            )
+
+        # Physical budget guarantee validator also rejects conservation violations & undersized tails.
+        with self.assertRaisesRegex(
+            AuthorityRefusal, "physical caller request conservation invariant violated"
+        ):
+            evaluate_physical_budget_guarantees(
+                configured_limit=512,
+                startup_liability=78,
+                confirmed_requests=10,
+                uncertain_requests=1,
+                reserved_undispatched=100,
+                remaining_unallocated=999,
+            )
+        with self.assertRaisesRegex(
+            AuthorityRefusal, "write_confirmation_tail must preserve at least"
+        ):
+            evaluate_physical_budget_guarantees(
+                configured_limit=512,
+                startup_liability=78,
+                confirmed_requests=0,
+                uncertain_requests=0,
+                reserved_undispatched=400,
+                remaining_unallocated=34,
+                write_confirmation_tail=2,
+            )
+
+        # 3. Unsupported legacy un-accounted record & reader-only accounting overlap are refused fail-closed.
+        with self.assertRaisesRegex(
+            ReviewInputError, "API accounting cannot be removed"
+        ):
+            closed_root.evolve(
+                generation=closed_root.generation + 1,
+                api_run_accounting=None,
+            )
+        unaccounted_record = SessionRecord.create(IDENTITY)
+        fixture.comment["body"] = render_session_comment(
+            repository_id=123,
+            pull_request=7,
+            record=unaccounted_record,
+        )
+        run3_dir = self.dir / "real-transport-legacy-refusal"
+        run3_dir.mkdir(parents=True, exist_ok=True)
+        caller3 = ApiRunRequestTransport(
+            directory=run3_dir,
+            run=ApiRunIdentity(123, 458),
+            plan=fixture.plan,
+            attempt=1,
+            job="hosted",
+            opener=fixture._external_open,
+        )
+        fixture.trace.clear()
+        fixture.accounted = caller3
+        http3 = GitHubHttp(api_url="https://api.github.test", opener=caller3.open)
+        native3 = GitHubIssueCommentSessionLedger(
+            http3, token="synthetic", app_slug="reviewsensei[bot]"
+        )
+        loaded_unaccounted = native3.load(IDENTITY).record
+        assert loaded_unaccounted is not None
+        with self.assertRaises(ReviewInputError):
+            caller3.rollover_and_activate(
+                native3,
+                IDENTITY,
+                config,
+                ApiExecutionOwner(1, "hosted", 0),
+                loaded_unaccounted,
+                lambda: None,
+            )
+
+        reader_only_doc = dict(closed_root.api_run_accounting)
+        reader_only_doc["version"] = PARTITIONED_ACTION_ACCOUNTING_VERSION
+        reader_only_record = SessionRecord.create(
+            IDENTITY,
+            generation=2,
+            last_committed_reservation_id=tx_active.reservation_id,
+            transaction=tx1,
+            api_run_accounting=reader_only_doc,
+        )
+        fixture.comment["body"] = render_session_comment(
+            repository_id=123,
+            pull_request=7,
+            record=reader_only_record,
+        )
+        run3b_dir = self.dir / "real-transport-v3-refusal"
+        run3b_dir.mkdir(parents=True, exist_ok=True)
+        caller3b = ApiRunRequestTransport(
+            directory=run3b_dir,
+            run=ApiRunIdentity(123, 459),
+            plan=fixture.plan,
+            attempt=1,
+            job="hosted",
+            opener=fixture._external_open,
+        )
+        fixture.trace.clear()
+        fixture.accounted = caller3b
+        http3b = GitHubHttp(api_url="https://api.github.test", opener=caller3b.open)
+        native3b = GitHubIssueCommentSessionLedger(
+            http3b, token="synthetic", app_slug="reviewsensei[bot]"
+        )
+        loaded_reader_only = native3b.load(IDENTITY).record
+        assert loaded_reader_only is not None
+        with self.assertRaisesRegex(
+            ReviewInputError, "caller-requests-v3 is reader-only"
+        ):
+            caller3b.rollover_and_activate(
+                native3b,
+                IDENTITY,
+                config,
+                ApiExecutionOwner(1, "hosted", 0),
+                loaded_reader_only,
+                lambda: None,
+            )
+
+        # 4. Unknown workflow executor commit & unknown head_sha refused on ApiRunActionsEvidence.
+        def actions_handler(req: Request):
+            path = urlsplit(req.full_url).path
+            if path == "/repos/owner/repo/actions/runs/900":
+                return json_response(
+                    {
+                        "id": 900,
+                        "run_attempt": 1,
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_sha": HEAD,
+                        "event": "pull_request",
+                        "repository": {"id": 123, "full_name": "owner/repo"},
+                        "referenced_workflows": [
+                            {
+                                "path": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml",
+                                "sha": "9" * 40,  # Unknown/unqualified executor SHA
+                                "ref": "refs/tags/v5",
+                            }
+                        ],
+                    }
+                )
+            raise AssertionError(path)
+
+        ev_http = GitHubHttp(
+            api_url="https://api.github.test",
+            opener=lambda req, timeout=5.0: actions_handler(req),
+        )
+        ev = ApiRunActionsEvidence(
+            ev_http, token="synthetic-actions", command_run_id="901", job="hosted"
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "historical executor source is unrecognized"
+        ):
+            ev.qualified_publication_cessation(
+                IDENTITY,
+                900,
+                ApiExecutionOwner(1, "hosted", 0),
+                head_sha=HEAD,
+            )
+        with self.assertRaisesRegex(
+            ReviewInputError, "historical executor did not prove successful review exit"
+        ):
+            ev.qualified_publication_cessation(
+                IDENTITY,
+                900,
+                ApiExecutionOwner(1, "hosted", 0),
+                head_sha="0" * 40,  # Mismatched/unknown head_sha
+            )
 
 
 if __name__ == "__main__":
