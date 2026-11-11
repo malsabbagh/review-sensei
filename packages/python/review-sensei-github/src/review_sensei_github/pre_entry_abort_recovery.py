@@ -1191,6 +1191,10 @@ class NoTransactionAttemptPacket:
             )
         if not isinstance(self.case_id, str) or not self.case_id.strip():
             raise ReviewInputError("no-transaction attempt case_id must be non-empty")
+        if type(self.repository_id) is not int or self.repository_id <= 0:
+            raise ReviewInputError(
+                "no-transaction attempt repository_id must be a positive integer"
+            )
         SessionIdentity(
             repository=self.repository,
             pull_request=self.pull_request,
@@ -1379,6 +1383,12 @@ def build_no_transaction_attempt_packet(
             )
         resolved_identity = identity
 
+    repo_id = resolved_identity.repository_id
+    if type(repo_id) is not int or repo_id <= 0:
+        raise ReviewInputError(
+            "no-transaction attempt packet requires a positive integer repository_id"
+        )
+
     assert record.api_run_accounting is not None
     old = ApiRunAccounting.from_document(record.api_run_accounting)
     valid_abort, abort_tx, _abort_failures = _validate_analysis_abort_receipt(
@@ -1464,7 +1474,7 @@ def build_no_transaction_attempt_packet(
     return NoTransactionAttemptPacket(
         case_id=resolved_case_id,
         repository=resolved_identity.repository,
-        repository_id=resolved_identity.repository_id,
+        repository_id=repo_id,
         pull_request=resolved_identity.pull_request,
         session_generation=record.generation,
         record_sha256=record.record_sha256,

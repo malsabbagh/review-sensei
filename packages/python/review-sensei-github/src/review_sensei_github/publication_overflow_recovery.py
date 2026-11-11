@@ -1264,6 +1264,10 @@ class PublicationOverflowAttemptPacket:
             )
         if not isinstance(self.case_id, str) or not self.case_id.strip():
             raise ReviewInputError("publication overflow case_id must be non-empty")
+        if type(self.repository_id) is not int or self.repository_id <= 0:
+            raise ReviewInputError(
+                "publication overflow repository_id must be a positive integer"
+            )
         SessionIdentity(
             repository=self.repository,
             pull_request=self.pull_request,
@@ -1459,10 +1463,15 @@ def build_publication_overflow_attempt_packet(
     pre-write overflow, uncertain response loss, observed review echoes, and
     unceased owners while recording explicit missing settlement proofs.
     """
-    if not isinstance(identity, SessionIdentity) or identity.repository_id is None:
+    if (
+        not isinstance(identity, SessionIdentity)
+        or type(identity.repository_id) is not int
+        or identity.repository_id <= 0
+    ):
         raise ReviewInputError(
             "publication overflow packet requires a repository_id-bound SessionIdentity"
         )
+    repo_id = identity.repository_id
     if not isinstance(record, SessionRecord) or record.transaction is None:
         raise ReviewInputError(
             "publication overflow packet requires a SessionRecord with transaction"
@@ -1470,10 +1479,7 @@ def build_publication_overflow_attempt_packet(
     if (
         record.repository != identity.repository
         or record.pull_request != identity.pull_request
-        or (
-            record.repository_id is not None
-            and record.repository_id != identity.repository_id
-        )
+        or (record.repository_id is not None and record.repository_id != repo_id)
     ):
         raise ReviewInputError("record identity conflicts with SessionIdentity")
     if (
@@ -1593,7 +1599,7 @@ def build_publication_overflow_attempt_packet(
     return PublicationOverflowAttemptPacket(
         case_id=resolved_case_id,
         repository=identity.repository,
-        repository_id=identity.repository_id,
+        repository_id=repo_id,
         pull_request=identity.pull_request,
         session_generation=record.generation,
         record_sha256=record.record_sha256,

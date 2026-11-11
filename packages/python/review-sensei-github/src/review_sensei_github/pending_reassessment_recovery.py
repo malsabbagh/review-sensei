@@ -1389,10 +1389,13 @@ def qualify_offline_pending_continuation(
     additional_caller_allowance: int = 0,
     additional_provider_allowance: int = 0,
     repeated_inference_calls: int = 0,
+    retained_result_immutable: bool = True,
 ) -> OfflineContinuationQualification:
     """Qualify bounded offline continuation checks with zero new funding and zero repeated inference."""
     if not isinstance(attribution, PendingReassessmentAttribution):
         raise ReviewInputError("attribution must be a PendingReassessmentAttribution")
+    if type(retained_result_immutable) is not bool:
+        raise ReviewInputError("retained_result_immutable must be a bool")
     for label, amount in (
         ("required_continuation_requests", required_continuation_requests),
         ("additional_caller_allowance", additional_caller_allowance),
@@ -1417,12 +1420,15 @@ def qualify_offline_pending_continuation(
     )
     inference_ok = repeated_inference_calls == 0
     completion_witness = bool(
-        attribution.state_code == "reassessment_completed_settled"
+        retained_result_immutable
+        and attribution.state_code == "reassessment_completed_settled"
         and attribution.terminal
         and not attribution.zero_decisions_recorded
     )
 
     reasons: list[str] = []
+    if not retained_result_immutable:
+        reasons.append("retained_result_digest_mutated")
     if pr_merged:
         reasons.append("merged_pr_live_rerun_forbidden")
     if additional_caller_allowance > 0:
@@ -1437,7 +1443,7 @@ def qualify_offline_pending_continuation(
     ):
         reasons.append("insufficient_remaining_caller_allowance")
 
-    if attribution.state_code in {
+    if retained_result_immutable and attribution.state_code in {
         "reassessment_completed_settled",
         "unfinished_partial_decision_assessment",
     }:
@@ -1505,9 +1511,10 @@ def qualify_offline_pending_continuation(
             "duplicate_or_corrupt_pending_receipt_conflict"
         ),
     }
-    reasons.append(
-        state_reason_map.get(attribution.state_code, "unsupported_pending_state")
-    )
+    if attribution.state_code in state_reason_map:
+        reasons.append(state_reason_map[attribution.state_code])
+    elif retained_result_immutable:
+        reasons.append("unsupported_pending_state")
     return OfflineContinuationQualification(
         qualifies_zero_inference_continuation=False,
         continuation_kind="not_eligible_requires_new_human_evidence_or_restart",
@@ -1600,6 +1607,7 @@ class PendingReassessmentAttemptPacket:
     diagnostics_available: bool
     missing_proofs: tuple[str, ...]
     attribution: PendingReassessmentAttribution
+    admissible_to_approve: bool = False
     zero_decision_is_completion_witness: bool = False
     offline_only: bool = True
     authority: bool = False
@@ -1626,6 +1634,10 @@ class PendingReassessmentAttemptPacket:
             )
         if not isinstance(self.case_id, str) or not self.case_id.strip():
             raise ReviewInputError("pending reassessment case_id must be non-empty")
+        if type(self.repository_id) is not int or self.repository_id <= 0:
+            raise ReviewInputError(
+                "pending reassessment repository_id must be a positive integer"
+            )
         SessionIdentity(
             repository=self.repository,
             pull_request=self.pull_request,
@@ -1633,8 +1645,13 @@ class PendingReassessmentAttemptPacket:
         )
         if self.pending_reason not in PENDING_WORK_REASONS:
             raise ReviewInputError("unsupported pending_reason")
-        if not self.retained_result_immutable:
-            raise ReviewInputError("retained accepted result must remain immutable")
+        if (
+            type(self.retained_result_immutable) is not bool
+            or type(self.admissible_to_approve) is not bool
+        ):
+            raise ReviewInputError(
+                "retained_result_immutable and admissible_to_approve must be booleans"
+            )
         for label, digest in (
             ("original_result_digest", self.original_result_digest),
             ("latest_result_digest", self.latest_result_digest),
@@ -1642,6 +1659,29 @@ class PendingReassessmentAttemptPacket:
             ("source_body_sha256", self.source_body_sha256),
         ):
             _require_hex(digest, _HEX64, label)
+        if self.retained_result_immutable != (
+            self.original_result_digest == self.latest_result_digest
+        ):
+            raise ReviewInputError(
+                "retained_result_immutable must match original_result_digest == latest_result_digest"
+            )
+        if not self.retained_result_immutable and (
+            self.admissible_to_approve
+            or self.offline_continuation.qualifies_zero_inference_continuation
+            or self.offline_continuation.completion_witness_established
+            or "immutable_accepted_result_digest" not in self.missing_proofs
+        ):
+            raise ReviewInputError(
+                "mutated retained result must fail closed (admissible_to_approve=False)"
+            )
+        if self.admissible_to_approve and (
+            not self.attribution.terminal
+            or self.attribution.state_code != "reassessment_completed_settled"
+            or self.pr_merged
+        ):
+            raise ReviewInputError(
+                "admissible_to_approve requires settled unmerged reassessment with immutable result"
+            )
         for label, opt_digest in (
             ("record_sha256", self.record_sha256),
             ("operation_key", self.operation_key),
@@ -1664,15 +1704,15 @@ class PendingReassessmentAttemptPacket:
         ):
             if ver != "unknown" and _VERSION_TOKEN_RE.fullmatch(ver) is None:
                 raise ReviewInputError(f"invalid {label}")
-        if (
-            self.pr_merged
-            and self.offline_continuation.qualifies_zero_inference_continuation
+        if self.pr_merged and (
+            self.admissible_to_approve
+            or self.offline_continuation.qualifies_zero_inference_continuation
         ):
             raise ReviewInputError(
-                "merged historical pull request cannot authorize live continuation"
+                "merged historical pull request cannot authorize live continuation or approval"
             )
         if (
-            not self.attribution.terminal
+            (not self.attribution.terminal or not self.retained_result_immutable)
             and not self.historical_settlement_receipt_supplied
             and "historical_live_settlement_receipt" not in self.missing_proofs
         ):
@@ -1686,6 +1726,7 @@ class PendingReassessmentAttemptPacket:
             "authority": False,
             "offline_only": True,
             "zero_decision_is_completion_witness": False,
+            "admissible_to_approve": self.admissible_to_approve,
             "case_id": self.case_id,
             "pending_work_identity": {
                 "repository": self.repository,
@@ -1707,6 +1748,7 @@ class PendingReassessmentAttemptPacket:
                 "accepted_result_sha256": self.accepted_result_sha256,
                 "eligibility_head_sha": self.eligibility_head_sha,
                 "retained_result_immutable": self.retained_result_immutable,
+                "admissible_to_approve": self.admissible_to_approve,
             },
             "source_revision": {
                 "source_comment_id": self.source_comment_id,
@@ -1786,22 +1828,31 @@ def build_pending_reassessment_attempt_packet(
     or model inference calls, separating unfinished zero-decision assessment from
     failed finalization and qualifying zero-funding / zero-inference continuation.
     """
-    if not isinstance(identity, SessionIdentity) or identity.repository_id is None:
+    if (
+        not isinstance(identity, SessionIdentity)
+        or type(identity.repository_id) is not int
+        or identity.repository_id <= 0
+    ):
         raise ReviewInputError(
             "pending reassessment packet requires a repository_id-bound SessionIdentity"
         )
+    repo_id = identity.repository_id
     if record is not None:
         if not isinstance(record, SessionRecord):
             raise ReviewInputError("record must be None or a SessionRecord")
         if (
             record.repository != identity.repository
             or record.pull_request != identity.pull_request
-            or (
-                record.repository_id is not None
-                and record.repository_id != identity.repository_id
-            )
+            or (record.repository_id is not None and record.repository_id != repo_id)
         ):
             raise ReviewInputError("record identity conflicts with SessionIdentity")
+
+    latest_digest = (
+        latest_eligibility.result_digest
+        if latest_eligibility is not None
+        else original_eligibility.result_digest
+    )
+    is_result_immutable = original_eligibility.result_digest == latest_digest
 
     attribution = qualify_pending_reassessment(
         original_eligibility=original_eligibility,
@@ -1833,6 +1884,7 @@ def build_pending_reassessment_attempt_packet(
         additional_caller_allowance=additional_caller_allowance,
         additional_provider_allowance=additional_provider_allowance,
         repeated_inference_calls=repeated_inference_calls,
+        retained_result_immutable=is_result_immutable,
     )
 
     caller_limit: int | None = None
@@ -1853,11 +1905,6 @@ def build_pending_reassessment_attempt_packet(
         accepted_result_sha256
         if accepted_result_sha256 is not None
         else (tx_result_sha or original_eligibility.result_digest)
-    )
-    latest_digest = (
-        latest_eligibility.result_digest
-        if latest_eligibility is not None
-        else original_eligibility.result_digest
     )
 
     resolved_case_id = case_id
@@ -1880,6 +1927,10 @@ def build_pending_reassessment_attempt_packet(
             )
 
     missing: list[str] = []
+    if not is_result_immutable:
+        missing.append("immutable_accepted_result_digest")
+        if not historical_settlement_receipt_supplied:
+            missing.append("historical_live_settlement_receipt")
     if not attribution.terminal:
         if attribution.assessment_unfinished:
             missing.append("completed_reassessment_decisions")
@@ -1902,10 +1953,17 @@ def build_pending_reassessment_attempt_packet(
     elif len(attribution.pending_finding_ids) > 0:
         missing.append("remaining_human_adjudication_decisions")
 
+    admissible_to_approve = bool(
+        is_result_immutable
+        and attribution.state_code == "reassessment_completed_settled"
+        and attribution.terminal
+        and not pr_merged
+    )
+
     return PendingReassessmentAttemptPacket(
         case_id=resolved_case_id,
         repository=identity.repository,
-        repository_id=identity.repository_id,
+        repository_id=repo_id,
         pull_request=identity.pull_request,
         pr_merged=bool(pr_merged),
         session_generation=record.generation if record is not None else None,
@@ -1920,10 +1978,7 @@ def build_pending_reassessment_attempt_packet(
         latest_result_digest=latest_digest,
         accepted_result_sha256=resolved_accepted_sha,
         eligibility_head_sha=original_eligibility.head_sha,
-        retained_result_immutable=(
-            original_eligibility.result_digest == latest_digest
-            or original_eligibility.head_sha == bound_head_sha
-        ),
+        retained_result_immutable=is_result_immutable,
         source_comment_id=attribution.source_comment_id,
         source_kind=attribution.source_kind,
         source_actor=attribution.source_actor,
@@ -1949,6 +2004,7 @@ def build_pending_reassessment_attempt_packet(
         diagnostics_available=bool(diagnostics_available),
         missing_proofs=tuple(dict.fromkeys(missing)),
         attribution=attribution,
+        admissible_to_approve=admissible_to_approve,
     )
 
 

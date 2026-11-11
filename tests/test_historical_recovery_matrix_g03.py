@@ -2277,6 +2277,9 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
             replace(valid_packet, record_sha256="xyz")
         with self.assertRaisesRegex(ReviewInputError, "positive integer"):
             replace(valid_packet, run_id=0)
+        for bad_repo_id in (None, 0, -1, True):
+            with self.assertRaisesRegex(ReviewInputError, "positive integer"):
+                replace(valid_packet, repository_id=bad_repo_id)  # type: ignore[arg-type]
         with self.assertRaisesRegex(ReviewInputError, "non-negative integer"):
             replace(valid_packet, confirmed_requests=-1)
         with self.assertRaisesRegex(ReviewInputError, "thread_cleanup_receipt_state"):
@@ -2343,6 +2346,13 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             empty_fx = EntryFixture(directory, limit=512)
             empty_ledger, empty_obs = _diagnostic_ledger(empty_fx)
+            with self.assertRaisesRegex(ReviewInputError, "repository_id"):
+                build_live_ledger_attempt_evidence_packet(
+                    ledger=empty_ledger,
+                    identity=replace(IDENTITY, repository_id=None),
+                    current_base=BASE_A,
+                    current_head=HEAD_A,
+                )
             missing_pkt = build_live_ledger_attempt_evidence_packet(
                 ledger=empty_ledger,
                 identity=IDENTITY,

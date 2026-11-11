@@ -1898,6 +1898,16 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ReviewInputError, "conflicts with SessionRecord"):
             build_no_transaction_attempt_packet(sv_142_rec, identity=IDENTITY)
+        no_repo_rec = _make_record(accounting=_base_accounting())
+        object.__setattr__(no_repo_rec, "repository_id", None)
+        with self.assertRaisesRegex(ReviewInputError, "positive integer repository_id"):
+            build_no_transaction_attempt_packet(
+                no_repo_rec,
+                identity=SessionIdentity("owner/repo", 7, repository_id=None),
+            )
+        for bad_repo_id in (None, 0, -1, True):
+            with self.assertRaisesRegex(ReviewInputError, "positive integer"):
+                replace(pkt_142_cold, repository_id=bad_repo_id)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

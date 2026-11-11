@@ -349,14 +349,19 @@ native receipts are recorded:
   `pending_reassessment_continuation`, `targeted_human_disposition`,
   `quarantine_published_tail_isolation`, `quarantine_prepublication_isolation`,
   or `controlled_serialized_restart`). Valid terminal command actions whose
-  `terminal_transaction` review marker is null remain terminal (`settled_terminal`),
+  `terminal_transaction` review marker is null remain terminal
+  (`state_code="terminal_action_without_review_transaction"`,
+  `terminal_settlement_form="authenticated_terminal_action_null_review_marker"`,
+  or `state_code="terminal_action_settled"`,
+  `terminal_settlement_form="authenticated_terminal_action_with_prior_review_marker"`),
   so a null review terminal marker alone is never treated as a universal failure
   rule. Conversely, ReviewSensei `#443` run `43074015855` generation `11`
   (`transaction.phase == "publication_succeeded"` with null `terminal_transaction`,
   null `terminal_action`, null `analysis_abort` cleanup, and missing close
-  diagnostics) is held as `nonterminal_publication_succeeded_unclosed` with
-  `inferred_cause="unknown"` and explicit missing proofs rather than inventing a
-  diagnosis from absent logs.
+  diagnostics) is held as `state_code="same_head_unclosed_publication_succeeded"`
+  (or `"superseded_head_unclosed_publication_succeeded"` across head advance)
+  with `terminal_settlement_form="unsettled"`, `inferred_cause="unknown"`, and
+  explicit missing proofs rather than inventing a diagnosis from absent logs.
 - **Pre-entry abort vs provider-entered holds (`pre_entry_abort_recovery`, G29):**
   `NoTransactionAttemptPacket` binds original entry, reservation, caller
   dispatch, owner cessation, executor provenance, and abort/cleanup evidence for

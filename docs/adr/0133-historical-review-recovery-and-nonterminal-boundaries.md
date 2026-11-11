@@ -62,11 +62,17 @@ invariant:
      retained results, publication/check/cleanup/terminal receipts, and missing
      proofs without mutating ledgers.
    - Preserve valid terminal command actions whose review `terminal_transaction`
-     marker is null (`settled_terminal`), while classifying ReviewSensei `#443`
-     run `43074015855` generation `11` (`publication_succeeded` with null
-     terminal/action/abort markers and missing close diagnostics) as
-     `nonterminal_publication_succeeded_unclosed` with `inferred_cause="unknown"`
-     and explicit missing-proof holds.
+     marker is null (`state_code="terminal_action_without_review_transaction"`,
+     `terminal_settlement_form="authenticated_terminal_action_null_review_marker"`,
+     or `state_code="terminal_action_settled"` /
+     `terminal_settlement_form="authenticated_terminal_action_with_prior_review_marker"`),
+     while classifying ReviewSensei `#443` run `43074015855` generation `11`
+     (`publication_succeeded` with null terminal/action/abort markers and
+     missing close diagnostics) as
+     `state_code="same_head_unclosed_publication_succeeded"` (or
+     `"superseded_head_unclosed_publication_succeeded"` across head advance),
+     `terminal_settlement_form="unsettled"`, and `inferred_cause="unknown"`
+     with explicit missing-proof holds.
 
 2. **Pre-entry abort boundary and `NoTransactionAttemptPacket` (`pre_entry_abort_recovery.py` — G29):**
    - Bind original entry, reservation, caller dispatch, owner cessation, executor

@@ -1491,6 +1491,10 @@ class AttemptEvidencePacket:
             )
         if not isinstance(self.case_id, str) or not self.case_id.strip():
             raise ReviewInputError("attempt evidence case_id must be non-empty")
+        if type(self.repository_id) is not int or self.repository_id <= 0:
+            raise ReviewInputError(
+                "attempt evidence repository_id must be a positive integer"
+            )
         SessionIdentity(
             repository=self.repository,
             pull_request=self.pull_request,
@@ -1867,6 +1871,11 @@ def _assemble_attempt_evidence_packet(
             missing.append("historical_live_settlement_receipt")
     deduped_missing = tuple(dict.fromkeys(missing))
 
+    repo_id = identity.repository_id
+    if type(repo_id) is not int or repo_id <= 0:
+        raise ReviewInputError(
+            "attempt evidence packet requires a positive integer repository_id"
+        )
     retained_verified = bool(
         tx is not None and tx.result_sha256 is not None and retained_context_available
     )
@@ -1874,7 +1883,7 @@ def _assemble_attempt_evidence_packet(
     return AttemptEvidencePacket(
         case_id=resolved_case_id,
         repository=identity.repository,
-        repository_id=identity.repository_id,
+        repository_id=repo_id,
         pull_request=identity.pull_request,
         session_generation=session_gen,
         record_sha256=record.record_sha256 if record is not None else None,
@@ -1995,7 +2004,7 @@ def build_attempt_evidence_packet(
         action_result_authenticated=action_result_authenticated,
         evidence_producer=evidence_producer,
     )
-    if record.repository_id is None:
+    if type(record.repository_id) is not int or record.repository_id <= 0:
         raise ReviewInputError(
             "attempt evidence packet requires a repository_id-bound SessionRecord"
         )

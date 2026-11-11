@@ -1916,9 +1916,7 @@ class PendingReassessmentG30Tests(unittest.TestCase):
             orig_elig.human_review,
             resolved=tuple(f.fingerprint for f in orig_elig.human_review.findings),
         )
-        resolved_elig = replace(
-            orig_elig, human_review=resolved_inv, result_digest="9" * 64
-        )
+        resolved_elig = replace(orig_elig, human_review=resolved_inv)
         pkt_fin = build_pending_reassessment_attempt_packet(
             identity=id_unmerged,
             original_eligibility=orig_elig,
@@ -1938,6 +1936,8 @@ class PendingReassessmentG30Tests(unittest.TestCase):
         self.assertEqual(
             pkt_fin.pending_reason, "finalizer_interrupted_after_durable_decisions"
         )
+        self.assertTrue(pkt_fin.retained_result_immutable)
+        self.assertFalse(pkt_fin.admissible_to_approve)
         self.assertTrue(pkt_fin.finalizer_entered)
         self.assertTrue(pkt_fin.finalizer_failed)
         self.assertFalse(pkt_fin.zero_decisions_recorded)
@@ -1967,6 +1967,7 @@ class PendingReassessmentG30Tests(unittest.TestCase):
             current_head_sha=HEAD,
             pr_merged=True,
         )
+        self.assertFalse(pkt_fin_merged.admissible_to_approve)
         self.assertFalse(
             pkt_fin_merged.offline_continuation.qualifies_zero_inference_continuation
         )
@@ -1998,6 +1999,9 @@ class PendingReassessmentG30Tests(unittest.TestCase):
             reply_result=settled_reply,
         )
         self.assertEqual(pkt_settled.pending_reason, "settled_all_human_holds_resolved")
+        self.assertTrue(pkt_settled.retained_result_immutable)
+        self.assertTrue(pkt_settled.admissible_to_approve)
+        self.assertTrue(pkt_settled.to_dict()["admissible_to_approve"])
         self.assertEqual(
             pkt_settled.offline_continuation.continuation_kind, "not_needed_settled"
         )
@@ -2008,9 +2012,7 @@ class PendingReassessmentG30Tests(unittest.TestCase):
             orig_elig.human_review,
             resolved=(orig_elig.human_review.findings[1].fingerprint,),
         )
-        partial_elig = replace(
-            orig_elig, human_review=partial_inv, result_digest="8" * 64
-        )
+        partial_elig = replace(orig_elig, human_review=partial_inv)
         pkt_partial = build_pending_reassessment_attempt_packet(
             identity=id_unmerged,
             original_eligibility=orig_elig,
@@ -2028,12 +2030,64 @@ class PendingReassessmentG30Tests(unittest.TestCase):
         self.assertEqual(
             pkt_partial.pending_reason, "partial_reassessment_remaining_human_holds"
         )
+        self.assertTrue(pkt_partial.retained_result_immutable)
+        self.assertFalse(pkt_partial.admissible_to_approve)
         self.assertFalse(
             pkt_partial.offline_continuation.completion_witness_established
         )
         self.assertEqual(
             pkt_partial.missing_proofs, ("remaining_human_adjudication_decisions",)
         )
+
+        # Contrast 4: Mutated result_digest on the SAME head_sha MUST fail closed
+        # (`retained_result_immutable=False`, `admissible_to_approve=False`).
+        mutated_same_head_elig = replace(resolved_elig, result_digest="9" * 64)
+        pkt_mutated = build_pending_reassessment_attempt_packet(
+            identity=id_unmerged,
+            original_eligibility=orig_elig,
+            latest_eligibility=mutated_same_head_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pr_merged=False,
+            reply_result=settled_reply,
+        )
+        self.assertFalse(pkt_mutated.retained_result_immutable)
+        self.assertFalse(pkt_mutated.admissible_to_approve)
+        self.assertFalse(pkt_mutated.to_dict()["admissible_to_approve"])
+        self.assertFalse(
+            pkt_mutated.to_dict()["accepted_result"]["retained_result_immutable"]
+        )
+        self.assertFalse(
+            pkt_mutated.to_dict()["accepted_result"]["admissible_to_approve"]
+        )
+        self.assertFalse(
+            pkt_mutated.offline_continuation.qualifies_zero_inference_continuation
+        )
+        self.assertFalse(
+            pkt_mutated.offline_continuation.completion_witness_established
+        )
+        self.assertEqual(
+            pkt_mutated.offline_continuation.continuation_kind,
+            "not_eligible_requires_new_human_evidence_or_restart",
+        )
+        self.assertIn(
+            "retained_result_digest_mutated",
+            pkt_mutated.offline_continuation.disqualifying_reasons,
+        )
+        self.assertNotIn(
+            "action_already_settled",
+            pkt_mutated.offline_continuation.disqualifying_reasons,
+        )
+        self.assertIn("immutable_accepted_result_digest", pkt_mutated.missing_proofs)
+        self.assertIn("historical_live_settlement_receipt", pkt_mutated.missing_proofs)
+        with self.assertRaisesRegex(ReviewInputError, "fail closed"):
+            replace(pkt_mutated, admissible_to_approve=True)
 
     def test_offline_continuation_and_attempt_packet_validation_guardrails(
         self,
@@ -2276,8 +2330,24 @@ class PendingReassessmentG30Tests(unittest.TestCase):
             {"zero_decision_is_completion_witness": True},
             {"attribution": "bad"},
             {"case_id": "  "},
+            {"repository_id": None},
+            {"repository_id": 0},
+            {"repository_id": -1},
+            {"repository_id": True},
             {"pending_reason": "bogus"},
+            {"retained_result_immutable": "bad"},
+            {"admissible_to_approve": "bad"},
             {"retained_result_immutable": False},
+            {
+                "latest_result_digest": "9" * 64,
+                "retained_result_immutable": False,
+                "admissible_to_approve": True,
+                "missing_proofs": (
+                    "immutable_accepted_result_digest",
+                    "historical_live_settlement_receipt",
+                ),
+            },
+            {"admissible_to_approve": True},
             {"executor_sha": "not-sha"},
             {"installed_core_version": "bad version!"},
             {"pr_merged": True, "offline_continuation": qual_cont},
