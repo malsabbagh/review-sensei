@@ -9,6 +9,13 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, TypedDict, cast
 
+from review_sensei.active_finding_window import (
+    ActiveWindowRoundState,
+    AuthorizedCoverageAcceptance,
+    AuthorizedHumanOverride,
+    ConfirmedFixEvidence,
+    assert_no_deferred_leakage,
+)
 from review_sensei.baseline import ReviewBaseline
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.budgets import ReviewWorkBudgets
@@ -31,6 +38,7 @@ from review_sensei.human_assessment import (
     HumanAssessmentDecision,
     HumanAssessmentReply,
     HumanAssessmentService,
+    finding_instance_fingerprint,
 )
 from review_sensei.models import ConversationReply, ReviewResult, ReviewTransaction
 from review_sensei.outcomes import (
@@ -41,6 +49,7 @@ from review_sensei.outcomes import (
 from review_sensei.planning import related_paths_for_change
 from review_sensei.providers.base import ReviewProvider
 from review_sensei.reassessment_work import HumanAssessmentWork, reassess
+from review_sensei.rescan import AuthorizedRescan
 from review_sensei.scope import ContextRequest
 
 if TYPE_CHECKING:
@@ -121,6 +130,15 @@ class GitHubWriteOptions:
     github_session_ledger: bool = False
     operation_entry: str = "enabled"
     complete_inventory: bool = False
+    max_active_findings: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_active_findings is not None and (
+            isinstance(self.max_active_findings, bool)
+            or not isinstance(self.max_active_findings, int)
+            or self.max_active_findings < 1
+        ):
+            raise ReviewInputError("max_active_findings must be a positive integer")
 
     def review_policy(self) -> str:
         """Return the effective review policy mode for this invocation."""
@@ -521,6 +539,45 @@ class GitHubApplication:
             recovery_phase=recovery_phase,
         )
 
+    def active_window_state(
+        self, *, repository_id: int, pull_request: int
+    ) -> ActiveWindowRoundState | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.active_window_state(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return None
+
+    def active_window_public_status(
+        self, *, repository_id: int, pull_request: int
+    ) -> dict[str, object] | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.active_window_public_status(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return None
+
+    def reconcile_active_window_slot(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        target: str,
+        resolved_state: str,
+        proof_sha256: str,
+    ) -> ActiveWindowRoundState:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError(
+                "active window reconciliation requires a ReviewPublisher"
+            )
+        return self.reviewer.reconcile_active_window_slot(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            target=target,
+            resolved_state=resolved_state,
+            proof_sha256=proof_sha256,
+        )
+
     def publish_review(
         self,
         *,
@@ -553,6 +610,11 @@ class GitHubApplication:
         continuation_digest: str | None = None,
         source_guard: Callable[[], bool] | None = None,
         publication_budget: EvidenceReadBudget | None = None,
+        max_active_findings: int | None = None,
+        confirmed_fixes: Sequence[ConfirmedFixEvidence] = (),
+        human_overrides: Sequence[AuthorizedHumanOverride] = (),
+        coverage_acceptance: AuthorizedCoverageAcceptance | None = None,
+        authorized_rescan: AuthorizedRescan | None = None,
     ) -> PublicationResult:
         reviewer = self.reviewer
         resume_thread_cleanup = (
@@ -1528,6 +1590,26 @@ class GitHubApplication:
                 "evidence_confirmed_concerns": evidence_confirmed_concerns,
                 "authorized_dispositions": authorized_dispositions,
             }
+            effective_max_active = (
+                max_active_findings
+                if max_active_findings is not None
+                else options.max_active_findings
+            )
+            if (
+                isinstance(reviewer, ReviewPublisher)
+                or effective_max_active is not None
+                or confirmed_fixes
+                or human_overrides
+                or coverage_acceptance is not None
+                or authorized_rescan is not None
+            ):
+                publisher_arguments.update(
+                    max_active_findings=effective_max_active,
+                    confirmed_fixes=confirmed_fixes,
+                    human_overrides=human_overrides,
+                    coverage_acceptance=coverage_acceptance,
+                    authorized_rescan=authorized_rescan,
+                )
             if (
                 not options.complete_inventory
                 and admitted_inventory_store is not None
@@ -1826,6 +1908,14 @@ class GitHubApplication:
             )
         if isinstance(reviewer, ReviewPublisher):
             publication = reviewer._finish_thread_cleanup(publication)
+            window_after = reviewer.active_window_state(
+                repository_id=repository_id, pull_request=pull_request
+            )
+            if (
+                window_after is not None
+                and not window_after.approval_eligibility.approved
+            ):
+                flags["independently_approval_eligible"] = False
         if (
             isinstance(result, ReviewResult)
             and result.coverage_only_partial
@@ -1986,6 +2076,30 @@ class GitHubApplication:
         typed_priors = cast(
             Sequence[tuple[str, Sequence[FindingIdentity]]], prior_inventories
         )
+        if (
+            typed_inventory is None
+            and not finding_fingerprints
+            and isinstance(self.reviewer, ReviewPublisher)
+        ):
+            window_state = self.reviewer.active_window_state(
+                repository_id=repository_id, pull_request=pull_request
+            )
+            if window_state is not None and window_state.head_sha == head_sha:
+                displayed_ids = {
+                    entry.obligation_id
+                    for entry in window_state.display_active_findings.entries
+                }
+                typed_inventory = tuple(
+                    FindingIdentity(
+                        instance=finding_instance_fingerprint(ob.comment),
+                        concern=ob.fingerprint,
+                        overridable=ob.required,
+                    )
+                    for ob in window_state.authoritative_decision_inventory.obligations
+                    if ob.obligation_id in displayed_ids
+                    and ob.unresolved
+                    and ob.comment is not None
+                )
 
         # Parse only the command spelling before choosing an authority path.
         # This placeholder deliberately prevents untrusted event actor/head
@@ -4239,6 +4353,7 @@ def _with_shadow(
 ) -> PublicationResult:
     if not shadow:
         return result
+    assert_no_deferred_leakage(shadow)
     from .action_completion import rebind_publication_metadata
 
     updated = replace(result, shadow=dict(shadow))

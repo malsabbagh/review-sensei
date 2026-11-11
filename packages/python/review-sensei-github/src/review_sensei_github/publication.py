@@ -13,6 +13,20 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 from urllib.parse import quote
 
+from review_sensei.active_finding_window import (
+    FORBIDDEN_PUBLIC_DEFERRED_KEYS,
+    OVERRIDE_DISPOSITION_ACTIONS,
+    ActiveWindowRoundState,
+    AuthorizedCoverageAcceptance,
+    AuthorizedHumanOverride,
+    ConfirmedFixEvidence,
+    apply_dispositions_to_window_state,
+    assert_no_deferred_leakage,
+    commit_window_publication,
+    evaluate_active_window_round,
+    project_display_review_result,
+    reconcile_uncertain_slot,
+)
 from review_sensei.baseline import ReviewBaseline
 from review_sensei.bounded_evidence import (
     MAX_PART_READS,
@@ -61,7 +75,8 @@ from review_sensei.presentation import (
     render_finding,
     render_review_summary,
 )
-from review_sensei.validation import validate_bounded_text
+from review_sensei.rescan import AuthorizedRescan
+from review_sensei.validation import DEFAULT_REVIEW_LIMITS, validate_bounded_text
 from review_sensei.verifier import (
     CandidateFinding,
     PublishableReview,
@@ -98,6 +113,7 @@ from .checks import (
     CheckOutcome,
     ReviewCheckPublisher,
     check_outcome_for_result,
+    review_check_outcome,
     review_check_outcome_for_publication_failure,
 )
 from .eligibility_parts import BoundPartitionedEligibilityReader
@@ -1422,6 +1438,10 @@ class PublicationResult:
         default=None, compare=False, repr=False
     )
 
+    def __post_init__(self) -> None:
+        if self.shadow is not None:
+            assert_no_deferred_leakage(self.shadow)
+
 
 _PUBLICATION_TO_RUN_STATUS = {
     "published": "reviewed",
@@ -1908,6 +1928,12 @@ class ReviewApprovalFinalizer:
         # Installed only on a single command finalization copy. Other
         # publication/conversation entry points acquire no new authority.
         self._thread_cleanup_token_provider: Callable[[], str] | None = None
+        self._active_window_states: dict[tuple[int, int], ActiveWindowRoundState] = {}
+
+    def active_window_state(
+        self, *, repository_id: int, pull_request: int
+    ) -> ActiveWindowRoundState | None:
+        return self._active_window_states.get((repository_id, pull_request))
 
     def quarantine_reader(self, *, token, repository, pull_request, head_sha):
         factory = self.quarantine_reader_factory
@@ -2281,6 +2307,43 @@ class ReviewApprovalFinalizer:
                 and eligibility.human_review.base_sha != preflight.base_sha
             ):
                 return PublicationResult(status="skipped_stale_base")
+            window_state = self._active_window_states.get(
+                (preflight.repository_id, pull_request)
+            )
+            if window_state is not None:
+                if (
+                    window_state.head_sha != head_sha
+                    or window_state.base_sha != preflight.base_sha
+                ):
+                    return known(
+                        PublicationResult(
+                            status="approval_withheld",
+                            diagnostic="approval_withheld",
+                        )
+                    )
+                if (
+                    not window_state.approval_eligibility.approved
+                    or window_state.display_active_findings.has_uncertain_slots
+                    or not window_state.authoritative_decision_inventory.inventory_satisfied
+                ):
+                    has_window_blockers = (
+                        bool(
+                            window_state.authoritative_decision_inventory.blocking_obligations
+                        )
+                        or window_state.display_active_findings.has_uncertain_slots
+                    )
+                    return known(
+                        PublicationResult(
+                            status="approval_withheld",
+                            diagnostic=(
+                                "required_fixes_open"
+                                if has_window_blockers
+                                else "approval_withheld"
+                            ),
+                        )
+                    )
+                if window_state.changed_file_coverage.coverage_uncertainty_accepted:
+                    coverage_uncertainty_accepted = True
             if not self._qualification_authorizes(
                 eligibility,
                 repository=repository,
@@ -2785,6 +2848,35 @@ class ReviewApprovalFinalizer:
             incomplete_coverage=effective_incomplete_coverage,
             policy_digest=policy_digest,
         )
+        window_state = self._active_window_states.get((repository_id, pull_request))
+        if window_state is not None and window_state.head_sha == head_sha:
+            preview_window = apply_dispositions_to_window_state(
+                window_state,
+                honored_fingerprints=active,
+                honored_instances=honored_instances,
+                actor=actor,
+                head_sha=head_sha,
+                slot_released=True,
+                coverage_uncertainty_accepted=coverage_accepted,
+            )
+            displayed_inline_instances = {
+                entry.instance for entry in index.entries if not entry.body_placed
+            }
+            displayed_ob_ids = {
+                entry.obligation_id
+                for entry in preview_window.display_active_findings.entries
+            }
+            if preview_window.display_active_findings.has_uncertain_slots or any(
+                ob.obligation_id not in displayed_ob_ids
+                or ob.comment is None
+                or finding_instance_fingerprint(ob.comment)
+                not in displayed_inline_instances
+                or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
+                for ob in preview_window.authoritative_decision_inventory.blocking_obligations
+            ):
+                has_blocking = True
+            if preview_window.changed_file_coverage.coverage_uncertainty_accepted:
+                coverage_accepted = True
         adjusted = eligibility.with_fresh_human_review(human)
         adjusted = replace(
             adjusted,
@@ -2798,6 +2890,12 @@ class ReviewApprovalFinalizer:
             head_sha=head_sha,
         )
         has_human = adjusted.facts.has_human_adjudication_findings
+        if window_state is not None and window_state.head_sha == head_sha:
+            if any(
+                ob.unresolved and ob.needs_human
+                for ob in preview_window.authoritative_decision_inventory.obligations
+            ):
+                has_human = True
         marker_match = _APPROVAL_ELIGIBILITY_RE.search(body)
         if marker_match is None:
             return PublicationResult(
@@ -3248,6 +3346,18 @@ class ReviewApprovalFinalizer:
                 check_failed = True
         if resolution is None:
             resolution = reconcile_cleanup()
+        if window_state is not None and window_state.head_sha == head_sha:
+            self._active_window_states[(repository_id, pull_request)] = (
+                apply_dispositions_to_window_state(
+                    window_state,
+                    honored_fingerprints=active,
+                    honored_instances=honored_instances,
+                    actor=actor,
+                    head_sha=head_sha,
+                    slot_released=not resolution.unconfirmed,
+                    coverage_uncertainty_accepted=coverage_accepted,
+                )
+            )
         check_confirmed = (
             check_result is not None
             and check_result.status in {"created", "updated"}
@@ -4584,6 +4694,366 @@ class ReviewPublisher:
         self._confirmed_review_id: int | None = None
         self._confirmed_check: tuple[str, str, int] | None = None
         self._persisted_index_has_blocking: bool = False
+        self._active_window_states: dict[tuple[int, int], ActiveWindowRoundState] = {}
+        self._active_window_inputs: dict[tuple[int, int], tuple[str, str, str]] = {}
+        self.finalizer._active_window_states = self._active_window_states
+
+    def active_window_state(
+        self, *, repository_id: int, pull_request: int
+    ) -> ActiveWindowRoundState | None:
+        return self._active_window_states.get((repository_id, pull_request))
+
+    def active_window_public_status(
+        self, *, repository_id: int, pull_request: int
+    ) -> dict[str, object] | None:
+        state = self._active_window_states.get((repository_id, pull_request))
+        return None if state is None else state.to_public_status()
+
+    def reconcile_active_window_slot(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        target: str,
+        resolved_state: str,
+        proof_sha256: str,
+    ) -> ActiveWindowRoundState:
+        current = self._active_window_states.get((repository_id, pull_request))
+        if current is None:
+            raise ReviewInputError("active window state is missing for pull request")
+        reconciled = reconcile_uncertain_slot(
+            current,
+            target=target,
+            resolved_state=resolved_state,
+            proof_sha256=proof_sha256,
+        )
+        self._active_window_states[(repository_id, pull_request)] = reconciled
+        return reconciled
+
+    def _plan_active_window_round(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        result: ReviewResult,
+        baseline: ReviewBaseline | None,
+        authorized_dispositions: Sequence[object],
+        max_active_findings: int | None,
+        confirmed_fixes: Sequence[ConfirmedFixEvidence],
+        human_overrides: Sequence[AuthorizedHumanOverride],
+        coverage_acceptance: AuthorizedCoverageAcceptance | None,
+        authorized_rescan: AuthorizedRescan | None,
+    ) -> tuple[ActiveWindowRoundState | None, str | None]:
+        prior_window_state = self._active_window_states.get(
+            (repository_id, pull_request)
+        )
+        window_active = (
+            max_active_findings is not None
+            or prior_window_state is not None
+            or bool(confirmed_fixes)
+            or bool(human_overrides)
+            or coverage_acceptance is not None
+            or authorized_rescan is not None
+        )
+        if not window_active:
+            return None, None
+        effective_cap = (
+            max_active_findings
+            if max_active_findings is not None
+            else (
+                prior_window_state.display_active_findings.max_active_findings
+                if prior_window_state is not None
+                else DEFAULT_REVIEW_LIMITS.max_comments
+            )
+        )
+        merged_overrides: list[AuthorizedHumanOverride] = list(human_overrides)
+        existing_override_ids = {item.obligation_id for item in merged_overrides}
+        if authorized_dispositions and prior_window_state is not None:
+            displayed_ids = {
+                entry.obligation_id
+                for entry in prior_window_state.display_active_findings.entries
+            }
+            slot_states = {
+                slot.target: slot.state
+                for slot in prior_window_state.display_active_findings.slots
+            }
+            for ob in prior_window_state.authoritative_decision_inventory.obligations:
+                if (
+                    not ob.unresolved
+                    or ob.obligation_id not in displayed_ids
+                    or ob.obligation_id in existing_override_ids
+                    or (
+                        ob.native_target is not None
+                        and slot_states.get(ob.native_target) == "uncertain"
+                    )
+                ):
+                    continue
+                ob_instance = (
+                    finding_instance_fingerprint(ob.comment)
+                    if ob.comment is not None
+                    else None
+                )
+                for disp in authorized_dispositions:
+                    action = getattr(disp, "action", None)
+                    actor = getattr(disp, "actor", None)
+                    reason = getattr(disp, "reason", None)
+                    honors = getattr(disp, "honors", None)
+                    if (
+                        action not in OVERRIDE_DISPOSITION_ACTIONS
+                        or not isinstance(actor, str)
+                        or not isinstance(reason, str)
+                        or not callable(honors)
+                    ):
+                        continue
+                    if honors(ob.fingerprint, head_sha=head_sha) or (
+                        ob_instance is not None
+                        and honors(ob_instance, head_sha=head_sha)
+                    ):
+                        proof = hashlib.sha256(
+                            canonical_bytes(
+                                {
+                                    "kind": "session-disposition-override",
+                                    "obligation_id": ob.obligation_id,
+                                    "actor": actor,
+                                    "head_sha": head_sha,
+                                    "reason": reason,
+                                }
+                            )
+                        ).hexdigest()
+                        merged_overrides.append(
+                            AuthorizedHumanOverride(
+                                obligation_id=ob.obligation_id,
+                                action=action,
+                                actor=actor,
+                                association="OWNER",
+                                head_sha=head_sha,
+                                reason=reason,
+                                proof_sha256=proof,
+                            )
+                        )
+                        existing_override_ids.add(ob.obligation_id)
+                        break
+
+        input_key = hashlib.sha256(
+            canonical_bytes(
+                {
+                    "head_sha": head_sha,
+                    "base_sha": base_sha,
+                    "result_digest": review_result_digest(result),
+                    "max_active_findings": effective_cap,
+                    "fixes": [
+                        {
+                            "obligation_id": item.obligation_id,
+                            "head_sha": item.head_sha,
+                            "evidence_sha256": item.evidence_sha256,
+                        }
+                        for item in confirmed_fixes
+                    ],
+                    "overrides": [
+                        {
+                            "obligation_id": item.obligation_id,
+                            "action": item.action,
+                            "head_sha": item.head_sha,
+                            "proof_sha256": item.proof_sha256,
+                            "slot_released": item.slot_released,
+                        }
+                        for item in merged_overrides
+                    ],
+                    "coverage_acceptance": (
+                        coverage_acceptance.proof_sha256
+                        if coverage_acceptance is not None
+                        else None
+                    ),
+                    "authorized_rescan": (
+                        authorized_rescan.request_id
+                        if authorized_rescan is not None
+                        else None
+                    ),
+                }
+            )
+        ).hexdigest()
+        if prior_window_state is not None and self._active_window_inputs.get(
+            (repository_id, pull_request)
+        ) == (head_sha, base_sha, input_key):
+            return prior_window_state, input_key
+
+        round_number = (
+            1 if prior_window_state is None else prior_window_state.round_number + 1
+        )
+        if authorized_rescan is not None:
+            coverage_mode = authorized_rescan.mode
+        elif prior_window_state is not None or baseline is not None:
+            coverage_mode = "incremental"
+        else:
+            coverage_mode = "full"
+
+        planned = evaluate_active_window_round(
+            result,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            max_active_findings=effective_cap,
+            round_number=round_number,
+            coverage_mode=coverage_mode,
+            prior_inventory=(
+                prior_window_state.authoritative_decision_inventory
+                if prior_window_state is not None
+                else None
+            ),
+            slots=(
+                prior_window_state.display_active_findings.slots
+                if prior_window_state is not None
+                else ()
+            ),
+            confirmed_fixes=confirmed_fixes,
+            human_overrides=tuple(merged_overrides),
+            authorized_rescan=authorized_rescan,
+            coverage_acceptance=coverage_acceptance,
+        )
+        return planned, input_key
+
+    def _commit_active_window_success(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        planned_state: ActiveWindowRoundState | None,
+        input_key: str | None,
+        review_id: int | None,
+    ) -> ActiveWindowRoundState | None:
+        if planned_state is None or input_key is None:
+            return None
+        current = planned_state
+        displayed_targets = {
+            entry.native_target
+            for entry in current.display_active_findings.entries
+            if entry.native_target is not None
+        }
+        for slot in current.display_active_findings.slots:
+            if slot.state == "uncertain" and slot.target in displayed_targets:
+                proof = hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "kind": "reconciled-native-readback",
+                            "target": slot.target,
+                            "head_sha": head_sha,
+                            "review_id": review_id,
+                        }
+                    )
+                ).hexdigest()
+                current = reconcile_uncertain_slot(
+                    current,
+                    target=slot.target,
+                    resolved_state="active",
+                    proof_sha256=proof,
+                )
+        prefix = (
+            f"review:{review_id}"
+            if isinstance(review_id, int) and review_id > 0
+            else f"head:{head_sha[:12]}"
+        )
+        created_targets = {
+            entry.obligation_id: f"{prefix}:{entry.obligation_id[:16]}"
+            for entry in current.display_active_findings.entries
+            if entry.target_action == "create"
+        }
+        has_reopen = any(
+            entry.target_action == "reopen"
+            for entry in current.display_active_findings.entries
+        )
+        if created_targets or has_reopen:
+            current = commit_window_publication(
+                current, created_targets=created_targets
+            )
+        self._active_window_states[(repository_id, pull_request)] = current
+        self._active_window_inputs[(repository_id, pull_request)] = (
+            head_sha,
+            base_sha,
+            input_key,
+        )
+        return current
+
+    def _commit_active_window_uncertain(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        planned_state: ActiveWindowRoundState | None,
+        input_key: str | None,
+    ) -> ActiveWindowRoundState | None:
+        if planned_state is None or input_key is None:
+            return None
+        uncertain_targets = {
+            entry.obligation_id: (
+                entry.native_target
+                or f"uncertain:{head_sha[:12]}:{entry.obligation_id[:16]}"
+            )
+            for entry in planned_state.display_active_findings.entries
+            if entry.target_action in {"create", "reopen"}
+        }
+        committed = (
+            commit_window_publication(
+                planned_state, uncertain_targets=uncertain_targets
+            )
+            if uncertain_targets
+            else planned_state
+        )
+        self._active_window_states[(repository_id, pull_request)] = committed
+        self._active_window_inputs[(repository_id, pull_request)] = (
+            head_sha,
+            base_sha,
+            input_key,
+        )
+        return committed
+
+    @staticmethod
+    def _adjust_assembled_for_window(
+        assembled: AssembledReview,
+        planned_state: ActiveWindowRoundState | None,
+        *,
+        convergence_policy: ReviewConvergencePolicy,
+        auto_approval: bool,
+    ) -> AssembledReview:
+        if (
+            planned_state is None
+            or not convergence_policy.automatic_github_review_events
+        ):
+            return assembled
+        has_blocking = (
+            bool(planned_state.authoritative_decision_inventory.blocking_obligations)
+            or planned_state.display_active_findings.has_uncertain_slots
+        )
+        window_approved = (
+            planned_state.approval_eligibility.approved
+            and not planned_state.display_active_findings.has_uncertain_slots
+            and planned_state.authoritative_decision_inventory.inventory_satisfied
+        )
+        if has_blocking and not assembled.requests_changes:
+            return replace(
+                assembled,
+                state=CHANGES_REQUIRED_STATE,
+                reason=None,
+                requests_changes=True,
+            )
+        if not window_approved and assembled.state == NO_REQUIRED_FIXES_STATE:
+            return replace(
+                assembled,
+                state=WITHHELD_STATE,
+                reason="unresolved review obligations or uncertain coverage remain",
+            )
+        if (
+            window_approved
+            and auto_approval
+            and planned_state.changed_file_coverage.coverage_uncertainty_accepted
+            and assembled.state == WITHHELD_STATE
+        ):
+            return replace(assembled, state=NO_REQUIRED_FIXES_STATE, reason=None)
+        return assembled
 
     def _native_group_host(self, *, result, assembled, store, capacity):
         from review_sensei.session import SessionIdentity
@@ -5040,6 +5510,7 @@ class ReviewPublisher:
         retained_eligibility: ReviewApprovalEligibility | None = None,
         persisted_eligibility: ReviewApprovalEligibility | None = None,
         check_capability_failure: CheckFailure | None = None,
+        coverage_uncertainty_accepted: bool = False,
     ) -> PublicationResult:
         """Re-assert one already-published result's gate and approval decision.
 
@@ -5081,12 +5552,21 @@ class ReviewPublisher:
                 else replay_eligibility.facts.qualification,
             ),
         )
-        check_diagnostic = self._check_state_or_diagnostic(
-            check_token=check_token,
-            repository=repository,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            outcome=check_outcome_for_result(
+        replay_check_outcome = (
+            review_check_outcome(
+                policy=policy,
+                review_status=replay_eligibility.facts.review_status,
+                required_fixes=replay_eligibility.facts.has_blocking_findings
+                or has_blocking_findings(result),
+                required_decisions=(
+                    replay_eligibility.facts.has_human_adjudication_findings
+                    or has_human_adjudication_findings(result)
+                ),
+                coverage_uncertainty_accepted=True,
+                review_verdict=result.review_verdict,
+            )
+            if coverage_uncertainty_accepted
+            else check_outcome_for_result(
                 replace(
                     result,
                     review_status=replay_eligibility.facts.review_status,
@@ -5094,7 +5574,14 @@ class ReviewPublisher:
                 policy=policy,
                 required_fixes=replay_eligibility.facts.has_blocking_findings,
                 required_decisions=replay_eligibility.facts.has_human_adjudication_findings,
-            ),
+            )
+        )
+        check_diagnostic = self._check_state_or_diagnostic(
+            check_token=check_token,
+            repository=repository,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            outcome=replay_check_outcome,
         )
         if check_token is None and check_capability_failure is not None:
             check_diagnostic = check_capability_failure.code
@@ -5107,6 +5594,7 @@ class ReviewPublisher:
             app_slug=app_slug,
             eligibility=replay_eligibility,
             require_persisted=True,
+            coverage_uncertainty_accepted=coverage_uncertainty_accepted,
         )
         diagnostic = check_diagnostic
         if diagnostic is None and finalized.status == "approval_withheld":
@@ -5167,6 +5655,11 @@ class ReviewPublisher:
         human_inventory_store: HumanInventoryStore | None = None,
         allow_human_inventory_start: bool = False,
         narrative_archive: Callable[[], ConfirmedNarrativeArchive] | None = None,
+        max_active_findings: int | None = None,
+        confirmed_fixes: Sequence[ConfirmedFixEvidence] = (),
+        human_overrides: Sequence[AuthorizedHumanOverride] = (),
+        coverage_acceptance: AuthorizedCoverageAcceptance | None = None,
+        authorized_rescan: AuthorizedRescan | None = None,
     ) -> PublicationResult:
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError(
@@ -5237,6 +5730,11 @@ class ReviewPublisher:
                 human_inventory_store=human_inventory_store,
                 allow_human_inventory_start=allow_human_inventory_start,
                 narrative_archive=narrative_archive,
+                max_active_findings=max_active_findings,
+                confirmed_fixes=confirmed_fixes,
+                human_overrides=human_overrides,
+                coverage_acceptance=coverage_acceptance,
+                authorized_rescan=authorized_rescan,
             )
             return (
                 publication
@@ -5289,6 +5787,11 @@ class ReviewPublisher:
         human_inventory_store: HumanInventoryStore | None = None,
         allow_human_inventory_start: bool = False,
         narrative_archive: Callable[[], ConfirmedNarrativeArchive] | None = None,
+        max_active_findings: int | None = None,
+        confirmed_fixes: Sequence[ConfirmedFixEvidence] = (),
+        human_overrides: Sequence[AuthorizedHumanOverride] = (),
+        coverage_acceptance: AuthorizedCoverageAcceptance | None = None,
+        authorized_rescan: AuthorizedRescan | None = None,
     ) -> PublicationResult:
         from .checkpoint_result_store import uses_grouped_publication
 
@@ -5432,7 +5935,62 @@ class ReviewPublisher:
                 authorized_dispositions=authorized_dispositions,
             )
         original_result = result
-        result = prepared.result
+        admitted_result = prepared.result
+        planned_window_state, window_input_key = self._plan_active_window_round(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            result=admitted_result,
+            baseline=baseline,
+            authorized_dispositions=authorized_dispositions,
+            max_active_findings=max_active_findings,
+            confirmed_fixes=confirmed_fixes,
+            human_overrides=human_overrides,
+            coverage_acceptance=coverage_acceptance,
+            authorized_rescan=authorized_rescan,
+        )
+        result = (
+            project_display_review_result(admitted_result, planned_window_state)
+            if planned_window_state is not None
+            else admitted_result
+        )
+        window_has_blocking = False
+        window_non_inline_blocking = False
+        window_has_human = False
+        window_coverage_accepted = False
+        window_approved = True
+        if planned_window_state is not None:
+            displayed_ob_ids = {
+                entry.obligation_id
+                for entry in planned_window_state.display_active_findings.entries
+            }
+            window_has_blocking = (
+                bool(
+                    planned_window_state.authoritative_decision_inventory.blocking_obligations
+                )
+                or planned_window_state.display_active_findings.has_uncertain_slots
+            )
+            window_non_inline_blocking = (
+                planned_window_state.display_active_findings.has_uncertain_slots
+                or any(
+                    ob.obligation_id not in displayed_ob_ids
+                    or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
+                    for ob in planned_window_state.authoritative_decision_inventory.blocking_obligations
+                )
+            )
+            window_has_human = any(
+                ob.unresolved and ob.needs_human
+                for ob in planned_window_state.authoritative_decision_inventory.obligations
+            )
+            window_coverage_accepted = (
+                planned_window_state.changed_file_coverage.coverage_uncertainty_accepted
+            )
+            window_approved = (
+                planned_window_state.approval_eligibility.approved
+                and not planned_window_state.display_active_findings.has_uncertain_slots
+                and planned_window_state.authoritative_decision_inventory.inventory_satisfied
+            )
         authority = self.finalizer.qualification_authority
         qualification_binding = (
             authority.issue_binding(
@@ -5460,6 +6018,21 @@ class ReviewPublisher:
             qualification=qualification,
             retained_eligibility=retained_eligibility,
         )
+        if planned_window_state is not None:
+            prospective_eligibility = replace(
+                prospective_eligibility,
+                facts=replace(
+                    prospective_eligibility.facts,
+                    has_blocking_findings=(
+                        prospective_eligibility.facts.has_blocking_findings
+                        or window_non_inline_blocking
+                    ),
+                    has_human_adjudication_findings=(
+                        prospective_eligibility.facts.has_human_adjudication_findings
+                        or window_has_human
+                    ),
+                ),
+            )
         prospective_eligibility = self._bind_qualification(
             prospective_eligibility, qualification_binding
         )
@@ -5468,7 +6041,11 @@ class ReviewPublisher:
         # before the first inventory, check, or review write. No reference or
         # caller-supplied hash can authorize a new staging attempt.
         needs_human_inventory = False
-        stage_human_inventory = complete_inventory and human_inventory_store is not None
+        stage_human_inventory = (
+            complete_inventory
+            and human_inventory_store is not None
+            and result is admitted_result
+        )
         human_inventory = prospective_eligibility.human_review
         if stage_human_inventory:
             from .default_human_inventory import (
@@ -5528,11 +6105,22 @@ class ReviewPublisher:
         # disagree. The finding review event and the finalizer's gate
         # maintenance still follow the operator's opt-in, so a blocking finding
         # keeps requesting changes on an ineligible review.
-        approval_eligible = _approval_eligible(result) and not (
-            retained_eligibility is not None
-            and (
-                prospective_eligibility.facts.has_blocking_findings
-                or prospective_eligibility.facts.has_human_adjudication_findings
+        base_result_eligible = _approval_eligible(result) or (
+            planned_window_state is not None
+            and window_coverage_accepted
+            and _incomplete_reason(result) is None
+            and not has_blocking_findings(result)
+            and not has_human_adjudication_findings(result)
+        )
+        approval_eligible = (
+            base_result_eligible
+            and window_approved
+            and not (
+                retained_eligibility is not None
+                and (
+                    prospective_eligibility.facts.has_blocking_findings
+                    or prospective_eligibility.facts.has_human_adjudication_findings
+                )
             )
         )
         auto_approval = auto_approve and approval_eligible
@@ -5556,27 +6144,36 @@ class ReviewPublisher:
             # can update a check or finalize an already published result. False
             # reserves the longer check/author boolean spelling; body placement
             # determines the same blocking fact used by the actual writer.
-            preflight_review = self._assemble_review_body(
-                result=result,
-                analysis=analysis,
-                convergence_policy=convergence_policy,
-                read_facts=lambda: self._conversation_resolution_facts(
-                    token=token, repository=repository, branch=base_branch
+            preflight_review = self._adjust_assembled_for_window(
+                self._assemble_review_body(
+                    result=result,
+                    analysis=analysis,
+                    convergence_policy=convergence_policy,
+                    read_facts=lambda: self._conversation_resolution_facts(
+                        token=token, repository=repository, branch=base_branch
+                    ),
+                    auto_approve=auto_approval,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
                 ),
-                auto_approve=auto_approval,
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                base_sha=base_sha,
+                planned_window_state,
+                convergence_policy=convergence_policy,
+                auto_approval=auto_approval,
             )
             if needs_human_inventory:
                 preflight_review = replace(preflight_review, compact_references=True)
-            body_blocking = any(
-                entry.blocking and entry.body_placed
-                for entry in preflight_review.index_entries
-            ) or bool(
-                retained_eligibility is not None
-                and retained_eligibility.facts.has_blocking_findings
+            body_blocking = (
+                any(
+                    entry.blocking and entry.body_placed
+                    for entry in preflight_review.index_entries
+                )
+                or window_non_inline_blocking
+                or bool(
+                    retained_eligibility is not None
+                    and retained_eligibility.facts.has_blocking_findings
+                )
             )
             preflight_document = replace(
                 prospective_eligibility,
@@ -5880,7 +6477,7 @@ class ReviewPublisher:
                 and identity_states
                 and not result_states
                 and not explicit_reanalysis
-                and not has_blocking_findings(result)
+                and not (has_blocking_findings(result) or window_has_blocking)
                 and not supersedes_prior_clean_review
             ):
                 raise GitHubPublicationError(
@@ -5891,7 +6488,7 @@ class ReviewPublisher:
                 # rescan receipt. The latest publication must still be
                 # incomplete; ordinary per-head reconciliation remains below.
                 if (
-                    result.transaction is None
+                    (result.transaction or original_result.transaction) is None
                     or persisted_eligibility is None
                     or (
                         persisted_eligibility.facts.review_status == "complete"
@@ -5899,6 +6496,15 @@ class ReviewPublisher:
                     )
                     or "APPROVED" in identity_states
                 ):
+                    self._commit_active_window_success(
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
+                        planned_state=planned_window_state,
+                        input_key=window_input_key,
+                        review_id=self._confirmed_review_id,
+                    )
                     return PublicationResult(status="already_published")
             elif retained_eligibility is not None:
                 if result_states:
@@ -5915,6 +6521,15 @@ class ReviewPublisher:
                         != prospective_eligibility
                     ):
                         return PublicationResult(status="skipped_stale_head")
+                    self._commit_active_window_success(
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
+                        planned_state=planned_window_state,
+                        input_key=window_input_key,
+                        review_id=self._confirmed_review_id,
+                    )
                     return self._finalize_published_result(
                         token=token,
                         repository=repository,
@@ -5931,9 +6546,19 @@ class ReviewPublisher:
                         qualification_binding=qualification_binding,
                         retained_eligibility=retained_eligibility,
                         persisted_eligibility=persisted_eligibility,
+                        coverage_uncertainty_accepted=window_coverage_accepted,
                     )
-            elif has_blocking_findings(result):
+            elif has_blocking_findings(result) or window_has_blocking:
                 if result_states and not supersedes_prior_clean_review:
+                    self._commit_active_window_success(
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
+                        planned_state=planned_window_state,
+                        input_key=window_input_key,
+                        review_id=self._confirmed_review_id,
+                    )
                     if not preflight.app_authored:
                         return self._finalize_published_result(
                             token=token,
@@ -5950,12 +6575,31 @@ class ReviewPublisher:
                             qualification=qualification,
                             qualification_binding=qualification_binding,
                             persisted_eligibility=persisted_eligibility,
+                            coverage_uncertainty_accepted=window_coverage_accepted,
                         )
                     return PublicationResult(status="already_published")
             elif not supersedes_prior_clean_review:
                 if "APPROVED" in identity_states:
+                    self._commit_active_window_success(
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
+                        planned_state=planned_window_state,
+                        input_key=window_input_key,
+                        review_id=self._confirmed_review_id,
+                    )
                     return PublicationResult(status="already_published")
                 if identity_states & {"COMMENTED", "CHANGES_REQUESTED"}:
+                    self._commit_active_window_success(
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
+                        planned_state=planned_window_state,
+                        input_key=window_input_key,
+                        review_id=self._confirmed_review_id,
+                    )
                     if not preflight.app_authored:
                         return self._finalize_published_result(
                             token=token,
@@ -5972,6 +6616,7 @@ class ReviewPublisher:
                             qualification=qualification,
                             qualification_binding=qualification_binding,
                             persisted_eligibility=persisted_eligibility,
+                            coverage_uncertainty_accepted=window_coverage_accepted,
                         )
                     return PublicationResult(status="already_published")
         except _NativeReplayAuthorityError:
@@ -6172,20 +6817,46 @@ class ReviewPublisher:
                 outcome=None,
             )
             if check_diagnostic is None:
-                check_diagnostic = self._check_state_or_diagnostic(
-                    check_token=check_token,
-                    repository=repository,
-                    head_sha=head_sha,
-                    app_slug=app_slug,
-                    outcome=check_outcome_for_result(
+                planned_check_outcome = (
+                    review_check_outcome(
+                        policy=effective_policy,
+                        review_status=prospective_eligibility.facts.review_status,
+                        required_fixes=(
+                            prospective_eligibility.facts.has_blocking_findings
+                            or has_blocking_findings(result)
+                            or window_has_blocking
+                        ),
+                        required_decisions=(
+                            prospective_eligibility.facts.has_human_adjudication_findings
+                            or has_human_adjudication_findings(result)
+                            or window_has_human
+                        ),
+                        coverage_uncertainty_accepted=True,
+                        review_verdict=result.review_verdict,
+                    )
+                    if window_coverage_accepted
+                    else check_outcome_for_result(
                         replace(
                             result,
                             review_status=prospective_eligibility.facts.review_status,
                         ),
                         policy=effective_policy,
-                        required_fixes=prospective_eligibility.facts.has_blocking_findings,
-                        required_decisions=prospective_eligibility.facts.has_human_adjudication_findings,
-                    ),
+                        required_fixes=(
+                            prospective_eligibility.facts.has_blocking_findings
+                            or window_has_blocking
+                        ),
+                        required_decisions=(
+                            prospective_eligibility.facts.has_human_adjudication_findings
+                            or window_has_human
+                        ),
+                    )
+                )
+                check_diagnostic = self._check_state_or_diagnostic(
+                    check_token=check_token,
+                    repository=repository,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    outcome=planned_check_outcome,
                 )
         if (
             not write_preflight.app_authored
@@ -6204,6 +6875,17 @@ class ReviewPublisher:
             check_published=check_diagnostic is None,
             retained_eligibility=retained_eligibility,
         )
+        if planned_window_state is not None:
+            eligibility = replace(
+                eligibility,
+                facts=replace(
+                    eligibility.facts,
+                    has_human_adjudication_findings=(
+                        eligibility.facts.has_human_adjudication_findings
+                        or window_has_human
+                    ),
+                ),
+            )
         if needs_human_inventory:
             eligibility = replace(
                 eligibility,
@@ -6211,7 +6893,7 @@ class ReviewPublisher:
             )
         eligibility = self._bind_qualification(eligibility, qualification_binding)
         try:
-            assembled = (
+            assembled = self._adjust_assembled_for_window(
                 continuation_review
                 or preflight_review
                 or self._assemble_review_body(
@@ -6226,11 +6908,17 @@ class ReviewPublisher:
                     pull_request=pull_request,
                     head_sha=head_sha,
                     base_sha=base_sha,
-                )
+                ),
+                planned_window_state,
+                convergence_policy=convergence_policy,
+                auto_approval=auto_approval,
             )
-            body_blocking = any(
-                entry.blocking and entry.body_placed
-                for entry in assembled.index_entries
+            body_blocking = (
+                any(
+                    entry.blocking and entry.body_placed
+                    for entry in assembled.index_entries
+                )
+                or window_non_inline_blocking
             )
             if retained_eligibility is not None:
                 # A continuation does not restate earlier findings. Their
@@ -6277,6 +6965,13 @@ class ReviewPublisher:
                 + len(restart_marker.encode("utf-8")),
                 preserve_explanations=human_inventory is not None,
             )
+            if planned_window_state is not None and any(
+                f'"{forbidden}"' in summary
+                for forbidden in FORBIDDEN_PUBLIC_DEFERRED_KEYS
+            ):
+                raise GitHubPublicationError(
+                    "public review summary must not expose deferred finding inventory"
+                )
             prepared_comments = assembled.inline_comments
 
             def body_for_summary(review_summary: str) -> str:
@@ -6461,6 +7156,15 @@ class ReviewPublisher:
                 ),
             )
             self._confirmed_review_id = evidence.main_review_id
+            self._commit_active_window_success(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                planned_state=planned_window_state,
+                input_key=window_input_key,
+                review_id=evidence.main_review_id,
+            )
             schedule_reconciled_cleanup()
             return self._finalize_after_publication(
                 token=token,
@@ -6476,6 +7180,7 @@ class ReviewPublisher:
                 else "published",
                 review_id=evidence.main_review_id,
                 assume_inline_unresolved=frozenset(assembled.inline_blocker_instances),
+                coverage_uncertainty_accepted=window_coverage_accepted,
             )
 
         try:
@@ -6506,6 +7211,15 @@ class ReviewPublisher:
                 base_sha=base_sha,
                 result_digest=review_result_digest(result),
             ):
+                self._commit_active_window_success(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    planned_state=planned_window_state,
+                    input_key=window_input_key,
+                    review_id=self._confirmed_review_id,
+                )
                 schedule_reconciled_cleanup()
                 return self._finalize_after_publication(
                     token=token,
@@ -6517,7 +7231,16 @@ class ReviewPublisher:
                     require_persisted=True,
                     check_diagnostic=check_diagnostic,
                     status="already_published",
+                    coverage_uncertainty_accepted=window_coverage_accepted,
                 )
+            self._commit_active_window_uncertain(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                planned_state=planned_window_state,
+                input_key=window_input_key,
+            )
             self._complete_failed_check(
                 check_token=check_token,
                 repository=repository,
@@ -6534,6 +7257,15 @@ class ReviewPublisher:
             if isinstance(review_id, int):
                 if type(review_id) is int and review_id > 0:
                     self._check_accounting_review_id = review_id
+                self._commit_active_window_success(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    planned_state=planned_window_state,
+                    input_key=window_input_key,
+                    review_id=review_id,
+                )
                 self._schedule_thread_cleanup(
                     token=token,
                     threads=suppression.superseded_threads,
@@ -6561,6 +7293,7 @@ class ReviewPublisher:
                     assume_inline_unresolved=frozenset(
                         assembled.inline_blocker_instances
                     ),
+                    coverage_uncertainty_accepted=window_coverage_accepted,
                 )
         if status == 404:
             self._complete_failed_check(
@@ -6623,10 +7356,27 @@ class ReviewPublisher:
                     for comment, _fingerprint, _body, _anchor in prepared_comments
                 ),
             ):
+                self._commit_active_window_uncertain(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    planned_state=planned_window_state,
+                    input_key=window_input_key,
+                )
                 return PublicationResult(
                     status="publication_incomplete",
                     diagnostic="publication_ambiguous",
                 )
+            self._commit_active_window_success(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                planned_state=planned_window_state,
+                input_key=window_input_key,
+                review_id=self._confirmed_review_id,
+            )
             schedule_reconciled_cleanup()
             return self._finalize_after_publication(
                 token=token,
@@ -6638,6 +7388,7 @@ class ReviewPublisher:
                 require_persisted=True,
                 check_diagnostic=check_diagnostic,
                 status="already_published",
+                coverage_uncertainty_accepted=window_coverage_accepted,
             )
         if status == 409 or status == 429 or status >= 500:
             if self._reconcile_marker(
@@ -6655,6 +7406,15 @@ class ReviewPublisher:
                 base_sha=base_sha,
                 result_digest=review_result_digest(result),
             ):
+                self._commit_active_window_success(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    planned_state=planned_window_state,
+                    input_key=window_input_key,
+                    review_id=self._confirmed_review_id,
+                )
                 schedule_reconciled_cleanup()
                 return self._finalize_after_publication(
                     token=token,
@@ -6666,7 +7426,16 @@ class ReviewPublisher:
                     require_persisted=True,
                     check_diagnostic=check_diagnostic,
                     status="already_published",
+                    coverage_uncertainty_accepted=window_coverage_accepted,
                 )
+            self._commit_active_window_uncertain(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                planned_state=planned_window_state,
+                input_key=window_input_key,
+            )
             self._complete_failed_check(
                 check_token=check_token,
                 repository=repository,
@@ -6702,6 +7471,7 @@ class ReviewPublisher:
         review_id: int | None = None,
         require_persisted: bool = True,
         assume_inline_unresolved: frozenset[str] | None = None,
+        coverage_uncertainty_accepted: bool = False,
     ) -> PublicationResult:
         """Finalize approval for one published head and report its withholding.
 
@@ -6722,6 +7492,7 @@ class ReviewPublisher:
             eligibility=eligibility,
             require_persisted=require_persisted,
             assume_inline_unresolved=assume_inline_unresolved,
+            coverage_uncertainty_accepted=coverage_uncertainty_accepted,
         )
         self._check_accounting_approval = finalized
         diagnostic = check_diagnostic
