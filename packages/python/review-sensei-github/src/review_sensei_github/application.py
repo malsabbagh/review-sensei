@@ -65,6 +65,7 @@ from review_sensei.session import (
 )
 from review_sensei.verifier import CandidateFinding, PublishableReview
 
+from .action_representability import guard_current_command_representability
 from .approval import (
     ReviewApprovalEligibility,
     has_blocking_findings,
@@ -2509,6 +2510,24 @@ class GitHubApplication:
             derived_incomplete_coverage = incomplete_coverage_from_result(
                 coverage_source
             )
+        if current_action is not None:
+            pre_effect_refusal = guard_current_command_representability(
+                current_action=current_action,
+                ledger=ledger,
+                identity=identity,
+                command=command,
+                head_sha=head_sha,
+                writes_enabled=bool(options.github_writes),
+                finding_fingerprints=finding_fingerprints,
+                finding_inventory=typed_inventory,
+                prior_inventories=typed_priors,
+                actor_role=effective_actor_role,
+                policy_digest=command_policy_digest,
+                provenance=command_provenance,
+                incomplete_coverage=derived_incomplete_coverage,
+            )
+            if pre_effect_refusal is not None:
+                return pre_effect_refusal
         if (
             command.action == "verify"
             and operation_entry == "enabled"

@@ -1447,12 +1447,12 @@ class ReviewResult:
 
     def __post_init__(self) -> None:
         if self.decision_pass is not None:
-            from .review_decision_receipt import validate_decision_receipt
+            from .review_decision_receipt import canonical_decision_receipt
 
-            validate_decision_receipt(self.decision_pass)
-            # Own nested receipt data independently of constructor/deserializer inputs.
+            # Own nested receipt data with canonical sorted key order so retained
+            # canonical JSON payloads preserve the exact v1 content_digest().
             object.__setattr__(
-                self, "decision_pass", deepcopy(dict(self.decision_pass))
+                self, "decision_pass", canonical_decision_receipt(self.decision_pass)
             )
             if (
                 self.decision_pass["status"] == "incomplete"

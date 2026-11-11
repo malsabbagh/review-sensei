@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 
 from .decision_provider import canonical, sha256
@@ -148,3 +149,15 @@ def validate_decision_receipt(value: object) -> None:
             raise ReviewInputError("decision model metadata is invalid")
     if len(canonical(dict(value)).encode("utf-8")) > 65_536:
         raise ReviewInputError("decision receipt exceeds its byte bound")
+
+
+def canonical_decision_receipt(value: Mapping[str, object]) -> dict[str, object]:
+    """Return an owned deep copy with canonical sorted JSON key ordering."""
+
+    validate_decision_receipt(value)
+    loaded = json.loads(canonical(dict(value)))
+    if not isinstance(loaded, dict):  # pragma: no cover - defensive runtime guard
+        raise ReviewInputError(
+            "canonical decision receipt must decode to a JSON object"
+        )
+    return loaded
