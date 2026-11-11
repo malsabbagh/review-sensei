@@ -41,7 +41,7 @@ from review_sensei.recovery_context import (
     resolve_recovery_context_store,
 )
 from review_sensei.service import ReviewRun, ReviewService
-from review_sensei.session import SessionIdentity, SessionLedger
+from review_sensei.session import SessionIdentity, SessionLedger, SessionRecord
 from review_sensei.work_recovery import WorkRecoveryStore
 
 if TYPE_CHECKING:
@@ -77,6 +77,24 @@ class _ReviewRunOptions(TypedDict, total=False):
     expected_evidence_digest: str | None
     monotonic: Callable[[], float] | None
     sleeper: Callable[[float], None] | None
+
+
+def _extract_ledger_accounting_version(record: SessionRecord) -> str:
+    raw_acc: object = record.api_run_accounting
+    if raw_acc is None:
+        return ACCOUNTING_VERSION
+    if not isinstance(raw_acc, Mapping):
+        raise RecoveryRefusalError(
+            "truncated_or_corrupt_context: record.api_run_accounting must be a mapping when present",
+            refusal_code="truncated_or_corrupt_context",
+        )
+    raw_ver = raw_acc.get("version", raw_acc.get("schema_version"))
+    if not isinstance(raw_ver, str) or not raw_ver.strip():
+        raise RecoveryRefusalError(
+            "truncated_or_corrupt_context: record.api_run_accounting is missing a valid version string",
+            refusal_code="truncated_or_corrupt_context",
+        )
+    return raw_ver
 
 
 def _resolve_cli_policy_commit(args: argparse.Namespace) -> str:
@@ -873,6 +891,26 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     "legacy --recover-from does not accept publication profile settings; "
                     "use --result or identity-bound --recover-retained"
                 )
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        getattr(args, "recovery_context_dir", None),
+                        getattr(args, "recovery_context_key_file", None),
+                        getattr(args, "policy_commit", None),
+                        getattr(args, "original_api_limit", None),
+                    )
+                )
+                or bool(getattr(args, "prior_consumed_requests", 0))
+                or getattr(
+                    args, "recovery_context_ttl_seconds", DEFAULT_RECOVERY_TTL_SECONDS
+                )
+                != DEFAULT_RECOVERY_TTL_SECONDS
+            ):
+                raise ReviewInputError(
+                    "legacy --recover-from does not accept recovery-context handoff settings; "
+                    "use --result or identity-bound --recover-retained"
+                )
             try:
                 artifact = load_recovery_artifact(args.recover_from)
                 artifact.validate(
@@ -1157,14 +1195,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     raw_admission_doc = engine_cli._load_context_document(
                         args.admission_context, label="admission context"
                     )
-                    rec_accounting_version = ACCOUNTING_VERSION
-                    if isinstance(loaded_rec.record.api_run_accounting, Mapping):
-                        raw_ver = loaded_rec.record.api_run_accounting.get(
-                            "version",
-                            loaded_rec.record.api_run_accounting.get("schema_version"),
-                        )
-                        if isinstance(raw_ver, str) and raw_ver.strip():
-                            rec_accounting_version = raw_ver
+                    rec_accounting_version = _extract_ledger_accounting_version(
+                        loaded_rec.record
+                    )
                     expected_bundle = build_bundle_from_context_documents(
                         transaction=loaded_rec.record.transaction,
                         configuration_context=configuration_context,
@@ -1335,7 +1368,6 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             recovery_store is not None
             and not args.recover_retained
             and not args.reconstruct_contexts
-            and not args.recover_from
         ):
             if (
                 result.transaction is None
@@ -1355,34 +1387,65 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                         repository_id=args.repository_id,
                     )
                 )
-                if loaded_cap.record is not None and isinstance(
-                    loaded_cap.record.api_run_accounting, Mapping
-                ):
-                    raw_cap_ver = loaded_cap.record.api_run_accounting.get(
-                        "version",
-                        loaded_cap.record.api_run_accounting.get("schema_version"),
+                if loaded_cap.record is not None:
+                    capture_accounting_version = _extract_ledger_accounting_version(
+                        loaded_cap.record
                     )
-                    if isinstance(raw_cap_ver, str) and raw_cap_ver.strip():
-                        capture_accounting_version = raw_cap_ver
-            capture_recovery_context_bundle(
-                recovery_store,
-                transaction=result.transaction,
-                configuration_context=configuration_context,
-                admission_context=admission_context_document(
-                    admission_baseline, admission_current_key
-                ),
-                evidence_context=evidence_context,
-                decision_policy_digest=publication_configuration.decision.digest(),
-                diff=diff,
-                policy_commit=_resolve_cli_policy_commit(args),
-                base_ref=args.base_branch or "main",
-                repository_id=args.repository_id,
-                placement_mode=recovery_placement_mode,
-                accounting_version=capture_accounting_version,
-                producer="github-publish-cli",
-                run_id=1,
-                attempt=1,
+            admission_doc = admission_context_document(
+                admission_baseline, admission_current_key
             )
+            resolved_policy_commit = _resolve_cli_policy_commit(args)
+            existing_handoff = (
+                recovery_store.directory / f"{result.transaction.transaction_id}.json"
+            )
+            if existing_handoff.is_symlink() or existing_handoff.exists():
+                expected_retry_bundle = build_bundle_from_context_documents(
+                    transaction=result.transaction,
+                    configuration_context=configuration_context,
+                    admission_context=admission_doc,
+                    evidence_context=evidence_context,
+                    decision_policy_digest=publication_configuration.decision.digest(),
+                    diff_sha256=hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+                    policy_commit=resolved_policy_commit,
+                    base_ref=args.base_branch or "main",
+                    repository_id=args.repository_id,
+                    placement_mode=recovery_placement_mode,
+                    accounting_version=capture_accounting_version,
+                    producer="github-publish-cli",
+                    run_id=2,
+                    attempt=2,
+                )
+                verify_stored_recovery_context(
+                    recovery_store,
+                    expected_bundle=expected_retry_bundle,
+                    current_run_id=2,
+                    original_api_limit=(
+                        args.original_api_limit
+                        if getattr(args, "original_api_limit", None) is not None
+                        else DEFAULT_API_REQUEST_LIMIT
+                    ),
+                    already_consumed_requests=(
+                        getattr(args, "prior_consumed_requests", 0) or 0
+                    ),
+                )
+            else:
+                capture_recovery_context_bundle(
+                    recovery_store,
+                    transaction=result.transaction,
+                    configuration_context=configuration_context,
+                    admission_context=admission_doc,
+                    evidence_context=evidence_context,
+                    decision_policy_digest=publication_configuration.decision.digest(),
+                    diff=diff,
+                    policy_commit=resolved_policy_commit,
+                    base_ref=args.base_branch or "main",
+                    repository_id=args.repository_id,
+                    placement_mode=recovery_placement_mode,
+                    accounting_version=capture_accounting_version,
+                    producer="github-publish-cli",
+                    run_id=1,
+                    attempt=1,
+                )
         try:
             review_outcome = application.publish_review(
                 options=GitHubWriteOptions(

@@ -172,11 +172,7 @@ def verify_stored_recovery_context(
 
     stored = decision.bundle
     drifted: list[str] = []
-    if (
-        expected_bundle.repository_id is not None
-        and stored.repository_id is not None
-        and stored.repository_id != expected_bundle.repository_id
-    ):
+    if stored.repository_id != expected_bundle.repository_id:
         drifted.append("repository_id")
     if expected_bundle.generation < stored.generation:
         drifted.append("generation")
