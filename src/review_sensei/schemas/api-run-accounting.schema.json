@@ -551,6 +551,25 @@
                       ]
                     }
                   }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "reason"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "canceled_unstarted"
+                    },
+                    "reason": {
+                      "enum": [
+                        "source_edited",
+                        "source_deleted"
+                      ]
+                    }
+                  }
                 }
               ]
             }

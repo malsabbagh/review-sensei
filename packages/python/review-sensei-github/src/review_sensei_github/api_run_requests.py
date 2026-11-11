@@ -886,22 +886,66 @@ class ApiRunRequestTransport:
             historical_authenticator=authenticate,
         )
 
-    def _rollover_and_activate(
-        self,
-        ledger,
-        identity,
-        configuration,
-        owner,
-        previous,
-        cessation,
-        *,
-        historical_authenticator=None,
+    def rollover_unstarted_and_activate(
+        self, ledger, identity, configuration, owner, previous, authenticate
     ):
-        from dataclasses import replace
+        """New run only: settle and archive a proven unstarted action on source mutation."""
+        from .api_run_history import read_action_result
+        from .api_run_plan import WRITE_CONFIRMATION_TAIL
+        from .unstarted_action_recovery import (
+            require_witness_issued,
+            settle_unstarted_record,
+        )
 
-        from .api_run_history import RETAINED_CONFIRMATION_TAIL, retain_previous_run
-        from .api_run_plan import owner_allocations
+        self._validate_rollover_prechecks(ledger, identity, owner, previous)
+        self._reservation_started = True
+        self._producer = ledger.evidence_producer()
+        ledger.evidence_budget = self.budget_view
+        unstarted_prepared = False
 
+        def settle_prepare(record):
+            nonlocal unstarted_prepared
+            if unstarted_prepared:
+                raise ReviewInputError(
+                    "unstarted rollover callback is already consumed"
+                )
+            unstarted_prepared = True
+            if record.record_sha256 != previous.record_sha256:
+                raise ReviewInputError("previous caller root changed")
+            if ledger.evidence_producer() != self._producer:
+                raise ReviewInputError("previous caller root producer changed")
+            witness = require_witness_issued(authenticate(record))
+            assert self._producer is not None
+            settled = settle_unstarted_record(
+                identity=identity,
+                record=record,
+                producer=self._producer,
+                witness=witness,
+            )
+            read_action_result(ledger, identity, settled)
+            self.budget_view.preflight(WRITE_CONFIRMATION_TAIL)
+            return settled
+
+        settled_confirmed = ledger.replace(identity, settle_prepare)
+        if any(
+            o.get("mutation")
+            and (o["outcome"] != "response" or o.get("uncertain_effect"))
+            and str(o["request_id"]) not in self._reconciled_mutations
+            for o in self.observations
+        ):
+            raise ReviewInputError("unstarted cancellation startup write is uncertain")
+        return self._rollover_after_prechecks(
+            ledger,
+            identity,
+            configuration,
+            owner,
+            settled_confirmed,
+            lambda: None,
+        )
+
+    def _validate_rollover_prechecks(
+        self, ledger, identity, owner, previous
+    ) -> ApiRunAccounting:
         self._require_ledger(ledger, identity)
         if (
             self._state is not None
@@ -920,9 +964,51 @@ class ApiRunRequestTransport:
             or old.identity.repository_id != self.run.repository_id
         ):
             raise ReviewInputError("new caller run identity conflicts")
+        return old
+
+    def _rollover_and_activate(
+        self,
+        ledger,
+        identity,
+        configuration,
+        owner,
+        previous,
+        cessation,
+        *,
+        historical_authenticator=None,
+    ):
+        self._validate_rollover_prechecks(ledger, identity, owner, previous)
         self._reservation_started = True
         self._producer = ledger.evidence_producer()
         ledger.evidence_budget = self.budget_view
+        return self._rollover_after_prechecks(
+            ledger,
+            identity,
+            configuration,
+            owner,
+            previous,
+            cessation,
+            historical_authenticator=historical_authenticator,
+        )
+
+    def _rollover_after_prechecks(
+        self,
+        ledger,
+        identity,
+        configuration,
+        owner,
+        previous,
+        cessation,
+        *,
+        historical_authenticator=None,
+    ):
+        from dataclasses import replace
+
+        from .api_run_history import RETAINED_CONFIRMATION_TAIL, retain_previous_run
+        from .api_run_plan import owner_allocations
+
+        old = ApiRunAccounting.from_document(previous.api_run_accounting)
+        old.require_writer_version()
         historical_prepared = False
 
         def prepare(record):
@@ -1430,6 +1516,78 @@ class ApiRunRequestTransport:
                     "outcome": proof.outcome,
                 },
             )
+            return record.evolve(generation=record.generation + 1)
+
+        confirmed = self._action_checkpoint(ledger, identity, prepare)
+        read_action_result(ledger, identity, confirmed)
+        return confirmed
+
+    def cancel_unstarted_action(self, ledger, identity, witness):
+        """Persist one bounded terminal cancellation for a proven unstarted action."""
+        from .api_run_history import read_action_result
+        from .unstarted_action_recovery import (
+            SAME_RUN_AUTHORITY_MODES,
+            require_witness_issued,
+            settle_unstarted_accounting,
+        )
+
+        self._require_ledger(ledger, identity)
+        verified = require_witness_issued(witness)
+        if (
+            self._action_unresolved()
+            or self._action_effect_boundary is not None
+            or self._action_result_proof is not None
+        ):
+            raise ReviewInputError(
+                "caller transport has started or unresolved work; cannot cancel as unstarted"
+            )
+        producer = ledger.evidence_producer()
+        if (
+            verified.identity != identity
+            or verified.target_run_id != self.run.run_id
+            or verified.producer != producer
+            or verified.authority_mode not in SAME_RUN_AUTHORITY_MODES
+        ):
+            raise ReviewInputError(
+                "unstarted cancellation witness scope conflicts with active caller"
+            )
+        action = self.accounting.action
+        if action is None:
+            raise ReviewInputError("caller action intent is unavailable")
+        if action["intent"] != verified.intent:
+            raise ReviewInputError(
+                "caller action intent does not match cancellation witness"
+            )
+        if action["execution_started"]:
+            raise ReviewInputError("started action cannot be canceled as unstarted")
+        expected_outcome = {"kind": "canceled_unstarted", "reason": verified.reason}
+        if action["phase"] == "terminal":
+            if action["outcome"] != expected_outcome:
+                raise ReviewInputError("caller action terminal receipt changed")
+            loaded = ledger.load(identity)
+            if (
+                loaded.status != "ok"
+                or loaded.record is None
+                or loaded.record.record_sha256 != self._root
+            ):
+                raise ReviewInputError("caller action terminal root changed")
+            read_action_result(ledger, identity, loaded.record)
+            return loaded.record
+        if self._root != verified.target_root_sha256:
+            raise ReviewInputError("unstarted cancellation root changed")
+        settled_state = settle_unstarted_accounting(
+            identity=identity,
+            state=self.accounting,
+            producer=producer,
+            witness=verified,
+        )
+        if self._terminal_reason is None:
+            self.begin_terminal("action-completion")
+
+        def prepare(record):
+            if record.record_sha256 != verified.target_root_sha256:
+                raise ReviewInputError("unstarted cancellation root changed")
+            self._state = settled_state
             return record.evolve(generation=record.generation + 1)
 
         confirmed = self._action_checkpoint(ledger, identity, prepare)
