@@ -299,6 +299,14 @@ def execute_reply(run: ReviewRun, args: Any) -> int:
         raise ReviewInputError("reply result is not a confirmed current outcome")
     outcome = _outcome(result, run)
     _configuration(run)
+    from .action_representability import require_action_settlement_representable
+
+    require_action_settlement_representable(
+        run,
+        outcome=outcome,
+        result_document=asdict(result),
+        action_name="reply",
+    )
     proof = caller.settle_action_effect(
         run.ledger,
         run.identity,

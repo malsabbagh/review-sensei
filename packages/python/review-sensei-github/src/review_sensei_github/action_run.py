@@ -315,11 +315,6 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             "command effect or required finalization remains unconfirmed: "
             + result.summary
         )
-    # Receipt publication is part of this same action and must be confirmed.
-    if result.receipts:
-        from .action_receipt import publish_command_receipt
-
-        publish_command_receipt(run, authority, args.comment_body, result)
     outcome = (
         {"kind": "applied", "reason": None}
         if result.applied
@@ -328,6 +323,20 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             "reason": "status" if command.action == "status" else "no_change",
         }
     )
+    from .action_representability import require_action_settlement_representable
+
+    require_action_settlement_representable(
+        run,
+        outcome=outcome,
+        result_document=asdict(result),
+        extra_work_requests=2 if result.receipts else 0,
+        action_name=command.action,
+    )
+    # Receipt publication is part of this same action and must be confirmed.
+    if result.receipts:
+        from .action_receipt import publish_command_receipt
+
+        publish_command_receipt(run, authority, args.comment_body, result)
     proof = caller.settle_action_effect(
         run.ledger,
         run.identity,

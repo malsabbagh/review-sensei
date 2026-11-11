@@ -181,6 +181,10 @@ def ensure_not_observation_only_evidence(candidate: object) -> None:
         raise ReviewInputError(
             "observation_only_not_authority: ancestry observation confers no recovery authority"
         )
+    if hasattr(candidate, "root_document") and hasattr(candidate, "result_document"):
+        raise ReviewInputError(
+            "observation_only_not_authority: archived action result observation confers no recovery authority"
+        )
     if isinstance(candidate, Mapping) and (
         candidate.get("schema_version") == "caller-action-result-v1"
         or candidate.get("accounting_version") == PARTITIONED_ACTION_ACCOUNTING_VERSION
