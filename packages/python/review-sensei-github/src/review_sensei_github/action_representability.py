@@ -175,7 +175,10 @@ def guard_current_command_representability(
         enable_disposition_snapshot_writes=bool(
             getattr(ledger, "enable_disposition_snapshot_writes", False)
         ),
-        evidence_budget=getattr(caller, "budget_view", None),
+        evidence_budget=(
+            getattr(ledger, "evidence_budget", None)
+            or getattr(caller, "budget_view", None)
+        ),
         accounting_version=str(caller.accounting.version),
         pricing=pricing,
         consumed_grants=consumed_grants,

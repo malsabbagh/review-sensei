@@ -995,6 +995,163 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                 base_acc, manifest={}, outcome={"kind": "applied", "reason": None}
             )
 
+    def test_preview_snapshot_staging_preserves_shared_budget_without_new_budget_init(
+        self,
+    ) -> None:
+        from review_sensei.disposition import FindingDisposition, FindingIdentity
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewTransaction
+
+        head_sha = "b" * 40
+        tx_id = ReviewTransaction.derive_id(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+            policy_digest="c" * 64,
+            configuration_digest="d" * 64,
+            evidence_digest="e" * 64,
+            reservation_id="2" * 64,
+        )
+        tx = ReviewTransaction(
+            transaction_id=tx_id,
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+            policy_digest="c" * 64,
+            configuration_digest="d" * 64,
+            evidence_digest="e" * 64,
+            generation=1,
+            reservation_id="2" * 64,
+            phase="publication_succeeded",
+            result_sha256="f" * 64,
+        )
+        prior_dispositions = tuple(
+            FindingDisposition(
+                fingerprint=f"{i:064x}",
+                action="accept-risk",
+                reason="ok",
+                actor="alice",
+                head_sha=head_sha,
+                actor_role="OWNER",
+                finding_reference=f"RS-{i:06X}",
+                recorded_at="2026-11-11T00:00:00Z",
+                policy_digest="c" * 64,
+                provenance=f"comment:{i + 1}",
+                target_kind="finding",
+            ).to_dict()
+            for i in range(20)
+        )
+        record = SessionRecord.create(IDENTITY).evolve(
+            completed_initial_reviews=1,
+            last_committed_reservation_id="2" * 64,
+            transaction=tx,
+            dispositions=prior_dispositions,
+        )
+        inventory = tuple(
+            FindingIdentity(
+                instance=f"{20 + j:06x}{'a' * 58}",
+                needs_human=True,
+            )
+            for j in range(5)
+        )
+        refs = tuple(f"RS-{20 + j:06X}" for j in range(5))
+        cmd = MaintainerCommand(
+            action="accept-risk",
+            actor="alice",
+            reason="acceptable risk",
+            head_sha=head_sha,
+            finding_references=refs,
+        )
+        shared_budget = EvidenceReadBudget()
+        binding = self._default_binding()
+        with patch.object(
+            EvidenceReadBudget,
+            "__init__",
+            side_effect=AssertionError("no replacement phase budget"),
+        ):
+            prev_res, prev_rec, rep = preview_session_command_representability(
+                identity=IDENTITY,
+                current_record=record,
+                command=cmd,
+                intent_sha256="1" * 64,
+                binding=binding,
+                finding_inventory=inventory,
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:999",
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=shared_budget,
+            )
+            assert prev_res is not None and prev_rec is not None
+            self.assertTrue(prev_res.applied)
+            self.assertIsNotNone(prev_rec.disposition_snapshot)
+            self.assertTrue(rep.representable)
+            self.assertEqual(shared_budget.calls, 0)
+
+            # Follow-up status/verify on an already-snapshotted record preserves snapshot root reserve:
+            _, _, verify_rep = preview_session_command_representability(
+                identity=IDENTITY,
+                current_record=prev_rec,
+                command=MaintainerCommand(
+                    action="verify", actor="alice", head_sha=head_sha
+                ),
+                intent_sha256="1" * 64,
+                binding=binding,
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=shared_budget,
+            )
+            self.assertTrue(verify_rep.representable)
+            self.assertGreater(verify_rep.future_reserve_bytes, 0)
+            self.assertEqual(shared_budget.calls, 0)
+
+            # Also cover >24 KiB partitioned in-memory staging + readback without budget calls:
+            from review_sensei.terminal_representability import _InMemoryPreviewLedger
+
+            preview_ledger = _InMemoryPreviewLedger(
+                record,
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=shared_budget,
+            )
+            large_doc = {
+                "schema_version": "1.0",
+                "dispositions": [
+                    {
+                        "fingerprint": f"{k:064x}",
+                        "reason": "r" * 480,
+                    }
+                    for k in range(60)
+                ],
+            }
+            part_binding = {
+                **binding,
+                "purpose": "dispositions",
+                "producer": "local-ledger",
+                "schema_version": "1.0",
+            }
+            staged_manifest = preview_ledger.stage_evidence(
+                IDENTITY,
+                binding=part_binding,
+                document=large_doc,
+                item_count=60,
+                max_manifest_bytes=8192,
+            )
+            self.assertEqual(staged_manifest["encoding"], "partitioned-json-v1")
+            roundtrip = preview_ledger.read_evidence(
+                IDENTITY,
+                staged_manifest,
+                expected_binding=part_binding,
+            )
+            self.assertEqual(roundtrip, large_doc)
+            self.assertEqual(shared_budget.calls, 0)
+            with self.assertRaises(ReviewInputError):
+                preview_ledger.read_evidence(
+                    IDENTITY,
+                    staged_manifest,
+                    expected_binding={**part_binding, "generation": 99},
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

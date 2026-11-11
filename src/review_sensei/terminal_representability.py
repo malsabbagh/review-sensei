@@ -29,12 +29,16 @@ from .api_work import (
     ApiRunAccounting,
 )
 from .bounded_evidence import (
+    INLINE_ENCODING,
     MAX_MANIFEST_BYTES,
     MAX_PARTITION_DECODED_BYTES,
     AuthenticatedPart,
     canonical_bytes,
     encode_evidence,
+    evidence_manifest,
     inline_manifest,
+    partition_evidence,
+    read_inline_evidence,
 )
 from .disposition import (
     FindingIdentity,
@@ -665,6 +669,8 @@ def evaluate_terminal_action_representability(
 class _InMemoryPreviewLedger:
     """Pure in-memory sandbox ledger that never constructs a budget or touches I/O."""
 
+    supports_paged_disposition_snapshot_writes = False
+
     def __init__(
         self,
         record: SessionRecord | None,
@@ -676,6 +682,7 @@ class _InMemoryPreviewLedger:
         self.enable_disposition_snapshot_writes = enable_disposition_snapshot_writes
         self.evidence_budget = evidence_budget
         self._parts: dict[str, tuple[object, str]] = {}
+        self._staged_documents: dict[str, tuple[dict[str, object], object]] = {}
 
     def evidence_producer(self) -> str:
         return "local-ledger"
@@ -693,6 +700,62 @@ class _InMemoryPreviewLedger:
             raise ReviewInputError("preview part is unavailable")
         doc, prod = self._parts[storage_id]
         return AuthenticatedPart(copy.deepcopy(doc), prod)
+
+    def stage_evidence(
+        self,
+        identity: SessionIdentity,
+        *,
+        binding: dict[str, object],
+        document: object,
+        item_count: int,
+        max_manifest_bytes: int,
+    ) -> dict[str, object]:
+        if (
+            not self.enable_disposition_snapshot_writes
+            or binding.get("purpose") != "dispositions"
+        ):
+            raise ReviewInputError(
+                "partition writers require explicit reader-first enablement"
+            )
+
+        parts = partition_evidence(document, binding=binding, item_count=item_count)
+        storage_ids = tuple(
+            self._write_part(
+                identity,
+                hashlib.sha256(canonical_bytes(part)).hexdigest(),
+                part,
+            )
+            for part in parts
+        )
+        manifest = evidence_manifest(
+            document,
+            binding=binding,
+            item_count=item_count,
+            parts=parts,
+            storage_ids=storage_ids,
+        )
+        if len(canonical_bytes(manifest)) > max_manifest_bytes:
+            raise ReviewInputError(
+                "partition manifest exceeds actual lifecycle allocation"
+            )
+        key = hashlib.sha256(canonical_bytes(manifest)).hexdigest()
+        self._staged_documents[key] = (dict(binding), copy.deepcopy(document))
+        return manifest
+
+    def read_evidence(
+        self,
+        identity: SessionIdentity,
+        manifest: dict[str, object],
+        *,
+        expected_binding: Mapping[str, object],
+    ) -> object:
+        if isinstance(manifest, dict) and manifest.get("encoding") == INLINE_ENCODING:
+            return read_inline_evidence(manifest, expected_binding=expected_binding)
+        key = hashlib.sha256(canonical_bytes(manifest)).hexdigest()
+        staged = self._staged_documents.get(key)
+        if staged is None or staged[0] != dict(expected_binding):
+            raise ReviewInputError("preview partition binding or manifest mismatch")
+        return copy.deepcopy(staged[1])
 
     def load(
         self, identity: SessionIdentity, *, now: datetime | None = None
@@ -860,10 +923,19 @@ def preview_session_command_representability(
                 ),
             )
 
-    sandbox_record = (
-        current_record.evolve(disposition_snapshot=None)
+    existing_snapshot_bytes = (
+        len(
+            canonical_bytes(
+                {"disposition_snapshot": current_record.disposition_snapshot}
+            )
+        )
         if current_record is not None
         and current_record.disposition_snapshot is not None
+        else 0
+    )
+    sandbox_record = (
+        current_record.evolve(disposition_snapshot=None)
+        if existing_snapshot_bytes > 0 and current_record is not None
         else current_record
     )
     sandbox_ledger = _InMemoryPreviewLedger(
@@ -954,6 +1026,13 @@ def preview_session_command_representability(
             "reason": "status" if command.action == "status" else "no_change",
         }
     )
+    effective_reserve = (
+        reserve + existing_snapshot_bytes
+        if existing_snapshot_bytes > 0
+        and preview_record is not None
+        and preview_record.disposition_snapshot is None
+        else reserve
+    )
     report = evaluate_terminal_action_representability(
         identity=identity,
         intent_sha256=intent_sha256,
@@ -963,7 +1042,7 @@ def preview_session_command_representability(
         current_record=preview_record,
         accounting_version=accounting_version,
         pricing=effective_pricing,
-        future_reserve_bytes=reserve,
+        future_reserve_bytes=effective_reserve,
         consumed_grants=consumed_grants,
         allow_v3_writer=v3_enabled,
         disposition_entry_count=entry_count,
