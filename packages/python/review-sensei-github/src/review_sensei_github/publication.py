@@ -88,6 +88,10 @@ from .approval import (
     restrict_result_qualification,
 )
 from .approval_progress import ApprovalProgress, build_approval_progress
+from .branch_lifecycle import (
+    evaluate_finalizer_pr_gate,
+    evaluate_live_pr_write_gate,
+)
 from .check_diagnostics import CHECK_FAILURE_CODES, CheckFailure, CheckOperationError
 from .checks import (
     REVIEW_POLICY_MODES,
@@ -3448,56 +3452,25 @@ class ReviewApprovalFinalizer:
         )
         if status == 404:
             raise GitHubPublicationError("review target was not found")
-        if status < 200 or status >= 300 or not isinstance(payload, dict):
+        if status < 200 or status >= 300:
             raise GitHubPublicationError("approval finalization preflight failed")
-        if type(payload.get("draft")) is not bool:
-            raise GitHubPublicationError(
-                "approval finalization preflight draft was invalid"
-            )
-        if payload.get("state") != "open" or payload.get("draft") is True:
+        decision = evaluate_finalizer_pr_gate(
+            payload,
+            repository=repository,
+            head_sha=head_sha,
+            app_slug=app_slug,
+        )
+        if not decision.admitted:
+            if decision.skip_status is None:
+                raise GitHubPublicationError("approval finalization preflight failed")
             return _FinalizationPreflight(
-                result=PublicationResult(status="skipped_pr_state")
+                result=PublicationResult(status=decision.skip_status)
             )
-        head = payload.get("head")
-        base = payload.get("base")
-        if not isinstance(head, dict) or not isinstance(base, dict):
-            raise GitHubPublicationError("approval finalization preflight was invalid")
-        if head.get("sha") != head_sha:
-            return _FinalizationPreflight(
-                result=PublicationResult(status="skipped_stale_head")
-            )
-        head_repo = head.get("repo")
-        base_repo = base.get("repo")
-        if not isinstance(head_repo, dict) or not isinstance(base_repo, dict):
-            raise GitHubPublicationError("approval finalization preflight was invalid")
-        if (
-            head_repo.get("fork") is not False
-            or base_repo.get("fork") is not False
-            or head_repo.get("full_name") != repository
-            or base_repo.get("full_name") != repository
-        ):
-            return _FinalizationPreflight(
-                result=PublicationResult(status="skipped_fork")
-            )
-        repository_id = base_repo.get("id")
-        base_sha = base.get("sha")
-        author = payload.get("user")
-        if (
-            isinstance(repository_id, bool)
-            or not isinstance(repository_id, int)
-            or repository_id < 1
-            or not isinstance(base_sha, str)
-            or not GIT_SHA_HEX.fullmatch(base_sha)
-            or not isinstance(author, dict)
-            or not isinstance(author.get("login"), str)
-            or not author["login"].strip()
-        ):
-            raise GitHubPublicationError("approval finalization preflight was invalid")
         return _FinalizationPreflight(
-            repository_id=repository_id,
-            base_sha=base_sha,
-            base_ref=base.get("ref"),
-            app_authored=author["login"] == app_slug,
+            repository_id=decision.repository_id,
+            base_sha=decision.base_sha,
+            base_ref=decision.base_ref,
+            app_authored=decision.app_authored,
         )
 
     def finding_index_from_reviews(
@@ -4610,6 +4583,7 @@ class ReviewPublisher:
         self._pending_thread_cleanup: Callable[[], str | None] | None = None
         self._confirmed_review_id: int | None = None
         self._confirmed_check: tuple[str, str, int] | None = None
+        self._persisted_index_has_blocking: bool = False
 
     def _native_group_host(self, *, result, assembled, store, capacity):
         from review_sensei.session import SessionIdentity
@@ -5211,6 +5185,7 @@ class ReviewPublisher:
         self._pending_thread_cleanup = None
         self._confirmed_review_id = None
         self._confirmed_check = None
+        self._persisted_index_has_blocking = False
         self._check_accounting_failure = None
         self._check_accounting_approval: PublicationResult | None = None
         self._check_accounting_review_id: int | None = None
@@ -5809,6 +5784,7 @@ class ReviewPublisher:
                     result_marker=marker,
                     app_slug=app_slug,
                     repository_id=repository_id if complete_inventory else None,
+                    lookup_repository_id=repository_id,
                     complete_review=complete_review,
                     base_sha=base_sha,
                     result_digest=review_result_digest(result),
@@ -5822,8 +5798,61 @@ class ReviewPublisher:
                     "confirmed publication complete native review is unavailable; "
                     "cleanup cannot recreate it"
                 )
+            # Determine whether this run supersedes a previously clean, complete
+            # review on ``head_sha`` (for example, a force-push revert carrying
+            # newer session baseline obligations). Inline blockers keep
+            # ``facts.has_blocking_findings=False`` because only body-placed
+            # blockers set that flag, so ``persisted_is_clean_complete`` also
+            # excludes ``CHANGES_REQUESTED``, persisted ``FindingIndex`` blockers,
+            # and same-digest replays of non-eligible results. When
+            # ``supersedes_prior_clean_review`` is True, reconciliation falls
+            # through both ``has_blocking_findings`` and non-blocking arms to
+            # ``write_preflight`` below so the superseding review is published.
+            current_result_digest = review_result_digest(result)
+            persisted_is_clean_complete = (
+                persisted_eligibility is not None
+                and persisted_eligibility.head_sha == head_sha
+                and not (
+                    persisted_eligibility.result_digest == current_result_digest
+                    and not _approval_eligible(result)
+                )
+                and "CHANGES_REQUESTED" not in identity_states
+                and not self._persisted_index_has_blocking
+                and persisted_eligibility.facts.review_status == "complete"
+                and persisted_eligibility.facts.coverage_blocker in {None, "reviewed"}
+                and evaluate_approval_facts(
+                    replace(
+                        persisted_eligibility.facts,
+                        enabled=True,
+                        app_authored=False,
+                        qualification="not-required",
+                        has_open_review_threads=bool(
+                            persisted_eligibility.facts.has_open_review_threads
+                        ),
+                    )
+                ).approved
+            )
+            prospective_has_non_clean_obligation = (
+                not approval_eligible
+                or has_blocking_findings(result)
+                or not evaluate_approval_facts(
+                    replace(
+                        prospective_eligibility.facts,
+                        enabled=True,
+                        app_authored=False,
+                        qualification="not-required",
+                        has_open_review_threads=bool(
+                            prospective_eligibility.facts.has_open_review_threads
+                        ),
+                    )
+                ).approved
+            )
+            supersedes_prior_clean_review = (
+                prospective_has_non_clean_obligation and persisted_is_clean_complete
+            )
             if (
                 result_states
+                and not supersedes_prior_clean_review
                 and complete_review is not None
                 and persisted_eligibility is not None
                 and self._confirmed_review_id is not None
@@ -5840,7 +5869,7 @@ class ReviewPublisher:
                     replacements=complete_review.inline_comments,
                     review_id=self._confirmed_review_id,
                 )
-                if persisted_eligibility.result_digest != review_result_digest(result):
+                if persisted_eligibility.result_digest != current_result_digest:
                     # A newer same-head result cannot lend this older report
                     # authority to mutate threads, even when its own index is valid.
                     self._pending_thread_cleanup = lambda: (
@@ -5852,6 +5881,7 @@ class ReviewPublisher:
                 and not result_states
                 and not explicit_reanalysis
                 and not has_blocking_findings(result)
+                and not supersedes_prior_clean_review
             ):
                 raise GitHubPublicationError(
                     "existing review does not prove complete publication of this result"
@@ -5903,7 +5933,7 @@ class ReviewPublisher:
                         persisted_eligibility=persisted_eligibility,
                     )
             elif has_blocking_findings(result):
-                if result_states:
+                if result_states and not supersedes_prior_clean_review:
                     if not preflight.app_authored:
                         return self._finalize_published_result(
                             token=token,
@@ -5922,7 +5952,7 @@ class ReviewPublisher:
                             persisted_eligibility=persisted_eligibility,
                         )
                     return PublicationResult(status="already_published")
-            else:
+            elif not supersedes_prior_clean_review:
                 if "APPROVED" in identity_states:
                     return PublicationResult(status="already_published")
                 if identity_states & {"COMMENTED", "CHANGES_REQUESTED"}:
@@ -7234,68 +7264,22 @@ class ReviewPublisher:
             raise GitHubPublicationError("review target was not found")
         if status < 200 or status >= 300:
             raise GitHubPublicationError("review preflight failed")
-        if not isinstance(payload, dict):
-            raise GitHubPublicationError("review preflight response was invalid")
-        if type(payload.get("draft")) is not bool:
-            raise GitHubPublicationError("review preflight draft was invalid")
-        if payload.get("state") != "open" or payload.get("draft") is True:
+        decision = evaluate_live_pr_write_gate(
+            payload,
+            repository=repository,
+            repository_id=repository_id,
+            head_sha=head_sha,
+            base_branch=base_branch,
+            base_sha=base_sha,
+            app_slug=app_slug,
+        )
+        if not decision.admitted:
+            if decision.skip_status is None:
+                raise GitHubPublicationError("review preflight failed")
             return _PreflightDecision(
-                result=PublicationResult(status="skipped_pr_state")
+                result=PublicationResult(status=decision.skip_status)
             )
-        head = payload.get("head")
-        if not isinstance(head, dict):
-            raise GitHubPublicationError("review preflight head was invalid")
-        if head.get("sha") != head_sha:
-            return _PreflightDecision(
-                result=PublicationResult(status="skipped_stale_head")
-            )
-        head_repository = head.get("repo")
-        if not isinstance(head_repository, dict):
-            raise GitHubPublicationError("review preflight head repository was invalid")
-        head_fork = head_repository.get("fork")
-        if not isinstance(head_fork, bool):
-            raise GitHubPublicationError("review preflight head repository was invalid")
-        if head_fork or head_repository.get("full_name") != repository:
-            return _PreflightDecision(result=PublicationResult(status="skipped_fork"))
-        base = payload.get("base")
-        if not isinstance(base, dict):
-            raise GitHubPublicationError("review preflight base was invalid")
-        repository_info = base.get("repo")
-        if not isinstance(repository_info, dict):
-            raise GitHubPublicationError("review preflight repository was invalid")
-        base_id = repository_info.get("id")
-        if isinstance(base_id, bool) or not isinstance(base_id, int) or base_id <= 0:
-            raise GitHubPublicationError("review preflight repository was invalid")
-        base_fork = repository_info.get("fork")
-        if not isinstance(base_fork, bool):
-            raise GitHubPublicationError("review preflight repository was invalid")
-        if base_id != repository_id:
-            return _PreflightDecision(
-                result=PublicationResult(status="skipped_repository_mismatch")
-            )
-        if repository_info.get("full_name") != repository:
-            return _PreflightDecision(
-                result=PublicationResult(status="skipped_repository_mismatch")
-            )
-        if base_fork:
-            return _PreflightDecision(result=PublicationResult(status="skipped_fork"))
-        actual_base_branch = base.get("ref")
-        actual_base_sha = base.get("sha")
-        if not isinstance(actual_base_branch, str) or not GIT_SHA_HEX.fullmatch(
-            actual_base_sha if isinstance(actual_base_sha, str) else ""
-        ):
-            raise GitHubPublicationError("review preflight base binding was invalid")
-        if actual_base_branch != base_branch or actual_base_sha != base_sha:
-            return _PreflightDecision(
-                result=PublicationResult(status="skipped_stale_base")
-            )
-        author = payload.get("user")
-        if not isinstance(author, dict):
-            raise GitHubPublicationError("review preflight author was invalid")
-        author_login = author.get("login")
-        if not isinstance(author_login, str) or not author_login.strip():
-            raise GitHubPublicationError("review preflight author was invalid")
-        return _PreflightDecision(app_authored=author_login == app_slug)
+        return _PreflightDecision(app_authored=decision.app_authored)
 
     def _published_state_index(
         self,
@@ -7308,11 +7292,13 @@ class ReviewPublisher:
         result_marker: str,
         app_slug: str,
         repository_id: int | None = None,
+        lookup_repository_id: int | None = None,
         complete_review: AssembledReview | None = None,
         base_sha: str | None = None,
         result_digest: str | None = None,
         native_host=None,
     ) -> tuple[frozenset[str], frozenset[str], ReviewApprovalEligibility | None]:
+        self._persisted_index_has_blocking = False
         if native_host is not None:
             reader = self.finalizer.quarantine_reader(
                 token=token,
@@ -7435,7 +7421,7 @@ class ReviewPublisher:
             # A complete-inventory replay must validate the retained inventory
             # before the already-published path updates checks or finalizes.
             try:
-                self.finalizer.finding_index_from_reviews(
+                persisted_index = self.finalizer.finding_index_from_reviews(
                     payload,
                     repository_id=repository_id,
                     pull_request=pull_request,
@@ -7449,6 +7435,26 @@ class ReviewPublisher:
                 ) from None
             except GitHubPublicationError as exc:
                 raise _NativeReplayAuthorityError(str(exc)) from exc
+            self._persisted_index_has_blocking = bool(
+                persisted_index is not None
+                and any(entry.blocking for entry in persisted_index.entries)
+            )
+        elif lookup_repository_id is not None and eligibility is not None:
+            try:
+                persisted_index = self.finalizer.finding_index_from_reviews(
+                    payload,
+                    repository_id=lookup_repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    eligibility=eligibility,
+                )
+            except (ReviewInputError, GitHubPublicationError):
+                persisted_index = None
+            self._persisted_index_has_blocking = bool(
+                persisted_index is not None
+                and any(entry.blocking for entry in persisted_index.entries)
+            )
         return frozenset(identity_states), frozenset(result_states), eligibility
 
     def _verify_complete_review(
