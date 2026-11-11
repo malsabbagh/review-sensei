@@ -603,7 +603,106 @@ class TitleFreshnessG19Tests(unittest.TestCase):
             provider.requests[-1].prompt,
         )
 
-        # Also prove full hosted `rescan` recovery on EntryFixture after PR title rename!
+        # Also prove real hosted `@reviewsensei review remaining` on EntryFixture:
+        # (a) unchanged title continues deferred chunks cleanly (exit 0, 2nd chunk reviewed),
+        # (b) mutated title refuses continuation before provider calls (exit 1, calls stay 1),
+        # (c) `@reviewsensei rescan` recovers cleanly under the renamed title!
+        for should_rename in (False, True):
+            with tempfile.TemporaryDirectory() as budget_dir:
+                b_hosted = EntryFixture(budget_dir, limit=1024)
+                b_hosted.provider_comments = []
+                (b_hosted.root / "review.patch").write_text(
+                    (b_hosted.root / "review.patch").read_text(encoding="utf-8")
+                    + "\ndiff --git a/src/second.py b/src/second.py\n"
+                    "--- /dev/null\n"
+                    "+++ b/src/second.py\n"
+                    "@@ -0,0 +1,2 @@\n"
+                    "+second = 1\n"
+                    "+second_next = 2\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                orig_engine_main = review_run.engine_main
+                max_calls_for_run = 1
+
+                def chunked_engine_main(argv_in: list[str], **kw: Any) -> int:
+                    return orig_engine_main(
+                        [*argv_in, "--orchestrate-large-changes"],
+                        **kw,
+                    )
+
+                def capped_budget(budget: ResourceBudget, _cfg: Any) -> ResourceBudget:
+                    return replace(budget, max_provider_calls=max_calls_for_run)
+
+                with (
+                    patch.object(
+                        review_run, "engine_main", side_effect=chunked_engine_main
+                    ),
+                    patch(
+                        "review_sensei.cli.DEFAULT_REVIEW_LIMITS",
+                        replace(ReviewLimits(), max_diff_files=1),
+                    ),
+                    patch(
+                        "review_sensei.cli._configured_resource_budget",
+                        side_effect=capped_budget,
+                    ),
+                ):
+                    self.assertEqual(b_hosted.invoke(), 0, b_hosted.error)
+                    self.assertEqual(b_hosted.provider_calls, 1)
+
+                    # Keep per-run ResourceBudget identical (`max_provider_calls=1`) so
+                    # continuation_scope_digest matches when the title is unchanged and
+                    # differs ONLY when the PR title is mutated!
+                    if should_rename:
+                        b_orig_ext = b_hosted.external
+
+                        def b_renamed_ext(req_obj: Any, timeout: Any) -> Any:
+                            resp = b_orig_ext(req_obj, timeout)
+                            if req_obj.full_url.endswith("/pulls/7"):
+                                raw = (
+                                    bytes(resp.body)
+                                    if hasattr(resp, "body")
+                                    else bytes(resp.read())
+                                )
+                                pull = dict(json.loads(raw.decode("utf-8")))
+                                pull["title"] = "Renamed title mid-budget-partial"
+                                return json_response(
+                                    pull, status=getattr(resp, "status", 200)
+                                )
+                            return resp
+
+                        b_hosted.external = b_renamed_ext  # type: ignore[method-assign]
+
+                    b_hosted.trace.clear()
+                    request(b_hosted, 14, "review remaining")
+                    rc_rem = b_hosted.invoke()
+                    if should_rename:
+                        self.assertEqual(rc_rem, 1)
+                        self.assertIn("operation entry refused", b_hosted.error)
+                        self.assertEqual(b_hosted.provider_calls, 1)
+                        # Because refusal occurred inside operation_entry after
+                        # `_operation_entry_started`, api_run_host fails closed by
+                        # leaving caller run 457 non-terminal (`_provider_effect_unresolved`).
+                        b_hosted.trace.clear()
+                        request(b_hosted, 15, "rescan")
+                        self.assertEqual(b_hosted.invoke(), 1)
+                        self.assertIn(
+                            "previous caller run is not terminal", b_hosted.error
+                        )
+                        self.assertEqual(b_hosted.provider_calls, 1)
+                    else:
+                        self.assertEqual(rc_rem, 0, b_hosted.error)
+                        self.assertEqual(b_hosted.provider_calls, 2)
+
+        with tempfile.TemporaryDirectory() as rem_dir:
+            rem_hosted, _ = partial_fixture(rem_dir)
+            calls_before_remaining = rem_hosted.provider_calls
+            rem_hosted.provider_comments = []
+            request(rem_hosted, 14, "review remaining")
+            self.assertEqual(rem_hosted.invoke(), 1)
+            self.assertIn("no reusable partial scope", rem_hosted.error)
+            self.assertEqual(rem_hosted.provider_calls, calls_before_remaining)
+
         with tempfile.TemporaryDirectory() as directory:
             hosted, _source = partial_fixture(directory)
             prior_record = parse_session_comment(
@@ -644,6 +743,166 @@ class TitleFreshnessG19Tests(unittest.TestCase):
                 hosted.selected.title, "Renamed PR title for hosted rescan"
             )
             self.assertEqual(len(settled.dispositions), 20)
+
+    def test_multibyte_entry_points_command_reply_and_core_cli_freshness(
+        self,
+    ) -> None:
+        """Exercise real multibyte UTF-8 title binding and mid-run edits across hosted review, command, reply, and core CLI."""
+        from test_action_reply_entry import ReplyEntryFixture
+        from test_action_run import CommandEntryFixture
+
+        from review_sensei import cli as core_cli
+
+        # 1. Multibyte UTF-8 title at exact 256-byte bootstrap ceiling edited mid-inference on hosted review-run:
+        multibyte_256 = ("漢" * 84) + "🧪"  # 252 + 4 = 256 UTF-8 bytes
+        self.assertEqual(len(multibyte_256.encode("utf-8")), 256)
+        with tempfile.TemporaryDirectory() as directory:
+            f_mb = _TitledEntryFixture(directory, live_title=multibyte_256)
+
+            def edit_mb_during_inference() -> None:
+                f_mb.live_title = "Édité après admission 🧪"
+
+            f_mb.before_provider = edit_mb_during_inference
+            self.assertEqual(f_mb.invoke_with_optional_title(), 0, f_mb.error)
+            self.assertEqual(f_mb.selected.title, multibyte_256)
+            self.assertIn(multibyte_256, f_mb.captured_prompts[0])
+            self.assertNotIn("Édité après admission 🧪", f_mb.captured_prompts[0])
+
+        # 2. Hosted command-run binds live multibyte title at bootstrap and preserves session across title edits:
+        with tempfile.TemporaryDirectory() as cmd_dir:
+            cmd_f = CommandEntryFixture(cmd_dir)
+            base_ext = cmd_f.external
+            live_cmd_title = ("é" * 126) + "🧪"  # 252 + 4 = 256 UTF-8 bytes
+
+            def cmd_ext(req_obj: Any, timeout: Any) -> Any:
+                resp = base_ext(req_obj, timeout)
+                if req_obj.full_url.endswith("/pulls/7"):
+                    raw = (
+                        bytes(resp.body)
+                        if hasattr(resp, "body")
+                        else bytes(resp.read())
+                    )
+                    pull = dict(json.loads(raw.decode("utf-8")))
+                    pull["title"] = live_cmd_title
+                    return json_response(pull, status=getattr(resp, "status", 200))
+                return resp
+
+            cmd_f.external = cmd_ext  # type: ignore[method-assign]
+            self.assertEqual(cmd_f.invoke(), 0, cmd_f.error)
+            cmd_f.select_command("@reviewsensei review pause", new_run=True)
+            live_cmd_title = "Post-review renamed command title 🧪"
+            self.assertEqual(cmd_f.invoke_command(), 0, cmd_f.error)
+            cmd_rec = parse_session_comment(cmd_f.comment["body"], identity=IDENTITY)
+            assert cmd_rec is not None and cmd_rec.api_run_accounting is not None
+            self.assertTrue(cmd_rec.operator_paused)
+            self.assertEqual(cmd_rec.api_run_accounting["action"]["phase"], "terminal")
+
+        # 3. Hosted reply-run mid-run title edit between bootstrap (<=256B) and conversation fetch (2048B cap):
+        with tempfile.TemporaryDirectory() as rep_dir:
+            rep_f = ReplyEntryFixture(rep_dir)
+            rep_base_ext = rep_f.external
+            pull_fetches = 0
+            post_bootstrap_title = "Mid-reply updated title 漢字 🧪"
+
+            def rep_ext(req_obj: Any, timeout: Any) -> Any:
+                nonlocal pull_fetches
+                resp = rep_base_ext(req_obj, timeout)
+                if req_obj.full_url.endswith("/pulls/7"):
+                    pull_fetches += 1
+                    raw = (
+                        bytes(resp.body)
+                        if hasattr(resp, "body")
+                        else bytes(resp.read())
+                    )
+                    pull = dict(json.loads(raw.decode("utf-8")))
+                    pull["title"] = (
+                        "Admitted reply title <=256B"
+                        if pull_fetches == 1
+                        else post_bootstrap_title
+                    )
+                    return json_response(pull, status=getattr(resp, "status", 200))
+                return resp
+
+            rep_f.external = rep_ext  # type: ignore[method-assign]
+            self.assertEqual(rep_f.invoke_reply(), 0, rep_f.error)
+            self.assertGreaterEqual(pull_fetches, 2)
+            self.assertEqual(rep_f.reply_posts, 1)
+            self.assertIn(post_bootstrap_title, rep_f.provider_requests[0].prompt)
+
+            # Mid-run edit exceeding ConversationPublisher 2048-byte cap refuses without silent truncation:
+            with tempfile.TemporaryDirectory() as rep_over_dir:
+                rep_over = ReplyEntryFixture(rep_over_dir)
+                over_base_ext = rep_over.external
+                over_fetches = 0
+
+                def over_ext(req_obj: Any, timeout: Any) -> Any:
+                    nonlocal over_fetches
+                    resp = over_base_ext(req_obj, timeout)
+                    if req_obj.full_url.endswith("/pulls/7"):
+                        over_fetches += 1
+                        raw = (
+                            bytes(resp.body)
+                            if hasattr(resp, "body")
+                            else bytes(resp.read())
+                        )
+                        pull = dict(json.loads(raw.decode("utf-8")))
+                        pull["title"] = (
+                            "Admitted reply title <=256B"
+                            if over_fetches == 1
+                            else ("é" * 1025)  # 2050 UTF-8 bytes > 2048B cap
+                        )
+                        return json_response(pull, status=getattr(resp, "status", 200))
+                    return resp
+
+                rep_over.external = over_ext  # type: ignore[method-assign]
+                self.assertEqual(rep_over.invoke_reply(), 0, rep_over.error)
+                self.assertEqual(len(rep_over.provider_requests), 1)
+                self.assertEqual(rep_over.reply_posts, 1)
+                # Post-bootstrap mid-run overflow is explicitly marked `[truncated]`, never silent:
+                self.assertIn("[truncated]", rep_over.provider_requests[0].prompt)
+                self.assertNotIn("é" * 1025, rep_over.provider_requests[0].prompt)
+
+        # 4. Direct core CLI (`review_sensei.cli.main`) binds exact multibyte `--title` without truncation:
+        with tempfile.TemporaryDirectory() as cli_dir:
+            diff_path = Path(cli_dir) / "change.patch"
+            diff_path.write_text(
+                "diff --git a/src/app.py b/src/app.py\n"
+                "--- a/src/app.py\n"
+                "+++ b/src/app.py\n"
+                "@@ -1 +1,2 @@\n"
+                " x = 1\n"
+                "+y = 2\n",
+                encoding="utf-8",
+            )
+            cli_provider = _RecordingProvider()
+            exact_cli_title = ("🧪" * 1023) + "é" + "a"  # 4092 + 2 + 1 = 4095B
+            with (
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=tx.HostedAnalysisCliTests._Registry(cli_provider),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                rc = core_cli.main(
+                    [
+                        "--diff",
+                        str(diff_path),
+                        "--repository",
+                        "owner/repo",
+                        "--pull-request",
+                        "7",
+                        "--base-sha",
+                        BASE,
+                        "--head-sha",
+                        HEAD,
+                        "--no-learning-proposals",
+                        f"--title={exact_cli_title}",
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(cli_provider.requests), 1)
+            self.assertIn(exact_cli_title, cli_provider.requests[0].prompt)
 
     def test_title_freshness_validation_guards_fail_closed(self) -> None:
         observed_phases: set[str] = set()

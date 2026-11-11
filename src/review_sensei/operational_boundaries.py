@@ -19,10 +19,11 @@ from .diff import DiffAnalysis, DiffFileRecord, DiffHunk
 from .disposition import incomplete_coverage_from_result
 from .document_context import DocumentSelectionReport
 from .errors import ReviewInputError
-from .models import ReviewRequest, ReviewResult
+from .models import ConversationContext, ReviewRequest, ReviewResult
 from .planning import LargeChangePlan, ReviewWorkPlan
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
+    ReviewLimits,
     utf8_size,
     validate_bounded_text,
     validate_repository_path,
@@ -1137,6 +1138,8 @@ def verify_published_title_attribution(
 
 HOSTED_BOOTSTRAP_MAX_TITLE_BYTES = 256
 DIRECT_CORE_MAX_TITLE_BYTES = DEFAULT_REVIEW_LIMITS.max_title_bytes
+CONVERSATION_CONTEXT_MAX_TITLE_BYTES = DEFAULT_REVIEW_LIMITS.max_title_bytes
+CONVERSATION_PUBLISHER_TITLE_CAP_BYTES = 2048
 TITLE_ENTRY_SURFACES = frozenset(
     {
         "routing_preflight",
@@ -1145,6 +1148,107 @@ TITLE_ENTRY_SURFACES = frozenset(
     }
 )
 HOSTED_ENTRY_PURPOSES = frozenset({"review", "command", "reply"})
+
+
+@dataclass(frozen=True)
+class TitleConstantContract:
+    """Verified source-level UTF-8 byte bound for one ReviewSensei title surface."""
+
+    surface_id: str
+    limit_bytes: int | None
+    enforces_utf8_bytes: bool
+    truncates_silently: bool
+    source_symbol: str
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.surface_id, 128, label="surface_id", allow_empty=False
+        )
+        if self.limit_bytes is not None:
+            _positive_int(self.limit_bytes, label="limit_bytes")
+        if not isinstance(self.enforces_utf8_bytes, bool) or not isinstance(
+            self.truncates_silently, bool
+        ):
+            raise ReviewInputError("title constant contract flags must be booleans")
+        if self.truncates_silently:
+            raise ReviewInputError("silent title truncation is forbidden")
+        if (self.limit_bytes is not None) != self.enforces_utf8_bytes:
+            raise ReviewInputError(
+                "limit_bytes presence must match enforces_utf8_bytes"
+            )
+        validate_bounded_text(
+            self.source_symbol, 256, label="source_symbol", allow_empty=False
+        )
+
+
+def inspect_title_constant_contracts() -> tuple[TitleConstantContract, ...]:
+    """Verify actual title byte-limit constants across core and hosted surfaces."""
+
+    live_core_limit = ReviewLimits().max_title_bytes
+    if (
+        live_core_limit != 4096
+        or DEFAULT_REVIEW_LIMITS.max_title_bytes != 4096
+        or DIRECT_CORE_MAX_TITLE_BYTES != 4096
+        or CONVERSATION_CONTEXT_MAX_TITLE_BYTES != 4096
+    ):
+        raise ReviewInputError("core title byte-limit constants drifted from 4096B")
+    if HOSTED_BOOTSTRAP_MAX_TITLE_BYTES != 256:
+        raise ReviewInputError(
+            "hosted bootstrap title byte-limit constant drifted from 256B"
+        )
+    if CONVERSATION_PUBLISHER_TITLE_CAP_BYTES != 2048:
+        raise ReviewInputError(
+            "conversation publisher title cap constant drifted from 2048B"
+        )
+    # Probe ConversationContext runtime enforcement at 4096 vs 4097 UTF-8 bytes.
+    ConversationContext(pull_request_title="a" * CONVERSATION_CONTEXT_MAX_TITLE_BYTES)
+    try:
+        ConversationContext(
+            pull_request_title="a" * (CONVERSATION_CONTEXT_MAX_TITLE_BYTES + 1)
+        )
+    except ReviewInputError:
+        pass
+    else:  # pragma: no cover - defensive runtime invariant
+        raise ReviewInputError(
+            "ConversationContext failed to enforce 4096-byte UTF-8 title bound"
+        )
+    return (
+        TitleConstantContract(
+            surface_id="routing_preflight",
+            limit_bytes=None,
+            enforces_utf8_bytes=False,
+            truncates_silently=False,
+            source_symbol=".github/workflows/review-sensei-run.yml:preflight",
+        ),
+        TitleConstantContract(
+            surface_id="hosted_bootstrap_review_command_reply",
+            limit_bytes=HOSTED_BOOTSTRAP_MAX_TITLE_BYTES,
+            enforces_utf8_bytes=True,
+            truncates_silently=False,
+            source_symbol="review_sensei_github.review_run.bootstrap:256",
+        ),
+        TitleConstantContract(
+            surface_id="hosted_conversation_publisher",
+            limit_bytes=CONVERSATION_PUBLISHER_TITLE_CAP_BYTES,
+            enforces_utf8_bytes=True,
+            truncates_silently=False,
+            source_symbol="review_sensei_github.conversation.MAX_CONTEXT_PR_TITLE_BYTES:2048",
+        ),
+        TitleConstantContract(
+            surface_id="direct_core_review_request_and_cli",
+            limit_bytes=DIRECT_CORE_MAX_TITLE_BYTES,
+            enforces_utf8_bytes=True,
+            truncates_silently=False,
+            source_symbol="review_sensei.validation.ReviewLimits.max_title_bytes:4096",
+        ),
+        TitleConstantContract(
+            surface_id="direct_core_conversation_context",
+            limit_bytes=CONVERSATION_CONTEXT_MAX_TITLE_BYTES,
+            enforces_utf8_bytes=True,
+            truncates_silently=False,
+            source_symbol="review_sensei.models.ConversationContext.pull_request_title:4096",
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -1980,6 +2084,8 @@ def classify_quota_throttle_recovery(
 
 
 __all__ = [
+    "CONVERSATION_CONTEXT_MAX_TITLE_BYTES",
+    "CONVERSATION_PUBLISHER_TITLE_CAP_BYTES",
     "DEFERRED_FITTING_UNIT_KINDS",
     "DIRECT_CORE_MAX_TITLE_BYTES",
     "HOSTED_BOOTSTRAP_MAX_TITLE_BYTES",
@@ -2002,6 +2108,7 @@ __all__ = [
     "QuotaThrottleRecoveryPlan",
     "TitleAttributionRecord",
     "TitleByteLimitEvaluation",
+    "TitleConstantContract",
     "TitleFreshnessDecision",
     "classify_change_coverage",
     "classify_mandatory_prompt_overflow",
@@ -2010,6 +2117,7 @@ __all__ = [
     "classify_work_plan_unprocessed",
     "evaluate_title_byte_limit",
     "evaluate_title_freshness",
+    "inspect_title_constant_contracts",
     "plan_cross_pr_concurrency",
     "verify_published_title_attribution",
 ]
