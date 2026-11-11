@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from .active_finding_window import (
@@ -45,6 +45,7 @@ from .active_finding_window import (
 )
 from .baseline import (
     BaselineFinding,
+    ReviewBaseline,
     resolution_criterion_digest,
 )
 from .bounded_evidence import canonical_bytes
@@ -52,7 +53,7 @@ from .context import comment_defect_kind, finding_lifecycle_for_comment
 from .convergence import ReviewConvergencePolicy
 from .errors import ReviewInputError
 from .human_assessment import finding_instance_fingerprint
-from .models import ReviewComment, ReviewResult
+from .models import FindingLifecycleRecord, ReviewComment, ReviewResult
 from .placement import (
     ANCHOR_LOCATIONS,
     BODY_PLACEMENT,
@@ -69,6 +70,8 @@ _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _COMMIT_SHA_RE = re.compile(r"^[a-f0-9]{40,64}$")
 _COPY_FROM_RE = re.compile(r"^copy from (.+)$", re.MULTILINE)
 _COPY_TO_RE = re.compile(r"^copy to (.+)$", re.MULTILINE)
+_RENAME_FROM_RE = re.compile(r"^rename from (.+)$", re.MULTILINE)
+_RENAME_TO_RE = re.compile(r"^rename to (.+)$", re.MULTILINE)
 _MARKDOWN_ESCAPE_RE = re.compile(r"([\\`*\[\]|<>~\r\n])")
 _MAX_SUMMARY_BODY_BYTES = 65_536
 
@@ -192,36 +195,45 @@ def extract_drift_descriptors_from_diff(diff: str) -> tuple[FileDriftDescriptor,
     analysis = analyze_diff(diff)
     descriptors: list[FileDriftDescriptor] = []
 
-    renamed_pairs = set(analysis.renamed_paths)
-    for old_path, new_path in analysis.renamed_paths:
-        descriptors.append(
-            FileDriftDescriptor(
-                drift_kind="file_rename",
-                source_path=old_path,
-                target_paths=(new_path,),
-            )
-        )
-
     # Detect Git copy headers if present in raw diff blocks, deduplicating
-    # against pairs already classified as renames or duplicate chunks.
+    # against pairs explicitly marked with rename headers or duplicate chunks.
+    explicit_renames: set[tuple[str, str]] = set()
     seen_copies: set[tuple[str, str]] = set()
+    copy_descriptors: list[FileDriftDescriptor] = []
     for chunk in diff.split("diff --git "):
         if not chunk.strip():
+            continue
+        ren_from = _RENAME_FROM_RE.search(chunk)
+        ren_to = _RENAME_TO_RE.search(chunk)
+        if ren_from is not None and ren_to is not None:
+            explicit_renames.add((ren_from.group(1).strip(), ren_to.group(1).strip()))
             continue
         copy_from = _COPY_FROM_RE.search(chunk)
         copy_to = _COPY_TO_RE.search(chunk)
         if copy_from is not None and copy_to is not None:
             src = copy_from.group(1).strip()
             dst = copy_to.group(1).strip()
-            if (src, dst) not in renamed_pairs and (src, dst) not in seen_copies:
+            if (src, dst) not in explicit_renames and (src, dst) not in seen_copies:
                 seen_copies.add((src, dst))
-                descriptors.append(
+                copy_descriptors.append(
                     FileDriftDescriptor(
                         drift_kind="file_copy",
                         source_path=src,
                         target_paths=(dst,),
                     )
                 )
+
+    renamed_pairs = set(analysis.renamed_paths)
+    for old_path, new_path in analysis.renamed_paths:
+        if (old_path, new_path) not in seen_copies:
+            descriptors.append(
+                FileDriftDescriptor(
+                    drift_kind="file_rename",
+                    source_path=old_path,
+                    target_paths=(new_path,),
+                )
+            )
+    descriptors.extend(copy_descriptors)
 
     for record in analysis.file_records:
         if (
@@ -769,6 +781,26 @@ class DriftEvaluationResult:
         }
         assert_no_deferred_leakage(payload)
         return payload
+
+    def to_baseline(
+        self, *, baseline_template: ReviewBaseline, generation: int | None = None
+    ) -> ReviewBaseline:
+        """Project unresolved drift obligations onto ``ReviewBaseline`` preserving original criteria."""
+
+        gen = baseline_template.generation if generation is None else generation
+        findings = tuple(
+            item.to_baseline_finding() for item in self.inventory.unresolved_obligations
+        )
+        return replace(
+            baseline_template,
+            complete=self.changed_file_coverage.fully_reviewed
+            and self.review_complete
+            and not self.inventory.has_omitted_uncertainty
+            and not self.inventory.has_ambiguous_drift,
+            coverage_complete=self.changed_file_coverage.fully_reviewed,
+            findings=findings,
+            generation=gen,
+        )
 
 
 def _expected_paths_for_prior(
@@ -2099,6 +2131,541 @@ class SyntheticNativeDriftPublisher:
         return committed, receipt
 
 
+def _recompute_drift_verdict(
+    *,
+    coverage_state: ChangedFileCoverageState,
+    review_complete: bool,
+    inventory: DriftInventory,
+    active_entries: tuple[DriftActiveEntry, ...],
+    slots: tuple[PublishedSlot, ...],
+) -> tuple[bool, tuple[str, ...], tuple[ActiveWindowRecoveryStep, ...]]:
+    reasons: list[str] = []
+    steps: list[ActiveWindowRecoveryStep] = []
+
+    def add_step(route: str, code: str, scope: str) -> None:
+        mapped_code = (
+            "ambiguous-finding-identity" if code == "ambiguous-drift-target" else code
+        )
+        step = ActiveWindowRecoveryStep(
+            route=route, reason_code=mapped_code, target_scope=scope
+        )
+        if step not in steps:
+            steps.append(step)
+
+    if not coverage_state.coverage_satisfied:
+        if coverage_state.approval_state == "partial":
+            reasons.append("coverage-partial")
+            add_step("rescan", "coverage-partial", "pull-request")
+            add_step("accept-coverage-uncertainty", "coverage-partial", "pull-request")
+        else:
+            reasons.append("coverage-incomplete")
+            add_step("rescan", "coverage-incomplete", "pull-request")
+
+    if not review_complete and not coverage_state.coverage_uncertainty_accepted:
+        reasons.append("review-incomplete")
+        add_step("verify", "review-incomplete", "pull-request")
+        add_step("rescan", "review-incomplete", "pull-request")
+
+    if any(s.state == "uncertain" for s in slots):
+        reasons.append("uncertain-native-slot")
+        add_step("verify", "uncertain-native-slot", "pull-request")
+
+    if inventory.has_ambiguous_drift:
+        reasons.append("ambiguous-drift-target")
+        add_step("override", "ambiguous-drift-target", "active-window")
+        add_step("accept-risk", "ambiguous-drift-target", "active-window")
+        add_step("rescan", "ambiguous-drift-target", "pull-request")
+
+    if inventory.has_omitted_uncertainty:
+        reasons.append("uncertain-finding-lifecycle")
+        add_step("verify", "uncertain-finding-lifecycle", "pull-request")
+        add_step("override", "uncertain-finding-lifecycle", "active-window")
+        add_step("rescan", "uncertain-finding-lifecycle", "pull-request")
+
+    if inventory.blocking_obligations:
+        reasons.append("unresolved-obligations")
+        scope = "active-window" if active_entries else "pull-request"
+        add_step("verify", "unresolved-obligations", scope)
+        add_step("override", "unresolved-obligations", scope)
+        add_step("accept-risk", "unresolved-obligations", scope)
+
+    return not reasons, tuple(reasons), tuple(steps)
+
+
+def drift_baseline_from_evaluation(
+    evaluation: DriftEvaluationResult,
+    *,
+    baseline_template: ReviewBaseline,
+) -> ReviewBaseline:
+    """Build a ``ReviewBaseline`` preserving ``OriginalFindingCriterion`` across drift."""
+
+    if not isinstance(evaluation, DriftEvaluationResult):
+        raise ReviewInputError(
+            "drift_baseline_from_evaluation requires a DriftEvaluationResult"
+        )
+    if not isinstance(baseline_template, ReviewBaseline):
+        raise ReviewInputError(
+            "drift_baseline_from_evaluation requires a ReviewBaseline template"
+        )
+    return evaluation.to_baseline(
+        baseline_template=baseline_template, generation=evaluation.round_number - 1
+    )
+
+
+def project_drift_review_result(
+    result: ReviewResult,
+    evaluation: DriftEvaluationResult,
+) -> ReviewResult:
+    """Project a ``ReviewResult`` onto ``DriftEvaluationResult.active_entries``.
+
+    Uniquely renamed/moved inline anchors emit a single comment at ``present_path``
+    / ``present_line``; deleted, whole-file-rewritten, outdated, or multi-target
+    ambiguous findings fall back to body/file placement (``side="FILE", line=None``)
+    so their blocking/human authority is preserved without minting duplicates.
+    """
+
+    if not isinstance(result, ReviewResult):
+        raise ReviewInputError("project_drift_review_result requires a ReviewResult")
+    if not isinstance(evaluation, DriftEvaluationResult):
+        raise ReviewInputError(
+            "project_drift_review_result requires a DriftEvaluationResult"
+        )
+    assert_no_deferred_leakage(evaluation.to_public_status())
+    obligations_by_id = {
+        item.obligation_id: item for item in evaluation.inventory.obligations
+    }
+    display_comments: list[ReviewComment] = []
+    display_lifecycles: list[FindingLifecycleRecord] = []
+    seen_fingerprints: set[str] = set()
+    current_gen = max(0, evaluation.round_number - 1)
+
+    for entry in evaluation.active_entries:
+        ob = obligations_by_id.get(entry.obligation_id)
+        if ob is None:
+            continue
+        base = ob.synthetic_comment_for_placement()
+        anchor_path = (
+            entry.present_path
+            or ob.present_anchor.path
+            or ob.criterion.origin_path
+            or base.path
+            or "UNANCHORED"
+        )
+        if (
+            entry.placement == INLINE_PLACEMENT
+            and entry.present_path is not None
+            and entry.present_line is not None
+            and entry.present_side in {"LEFT", "RIGHT"}
+        ):
+            projected = replace(
+                base,
+                path=entry.present_path,
+                line=entry.present_line,
+                side=entry.present_side,
+                symbol=ob.present_anchor.symbol or ob.criterion.origin_symbol,
+                blocking=ob.criterion.blocking,
+                needs_human=ob.criterion.needs_human
+                or ob.lifecycle_state == "ambiguous-multi-target",
+                effective_blocking=ob.blocks_approval_now,
+            )
+        else:
+            body_text = base.body
+            if ob.lifecycle_state == "ambiguous-multi-target":
+                cands = ", ".join(ob.present_anchor.candidate_paths) or anchor_path
+                suffix = f" [Drift hold ({ob.present_anchor.drift_kind}): candidate paths: {cands}]"
+                if suffix not in body_text:
+                    body_text = f"{body_text}{suffix}"
+            elif ob.present_anchor.drift_kind != "unchanged":
+                origin_loc = ob.criterion.origin_path or anchor_path
+                suffix = (
+                    f" [Origin: {origin_loc}; drift: {ob.present_anchor.drift_kind}]"
+                )
+                if suffix not in body_text:
+                    body_text = f"{body_text}{suffix}"
+            projected = replace(
+                base,
+                path=anchor_path,
+                line=None,
+                side="FILE",
+                body=body_text,
+                symbol=ob.present_anchor.symbol or ob.criterion.origin_symbol,
+                blocking=ob.criterion.blocking
+                or ob.lifecycle_state
+                in {"omitted-uncertain", "ambiguous-multi-target"},
+                needs_human=ob.criterion.needs_human
+                or ob.lifecycle_state == "ambiguous-multi-target",
+                effective_blocking=ob.blocks_approval_now,
+            )
+        display_comments.append(projected)
+        fp = finding_lifecycle_for_comment(
+            projected, generation=ob.generation
+        ).fingerprint
+        if fp not in seen_fingerprints:
+            seen_fingerprints.add(fp)
+            lc_state = (
+                "uncertain"
+                if ob.lifecycle_state in {"omitted-uncertain", "ambiguous-multi-target"}
+                else ("still-present" if ob.generation < current_gen else "new")
+            )
+            display_lifecycles.append(
+                FindingLifecycleRecord(fingerprint=fp, state=lc_state)
+            )
+
+    comments_tuple = tuple(display_comments)
+    lifecycles_tuple = tuple(display_lifecycles)
+    if (
+        comments_tuple == result.comments
+        and lifecycles_tuple == result.finding_lifecycles
+    ):
+        return result
+    return replace(
+        result,
+        comments=comments_tuple,
+        finding_lifecycles=lifecycles_tuple,
+        transaction=None,
+    )
+
+
+def commit_drift_publication(
+    evaluation: DriftEvaluationResult,
+    *,
+    created_threads: Mapping[str, tuple[str, int]] | None = None,
+    uncertain_threads: Mapping[str, tuple[str, int, str]] | None = None,
+) -> DriftEvaluationResult:
+    """Record confirmed or uncertain native GitHub thread bindings after publication."""
+
+    if not isinstance(evaluation, DriftEvaluationResult):
+        raise ReviewInputError(
+            "commit_drift_publication requires a DriftEvaluationResult"
+        )
+    created_map = dict(created_threads or {})
+    uncertain_map = dict(uncertain_threads or {})
+    entries_by_oid = {e.obligation_id: e for e in evaluation.active_entries}
+    updated_obligations: list[DriftTrackedObligation] = []
+    updated_entries: list[DriftActiveEntry] = []
+
+    for item in evaluation.inventory.obligations:
+        entry = entries_by_oid.get(item.obligation_id)
+        if item.obligation_id in uncertain_map:
+            tid, cid, proof = uncertain_map[item.obligation_id]
+            placement = entry.placement if entry is not None else INLINE_PLACEMENT
+            reason = entry.body_reason if entry is not None else None
+            binding = NativeThreadBinding(
+                thread_id=tid,
+                comment_id=cid,
+                placement=placement,
+                body_reason=reason,
+                slot_state="uncertain",
+                proof_sha256=proof,
+            )
+            updated_obligations.append(replace(item, thread_binding=binding))
+            continue
+        if item.obligation_id in created_map:
+            tid, cid = created_map[item.obligation_id]
+            placement = entry.placement if entry is not None else INLINE_PLACEMENT
+            reason = entry.body_reason if entry is not None else None
+            proof = hashlib.sha256(
+                canonical_bytes(
+                    {
+                        "thread_id": tid,
+                        "comment_id": cid,
+                        "head_sha": evaluation.head_sha,
+                        "obligation_id": item.obligation_id,
+                    }
+                )
+            ).hexdigest()
+            binding = NativeThreadBinding(
+                thread_id=tid,
+                comment_id=cid,
+                placement=placement,
+                body_reason=reason,
+                slot_state="active",
+                proof_sha256=proof,
+            )
+            updated_obligations.append(replace(item, thread_binding=binding))
+            continue
+        if entry is not None and item.thread_binding is not None:
+            proof = hashlib.sha256(
+                canonical_bytes(
+                    {
+                        "thread_id": item.thread_binding.thread_id,
+                        "head_sha": evaluation.head_sha,
+                        "obligation_id": item.obligation_id,
+                        "placement": entry.placement,
+                    }
+                )
+            ).hexdigest()
+            binding = replace(
+                item.thread_binding,
+                placement=entry.placement,
+                body_reason=entry.body_reason,
+                slot_state="active",
+                proof_sha256=proof,
+                host_marked_resolved=False,
+            )
+            updated_obligations.append(replace(item, thread_binding=binding))
+            continue
+        updated_obligations.append(item)
+
+    new_inventory = DriftInventory(obligations=tuple(updated_obligations))
+    by_oid = {o.obligation_id: o for o in new_inventory.obligations}
+    for entry in evaluation.active_entries:
+        ob = by_oid[entry.obligation_id]
+        bound_tid: str | None = (
+            ob.thread_binding.thread_id if ob.thread_binding is not None else None
+        )
+        action = (
+            "update"
+            if (
+                bound_tid is not None
+                and ob.thread_binding is not None
+                and ob.thread_binding.slot_state == "active"
+            )
+            else entry.thread_action
+        )
+        updated_entries.append(
+            replace(entry, thread_id=bound_tid, thread_action=action)
+        )
+
+    slots = tuple(
+        o.thread_binding.to_slot()
+        for o in new_inventory.obligations
+        if o.thread_binding is not None
+    )
+    entries_tuple = tuple(updated_entries)
+    approved, reasons, steps = _recompute_drift_verdict(
+        coverage_state=evaluation.changed_file_coverage,
+        review_complete=evaluation.review_complete,
+        inventory=new_inventory,
+        active_entries=entries_tuple,
+        slots=slots,
+    )
+    return replace(
+        evaluation,
+        inventory=new_inventory,
+        active_entries=entries_tuple,
+        slots=slots,
+        approved=approved,
+        withheld_reasons=reasons,
+        recovery_steps=steps,
+    )
+
+
+def reconcile_uncertain_drift_thread(
+    evaluation: DriftEvaluationResult,
+    *,
+    thread_id: str,
+    resolved_state: str,
+    proof_sha256: str,
+) -> DriftEvaluationResult:
+    """Reconcile an uncertain drift thread binding after readback verification."""
+
+    if not isinstance(evaluation, DriftEvaluationResult):
+        raise ReviewInputError(
+            "reconcile_uncertain_drift_thread requires a DriftEvaluationResult"
+        )
+    _require_target_id(thread_id, label="thread_id")
+    if resolved_state not in {"active", "contingent", "released"}:
+        raise ReviewInputError("resolved_state must be active, contingent, or released")
+    _require_sha256(proof_sha256, label="proof_sha256")
+
+    matched = False
+    updated_obligations: list[DriftTrackedObligation] = []
+    for item in evaluation.inventory.obligations:
+        tb = item.thread_binding
+        if tb is not None and tb.thread_id == thread_id:
+            if tb.slot_state != "uncertain":
+                raise ReviewInputError("target drift thread is not in uncertain state")
+            matched = True
+            new_tb = (
+                None
+                if resolved_state == "released" and item.unresolved
+                else replace(tb, slot_state=resolved_state, proof_sha256=proof_sha256)
+            )
+            updated_obligations.append(replace(item, thread_binding=new_tb))
+        else:
+            updated_obligations.append(item)
+    if not matched:
+        raise ReviewInputError("unknown uncertain drift thread_id")
+
+    new_inventory = DriftInventory(obligations=tuple(updated_obligations))
+    slots = tuple(
+        o.thread_binding.to_slot()
+        for o in new_inventory.obligations
+        if o.thread_binding is not None
+    )
+    approved, reasons, steps = _recompute_drift_verdict(
+        coverage_state=evaluation.changed_file_coverage,
+        review_complete=evaluation.review_complete,
+        inventory=new_inventory,
+        active_entries=evaluation.active_entries,
+        slots=slots,
+    )
+    return replace(
+        evaluation,
+        inventory=new_inventory,
+        slots=slots,
+        approved=approved,
+        withheld_reasons=reasons,
+        recovery_steps=steps,
+    )
+
+
+def apply_dispositions_to_drift_state(
+    evaluation: DriftEvaluationResult,
+    *,
+    honored_fingerprints: Collection[str],
+    honored_instances: Collection[str],
+    actor: str,
+    head_sha: str,
+    slot_released: bool,
+    coverage_uncertainty_accepted: bool = False,
+) -> DriftEvaluationResult:
+    """Apply honored maintainer command dispositions to displayed drift obligations.
+
+    Whole-obligation overrides resolve ``active-unresolved``, ``omitted-uncertain``,
+    and ``ambiguous-multi-target`` obligations ONLY when they are displayed in
+    ``evaluation.active_entries`` on ``head_sha``; non-displayed obligations
+    stay unresolved in ``evaluation.inventory``.
+    """
+
+    if not isinstance(evaluation, DriftEvaluationResult):
+        raise ReviewInputError(
+            "apply_dispositions_to_drift_state requires a DriftEvaluationResult"
+        )
+    _require_commit_sha(head_sha, label="head_sha")
+    if evaluation.head_sha != head_sha:
+        raise ReviewInputError("drift disposition head_sha mismatch")
+    if not isinstance(actor, str) or not actor.strip():
+        raise ReviewInputError("drift disposition actor must be non-empty")
+    _require_bool(slot_released, label="slot_released")
+    _require_bool(coverage_uncertainty_accepted, label="coverage_uncertainty_accepted")
+
+    displayed_ids = {e.obligation_id for e in evaluation.active_entries}
+    honored_fp = frozenset(honored_fingerprints)
+    honored_inst = frozenset(honored_instances)
+    projected_result = project_drift_review_result(
+        ReviewResult(
+            summary="drift-projection",
+            comments=(),
+            provider="internal",
+            review_status="complete" if evaluation.review_complete else "partial",
+        ),
+        evaluation,
+    )
+    displayed_entries = list(evaluation.active_entries)
+    projected_by_oid: dict[str, ReviewComment] = {}
+    for entry, p_comment in zip(
+        displayed_entries, projected_result.comments, strict=False
+    ):
+        projected_by_oid[entry.obligation_id] = p_comment
+
+    updated_obligations: list[DriftTrackedObligation] = []
+    for item in evaluation.inventory.obligations:
+        proj_c = projected_by_oid.get(item.obligation_id)
+        proj_fp = (
+            finding_lifecycle_for_comment(proj_c).fingerprint
+            if proj_c is not None
+            else None
+        )
+        proj_inst = finding_instance_fingerprint(proj_c) if proj_c is not None else None
+        latest_inst = (
+            finding_instance_fingerprint(item.latest_comment)
+            if item.latest_comment is not None
+            else None
+        )
+        is_honored = (
+            item.unresolved
+            and item.obligation_id in displayed_ids
+            and (
+                item.criterion.original_fingerprint in honored_fp
+                or (proj_fp is not None and proj_fp in honored_fp)
+                or (proj_inst is not None and proj_inst in honored_inst)
+                or (latest_inst is not None and latest_inst in honored_inst)
+            )
+            and (
+                item.thread_binding is None
+                or item.thread_binding.slot_state != "uncertain"
+            )
+        )
+        if not is_honored:
+            updated_obligations.append(item)
+            continue
+        proof = hashlib.sha256(
+            b"reviewsensei:drift-command-override:v1:"
+            + canonical_bytes(
+                {
+                    "obligation_id": item.obligation_id,
+                    "actor": actor.strip(),
+                    "head_sha": head_sha,
+                    "slot_released": slot_released,
+                }
+            )
+        ).hexdigest()
+        new_tb = (
+            replace(
+                item.thread_binding,
+                slot_state="released" if slot_released else "contingent",
+                proof_sha256=proof,
+            )
+            if item.thread_binding is not None
+            else None
+        )
+        updated_obligations.append(
+            replace(
+                item,
+                lifecycle_state="authorized-override",
+                thread_binding=new_tb,
+                resolution_proof_sha256=proof,
+            )
+        )
+
+    new_inventory = DriftInventory(obligations=tuple(updated_obligations))
+    resolved_ids = {
+        o.obligation_id for o in new_inventory.obligations if not o.unresolved
+    }
+    remaining_entries = tuple(
+        e for e in evaluation.active_entries if e.obligation_id not in resolved_ids
+    )
+    slots = tuple(
+        o.thread_binding.to_slot()
+        for o in new_inventory.obligations
+        if o.thread_binding is not None
+    )
+    new_cov = evaluation.changed_file_coverage
+    if (
+        coverage_uncertainty_accepted
+        and new_cov.approval_state == "partial"
+        and not new_cov.coverage_uncertainty_accepted
+    ):
+        cov_proof = hashlib.sha256(
+            b"reviewsensei:drift-coverage-override:v1:"
+            + canonical_bytes({"actor": actor.strip(), "head_sha": head_sha})
+        ).hexdigest()
+        new_cov = replace(
+            new_cov,
+            coverage_uncertainty_accepted=True,
+            acceptance_proof_sha256=cov_proof,
+        )
+    approved, reasons, steps = _recompute_drift_verdict(
+        coverage_state=new_cov,
+        review_complete=evaluation.review_complete,
+        inventory=new_inventory,
+        active_entries=remaining_entries,
+        slots=slots,
+    )
+    return replace(
+        evaluation,
+        changed_file_coverage=new_cov,
+        inventory=new_inventory,
+        active_entries=remaining_entries,
+        slots=slots,
+        approved=approved,
+        withheld_reasons=reasons,
+        recovery_steps=steps,
+    )
+
+
 __all__ = [
     "DRIFT_KINDS",
     "DRIFT_LIFECYCLE_STATES",
@@ -2116,7 +2683,12 @@ __all__ = [
     "OriginalFindingCriterion",
     "PresentLocationAnchor",
     "SyntheticNativeDriftPublisher",
+    "apply_dispositions_to_drift_state",
+    "commit_drift_publication",
+    "drift_baseline_from_evaluation",
     "drift_obligation_from_comment",
     "evaluate_drift_round",
     "extract_drift_descriptors_from_diff",
+    "project_drift_review_result",
+    "reconcile_uncertain_drift_thread",
 ]

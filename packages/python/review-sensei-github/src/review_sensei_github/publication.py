@@ -42,6 +42,16 @@ from review_sensei.convergence import (
 from review_sensei.coverage import CoverageManifest, coverage_approval_state
 from review_sensei.diff import DiffAnalysis, analyze_diff
 from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
+from review_sensei.finding_drift import (
+    DriftEvaluationResult,
+    FileDriftDescriptor,
+    apply_dispositions_to_drift_state,
+    commit_drift_publication,
+    drift_baseline_from_evaluation,
+    evaluate_drift_round,
+    project_drift_review_result,
+    reconcile_uncertain_drift_thread,
+)
 from review_sensei.human_assessment import (
     PendingHumanReview,
     finding_instance_fingerprint,
@@ -1929,11 +1939,17 @@ class ReviewApprovalFinalizer:
         # publication/conversation entry points acquire no new authority.
         self._thread_cleanup_token_provider: Callable[[], str] | None = None
         self._active_window_states: dict[tuple[int, int], ActiveWindowRoundState] = {}
+        self._drift_states: dict[tuple[int, int], DriftEvaluationResult] = {}
 
     def active_window_state(
         self, *, repository_id: int, pull_request: int
     ) -> ActiveWindowRoundState | None:
         return self._active_window_states.get((repository_id, pull_request))
+
+    def drift_state(
+        self, *, repository_id: int, pull_request: int
+    ) -> DriftEvaluationResult | None:
+        return self._drift_states.get((repository_id, pull_request))
 
     def quarantine_reader(self, *, token, repository, pull_request, head_sha):
         factory = self.quarantine_reader_factory
@@ -2343,6 +2359,44 @@ class ReviewApprovalFinalizer:
                         )
                     )
                 if window_state.changed_file_coverage.coverage_uncertainty_accepted:
+                    coverage_uncertainty_accepted = True
+            drift_state = self._drift_states.get(
+                (preflight.repository_id, pull_request)
+            )
+            if drift_state is not None:
+                if (
+                    drift_state.head_sha != head_sha
+                    or drift_state.base_sha != preflight.base_sha
+                ):
+                    return known(
+                        PublicationResult(
+                            status="approval_withheld",
+                            diagnostic="approval_withheld",
+                        )
+                    )
+                has_uncertain_drift_slot = any(
+                    s.state == "uncertain" for s in drift_state.slots
+                )
+                if (
+                    not drift_state.approved
+                    or has_uncertain_drift_slot
+                    or bool(drift_state.inventory.blocking_obligations)
+                ):
+                    has_drift_blockers = (
+                        bool(drift_state.inventory.blocking_obligations)
+                        or has_uncertain_drift_slot
+                    )
+                    return known(
+                        PublicationResult(
+                            status="approval_withheld",
+                            diagnostic=(
+                                "required_fixes_open"
+                                if has_drift_blockers
+                                else "approval_withheld"
+                            ),
+                        )
+                    )
+                if drift_state.changed_file_coverage.coverage_uncertainty_accepted:
                     coverage_uncertainty_accepted = True
             if not self._qualification_authorizes(
                 eligibility,
@@ -2807,10 +2861,58 @@ class ReviewApprovalFinalizer:
                 continue
             if honors(fingerprint, head_sha=head_sha):
                 active.append(fingerprint)
+        drift_state = self._drift_states.get((repository_id, pull_request))
+        drift_resolved_instances: set[str] = set()
+        if drift_state is not None and drift_state.head_sha == head_sha:
+            drift_projected = project_drift_review_result(
+                ReviewResult(
+                    summary="drift-projection",
+                    comments=(),
+                    provider="internal",
+                    review_status=(
+                        "complete" if drift_state.review_complete else "partial"
+                    ),
+                ),
+                drift_state,
+            )
+            proj_inst_by_oid = {
+                d_entry.obligation_id: finding_instance_fingerprint(p_comm)
+                for d_entry, p_comm in zip(
+                    drift_state.active_entries, drift_projected.comments, strict=False
+                )
+            }
+            prior_unresolved_oids = {
+                ob.obligation_id
+                for ob in drift_state.inventory.obligations
+                if ob.unresolved
+            }
+            initial_honored_inst = frozenset(
+                entry.instance
+                for entry in index.entries
+                if entry.instance in active
+                or (entry.lifecycle is not None and entry.lifecycle in active)
+            )
+            preview_check = apply_dispositions_to_drift_state(
+                drift_state,
+                honored_fingerprints=active,
+                honored_instances=initial_honored_inst,
+                actor=actor,
+                head_sha=head_sha,
+                slot_released=True,
+                coverage_uncertainty_accepted=False,
+            )
+            for ob in preview_check.inventory.obligations:
+                if (
+                    ob.obligation_id in prior_unresolved_oids
+                    and not ob.unresolved
+                    and ob.obligation_id in proj_inst_by_oid
+                ):
+                    drift_resolved_instances.add(proj_inst_by_oid[ob.obligation_id])
         honored = tuple(
             entry
             for entry in index.entries
             if entry.instance in active
+            or entry.instance in drift_resolved_instances
             or (entry.lifecycle is not None and entry.lifecycle in active)
         )
         honored_instances = frozenset(entry.instance for entry in honored)
@@ -2877,6 +2979,30 @@ class ReviewApprovalFinalizer:
                 has_blocking = True
             if preview_window.changed_file_coverage.coverage_uncertainty_accepted:
                 coverage_accepted = True
+        drift_state = self._drift_states.get((repository_id, pull_request))
+        preview_drift: DriftEvaluationResult | None = None
+        if drift_state is not None and drift_state.head_sha == head_sha:
+            preview_drift = apply_dispositions_to_drift_state(
+                drift_state,
+                honored_fingerprints=active,
+                honored_instances=honored_instances,
+                actor=actor,
+                head_sha=head_sha,
+                slot_released=True,
+                coverage_uncertainty_accepted=coverage_accepted,
+            )
+            displayed_drift_ids = {
+                entry.obligation_id for entry in preview_drift.active_entries
+            }
+            if any(s.state == "uncertain" for s in preview_drift.slots) or any(
+                ob.obligation_id not in displayed_drift_ids
+                or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-multi-target"}
+                or ob.blocks_approval_now
+                for ob in preview_drift.inventory.blocking_obligations
+            ):
+                has_blocking = True
+            if preview_drift.changed_file_coverage.coverage_uncertainty_accepted:
+                coverage_accepted = True
         adjusted = eligibility.with_fresh_human_review(human)
         adjusted = replace(
             adjusted,
@@ -2894,6 +3020,16 @@ class ReviewApprovalFinalizer:
             if any(
                 ob.unresolved and ob.needs_human
                 for ob in preview_window.authoritative_decision_inventory.obligations
+            ):
+                has_human = True
+        if preview_drift is not None:
+            if any(
+                ob.unresolved
+                and (
+                    ob.criterion.needs_human
+                    or ob.lifecycle_state == "ambiguous-multi-target"
+                )
+                for ob in preview_drift.inventory.obligations
             ):
                 has_human = True
         marker_match = _APPROVAL_ELIGIBILITY_RE.search(body)
@@ -3350,6 +3486,18 @@ class ReviewApprovalFinalizer:
             self._active_window_states[(repository_id, pull_request)] = (
                 apply_dispositions_to_window_state(
                     window_state,
+                    honored_fingerprints=active,
+                    honored_instances=honored_instances,
+                    actor=actor,
+                    head_sha=head_sha,
+                    slot_released=not resolution.unconfirmed,
+                    coverage_uncertainty_accepted=coverage_accepted,
+                )
+            )
+        if drift_state is not None and drift_state.head_sha == head_sha:
+            self._drift_states[(repository_id, pull_request)] = (
+                apply_dispositions_to_drift_state(
+                    drift_state,
                     honored_fingerprints=active,
                     honored_instances=honored_instances,
                     actor=actor,
@@ -4697,6 +4845,10 @@ class ReviewPublisher:
         self._active_window_states: dict[tuple[int, int], ActiveWindowRoundState] = {}
         self._active_window_inputs: dict[tuple[int, int], tuple[str, str, str]] = {}
         self.finalizer._active_window_states = self._active_window_states
+        self._drift_states: dict[tuple[int, int], DriftEvaluationResult] = {}
+        self._drift_inputs: dict[tuple[int, int], tuple[str, str, str]] = {}
+        self._drift_concern_history: dict[tuple[int, int, str], frozenset[str]] = {}
+        self.finalizer._drift_states = self._drift_states
 
     def active_window_state(
         self, *, repository_id: int, pull_request: int
@@ -4708,6 +4860,52 @@ class ReviewPublisher:
     ) -> dict[str, object] | None:
         state = self._active_window_states.get((repository_id, pull_request))
         return None if state is None else state.to_public_status()
+
+    def drift_state(
+        self, *, repository_id: int, pull_request: int
+    ) -> DriftEvaluationResult | None:
+        return self._drift_states.get((repository_id, pull_request))
+
+    def drift_public_status(
+        self, *, repository_id: int, pull_request: int
+    ) -> dict[str, object] | None:
+        state = self._drift_states.get((repository_id, pull_request))
+        return None if state is None else state.to_public_status()
+
+    def drift_baseline(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        baseline_template: ReviewBaseline,
+    ) -> ReviewBaseline | None:
+        state = self._drift_states.get((repository_id, pull_request))
+        if state is None:
+            return None
+        return drift_baseline_from_evaluation(
+            state, baseline_template=baseline_template
+        )
+
+    def reconcile_drift_thread(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        thread_id: str,
+        resolved_state: str,
+        proof_sha256: str,
+    ) -> DriftEvaluationResult:
+        current = self._drift_states.get((repository_id, pull_request))
+        if current is None:
+            raise ReviewInputError("drift state is missing for pull request")
+        reconciled = reconcile_uncertain_drift_thread(
+            current,
+            thread_id=thread_id,
+            resolved_state=resolved_state,
+            proof_sha256=proof_sha256,
+        )
+        self._drift_states[(repository_id, pull_request)] = reconciled
+        return reconciled
 
     def reconcile_active_window_slot(
         self,
@@ -5055,6 +5253,333 @@ class ReviewPublisher:
             return replace(assembled, state=NO_REQUIRED_FIXES_STATE, reason=None)
         return assembled
 
+    def _plan_drift_round(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        result: ReviewResult,
+        diff: str,
+        baseline: ReviewBaseline | None,
+        convergence_policy: ReviewConvergencePolicy,
+        authorized_dispositions: Sequence[object],
+        max_active_findings: int | None,
+        confirmed_fixes: Sequence[ConfirmedFixEvidence],
+        human_overrides: Sequence[AuthorizedHumanOverride],
+        coverage_acceptance: AuthorizedCoverageAcceptance | None,
+        authorized_rescan: AuthorizedRescan | None,
+        enable_drift_tracking: bool,
+        drift_descriptors: Sequence[FileDriftDescriptor],
+        host_outdated_threads: frozenset[str],
+        host_resolved_threads: frozenset[str],
+    ) -> tuple[DriftEvaluationResult | None, str | None]:
+        prior_drift = self._drift_states.get((repository_id, pull_request))
+        drift_active = (
+            enable_drift_tracking
+            or prior_drift is not None
+            or bool(drift_descriptors)
+            or bool(host_outdated_threads)
+            or bool(host_resolved_threads)
+        )
+        if not drift_active:
+            return None, None
+        effective_cap = (
+            max_active_findings
+            if max_active_findings is not None
+            else (
+                prior_drift.max_active_findings
+                if prior_drift is not None
+                else DEFAULT_REVIEW_LIMITS.max_comments
+            )
+        )
+        merged_overrides: list[AuthorizedHumanOverride] = list(human_overrides)
+        existing_override_ids = {item.obligation_id for item in merged_overrides}
+        if authorized_dispositions and prior_drift is not None:
+            displayed_ids = {
+                entry.obligation_id for entry in prior_drift.active_entries
+            }
+            for ob in prior_drift.inventory.obligations:
+                if (
+                    not ob.unresolved
+                    or ob.obligation_id not in displayed_ids
+                    or ob.obligation_id in existing_override_ids
+                    or (
+                        ob.thread_binding is not None
+                        and ob.thread_binding.slot_state == "uncertain"
+                    )
+                ):
+                    continue
+                ob_inst = (
+                    finding_instance_fingerprint(ob.latest_comment)
+                    if ob.latest_comment is not None
+                    else None
+                )
+                for disp in authorized_dispositions:
+                    action = getattr(disp, "action", None)
+                    actor = getattr(disp, "actor", None)
+                    reason = getattr(disp, "reason", None)
+                    honors = getattr(disp, "honors", None)
+                    if (
+                        action not in OVERRIDE_DISPOSITION_ACTIONS
+                        or not isinstance(actor, str)
+                        or not isinstance(reason, str)
+                        or not callable(honors)
+                    ):
+                        continue
+                    if honors(ob.criterion.original_fingerprint, head_sha=head_sha) or (
+                        ob_inst is not None and honors(ob_inst, head_sha=head_sha)
+                    ):
+                        proof = hashlib.sha256(
+                            canonical_bytes(
+                                {
+                                    "kind": "session-drift-disposition-override",
+                                    "obligation_id": ob.obligation_id,
+                                    "actor": actor,
+                                    "head_sha": head_sha,
+                                    "reason": reason,
+                                }
+                            )
+                        ).hexdigest()
+                        merged_overrides.append(
+                            AuthorizedHumanOverride(
+                                obligation_id=ob.obligation_id,
+                                action=action,
+                                actor=actor,
+                                association="OWNER",
+                                head_sha=head_sha,
+                                reason=reason,
+                                proof_sha256=proof,
+                            )
+                        )
+                        existing_override_ids.add(ob.obligation_id)
+                        break
+
+        input_key = hashlib.sha256(
+            canonical_bytes(
+                {
+                    "head_sha": head_sha,
+                    "base_sha": base_sha,
+                    "result_digest": review_result_digest(result),
+                    "diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+                    "max_active_findings": effective_cap,
+                    "descriptors": [
+                        {
+                            "kind": d.drift_kind,
+                            "src": d.source_path,
+                            "dst": list(d.target_paths),
+                            "syms": list(d.moved_symbols),
+                        }
+                        for d in drift_descriptors
+                    ],
+                    "outdated": sorted(host_outdated_threads),
+                    "resolved": sorted(host_resolved_threads),
+                    "fixes": [
+                        {
+                            "obligation_id": item.obligation_id,
+                            "head_sha": item.head_sha,
+                            "evidence_sha256": item.evidence_sha256,
+                            "paths": list(item.verified_paths),
+                        }
+                        for item in confirmed_fixes
+                    ],
+                    "overrides": [
+                        {
+                            "obligation_id": item.obligation_id,
+                            "action": item.action,
+                            "head_sha": item.head_sha,
+                            "proof_sha256": item.proof_sha256,
+                        }
+                        for item in merged_overrides
+                    ],
+                    "coverage_acceptance": (
+                        coverage_acceptance.proof_sha256
+                        if coverage_acceptance is not None
+                        else None
+                    ),
+                    "authorized_rescan": (
+                        authorized_rescan.request_id
+                        if authorized_rescan is not None
+                        else None
+                    ),
+                }
+            )
+        ).hexdigest()
+        if prior_drift is not None and self._drift_inputs.get(
+            (repository_id, pull_request)
+        ) == (head_sha, base_sha, input_key):
+            return prior_drift, input_key
+
+        round_number = 1 if prior_drift is None else prior_drift.round_number + 1
+        if authorized_rescan is not None:
+            coverage_mode = authorized_rescan.mode
+        elif prior_drift is not None or baseline is not None:
+            coverage_mode = (
+                result.coverage_mode
+                if result.coverage_mode in {"incremental", "fallback-full"}
+                else "incremental"
+            )
+        else:
+            coverage_mode = "full"
+
+        planned = evaluate_drift_round(
+            result,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            max_active_findings=effective_cap,
+            round_number=round_number,
+            coverage_mode=coverage_mode,
+            prior_inventory=(
+                prior_drift.inventory if prior_drift is not None else None
+            ),
+            drift_descriptors=drift_descriptors,
+            diff_text=diff,
+            host_outdated_threads=host_outdated_threads,
+            host_resolved_threads=host_resolved_threads,
+            confirmed_fixes=confirmed_fixes,
+            human_overrides=tuple(merged_overrides),
+            authorized_rescan=authorized_rescan,
+            coverage_acceptance=coverage_acceptance,
+            convergence_policy=convergence_policy,
+            advisory=not convergence_policy.automatic_github_review_events,
+        )
+        return planned, input_key
+
+    def _commit_drift_success(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        planned_drift: DriftEvaluationResult | None,
+        input_key: str | None,
+        review_id: int | None,
+    ) -> DriftEvaluationResult | None:
+        if planned_drift is None or input_key is None:
+            return None
+        rid = (
+            review_id
+            if isinstance(review_id, int) and review_id > 0
+            else int(head_sha[:6], 16) + 1
+        )
+        created_threads: dict[str, tuple[str, int]] = {}
+        for idx, entry in enumerate(planned_drift.active_entries):
+            if entry.placement == INLINE_PLACEMENT and (
+                entry.thread_action in {"create", "reopen"} or entry.thread_id is None
+            ):
+                tid = entry.thread_id or f"PRRT_{rid}_{idx}"
+                cid = rid * 100 + idx
+                created_threads[entry.obligation_id] = (tid, cid)
+        committed = commit_drift_publication(
+            planned_drift, created_threads=created_threads
+        )
+        for ob in committed.inventory.obligations:
+            key = (repository_id, pull_request, ob.obligation_id)
+            seen = set(self._drift_concern_history.get(key, ()))
+            seen.add(ob.criterion.original_fingerprint)
+            seen.add(
+                finding_lifecycle_for_comment(
+                    ob.synthetic_comment_for_placement()
+                ).fingerprint
+            )
+            if ob.latest_comment is not None:
+                seen.add(finding_lifecycle_for_comment(ob.latest_comment).fingerprint)
+            self._drift_concern_history[key] = frozenset(seen)
+        self._drift_states[(repository_id, pull_request)] = committed
+        self._drift_inputs[(repository_id, pull_request)] = (
+            head_sha,
+            base_sha,
+            input_key,
+        )
+        return committed
+
+    def _commit_drift_uncertain(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        planned_drift: DriftEvaluationResult | None,
+        input_key: str | None,
+    ) -> DriftEvaluationResult | None:
+        if planned_drift is None or input_key is None:
+            return None
+        uncertain_threads: dict[str, tuple[str, int, str]] = {}
+        for idx, entry in enumerate(planned_drift.active_entries):
+            if entry.placement == INLINE_PLACEMENT and entry.thread_action in {
+                "create",
+                "reopen",
+            }:
+                tid = (
+                    entry.thread_id
+                    or f"uncertain-drift:{head_sha[:12]}:{entry.obligation_id[:16]}"
+                )
+                proof = hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "kind": "uncertain-drift-post",
+                            "thread_id": tid,
+                            "head_sha": head_sha,
+                            "obligation_id": entry.obligation_id,
+                        }
+                    )
+                ).hexdigest()
+                uncertain_threads[entry.obligation_id] = (tid, idx + 1, proof)
+        committed = (
+            commit_drift_publication(planned_drift, uncertain_threads=uncertain_threads)
+            if uncertain_threads
+            else planned_drift
+        )
+        self._drift_states[(repository_id, pull_request)] = committed
+        self._drift_inputs[(repository_id, pull_request)] = (
+            head_sha,
+            base_sha,
+            input_key,
+        )
+        return committed
+
+    @staticmethod
+    def _adjust_assembled_for_drift(
+        assembled: AssembledReview,
+        planned_drift: DriftEvaluationResult | None,
+        *,
+        convergence_policy: ReviewConvergencePolicy,
+        auto_approval: bool,
+    ) -> AssembledReview:
+        if (
+            planned_drift is None
+            or not convergence_policy.automatic_github_review_events
+        ):
+            return assembled
+        has_uncertain = any(s.state == "uncertain" for s in planned_drift.slots)
+        has_blocking = (
+            bool(planned_drift.inventory.blocking_obligations) or has_uncertain
+        )
+        if has_blocking and not assembled.requests_changes:
+            return replace(
+                assembled,
+                state=CHANGES_REQUIRED_STATE,
+                reason=None,
+                requests_changes=True,
+            )
+        if not planned_drift.approved and assembled.state == NO_REQUIRED_FIXES_STATE:
+            return replace(
+                assembled,
+                state=WITHHELD_STATE,
+                reason="unresolved drifted review obligations or uncertain coverage remain",
+            )
+        if (
+            planned_drift.approved
+            and auto_approval
+            and planned_drift.changed_file_coverage.coverage_uncertainty_accepted
+            and assembled.state == WITHHELD_STATE
+        ):
+            return replace(assembled, state=NO_REQUIRED_FIXES_STATE, reason=None)
+        return assembled
+
     def _native_group_host(self, *, result, assembled, store, capacity):
         from review_sensei.session import SessionIdentity
 
@@ -5205,7 +5730,16 @@ class ReviewPublisher:
         review_id: int,
         threads: Sequence[tuple[str, str]] | None = None,
     ) -> None:
-        if not replacements:
+        drift_state = self._drift_states.get((repository_id, pull_request))
+        drift_has_resolved = (
+            drift_state is not None
+            and drift_state.head_sha == head_sha
+            and any(
+                not ob.unresolved and ob.thread_binding is not None
+                for ob in drift_state.inventory.obligations
+            )
+        )
+        if not replacements and not drift_has_resolved:
             return
 
         def cleanup() -> str | None:
@@ -5660,6 +6194,10 @@ class ReviewPublisher:
         human_overrides: Sequence[AuthorizedHumanOverride] = (),
         coverage_acceptance: AuthorizedCoverageAcceptance | None = None,
         authorized_rescan: AuthorizedRescan | None = None,
+        enable_drift_tracking: bool = False,
+        drift_descriptors: Sequence[FileDriftDescriptor] = (),
+        host_outdated_threads: frozenset[str] = frozenset(),
+        host_resolved_threads: frozenset[str] = frozenset(),
     ) -> PublicationResult:
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError(
@@ -5735,6 +6273,10 @@ class ReviewPublisher:
                 human_overrides=human_overrides,
                 coverage_acceptance=coverage_acceptance,
                 authorized_rescan=authorized_rescan,
+                enable_drift_tracking=enable_drift_tracking,
+                drift_descriptors=drift_descriptors,
+                host_outdated_threads=host_outdated_threads,
+                host_resolved_threads=host_resolved_threads,
             )
             return (
                 publication
@@ -5792,6 +6334,10 @@ class ReviewPublisher:
         human_overrides: Sequence[AuthorizedHumanOverride] = (),
         coverage_acceptance: AuthorizedCoverageAcceptance | None = None,
         authorized_rescan: AuthorizedRescan | None = None,
+        enable_drift_tracking: bool = False,
+        drift_descriptors: Sequence[FileDriftDescriptor] = (),
+        host_outdated_threads: frozenset[str] = frozenset(),
+        host_resolved_threads: frozenset[str] = frozenset(),
     ) -> PublicationResult:
         from .checkpoint_result_store import uses_grouped_publication
 
@@ -5936,31 +6482,87 @@ class ReviewPublisher:
             )
         original_result = result
         admitted_result = prepared.result
-        planned_window_state, window_input_key = self._plan_active_window_round(
+        planned_drift_state, drift_input_key = self._plan_drift_round(
             repository_id=repository_id,
             pull_request=pull_request,
             head_sha=head_sha,
             base_sha=base_sha,
             result=admitted_result,
+            diff=diff,
             baseline=baseline,
+            convergence_policy=convergence_policy,
             authorized_dispositions=authorized_dispositions,
             max_active_findings=max_active_findings,
             confirmed_fixes=confirmed_fixes,
             human_overrides=human_overrides,
             coverage_acceptance=coverage_acceptance,
             authorized_rescan=authorized_rescan,
+            enable_drift_tracking=enable_drift_tracking,
+            drift_descriptors=drift_descriptors,
+            host_outdated_threads=host_outdated_threads,
+            host_resolved_threads=host_resolved_threads,
         )
-        result = (
-            project_display_review_result(admitted_result, planned_window_state)
-            if planned_window_state is not None
-            else admitted_result
+        planned_window_state, window_input_key = (
+            (None, None)
+            if planned_drift_state is not None
+            else self._plan_active_window_round(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                result=admitted_result,
+                baseline=baseline,
+                authorized_dispositions=authorized_dispositions,
+                max_active_findings=max_active_findings,
+                confirmed_fixes=confirmed_fixes,
+                human_overrides=human_overrides,
+                coverage_acceptance=coverage_acceptance,
+                authorized_rescan=authorized_rescan,
+            )
         )
+        if planned_drift_state is not None:
+            result = project_drift_review_result(admitted_result, planned_drift_state)
+        elif planned_window_state is not None:
+            result = project_display_review_result(
+                admitted_result, planned_window_state
+            )
+        else:
+            result = admitted_result
         window_has_blocking = False
         window_non_inline_blocking = False
         window_has_human = False
         window_coverage_accepted = False
         window_approved = True
-        if planned_window_state is not None:
+        if planned_drift_state is not None:
+            displayed_drift_ids = {
+                entry.obligation_id for entry in planned_drift_state.active_entries
+            }
+            has_uncertain_drift = any(
+                s.state == "uncertain" for s in planned_drift_state.slots
+            )
+            window_has_blocking = (
+                bool(planned_drift_state.inventory.blocking_obligations)
+                or has_uncertain_drift
+            )
+            window_non_inline_blocking = has_uncertain_drift or any(
+                ob.obligation_id not in displayed_drift_ids
+                or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-multi-target"}
+                or not ob.present_anchor.inline_anchorable
+                for ob in planned_drift_state.inventory.blocking_obligations
+            )
+            window_has_human = any(
+                ob.unresolved
+                and (
+                    ob.criterion.needs_human
+                    or ob.lifecycle_state == "ambiguous-multi-target"
+                )
+                for ob in planned_drift_state.inventory.obligations
+            )
+            window_coverage_accepted = (
+                planned_drift_state.changed_file_coverage.coverage_uncertainty_accepted
+            )
+            window_approved = planned_drift_state.approved and not has_uncertain_drift
+        elif planned_window_state is not None:
             displayed_ob_ids = {
                 entry.obligation_id
                 for entry in planned_window_state.display_active_findings.entries
@@ -6875,7 +7477,7 @@ class ReviewPublisher:
             check_published=check_diagnostic is None,
             retained_eligibility=retained_eligibility,
         )
-        if planned_window_state is not None:
+        if planned_window_state is not None or planned_drift_state is not None:
             eligibility = replace(
                 eligibility,
                 facts=replace(
@@ -6893,23 +7495,28 @@ class ReviewPublisher:
             )
         eligibility = self._bind_qualification(eligibility, qualification_binding)
         try:
-            assembled = self._adjust_assembled_for_window(
-                continuation_review
-                or preflight_review
-                or self._assemble_review_body(
-                    result=result,
-                    analysis=analysis,
-                    convergence_policy=convergence_policy,
-                    read_facts=lambda: self._conversation_resolution_facts(
-                        token=token, repository=repository, branch=base_branch
+            assembled = self._adjust_assembled_for_drift(
+                self._adjust_assembled_for_window(
+                    continuation_review
+                    or preflight_review
+                    or self._assemble_review_body(
+                        result=result,
+                        analysis=analysis,
+                        convergence_policy=convergence_policy,
+                        read_facts=lambda: self._conversation_resolution_facts(
+                            token=token, repository=repository, branch=base_branch
+                        ),
+                        auto_approve=auto_approval,
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
                     ),
-                    auto_approve=auto_approval,
-                    repository_id=repository_id,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    base_sha=base_sha,
+                    planned_window_state,
+                    convergence_policy=convergence_policy,
+                    auto_approval=auto_approval,
                 ),
-                planned_window_state,
+                planned_drift_state,
                 convergence_policy=convergence_policy,
                 auto_approval=auto_approval,
             )
@@ -7022,7 +7629,13 @@ class ReviewPublisher:
                 "formatted review exceeds the configured publication limit"
             ) from exc
         suppression = complete_suppression or PublishedFindingSuppression({}, {})
-        if prepared_comments and complete_suppression is None:
+        drift_has_resolved_threads = planned_drift_state is not None and any(
+            not ob.unresolved and ob.thread_binding is not None
+            for ob in planned_drift_state.inventory.obligations
+        )
+        if (
+            prepared_comments or drift_has_resolved_threads
+        ) and complete_suppression is None:
             suppression = self._published_finding_suppression(
                 token=token,
                 repository=repository,
@@ -7098,7 +7711,9 @@ class ReviewPublisher:
             # Exact complete reconciliation selects the native review id. A
             # legacy marker alone cannot authorize old-thread mutations.
             if self._confirmed_review_id is None:
-                if suppression.superseded_threads and prepared_comments:
+                if suppression.superseded_threads and (
+                    prepared_comments or drift_has_resolved_threads
+                ):
                     self._pending_thread_cleanup = lambda: (
                         "thread_resolution_unconfirmed"
                     )
@@ -7165,7 +7780,23 @@ class ReviewPublisher:
                 input_key=window_input_key,
                 review_id=evidence.main_review_id,
             )
+            self._commit_drift_success(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                planned_drift=planned_drift_state,
+                input_key=drift_input_key,
+                review_id=evidence.main_review_id,
+            )
             schedule_reconciled_cleanup()
+            if (
+                planned_drift_state is not None
+                and planned_drift_state.approved
+                and not self._defer_thread_cleanup
+            ):
+                self._finish_thread_cleanup(PublicationResult(status="published"))
+                self._pending_thread_cleanup = None
             return self._finalize_after_publication(
                 token=token,
                 repository=repository,
@@ -7220,7 +7851,23 @@ class ReviewPublisher:
                     input_key=window_input_key,
                     review_id=self._confirmed_review_id,
                 )
+                self._commit_drift_success(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    planned_drift=planned_drift_state,
+                    input_key=drift_input_key,
+                    review_id=self._confirmed_review_id,
+                )
                 schedule_reconciled_cleanup()
+                if (
+                    planned_drift_state is not None
+                    and planned_drift_state.approved
+                    and not self._defer_thread_cleanup
+                ):
+                    self._finish_thread_cleanup(PublicationResult(status="published"))
+                    self._pending_thread_cleanup = None
                 return self._finalize_after_publication(
                     token=token,
                     repository=repository,
@@ -7240,6 +7887,14 @@ class ReviewPublisher:
                 base_sha=base_sha,
                 planned_state=planned_window_state,
                 input_key=window_input_key,
+            )
+            self._commit_drift_uncertain(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                planned_drift=planned_drift_state,
+                input_key=drift_input_key,
             )
             self._complete_failed_check(
                 check_token=check_token,
@@ -7266,6 +7921,15 @@ class ReviewPublisher:
                     input_key=window_input_key,
                     review_id=review_id,
                 )
+                self._commit_drift_success(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    planned_drift=planned_drift_state,
+                    input_key=drift_input_key,
+                    review_id=review_id,
+                )
                 self._schedule_thread_cleanup(
                     token=token,
                     threads=suppression.superseded_threads,
@@ -7279,6 +7943,13 @@ class ReviewPublisher:
                     eligibility=eligibility,
                     replacements=prepared_comments,
                 )
+                if (
+                    planned_drift_state is not None
+                    and planned_drift_state.approved
+                    and not self._defer_thread_cleanup
+                ):
+                    self._finish_thread_cleanup(PublicationResult(status="published"))
+                    self._pending_thread_cleanup = None
                 return self._finalize_after_publication(
                     token=token,
                     repository=repository,
@@ -7415,7 +8086,23 @@ class ReviewPublisher:
                     input_key=window_input_key,
                     review_id=self._confirmed_review_id,
                 )
+                self._commit_drift_success(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    planned_drift=planned_drift_state,
+                    input_key=drift_input_key,
+                    review_id=self._confirmed_review_id,
+                )
                 schedule_reconciled_cleanup()
+                if (
+                    planned_drift_state is not None
+                    and planned_drift_state.approved
+                    and not self._defer_thread_cleanup
+                ):
+                    self._finish_thread_cleanup(PublicationResult(status="published"))
+                    self._pending_thread_cleanup = None
                 return self._finalize_after_publication(
                     token=token,
                     repository=repository,
@@ -7435,6 +8122,14 @@ class ReviewPublisher:
                 base_sha=base_sha,
                 planned_state=planned_window_state,
                 input_key=window_input_key,
+            )
+            self._commit_drift_uncertain(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                planned_drift=planned_drift_state,
+                input_key=drift_input_key,
             )
             self._complete_failed_check(
                 check_token=check_token,
@@ -7566,6 +8261,30 @@ class ReviewPublisher:
         from .thread_resolution import FindingThreadResolver
 
         replacement_concerns = {item[1] for item in replacements}
+        drift_state = self._drift_states.get((repository_id, pull_request))
+        if drift_state is not None and drift_state.head_sha == head_sha:
+            active_inline_oids = {
+                entry.obligation_id
+                for entry in drift_state.active_entries
+                if entry.placement == INLINE_PLACEMENT
+            }
+            for ob in drift_state.inventory.obligations:
+                if ob.obligation_id in active_inline_oids or not ob.unresolved:
+                    replacement_concerns.update(
+                        self._drift_concern_history.get(
+                            (repository_id, pull_request, ob.obligation_id), ()
+                        )
+                    )
+                    replacement_concerns.add(ob.criterion.original_fingerprint)
+                    replacement_concerns.add(
+                        finding_lifecycle_for_comment(
+                            ob.synthetic_comment_for_placement()
+                        ).fingerprint
+                    )
+                    if ob.latest_comment is not None:
+                        replacement_concerns.add(
+                            finding_lifecycle_for_comment(ob.latest_comment).fingerprint
+                        )
         matching = {
             thread: concern
             for thread, concern in threads

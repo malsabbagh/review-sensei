@@ -33,6 +33,11 @@ from review_sensei.coverage import coverage_approval_state
 from review_sensei.diff import analyze_diff
 from review_sensei.disposition import MaintainerCommand
 from review_sensei.errors import ReviewInputError
+from review_sensei.finding_drift import (
+    DriftEvaluationResult,
+    FileDriftDescriptor,
+    project_drift_review_result,
+)
 from review_sensei.human_assessment import (
     MAX_HUMAN_FINDINGS,
     HumanAssessmentDecision,
@@ -131,6 +136,7 @@ class GitHubWriteOptions:
     operation_entry: str = "enabled"
     complete_inventory: bool = False
     max_active_findings: int | None = None
+    enable_drift_tracking: bool = False
 
     def __post_init__(self) -> None:
         if self.max_active_findings is not None and (
@@ -139,6 +145,8 @@ class GitHubWriteOptions:
             or self.max_active_findings < 1
         ):
             raise ReviewInputError("max_active_findings must be a positive integer")
+        if not isinstance(self.enable_drift_tracking, bool):
+            raise ReviewInputError("enable_drift_tracking must be a boolean")
 
     def review_policy(self) -> str:
         """Return the effective review policy mode for this invocation."""
@@ -578,6 +586,60 @@ class GitHubApplication:
             proof_sha256=proof_sha256,
         )
 
+    def drift_state(
+        self, *, repository_id: int, pull_request: int
+    ) -> DriftEvaluationResult | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.drift_state(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return None
+
+    def drift_public_status(
+        self, *, repository_id: int, pull_request: int
+    ) -> dict[str, object] | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.drift_public_status(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return None
+
+    def drift_baseline(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        baseline_template: ReviewBaseline,
+    ) -> ReviewBaseline | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.drift_baseline(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                baseline_template=baseline_template,
+            )
+        return None
+
+    def reconcile_drift_thread(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        thread_id: str,
+        resolved_state: str,
+        proof_sha256: str,
+    ) -> DriftEvaluationResult:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError(
+                "drift thread reconciliation requires a ReviewPublisher"
+            )
+        return self.reviewer.reconcile_drift_thread(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            thread_id=thread_id,
+            resolved_state=resolved_state,
+            proof_sha256=proof_sha256,
+        )
+
     def publish_review(
         self,
         *,
@@ -615,6 +677,10 @@ class GitHubApplication:
         human_overrides: Sequence[AuthorizedHumanOverride] = (),
         coverage_acceptance: AuthorizedCoverageAcceptance | None = None,
         authorized_rescan: AuthorizedRescan | None = None,
+        enable_drift_tracking: bool = False,
+        drift_descriptors: Sequence[FileDriftDescriptor] = (),
+        host_outdated_threads: frozenset[str] = frozenset(),
+        host_resolved_threads: frozenset[str] = frozenset(),
     ) -> PublicationResult:
         reviewer = self.reviewer
         resume_thread_cleanup = (
@@ -1595,6 +1661,7 @@ class GitHubApplication:
                 if max_active_findings is not None
                 else options.max_active_findings
             )
+            effective_drift = enable_drift_tracking or options.enable_drift_tracking
             if (
                 isinstance(reviewer, ReviewPublisher)
                 or effective_max_active is not None
@@ -1602,6 +1669,10 @@ class GitHubApplication:
                 or human_overrides
                 or coverage_acceptance is not None
                 or authorized_rescan is not None
+                or effective_drift
+                or drift_descriptors
+                or host_outdated_threads
+                or host_resolved_threads
             ):
                 publisher_arguments.update(
                     max_active_findings=effective_max_active,
@@ -1609,6 +1680,10 @@ class GitHubApplication:
                     human_overrides=human_overrides,
                     coverage_acceptance=coverage_acceptance,
                     authorized_rescan=authorized_rescan,
+                    enable_drift_tracking=effective_drift,
+                    drift_descriptors=drift_descriptors,
+                    host_outdated_threads=host_outdated_threads,
+                    host_resolved_threads=host_resolved_threads,
                 )
             if (
                 not options.complete_inventory
@@ -2100,6 +2175,46 @@ class GitHubApplication:
                     and ob.unresolved
                     and ob.comment is not None
                 )
+            else:
+                drift_state = self.reviewer.drift_state(
+                    repository_id=repository_id, pull_request=pull_request
+                )
+                if drift_state is not None and drift_state.head_sha == head_sha:
+                    projected_drift = project_drift_review_result(
+                        ReviewResult(
+                            summary="drift-command-inventory",
+                            comments=(),
+                            provider="internal",
+                            review_status=(
+                                "complete" if drift_state.review_complete else "partial"
+                            ),
+                        ),
+                        drift_state,
+                    )
+                    by_oid = {
+                        ob.obligation_id: ob for ob in drift_state.inventory.obligations
+                    }
+                    drift_identities: list[FindingIdentity] = []
+                    seen_drift_inst: set[str] = set()
+                    for entry, p_comment in zip(
+                        drift_state.active_entries,
+                        projected_drift.comments,
+                        strict=False,
+                    ):
+                        ob = by_oid.get(entry.obligation_id)
+                        if ob is None or not ob.unresolved:
+                            continue
+                        inst = finding_instance_fingerprint(p_comment)
+                        if inst not in seen_drift_inst:
+                            seen_drift_inst.add(inst)
+                            drift_identities.append(
+                                FindingIdentity(
+                                    instance=inst,
+                                    concern=ob.criterion.original_fingerprint,
+                                    overridable=ob.blocks_approval_now,
+                                )
+                            )
+                    typed_inventory = tuple(drift_identities)
 
         # Parse only the command spelling before choosing an authority path.
         # This placeholder deliberately prevents untrusted event actor/head
