@@ -3,8 +3,15 @@
 This document specifies ReviewSensei's deterministic contracts for pull-request
 state transitions, branch deletion and recreation, Git commit-graph rewrites,
 base-branch retargeting, and mid-flight draft or close transitions (**G05**,
-**G06**, and **G23**). See [ADR 0135](adr/0135-branch-state-lifecycle.md) for
-the architectural decision record.
+**G06**, and **G23**), implemented in
+`packages/python/review-sensei-github/src/review_sensei_github/branch_lifecycle.py`
+with live enforcement in `publication.py`, `review_run.py`, and
+`src/review_sensei/workflow.py` and verified by
+`tests/test_reopen_branch_lifecycle_g05.py`,
+`tests/test_force_push_ancestry_g06.py`, and
+`tests/test_active_draft_close_g23.py`. See
+[ADR 0135](adr/0135-branch-state-lifecycle.md) for the architectural decision
+record.
 
 ---
 

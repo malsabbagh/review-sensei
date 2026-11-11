@@ -88,6 +88,10 @@ from .approval import (
     restrict_result_qualification,
 )
 from .approval_progress import ApprovalProgress, build_approval_progress
+from .branch_lifecycle import (
+    evaluate_finalizer_pr_gate,
+    evaluate_live_pr_write_gate,
+)
 from .check_diagnostics import CHECK_FAILURE_CODES, CheckFailure, CheckOperationError
 from .checks import (
     REVIEW_POLICY_MODES,
@@ -3448,56 +3452,25 @@ class ReviewApprovalFinalizer:
         )
         if status == 404:
             raise GitHubPublicationError("review target was not found")
-        if status < 200 or status >= 300 or not isinstance(payload, dict):
+        if status < 200 or status >= 300:
             raise GitHubPublicationError("approval finalization preflight failed")
-        if type(payload.get("draft")) is not bool:
-            raise GitHubPublicationError(
-                "approval finalization preflight draft was invalid"
-            )
-        if payload.get("state") != "open" or payload.get("draft") is True:
+        decision = evaluate_finalizer_pr_gate(
+            payload,
+            repository=repository,
+            head_sha=head_sha,
+            app_slug=app_slug,
+        )
+        if not decision.admitted:
+            if decision.skip_status is None:
+                raise GitHubPublicationError("approval finalization preflight failed")
             return _FinalizationPreflight(
-                result=PublicationResult(status="skipped_pr_state")
+                result=PublicationResult(status=decision.skip_status)
             )
-        head = payload.get("head")
-        base = payload.get("base")
-        if not isinstance(head, dict) or not isinstance(base, dict):
-            raise GitHubPublicationError("approval finalization preflight was invalid")
-        if head.get("sha") != head_sha:
-            return _FinalizationPreflight(
-                result=PublicationResult(status="skipped_stale_head")
-            )
-        head_repo = head.get("repo")
-        base_repo = base.get("repo")
-        if not isinstance(head_repo, dict) or not isinstance(base_repo, dict):
-            raise GitHubPublicationError("approval finalization preflight was invalid")
-        if (
-            head_repo.get("fork") is not False
-            or base_repo.get("fork") is not False
-            or head_repo.get("full_name") != repository
-            or base_repo.get("full_name") != repository
-        ):
-            return _FinalizationPreflight(
-                result=PublicationResult(status="skipped_fork")
-            )
-        repository_id = base_repo.get("id")
-        base_sha = base.get("sha")
-        author = payload.get("user")
-        if (
-            isinstance(repository_id, bool)
-            or not isinstance(repository_id, int)
-            or repository_id < 1
-            or not isinstance(base_sha, str)
-            or not GIT_SHA_HEX.fullmatch(base_sha)
-            or not isinstance(author, dict)
-            or not isinstance(author.get("login"), str)
-            or not author["login"].strip()
-        ):
-            raise GitHubPublicationError("approval finalization preflight was invalid")
         return _FinalizationPreflight(
-            repository_id=repository_id,
-            base_sha=base_sha,
-            base_ref=base.get("ref"),
-            app_authored=author["login"] == app_slug,
+            repository_id=decision.repository_id,
+            base_sha=decision.base_sha,
+            base_ref=decision.base_ref,
+            app_authored=decision.app_authored,
         )
 
     def finding_index_from_reviews(
@@ -5846,15 +5819,40 @@ class ReviewPublisher:
                     self._pending_thread_cleanup = lambda: (
                         "thread_resolution_unconfirmed"
                     )
-            supersedes_prior_clean_review = (
-                not approval_eligible
-                or prospective_eligibility.facts.has_human_adjudication_findings
-            ) and (
+            # ``ApprovalFacts.from_dict`` requires ``coverage_blocker`` as a
+            # mandatory persisted key: ``None`` represents a complete review
+            # without a ``CoverageManifest``, ``"reviewed"`` represents full
+            # manifest coverage, and partial/incomplete/unknown coverage stores
+            # ``"partial"``/``"incomplete"``/``"unknown"``. Evaluating through
+            # ``evaluate_approval_facts`` ensures ``persisted_is_clean_complete``
+            # holds only when the latest persisted review on ``head_sha`` was
+            # complete, coverage-clean, and free of blocking, human-adjudication,
+            # or review-verdict obligations. When a force-push reverts back to a
+            # previously clean ``head_sha`` while carrying newer obligations
+            # (``supersedes_prior_clean_review``), reconciliation must neither
+            # fail closed on the prior clean review nor short-circuit via
+            # ``already_published``/``_finalize_published_result``; instead it
+            # falls through to ``write_preflight`` below to emit the superseding
+            # non-approving review.
+            persisted_is_clean_complete = (
                 persisted_eligibility is not None
-                and persisted_eligibility.facts.review_status == "complete"
-                and persisted_eligibility.facts.coverage_blocker in {None, "reviewed"}
-                and not persisted_eligibility.facts.has_blocking_findings
-                and not persisted_eligibility.facts.has_human_adjudication_findings
+                and evaluate_approval_facts(
+                    replace(
+                        persisted_eligibility.facts,
+                        enabled=True,
+                        app_authored=False,
+                        qualification="not-required",
+                        has_open_review_threads=False,
+                    )
+                ).approved
+            )
+            prospective_has_non_clean_obligation = (
+                not approval_eligible
+                or prospective_eligibility.facts.has_blocking_findings
+                or prospective_eligibility.facts.has_human_adjudication_findings
+            )
+            supersedes_prior_clean_review = (
+                prospective_has_non_clean_obligation and persisted_is_clean_complete
             )
             if (
                 complete_inventory
@@ -5914,7 +5912,7 @@ class ReviewPublisher:
                         persisted_eligibility=persisted_eligibility,
                     )
             elif has_blocking_findings(result):
-                if result_states:
+                if result_states and not supersedes_prior_clean_review:
                     if not preflight.app_authored:
                         return self._finalize_published_result(
                             token=token,
@@ -5933,8 +5931,8 @@ class ReviewPublisher:
                             persisted_eligibility=persisted_eligibility,
                         )
                     return PublicationResult(status="already_published")
-            elif not supersedes_prior_clean_review or result_states:
-                if "APPROVED" in identity_states and not supersedes_prior_clean_review:
+            elif not supersedes_prior_clean_review:
+                if "APPROVED" in identity_states:
                     return PublicationResult(status="already_published")
                 if identity_states & {"COMMENTED", "CHANGES_REQUESTED"}:
                     if not preflight.app_authored:
@@ -7245,8 +7243,6 @@ class ReviewPublisher:
             raise GitHubPublicationError("review target was not found")
         if status < 200 or status >= 300:
             raise GitHubPublicationError("review preflight failed")
-        from .branch_lifecycle import evaluate_live_pr_write_gate
-
         decision = evaluate_live_pr_write_gate(
             payload,
             repository=repository,
@@ -7257,7 +7253,8 @@ class ReviewPublisher:
             app_slug=app_slug,
         )
         if not decision.admitted:
-            assert decision.skip_status is not None
+            if decision.skip_status is None:
+                raise GitHubPublicationError("review preflight failed")
             return _PreflightDecision(
                 result=PublicationResult(status=decision.skip_status)
             )

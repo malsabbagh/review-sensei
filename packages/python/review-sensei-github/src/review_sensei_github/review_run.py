@@ -1227,6 +1227,15 @@ def bootstrap(
         control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
         authority=authority,
     )
+    head_repo = head.get("repo")
+    head_repo_full_name = (
+        head_repo.get("full_name") if isinstance(head_repo, dict) else None
+    )
+    resolved_head_repository = (
+        head_repo_full_name
+        if isinstance(head_repo_full_name, str) and head_repo_full_name.strip()
+        else args.repository
+    )
     result = ReviewRun(
         caller,
         ledger,
@@ -1238,7 +1247,7 @@ def bootstrap(
         args.base_sha,
         args.head_sha,
         base["ref"],
-        (head.get("repo") or {}).get("full_name", args.repository),
+        resolved_head_repository,
         configuration_path,
         session.attestation,
         session.grant,

@@ -46,7 +46,13 @@ class StateReplyFixture(FreshnessReplyFixture):
         response = super().external(request, timeout)
         target = urlsplit(request.full_url)
         if request.get_method() == "GET" and target.path.endswith("/pulls/7"):
+            if response.status != 200:
+                raise AssertionError(
+                    f"expected 200 OK for GET {target.path}, got {response.status}"
+                )
             pull = json.loads(response.read(524288))
+            if not isinstance(pull, dict) or pull.get("number") != 7:
+                raise AssertionError(f"unexpected PR #7 payload: {pull!r}")
             pull["state"] = self.live_state
             pull["draft"] = self.live_draft
             return json_response(pull)
@@ -491,12 +497,15 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
                 fx = LifecycleEntryFixture(Path(tmp))
                 original_preflight = ReviewPublisher._preflight_pr
-                preflight_calls = 0
+                transitioned = False
 
                 def transition_on_final_preflight(publisher, **kwargs):
-                    nonlocal preflight_calls
-                    preflight_calls += 1
-                    if preflight_calls == 3:
+                    nonlocal transitioned
+                    if not transitioned and any(
+                        "default-human-inventory" in str(item.get("body", ""))
+                        for item in fx.extra_comments.values()
+                    ):
+                        transitioned = True
                         _apply_transition(fx, kind)
                     return original_preflight(publisher, **kwargs)
 
@@ -504,6 +513,7 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
                     ReviewPublisher, "_preflight_pr", transition_on_final_preflight
                 ):
                     code_1, out_1 = fx.run_and_read(human=False)
+                self.assertTrue(transitioned)
                 self.assertEqual(code_1, 1)
                 assert out_1 is not None
                 self.assertEqual(out_1["status"], "skipped_pr_state")

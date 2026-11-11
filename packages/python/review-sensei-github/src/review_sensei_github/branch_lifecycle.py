@@ -27,6 +27,14 @@ across three tightly coupled operational boundaries:
    revocation of already-dispatched requests, holding terminal accounting on
    lost/uncertain mutation responses, and recovering without duplicate model
    inference where retained or published artifacts remain valid.
+
+Deployment boundary: all transition classifiers in this module
+(``classify_reopen_branch_transition``, ``classify_source_identity_transition``,
+and ``classify_active_work_state_transition``) are pure functions over typed
+value objects. Only ``inspect_git_ancestry`` invokes a local ``git`` subprocess
+against a checkout; hosted GitHub App paths without a local clone can populate
+``GitAncestryEvidence`` from authenticated GitHub compare/commit APIs or supply
+``GitAncestryEvidence.unavailable()`` to fail closed.
 """
 
 from __future__ import annotations
@@ -50,6 +58,7 @@ from .errors import GitHubPublicationError
 _GIT_SHA_HEX = re.compile(r"^[0-9a-f]{40}$")
 
 ReopenTransitionKind = Literal[
+    "distinct_pull_request",
     "distinct_pull_request_on_recreated_branch",
     "closed_blocking_writes",
     "head_branch_deleted_blocking_writes",
@@ -96,6 +105,10 @@ def evaluate_live_pr_write_gate(
     Enforces exact-boolean ``draft`` validation (G24), open-state admission,
     same-repository non-fork head/base checks (including deleted ``head.repo``
     refusal), and exact ``head_sha`` plus ``(base_branch, base_sha)`` binding.
+
+    Trust boundary: ``payload`` MUST come from a freshly fetched, authenticated
+    GitHub REST ``GET /repos/{owner}/{repo}/pulls/{pull_number}`` response—never
+    from an unauthenticated webhook body or caller-controlled user input.
     """
 
     if not isinstance(payload, dict):
@@ -192,6 +205,111 @@ def evaluate_live_pr_write_gate(
 
 
 @dataclass(frozen=True)
+class FinalizerWriteGateDecision:
+    """Result of validating a live PR payload before approval finalization."""
+
+    admitted: bool
+    skip_status: str | None
+    reason: str
+    repository_id: int = 0
+    base_sha: str = ""
+    base_ref: str | None = None
+    app_authored: bool = False
+
+
+def evaluate_finalizer_pr_gate(
+    payload: object,
+    *,
+    repository: str,
+    head_sha: str,
+    app_slug: str,
+) -> FinalizerWriteGateDecision:
+    """Validate live PR state before admitting an approval finalization write.
+
+    Preserves ``ReviewApprovalFinalizer`` fail-closed diagnostics while sharing
+    exact-boolean ``draft`` validation, ``state == "open"`` admission,
+    same-repository non-fork checks, and ``head_sha`` freshness fencing.
+
+    Trust boundary: ``payload`` MUST come from a freshly fetched, authenticated
+    GitHub REST ``GET /repos/{owner}/{repo}/pulls/{pull_number}`` response—never
+    from an unauthenticated webhook body or caller-controlled user input.
+    """
+
+    if not isinstance(payload, dict):
+        raise GitHubPublicationError("approval finalization preflight failed")
+    if type(payload.get("draft")) is not bool:
+        raise GitHubPublicationError(
+            "approval finalization preflight draft was invalid"
+        )
+    if payload.get("state") != "open":
+        return FinalizerWriteGateDecision(
+            admitted=False,
+            skip_status="skipped_pr_state",
+            reason="pr_closed",
+        )
+    if payload.get("draft") is True:
+        return FinalizerWriteGateDecision(
+            admitted=False,
+            skip_status="skipped_pr_state",
+            reason="pr_draft",
+        )
+    head = payload.get("head")
+    base = payload.get("base")
+    if not isinstance(head, dict) or not isinstance(base, dict):
+        raise GitHubPublicationError("approval finalization preflight was invalid")
+    if head.get("sha") != head_sha:
+        return FinalizerWriteGateDecision(
+            admitted=False,
+            skip_status="skipped_stale_head",
+            reason="stale_head_sha",
+        )
+    head_repo = head.get("repo")
+    base_repo = base.get("repo")
+    if not isinstance(head_repo, dict) or not isinstance(base_repo, dict):
+        raise GitHubPublicationError("approval finalization preflight was invalid")
+    head_fork = head_repo.get("fork")
+    base_fork = base_repo.get("fork")
+    if type(head_fork) is not bool or type(base_fork) is not bool:
+        raise GitHubPublicationError("approval finalization preflight was invalid")
+    if (
+        head_fork
+        or base_fork
+        or head_repo.get("full_name") != repository
+        or base_repo.get("full_name") != repository
+    ):
+        return FinalizerWriteGateDecision(
+            admitted=False,
+            skip_status="skipped_fork",
+            reason="repository_fork_or_mismatch",
+        )
+    repository_id = base_repo.get("id")
+    base_sha = base.get("sha")
+    raw_base_ref = base.get("ref")
+    author = payload.get("user")
+    if (
+        isinstance(repository_id, bool)
+        or not isinstance(repository_id, int)
+        or repository_id < 1
+        or not isinstance(base_sha, str)
+        or _GIT_SHA_HEX.fullmatch(base_sha) is None
+        or (raw_base_ref is not None and not isinstance(raw_base_ref, str))
+        or not isinstance(author, dict)
+        or not isinstance(author.get("login"), str)
+        or not author["login"].strip()
+    ):
+        raise GitHubPublicationError("approval finalization preflight was invalid")
+    return FinalizerWriteGateDecision(
+        admitted=True,
+        skip_status=None,
+        reason="admitted",
+        repository_id=repository_id,
+        base_sha=base_sha,
+        base_ref=raw_base_ref,
+        app_authored=author["login"] == app_slug,
+    )
+
+
+@dataclass(frozen=True)
 class PullRequestLifecycleSnapshot:
     """Validated snapshot of a pull request across close/reopen/branch changes."""
 
@@ -218,7 +336,11 @@ class PullRequestLifecycleSnapshot:
         *,
         branch_ref_exists: bool = True,
     ) -> PullRequestLifecycleSnapshot:
-        """Validate a GitHub pull-request payload into an immutable snapshot."""
+        """Validate a GitHub pull-request payload into an immutable snapshot.
+
+        Trust boundary: ``payload`` MUST originate from an authenticated GitHub
+        REST pull-request read rather than untrusted webhook or user input.
+        """
 
         if not isinstance(payload, dict):
             raise GitHubPublicationError("pull request payload was invalid")
@@ -381,12 +503,15 @@ def classify_reopen_branch_transition(
     *,
     prior_record: SessionRecord | None = None,
     ledger: object | None = None,
-    prior_approved_binding: tuple[str, str] | None = None,
+    prior_approved_binding: tuple[str, str] | tuple[str, str, str] | None = None,
 ) -> ReopenBranchLifecycleDecision:
     """Classify a close/reopen or branch delete/recreate transition (G05).
 
-    ``prior_approved_binding`` is ``(base_sha, head_sha)`` of any previously
-    published bot ``APPROVED`` review on ``previous.pull_request``.
+    ``prior_approved_binding`` is either ``(base_sha, head_sha)`` or
+    ``(base_ref, base_sha, head_sha)`` of any previously published bot
+    ``APPROVED`` review on ``previous.pull_request``. Approvals are invalidated
+    whenever ``base_ref``, ``base_sha``, or ``head_sha`` changes, or whenever
+    unresolved session obligations remain active.
     """
 
     if (
@@ -396,8 +521,17 @@ def classify_reopen_branch_transition(
         raise GitHubPublicationError("lifecycle snapshots span different repositories")
 
     if previous.pull_request != current.pull_request:
+        recreated_same_branch = current.head_ref == previous.head_ref and (
+            previous.state != "open"
+            or not previous.head_repo_present
+            or not previous.branch_ref_exists
+        )
         return ReopenBranchLifecycleDecision(
-            transition_kind="distinct_pull_request_on_recreated_branch",
+            transition_kind=(
+                "distinct_pull_request_on_recreated_branch"
+                if recreated_same_branch
+                else "distinct_pull_request"
+            ),
             shares_session_identity=False,
             admits_live_writes=current.admits_live_writes,
             preserves_prior_obligations=False,
@@ -416,13 +550,26 @@ def classify_reopen_branch_transition(
         else 0
     )
     same_snapshot = (
-        current.head_sha == previous.head_sha and current.base_sha == previous.base_sha
+        current.head_sha == previous.head_sha
+        and current.base_sha == previous.base_sha
+        and current.base_ref == previous.base_ref
     )
-    approval_matches_current = (
-        prior_approved_binding is not None
-        and prior_approved_binding == (current.base_sha, current.head_sha)
-        and not unresolved
-    )
+    if prior_approved_binding is None:
+        binding_matches_current = False
+    elif len(prior_approved_binding) == 2:
+        binding_matches_current = (
+            current.base_ref == previous.base_ref
+            and prior_approved_binding == (current.base_sha, current.head_sha)
+        )
+    elif len(prior_approved_binding) == 3:
+        binding_matches_current = prior_approved_binding == (
+            current.base_ref,
+            current.base_sha,
+            current.head_sha,
+        )
+    else:
+        raise GitHubPublicationError("prior_approved_binding tuple shape was invalid")
+    approval_matches_current = binding_matches_current and not unresolved
 
     if current.state != "open" or current.draft is True:
         return ReopenBranchLifecycleDecision(
@@ -561,14 +708,33 @@ SourceRecoveryMode = Literal[
 
 @dataclass(frozen=True)
 class GitAncestryEvidence:
-    """Bounded local Git commit-graph facts between two PR snapshots (G06)."""
+    """Transport-neutral Git commit-graph facts between two PR snapshots (G06).
+
+    All tree-SHA and diff-parity fields are explicit so callers cannot omit
+    force-push evidence by accident. Hosted paths without commit-graph evidence
+    should construct ``GitAncestryEvidence.unavailable()``, which fails closed
+    to ``unrelated_history``.
+    """
 
     merge_base_sha: str | None
     prior_head_is_ancestor_of_new_head: bool
     prior_base_is_ancestor_of_new_base: bool
-    prior_head_tree_sha: str | None = None
-    new_head_tree_sha: str | None = None
-    diff_bytes_identical: bool = False
+    prior_head_tree_sha: str | None
+    new_head_tree_sha: str | None
+    diff_bytes_identical: bool
+
+    @classmethod
+    def unavailable(cls) -> GitAncestryEvidence:
+        """Return a fail-closed sentinel when commit-graph evidence is absent."""
+
+        return cls(
+            merge_base_sha=None,
+            prior_head_is_ancestor_of_new_head=False,
+            prior_base_is_ancestor_of_new_base=False,
+            prior_head_tree_sha=None,
+            new_head_tree_sha=None,
+            diff_bytes_identical=False,
+        )
 
 
 def _validate_sha(value: object, *, label: str) -> str:
@@ -599,7 +765,14 @@ def inspect_git_ancestry(
     current_base_sha: str,
     current_head_sha: str,
 ) -> GitAncestryEvidence:
-    """Inspect local Git ancestry, merge-base, tree SHAs, and three-dot diff parity."""
+    """Inspect local Git ancestry, merge-base, tree SHAs, and three-dot diff parity.
+
+    Records both ``(prior_head_tree_sha, new_head_tree_sha)`` and three-dot
+    ``git diff base...head`` byte parity so ``classify_source_identity_transition``
+    can detect identical-content force-pushes via either exact head-tree
+    equality (e.g. commit metadata amend) or identical effective branch diff
+    bytes.
+    """
 
     if not isinstance(repo_root, Path) or not repo_root.is_dir():
         raise GitHubPublicationError("repository root must be an existing directory")
@@ -666,10 +839,19 @@ class SourceIdentityTransitionDecision:
     """Classification of PR head/base history rewrites and ref retargets (G06).
 
     Explicitly separates ``same_sha_base_ref_retarget`` (where ``base_ref``
-    changes while ``base_sha`` is unchanged, keeping ``ReviewContextCacheKey``
-    compatible while gating mid-flight review/reply writes as
-    ``skipped_stale_base``) from ``base_sha`` drift invalidation
-    (``rebase-or-base-change``).
+    changes while ``base_sha`` and ``head_sha`` are unchanged, keeping
+    ``ReviewContextCacheKey`` compatible while gating mid-flight review/reply
+    writes as ``skipped_stale_base``) from ``base_sha`` drift invalidation
+    (``rebase-or-base-change``) and combined head-change + base-ref retargets
+    (``base-ref-retarget``).
+
+    Note on ``baseline_cache_compatible``: ``True`` mirrors
+    ``ReviewContextCacheKey`` compatibility—meaning the persisted session
+    baseline record is NOT invalidated and prior obligations stay bound—not
+    that cached review output may be emitted verbatim without verification.
+    Whenever ``recovery_mode == "incremental_verify"`` or
+    ``"verify_against_latest_obligations"``, the new head diff and obligations
+    must still be verified before any approval can be granted.
     """
 
     transition_kind: SourceIdentityTransitionKind
@@ -694,7 +876,18 @@ def classify_source_identity_transition(
     ancestry: GitAncestryEvidence,
     previously_reviewed_head_shas: Collection[str] = (),
 ) -> SourceIdentityTransitionDecision:
-    """Classify all 7 G06 head/base ancestry and ref-retarget transitions."""
+    """Classify all G06 head/base ancestry and ref-retarget transitions.
+
+    Identical-content force-pushes (``force_push_identical_tree_new_sha``) match
+    on a two-signal OR: either ``prior_head_tree_sha == new_head_tree_sha``
+    (exact head tree match, e.g. ``git commit --amend`` message rewrite) or
+    ``ancestry.diff_bytes_identical`` (identical three-dot ``base...head`` patch
+    bytes even when head trees differ). When ``head_changed`` and
+    ``base_ref_changed`` both hold on an unchanged ``base_sha``, baseline cache
+    reuse is invalidated with ``baseline_invalidation_reason="base-ref-retarget"``
+    so branch-ref-scoped review context is never silently reused across target
+    branches.
+    """
 
     prev_ref = _validate_ref(previous_base_ref, label="previous_base_ref")
     curr_ref = _validate_ref(current_base_ref, label="current_base_ref")
@@ -779,17 +972,25 @@ def classify_source_identity_transition(
             recovery_mode="fallback_full_review",
         )
 
+    cache_compatible_on_head_change = not base_ref_changed
+    invalidation_on_head_change: str | None = (
+        "base-ref-retarget" if base_ref_changed else None
+    )
+    head_change_recovery: SourceRecoveryMode = (
+        "fallback_full_review" if base_ref_changed else "incremental_verify"
+    )
+
     if ancestry.prior_head_is_ancestor_of_new_head:
         return SourceIdentityTransitionDecision(
             transition_kind="fast_forward_head_advance",
-            baseline_cache_compatible=True,
-            baseline_invalidation_reason=None,
+            baseline_cache_compatible=cache_compatible_on_head_change,
+            baseline_invalidation_reason=invalidation_on_head_change,
             in_flight_publication_skip_status="skipped_stale_head",
             in_flight_reply_skip_status="skipped_stale_head",
             preserves_newer_session_obligations=True,
             reuses_superseded_approval_without_verification=False,
             revokes_post_dispatch_effects=False,
-            recovery_mode="incremental_verify",
+            recovery_mode=head_change_recovery,
         )
 
     if not ancestry.prior_head_is_ancestor_of_new_head and (
@@ -797,14 +998,21 @@ def classify_source_identity_transition(
     ):
         return SourceIdentityTransitionDecision(
             transition_kind="force_push_revert_to_prior_sha",
-            baseline_cache_compatible=True,
-            baseline_invalidation_reason=None,
+            baseline_cache_compatible=cache_compatible_on_head_change,
+            baseline_invalidation_reason=invalidation_on_head_change,
             in_flight_publication_skip_status="skipped_stale_head",
             in_flight_reply_skip_status="skipped_stale_head",
             preserves_newer_session_obligations=True,
             reuses_superseded_approval_without_verification=False,
             revokes_post_dispatch_effects=False,
             recovery_mode="verify_against_latest_obligations",
+        )
+
+    if not ancestry.diff_bytes_identical and (
+        ancestry.prior_head_tree_sha is None or ancestry.new_head_tree_sha is None
+    ):
+        raise GitHubPublicationError(
+            "force-push ancestry classification requires head tree SHA or diff parity evidence"
         )
 
     identical_tree_or_diff = (
@@ -814,26 +1022,26 @@ def classify_source_identity_transition(
     if not ancestry.prior_head_is_ancestor_of_new_head and identical_tree_or_diff:
         return SourceIdentityTransitionDecision(
             transition_kind="force_push_identical_tree_new_sha",
-            baseline_cache_compatible=True,
-            baseline_invalidation_reason=None,
+            baseline_cache_compatible=cache_compatible_on_head_change,
+            baseline_invalidation_reason=invalidation_on_head_change,
             in_flight_publication_skip_status="skipped_stale_head",
             in_flight_reply_skip_status="skipped_stale_head",
             preserves_newer_session_obligations=True,
             reuses_superseded_approval_without_verification=False,
             revokes_post_dispatch_effects=False,
-            recovery_mode="incremental_verify",
+            recovery_mode=head_change_recovery,
         )
 
     return SourceIdentityTransitionDecision(
         transition_kind="force_push_changed_content",
-        baseline_cache_compatible=True,
-        baseline_invalidation_reason=None,
+        baseline_cache_compatible=cache_compatible_on_head_change,
+        baseline_invalidation_reason=invalidation_on_head_change,
         in_flight_publication_skip_status="skipped_stale_head",
         in_flight_reply_skip_status="skipped_stale_head",
         preserves_newer_session_obligations=True,
         reuses_superseded_approval_without_verification=False,
         revokes_post_dispatch_effects=False,
-        recovery_mode="incremental_verify",
+        recovery_mode=head_change_recovery,
     )
 
 
@@ -1073,3 +1281,29 @@ def classify_active_work_state_transition(
         duplicate_inference_on_recovery=False,
         recovery_route="hold_uncertain_effect_until_reconciled",
     )
+
+
+__all__ = (
+    "ActiveTransitionKind",
+    "ActiveWorkRecoveryRoute",
+    "ActiveWorkTransitionDecision",
+    "ActiveWorkTransitionPhase",
+    "DispatchEffectState",
+    "FinalizerWriteGateDecision",
+    "GitAncestryEvidence",
+    "LifecycleRecoveryAction",
+    "LiveWriteGateDecision",
+    "PullRequestLifecycleSnapshot",
+    "ReopenBranchLifecycleDecision",
+    "ReopenTransitionKind",
+    "SourceIdentityTransitionDecision",
+    "SourceIdentityTransitionKind",
+    "SourceRecoveryMode",
+    "classify_active_work_state_transition",
+    "classify_reopen_branch_transition",
+    "classify_source_identity_transition",
+    "evaluate_finalizer_pr_gate",
+    "evaluate_live_pr_write_gate",
+    "inspect_git_ancestry",
+    "session_has_unresolved_obligations",
+)

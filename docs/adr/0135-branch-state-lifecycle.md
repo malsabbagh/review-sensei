@@ -4,7 +4,7 @@
 - Date: 2026-11-11
 - Decision owner/reviewers: ReviewSensei maintainers; independent source review
 - Linked GitHub Issue: pending; Batch 5 lifecycle gap qualification (G05, G06, G23)
-- Linked PR: pending; `fix/gaps-g05-g06-g23-branch-state-lifecycle`
+- Linked PR: [#447](https://github.com/malsabbagh/review-sensei/pull/447)
 
 ## Context
 
@@ -52,11 +52,16 @@ type-checked lifecycle decision module and wire live write gates across
      same-SHA reopen while isolating distinct PR numbers on recreated branches.
 
 2. **Git ancestry inspection and superseding obligation publication (`G06`):**
-   - Provide `inspect_git_ancestry` and `classify_source_identity_transition` to
-     classify all seven head/base commit-graph and ref-retarget transitions.
-   - Separate `same_sha_base_ref_retarget` (cache-compatible `base_sha`,
-     in-flight `skipped_stale_base` fence, zero-inference retained replay on the
-     rebound `base.ref`) from `base_sha` drift (`rebase-or-base-change`).
+   - Provide `inspect_git_ancestry` (local Git collector) and
+     `classify_source_identity_transition` (pure classifier over transport-neutral
+     `GitAncestryEvidence`) to classify head/base commit-graph and ref-retarget
+     transitions, failing closed via `GitAncestryEvidence.unavailable()` when
+     ancestry evidence is absent.
+   - Separate `same_sha_base_ref_retarget` (cache-compatible `base_sha` on
+     constant `head_sha`, in-flight `skipped_stale_base` fence, zero-inference
+     retained replay on the rebound `base.ref`) from `base_sha` drift
+     (`rebase-or-base-change`) and combined head-change + base-ref retargets
+     (`base-ref-retarget`).
    - Update `ReviewPublisher` reconciliation so that when a branch force-pushes
      back to a previously cleanly reviewed `head_sha` while carrying newer
      unresolved session obligations (`supersedes_prior_clean_review`),
@@ -114,25 +119,36 @@ shared distribution manifests remain unchanged.
 
 ## Validation
 
-- `tests/test_reopen_branch_lifecycle_g05.py`: 7 end-to-end and unit tests
-  covering close/reopen, deleted/recreated branches, PR `#7` vs. PR `#8`
-  isolation, failed-attempt conservation, and duplicate/reordered deliveries.
-- `tests/test_force_push_ancestry_g06.py`: 6 end-to-end and real-Git ancestry
-  tests covering all 7 commit-graph transitions, `H1 -> H2 -> H1` obligation
-  preservation, identical-tree force-pushes, same-SHA `base_ref` retarget
-  zero-inference recovery, post-`COMMENT` rewrite fencing, and `G04` dirty
-  mergeability controls.
+- `tests/test_reopen_branch_lifecycle_g05.py`: 8 end-to-end and unit tests
+  covering close/reopen, deleted/recreated branches, cold-start and base-ref
+  retarget matrix cells, PR `#7` vs. PR `#8` isolation, failed-attempt
+  conservation, duplicate/reordered deliveries, and live publisher/finalizer
+  write gates.
+- `tests/test_force_push_ancestry_g06.py`: 7 end-to-end, reconciliation-matrix,
+  and real-Git ancestry tests covering commit-graph and combined head+base-ref
+  retarget transitions, `H1 -> H2 -> H1` obligation preservation and
+  `supersedes_prior_clean_review` control flow, identical-tree/diff force-pushes,
+  same-SHA `base_ref` retarget zero-inference recovery, post-`COMMENT` rewrite
+  fencing, and `G04` dirty mergeability controls.
 - `tests/test_active_draft_close_g23.py`: 6 comprehensive tests covering
   `draft=True` and `state="closed"` across all 5 active-work phases on review
   and reply routes, including lost-response `stored` vs. `unconfirmed`
   accounting holds.
 - Full regression anchors (`test_g04_merge_characterization`,
   `test_draft_validation`, `test_reply_freshness_g33`,
-  `test_bounded_v1_publication`, `test_review_run`) and repository quality gates
-  (`ruff`, `mypy`, schema/pin checks, and branch coverage).
+  `test_bounded_v1_publication`, `test_github_publication`, `test_review_run`)
+  and repository quality gates (`ruff`, `mypy`, schema/contract checks, and
+  branch coverage).
 
 ## Rollout and rollback
 
 Ships through normal source review and CI with no schema migration or workflow
 input changes. Rollback reverts the branch commits cleanly without invalidating
 persisted session-ledger comments.
+
+## Follow-up work
+
+- When hosted GitHub App workflows without a local Git checkout need commit-graph
+  classification directly, populate `GitAncestryEvidence` from GitHub's
+  authenticated compare/commit REST endpoints rather than `inspect_git_ancestry`,
+  keeping `classify_source_identity_transition` unchanged.

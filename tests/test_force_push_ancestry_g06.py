@@ -11,8 +11,31 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from fake_github_http import json_response
-from g04_merge_support import G04MergeFixture, git
+try:
+    from fake_github_http import json_response
+    from g04_merge_support import G04MergeFixture, git
+    from test_controlled_restart import registration as restart_registration
+    from test_controlled_restart_journeys import RestartJourney
+    from test_reopen_branch_lifecycle_g05 import (
+        SAMPLE_DIFF,
+        LifecycleEntryFixture,
+        _sample_pr_payload,
+    )
+    from test_reply_freshness_g33 import FreshnessReplyFixture
+    from test_review_run import IDENTITY
+except ModuleNotFoundError:
+    from tests.fake_github_http import json_response
+    from tests.g04_merge_support import G04MergeFixture, git
+    from tests.test_controlled_restart import registration as restart_registration
+    from tests.test_controlled_restart_journeys import RestartJourney
+    from tests.test_reopen_branch_lifecycle_g05 import (
+        SAMPLE_DIFF,
+        LifecycleEntryFixture,
+        _sample_pr_payload,
+    )
+    from tests.test_reply_freshness_g33 import FreshnessReplyFixture
+    from tests.test_review_run import IDENTITY
+
 from review_sensei_github.branch_lifecycle import (
     GitAncestryEvidence,
     classify_source_identity_transition,
@@ -22,20 +45,18 @@ from review_sensei_github.branch_lifecycle import (
 )
 from review_sensei_github.conversation import ConversationPublisher
 from review_sensei_github.errors import GitHubPublicationError
-from review_sensei_github.publication import ReviewPublisher
+from review_sensei_github.http import GitHubHttp
+from review_sensei_github.publication import ReviewApprovalFinalizer, ReviewPublisher
 from review_sensei_github.session_ledger import parse_session_comment
-from test_controlled_restart import registration as restart_registration
-from test_controlled_restart_journeys import RestartJourney
-from test_reopen_branch_lifecycle_g05 import LifecycleEntryFixture, _sample_pr_payload
-from test_reply_freshness_g33 import FreshnessReplyFixture
-from test_review_run import IDENTITY
 
+from review_sensei.api_work import ApiRunAccounting
 from review_sensei.baseline import (
     evaluate_baseline_compatibility,
 )
 from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
+from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.session import read_session_baseline
 from review_sensei.workflow import prepare_diff
 
@@ -434,6 +455,87 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             self.assertEqual(dec_same.transition_kind, "unchanged_snapshot")
             self.assertIsNone(dec_same.in_flight_publication_skip_status)
 
+            # Combined head change + same-SHA base_ref retarget invalidates baseline cache
+            # with `base-ref-retarget` so branch-scoped context is not silently reused.
+            dec_ff_retarget = classify_source_identity_transition(
+                previous_base_ref="main-b1",
+                previous_base_sha=shas["b1"],
+                previous_head_sha=shas["h1"],
+                current_base_ref="release/1.0",
+                current_base_sha=shas["b1"],
+                current_head_sha=shas["h2_ff"],
+                ancestry=anc_1,
+            )
+            self.assertEqual(
+                dec_ff_retarget.transition_kind, "fast_forward_head_advance"
+            )
+            self.assertFalse(dec_ff_retarget.baseline_cache_compatible)
+            self.assertEqual(
+                dec_ff_retarget.baseline_invalidation_reason, "base-ref-retarget"
+            )
+            self.assertEqual(dec_ff_retarget.recovery_mode, "fallback_full_review")
+
+            dec_revert_retarget = classify_source_identity_transition(
+                previous_base_ref="main-b1",
+                previous_base_sha=shas["b1"],
+                previous_head_sha=shas["h2_ff"],
+                current_base_ref="release/1.0",
+                current_base_sha=shas["b1"],
+                current_head_sha=shas["h1"],
+                ancestry=anc_4,
+                previously_reviewed_head_shas={shas["h1"], shas["h2_ff"]},
+            )
+            self.assertEqual(
+                dec_revert_retarget.transition_kind, "force_push_revert_to_prior_sha"
+            )
+            self.assertFalse(dec_revert_retarget.baseline_cache_compatible)
+            self.assertEqual(
+                dec_revert_retarget.baseline_invalidation_reason, "base-ref-retarget"
+            )
+            self.assertEqual(
+                dec_revert_retarget.recovery_mode, "verify_against_latest_obligations"
+            )
+
+            # Two-signal OR unit matrix for `force_push_identical_tree_new_sha`:
+            # (a) tree SHA match only, (b) diff-byte match only, (c) neither.
+            tree_a = "1" * 40
+            tree_b = "2" * 40
+            for label, p_tree, n_tree, diff_eq, expected_kind in (
+                (
+                    "tree_match_only",
+                    tree_a,
+                    tree_a,
+                    False,
+                    "force_push_identical_tree_new_sha",
+                ),
+                (
+                    "diff_match_only",
+                    tree_a,
+                    tree_b,
+                    True,
+                    "force_push_identical_tree_new_sha",
+                ),
+                ("neither_signal", tree_a, tree_b, False, "force_push_changed_content"),
+            ):
+                with self.subTest(two_signal_case=label):
+                    sig_dec = classify_source_identity_transition(
+                        previous_base_ref="main-b1",
+                        previous_base_sha=shas["b1"],
+                        previous_head_sha=shas["h1"],
+                        current_base_ref="main-b1",
+                        current_base_sha=shas["b1"],
+                        current_head_sha=shas["h_rewritten"],
+                        ancestry=GitAncestryEvidence(
+                            merge_base_sha=shas["b1"],
+                            prior_head_is_ancestor_of_new_head=False,
+                            prior_base_is_ancestor_of_new_base=True,
+                            prior_head_tree_sha=p_tree,
+                            new_head_tree_sha=n_tree,
+                            diff_bytes_identical=diff_eq,
+                        ),
+                    )
+                    self.assertEqual(sig_dec.transition_kind, expected_kind)
+
     def test_force_push_back_to_approved_sha_preserves_newer_obligations(
         self,
     ) -> None:
@@ -518,12 +620,18 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = LifecycleEntryFixture(Path(tmp))
             original_preflight = ReviewPublisher._preflight_pr
-            preflight_calls = 0
+            retargeted = False
 
             def retarget_on_final_preflight(publisher, **kwargs):
-                nonlocal preflight_calls
-                preflight_calls += 1
-                if preflight_calls == 3:
+                nonlocal retargeted
+                # Anchor on the post-staging pre-mutation fence (immediately after
+                # `human_inventory_store.stage` records the default human inventory
+                # part comment), rather than a brittle preflight call counter.
+                if not retargeted and any(
+                    "default-human-inventory" in str(item.get("body", ""))
+                    for item in fixture.extra_comments.values()
+                ):
+                    retargeted = True
                     fixture.base_ref = "release/1.0"
                 return original_preflight(publisher, **kwargs)
 
@@ -531,6 +639,7 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
                 ReviewPublisher, "_preflight_pr", retarget_on_final_preflight
             ):
                 code_mid, out_mid = fixture.run_and_read(human=False)
+            self.assertTrue(retargeted)
             self.assertEqual(code_mid, 1)
             assert out_mid is not None
             self.assertEqual(out_mid["status"], "skipped_stale_base")
@@ -604,6 +713,8 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             for sub in ("prior", "restart"):
                 (mid_root / sub).mkdir()
             fx_mid = LifecycleEntryFixture(mid_root / "prior")
+            initial_head = fx_mid.live_head
+            prior_run_id = fx_mid.run_id
             rewritten_head = "c" * 40
             fx_mid.before_provider = lambda: setattr(
                 fx_mid, "live_head", rewritten_head
@@ -616,6 +727,22 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
                 "retention current pull request identity mismatches", fx_mid.error
             )
 
+            # Snapshot the consistent non-terminal predecessor state immediately
+            # after the interrupted run, before exercising unauthenticated rollover.
+            assert fx_mid.comment is not None
+            prior_comment = copy.deepcopy(fx_mid.comment)
+            prior_parts = copy.deepcopy(fx_mid.extra_comments)
+            prior_record = parse_session_comment(
+                prior_comment["body"], identity=IDENTITY
+            )
+            assert prior_record is not None
+            assert prior_record.api_run_accounting is not None
+            self.assertIsNone(
+                ApiRunAccounting.from_document(
+                    prior_record.api_run_accounting
+                ).terminal_transaction
+            )
+
             # Unauthenticated new-run rollover fails closed with zero inference.
             fx_mid.before_provider = None
             fx_mid.advance_run_to_head(rewritten_head)
@@ -625,19 +752,16 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             self.assertEqual(fx_mid.provider_calls, 1)
             self.assertEqual(fx_mid.review_posts, [])
 
-            # Designated controlled restart archives the non-terminal predecessor and
-            # completes review on `rewritten_head`.
-            prior_run_id = 456
-            old_comment = copy.deepcopy(fx_mid.comment)
-            parts = copy.deepcopy(fx_mid.extra_comments)
-            for item in parts.values():
+            # Designated controlled restart archives the captured non-terminal
+            # predecessor snapshot and completes review on `rewritten_head`.
+            for item in prior_parts.values():
                 item["issue_url"] = "https://api.github.test/repos/owner/repo/issues/7"
-            journey = RestartJourney(mid_root / "restart", body=old_comment["body"])
+            journey = RestartJourney(mid_root / "restart", body=prior_comment["body"])
             r_fx = journey.fixture
-            r_fx.run_id = fx_mid.run_id + 1
+            r_fx.run_id = prior_run_id + 10
             r_fx.live_head = r_fx.requested_head = rewritten_head
-            r_fx.extra_comments = copy.deepcopy(parts)
-            archived = [journey.old, *parts.values()]
+            r_fx.extra_comments = copy.deepcopy(prior_parts)
+            archived = [journey.old, *prior_parts.values()]
             journey.row = restart_registration(
                 policy_commit=r_fx.policy,
                 workflow_sha="a" * 40,
@@ -661,7 +785,7 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
                 path = urlsplit(request.full_url).path
                 if path == f"/repos/owner/repo/actions/runs/{prior_run_id}":
                     value = json.loads(response.read(512 * 1024 + 1))
-                    value.update(conclusion="failure", head_sha="b" * 40)
+                    value.update(conclusion="failure", head_sha=initial_head)
                     return json_response(value)
                 if (
                     path
@@ -707,9 +831,21 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             assert out_partial is not None
             self.assertEqual(out_partial["status"], "published")
             self.assertTrue(out_partial["accounting_terminal"])
-            # COMMENT succeeded on H1, APPROVE skipped as stale head; H1 COMMENT was NOT revoked.
+            # COMMENT succeeded on H1, APPROVE skipped as stale head; H1 COMMENT was NOT revoked,
+            # zero APPROVED reviews exist, and the new head `"f" * 40` has no review/eligibility yet.
             self.assertEqual([r["event"] for r in fx_post.review_posts], ["COMMENT"])
+            self.assertEqual([r["state"] for r in fx_post.reviews], ["COMMENTED"])
             self.assertEqual(fx_post.review_posts[0]["commit_id"], "b" * 40)
+            self.assertIsNone(
+                ReviewApprovalFinalizer(http=fx_post.http).load_eligibility(
+                    token="installation-token",
+                    repository="owner/repo",
+                    pull_request=7,
+                    head_sha="f" * 40,
+                    app_slug="reviewsensei[bot]",
+                    require_valid=True,
+                )
+            )
 
             fx_post.rewrite_to = None
             fx_post.advance_run_to_head("f" * 40)
@@ -733,8 +869,284 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             code_g04 = g04.invoke_fresh()
             row_g04 = g04.observation(case="g06_dirty_conflict_control", code=code_g04)
             self.assertEqual(code_g04, 0, g04.error)
+            self.assertEqual(g04.provider_calls, 1)
             self.assertEqual(row_g04["provider_has_exact_diff"], [True])
             self.assertIsNotNone(row_g04["terminal_transaction"])
+            self.assertEqual(len(g04.acquisitions), 1)
+            self.assertEqual(g04.acquisitions[0]["base"], g04.conflict_base)
+            self.assertEqual(g04.acquisitions[0]["head"], g04.original_head)
+            self.assertEqual(
+                g04.acquisitions[0]["diff_sha256"],
+                g04.acquisitions[0]["expected_diff_sha256"],
+            )
+            self.assertIn("-value = 0\n+value = 1\n", g04.analysis_diffs[0])
+            self.assertNotIn("value = 2", g04.analysis_diffs[0])
+            self.assertEqual(g04.review_payloads[-1]["commit_id"], g04.original_head)
+
+    def test_supersedes_prior_clean_review_reconciliation_matrix(self) -> None:
+        """Table test for `supersedes_prior_clean_review` control flow (RS-808BF5, RS-0C080F)."""
+
+        head = "a" * 40
+        base = "b" * 40
+        clean_res = ReviewResult(
+            summary="Clean complete review.",
+            comments=(),
+            provider="ollama",
+            review_status="complete",
+        )
+        other_clean_res = ReviewResult(
+            summary="Clean complete review with optional suggestion.",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=2,
+                    body="Optional style suggestion.",
+                    severity="low",
+                    category="maintainability",
+                    effective_blocking=False,
+                    needs_human=False,
+                ),
+            ),
+            provider="ollama",
+            review_status="complete",
+        )
+        partial_res_1 = ReviewResult(
+            summary="Partial review carrying incomplete coverage.",
+            comments=(),
+            provider="ollama",
+            review_status="partial",
+        )
+        partial_res_2 = ReviewResult(
+            summary="Different partial review.",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=2,
+                    body="Optional note on partial run.",
+                    severity="low",
+                    category="maintainability",
+                    effective_blocking=False,
+                    needs_human=False,
+                ),
+            ),
+            provider="ollama",
+            review_status="partial",
+        )
+        human_res = ReviewResult(
+            summary="Superseding review carrying human decision obligation.",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=2,
+                    body="Verify behavior after reverting head commit.",
+                    severity="high",
+                    category="correctness",
+                    effective_blocking=False,
+                    needs_human=True,
+                ),
+            ),
+            provider="ollama",
+            review_status="complete",
+        )
+
+        def make_harness():
+            stored_reviews: list[dict[str, object]] = []
+            review_comments: dict[int, list[dict[str, object]]] = {}
+            posted_events: list[str] = []
+            next_id = 5000
+
+            def opener(request, timeout=None):
+                nonlocal next_id
+                path = urlsplit(request.full_url).path
+                method = request.get_method()
+                if path.endswith("/pulls/7") and method == "GET":
+                    return json_response(
+                        _sample_pr_payload(number=7, base_sha=base, head_sha=head)
+                    )
+                if path.endswith("/pulls/7/reviews") and method == "GET":
+                    return json_response(list(stored_reviews))
+                if path.endswith("/pulls/7/reviews") and method == "POST":
+                    payload = json.loads(request.data)
+                    event = str(payload.get("event", "COMMENT"))
+                    posted_events.append(event)
+                    next_id += 1
+                    rid = next_id
+                    bot_user = {
+                        "id": 999,
+                        "login": "reviewsensei[bot]",
+                        "type": "Bot",
+                    }
+                    created = {
+                        "id": rid,
+                        "state": "APPROVED" if event == "APPROVE" else "COMMENTED",
+                        "body": payload.get("body", ""),
+                        "commit_id": payload.get("commit_id", head),
+                        "submitted_at": "2026-11-11T00:00:00Z",
+                        "user": bot_user,
+                    }
+                    stored_reviews.append(created)
+                    inline_list: list[dict[str, object]] = []
+                    for idx, raw_comment in enumerate(
+                        payload.get("comments") or [], start=1
+                    ):
+                        inline_list.append(
+                            {
+                                "id": rid * 100 + idx,
+                                "pull_request_review_id": rid,
+                                "body": raw_comment.get("body", ""),
+                                "path": raw_comment.get("path", ""),
+                                "line": raw_comment.get("line"),
+                                "side": raw_comment.get("side", "RIGHT"),
+                                "commit_id": payload.get("commit_id", head),
+                                "user": bot_user,
+                            }
+                        )
+                    review_comments[rid] = inline_list
+                    return json_response(created, status=200)
+                if (
+                    "/pulls/7/reviews/" in path
+                    and path.endswith("/comments")
+                    and method == "GET"
+                ):
+                    rid_str = path.rsplit("/reviews/", 1)[1].split("/", 1)[0]
+                    return json_response(list(review_comments.get(int(rid_str), [])))
+                if path.endswith("/pulls/7/comments") and method == "GET":
+                    all_comments = [
+                        c for items in review_comments.values() for c in items
+                    ]
+                    return json_response(all_comments)
+                if path.endswith("/rules/branches/main") and method == "GET":
+                    return json_response([])
+                if path.endswith("/branches/main/protection") and method == "GET":
+                    return json_response(
+                        {"message": "Branch not protected"}, status=404
+                    )
+                if path == "/graphql" and method == "POST":
+                    return json_response(
+                        {
+                            "data": {
+                                "repository": {
+                                    "pullRequest": {
+                                        "reviewThreads": {
+                                            "nodes": [],
+                                            "pageInfo": {
+                                                "hasNextPage": False,
+                                                "endCursor": None,
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    )
+                raise AssertionError(f"unexpected request: {method} {path}")
+
+            http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+            return (
+                ReviewPublisher(http=http),
+                stored_reviews,
+                review_comments,
+                posted_events,
+            )
+
+        def run_pub(
+            publisher: ReviewPublisher, res: ReviewResult, *, auto_approve: bool = True
+        ):
+            return publisher.publish(
+                token="installation-token",
+                repository="owner/repo",
+                repository_id=123,
+                pull_request=7,
+                head_sha=head,
+                base_branch="main",
+                base_sha=base,
+                diff=SAMPLE_DIFF,
+                result=res,
+                auto_approve=auto_approve,
+                app_slug="reviewsensei[bot]",
+                complete_inventory=True,
+            )
+
+        # 1. {clean persisted, non-clean prospective, empty result_states} across
+        # COMMENTED-only, APPROVED+COMMENTED, and APPROVED-only identity states:
+        # all publish a superseding COMMENT review without emitting APPROVE.
+        for mode in ("commented_only", "mixed_approved_commented", "approved_only"):
+            with self.subTest(case="clean_to_non_clean_empty_result_states", mode=mode):
+                pub, stored, _rcomments, events = make_harness()
+                init_out = run_pub(
+                    pub, clean_res, auto_approve=(mode != "commented_only")
+                )
+                self.assertEqual(init_out.status, "published")
+                if mode == "approved_only":
+                    # Retain the clean eligibility body on a single APPROVED review.
+                    comment_body = str(stored[0]["body"])
+                    stored[:] = [
+                        {**stored[-1], "state": "APPROVED", "body": comment_body}
+                    ]
+                events.clear()
+                sup_out = run_pub(pub, human_res, auto_approve=True)
+                self.assertEqual(sup_out.status, "published")
+                self.assertEqual(events, ["COMMENT"])
+
+        # 2. {clean persisted AFTER an earlier identical non-clean review (`result_states`
+        # non-empty!), non-clean prospective}: STILL publishes superseding COMMENT rather
+        # than short-circuiting on the stale pre-approval `result_states` match (RS-0C080F).
+        with self.subTest(case="clean_after_prior_dirty_with_nonempty_result_states"):
+            pub_pre, stored_pre, rcomments_pre, _ = make_harness()
+            self.assertEqual(
+                run_pub(pub_pre, human_res, auto_approve=True).status, "published"
+            )
+            earlier_dirty_review = copy.deepcopy(stored_pre[0])
+            earlier_dirty_review["id"] = 4901
+            earlier_dirty_comments = [
+                {**c, "pull_request_review_id": 4901}
+                for c in copy.deepcopy(rcomments_pre[int(stored_pre[0]["id"])])
+            ]
+
+            pub, stored, rcomments, events = make_harness()
+            self.assertEqual(
+                run_pub(pub, clean_res, auto_approve=True).status, "published"
+            )
+            # Prepend the earlier dirty review before the latest clean+APPROVED reviews.
+            stored.insert(0, earlier_dirty_review)
+            rcomments[4901] = earlier_dirty_comments
+            events.clear()
+            sup_nonempty = run_pub(pub, human_res, auto_approve=True)
+            self.assertEqual(sup_nonempty.status, "published")
+            self.assertEqual(events, ["COMMENT"])
+
+        # 3. {clean persisted, clean prospective}:
+        # - identical clean result short-circuits as `already_published` with zero POSTs;
+        # - different clean result (`empty result_states`) fails closed under complete_inventory.
+        with self.subTest(case="clean_to_clean"):
+            pub, _stored, _rcomments, events = make_harness()
+            self.assertEqual(
+                run_pub(pub, clean_res, auto_approve=True).status, "published"
+            )
+            events.clear()
+            same_clean = run_pub(pub, clean_res, auto_approve=True)
+            self.assertEqual(same_clean.status, "already_published")
+            self.assertEqual(events, [])
+            with self.assertRaisesRegex(
+                GitHubPublicationError,
+                "existing review does not prove complete publication of this result",
+            ):
+                run_pub(pub, other_clean_res, auto_approve=True)
+
+        # 4. {non-clean persisted, non-clean prospective, empty result_states}:
+        # fails closed rather than treating an incomplete/non-clean review as superseded.
+        with self.subTest(case="non_clean_to_non_clean_fails_closed"):
+            pub, _stored, _rcomments, events = make_harness()
+            self.assertEqual(
+                run_pub(pub, partial_res_1, auto_approve=True).status, "published"
+            )
+            events.clear()
+            with self.assertRaisesRegex(
+                GitHubPublicationError,
+                "existing review does not prove complete publication of this result",
+            ):
+                run_pub(pub, partial_res_2, auto_approve=True)
+            self.assertEqual(events, [])
 
     def test_ancestry_and_source_classifier_input_validation(self) -> None:
         with self.assertRaisesRegex(
@@ -772,6 +1184,47 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
                     merge_base_sha="a" * 40,
                     prior_head_is_ancestor_of_new_head=True,
                     prior_base_is_ancestor_of_new_base=True,
+                    prior_head_tree_sha="c" * 40,
+                    new_head_tree_sha="c" * 40,
+                    diff_bytes_identical=True,
+                ),
+            )
+
+        # `GitAncestryEvidence.unavailable()` fails closed to `unrelated_history`.
+        unavail = classify_source_identity_transition(
+            previous_base_ref="main",
+            previous_base_sha="a" * 40,
+            previous_head_sha="b" * 40,
+            current_base_ref="main",
+            current_base_sha="a" * 40,
+            current_head_sha="d" * 40,
+            ancestry=GitAncestryEvidence.unavailable(),
+        )
+        self.assertEqual(unavail.transition_kind, "unrelated_history")
+        self.assertFalse(unavail.baseline_cache_compatible)
+        self.assertEqual(
+            unavail.recovery_mode, "refuse_prepare_diff_retarget_or_rescan"
+        )
+
+        # Force-push classification fails closed when tree SHA and diff parity evidence are missing.
+        with self.assertRaisesRegex(
+            GitHubPublicationError,
+            "force-push ancestry classification requires head tree SHA or diff parity evidence",
+        ):
+            classify_source_identity_transition(
+                previous_base_ref="main",
+                previous_base_sha="a" * 40,
+                previous_head_sha="b" * 40,
+                current_base_ref="main",
+                current_base_sha="a" * 40,
+                current_head_sha="d" * 40,
+                ancestry=GitAncestryEvidence(
+                    merge_base_sha="a" * 40,
+                    prior_head_is_ancestor_of_new_head=False,
+                    prior_base_is_ancestor_of_new_base=True,
+                    prior_head_tree_sha=None,
+                    new_head_tree_sha=None,
+                    diff_bytes_identical=False,
                 ),
             )
 
