@@ -53,7 +53,10 @@ from review_sensei.writer_containment import (
 from .api_run_history import read_action_result
 from .api_run_owner import ApiRunActionsEvidence
 from .api_run_requests import json_copy
-from .unstarted_action_recovery import authenticate_unstarted_cancellation
+from .unstarted_action_recovery import (
+    NoBusinessDispatchEvidence,
+    authenticate_unstarted_cancellation,
+)
 
 if TYPE_CHECKING:
     from .api_run_requests import ApiRunRequestTransport
@@ -732,6 +735,8 @@ def execute_source_lifecycle_route(
     actions_evidence: ApiRunActionsEvidence | None = None,
     canonical_coordinator: ContainedForwardingCoordinator | None = None,
     canonical_token: IssuedWriterToken | None = None,
+    no_business_dispatch_evidence: NoBusinessDispatchEvidence | None = None,
+    require_positive_dispatch_proof: bool = False,
     rollover_configuration: FrozenApiConfiguration | None = None,
     rollover_owner: ApiExecutionOwner | None = None,
 ) -> tuple[SourceLifecycleClassification, SessionRecord | ApiRunAccounting | None]:
@@ -782,6 +787,8 @@ def execute_source_lifecycle_route(
                 actions_evidence=actions_evidence,
                 canonical_coordinator=canonical_coordinator,
                 canonical_token=canonical_token,
+                no_business_dispatch_evidence=no_business_dispatch_evidence,
+                require_positive_dispatch_proof=require_positive_dispatch_proof,
                 mode="same_run",
             )
             _require_still_unstarted_before_g32(
@@ -817,6 +824,8 @@ def execute_source_lifecycle_route(
                     actions_evidence=actions_evidence,
                     canonical_coordinator=canonical_coordinator,
                     canonical_token=canonical_token,
+                    no_business_dispatch_evidence=no_business_dispatch_evidence,
+                    require_positive_dispatch_proof=require_positive_dispatch_proof,
                     mode="cross_run",
                 )
 

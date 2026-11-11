@@ -10,11 +10,14 @@ import argparse
 import hashlib
 import json
 import os
-from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+import threading
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from review_sensei.api_work import ApiRunAccounting
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.convergence import resolve_review_convergence_policy
 from review_sensei.disposition import (
@@ -23,8 +26,14 @@ from review_sensei.disposition import (
     parse_maintainer_command,
 )
 from review_sensei.errors import ReviewInputError
+from review_sensei.writer_containment import (
+    ContainedForwardingCoordinator,
+    IssuedWriterToken,
+)
 
 from .action_representability import require_action_settlement_representable
+from .api_run_owner import ApiRunActionsEvidence
+from .api_run_requests import ApiRunRequestTransport
 from .application import GitHubApplication, GitHubWriteOptions
 from .comment_intent import verify_live_comment_source
 from .conversation import ConversationPublisher
@@ -37,6 +46,148 @@ from .source_comment_lifecycle import (
     admit_event_comment_source,
     execute_source_lifecycle_route,
 )
+from .unstarted_action_recovery import NoBusinessDispatchEvidence
+
+
+@dataclass(frozen=True)
+class UnstartedCallerRecoveryGate:
+    """Explicit caller authority gate for G32 unstarted-action recovery.
+
+    Requires BOTH positive ``NoBusinessDispatchEvidence`` AND qualified owner
+    cessation (``use_actions_evidence=True``) or canonical writer epoch fencing.
+    """
+
+    target_run_id: int
+    no_business_dispatch_evidence: NoBusinessDispatchEvidence | None
+    mode: str = "same_run"
+    use_actions_evidence: bool = False
+    canonical_coordinator: ContainedForwardingCoordinator | None = None
+    canonical_token: IssuedWriterToken | None = None
+
+    def validate_preconditions(self) -> NoBusinessDispatchEvidence:
+        if type(self.target_run_id) is not int or self.target_run_id <= 0:
+            raise ReviewInputError("unstarted recovery target_run_id must be positive")
+        if self.mode not in {"same_run", "cross_run"}:
+            raise ReviewInputError("unstarted recovery mode is unsupported")
+        if not isinstance(
+            self.no_business_dispatch_evidence, NoBusinessDispatchEvidence
+        ):
+            raise ReviewInputError(
+                "ordinary unstarted action recovery requires explicit NoBusinessDispatchEvidence; "
+                "comment deletion, execution_started=false, null markers, and cancelled jobs alone "
+                "are insufficient authority"
+            )
+        if self.no_business_dispatch_evidence.target_run_id != self.target_run_id:
+            raise ReviewInputError(
+                "unstarted recovery gate target_run_id conflicts with dispatch evidence"
+            )
+        has_canonical = (
+            self.canonical_coordinator is not None or self.canonical_token is not None
+        )
+        if not self.use_actions_evidence and not has_canonical:
+            raise ReviewInputError(
+                "unstarted action cancellation requires owner cessation or canonical fence proof"
+            )
+        return self.no_business_dispatch_evidence
+
+
+_ROLLOVER_GUARD_LOCK = threading.RLock()
+
+
+@contextmanager
+def _cross_run_unstarted_rollover_guard(
+    gate: UnstartedCallerRecoveryGate | None,
+) -> Iterator[bool]:
+    if gate is None:
+        yield False
+        return
+    evidence_obj = gate.validate_preconditions()
+    if gate.mode != "cross_run":
+        yield False
+        return
+
+    with _ROLLOVER_GUARD_LOCK:
+        original_rollover = ApiRunRequestTransport.rollover_and_activate
+        owner_thread_id = threading.get_ident()
+        applied = False
+
+        def _guarded_rollover(
+            self: ApiRunRequestTransport,
+            native: Any,
+            identity: Any,
+            frozen: Any,
+            owner: Any,
+            previous_root: Any,
+            require_cessation: Any,
+        ) -> Any:
+            nonlocal applied
+            if threading.get_ident() != owner_thread_id or applied:
+                return original_rollover(
+                    self,
+                    native,
+                    identity,
+                    frozen,
+                    owner,
+                    previous_root,
+                    require_cessation,
+                )
+            if previous_root is None or previous_root.api_run_accounting is None:
+                raise ReviewInputError(
+                    "cross-run unstarted recovery requires a predecessor accounting record"
+                )
+            prev_state = ApiRunAccounting.from_document(
+                previous_root.api_run_accounting
+            )
+            if prev_state.identity.run_id != gate.target_run_id:
+                raise ReviewInputError(
+                    "cross-run unstarted recovery gate target_run_id conflicts with predecessor"
+                )
+            actions_ev: ApiRunActionsEvidence | None = None
+            if gate.use_actions_evidence:
+                origin_reader = getattr(native, "_quarantine_origin_reader", None)
+                actions_tok = getattr(origin_reader, "actions_token", None)
+                if not isinstance(actions_tok, str) or not actions_tok.strip():
+                    raise ReviewInputError(
+                        "cross-run unstarted recovery requires authenticated actions_token"
+                    )
+                actions_ev = ApiRunActionsEvidence(
+                    native.http,
+                    token=actions_tok,
+                    command_run_id=str(self.run.run_id),
+                    job=self.job,
+                )
+            require_cessation()
+            classification, activated = execute_source_lifecycle_route(
+                caller=self,
+                ledger=native,
+                identity=identity,
+                record=previous_root,
+                candidate_source=None,
+                mode="cross_run",
+                actions_evidence=actions_ev,
+                canonical_coordinator=gate.canonical_coordinator,
+                canonical_token=gate.canonical_token,
+                no_business_dispatch_evidence=evidence_obj,
+                require_positive_dispatch_proof=True,
+                rollover_configuration=frozen,
+                rollover_owner=owner,
+            )
+            if classification.route != "g32_unstarted_cancellation":
+                raise ReviewInputError(
+                    f"cross-run unstarted recovery refused on route {classification.route!r}"
+                )
+            applied = True
+            return activated
+
+        setattr(ApiRunRequestTransport, "rollover_and_activate", _guarded_rollover)
+        try:
+            yield True
+        finally:
+            setattr(ApiRunRequestTransport, "rollover_and_activate", original_rollover)
+        if not applied:
+            raise ReviewInputError(
+                "cross-run unstarted recovery gate did not settle a stranded predecessor"
+            )
 
 
 def event_source(args: Any, *, purpose: str) -> dict[str, object]:
@@ -65,9 +216,33 @@ def reconcile_action_source_lifecycle(
     event_delivery: Mapping[str, Any] | None = None,
     has_pending_receipt: bool = False,
     verify_before_intent: bool = False,
+    unstarted_recovery: UnstartedCallerRecoveryGate | None = None,
 ) -> SourceLifecycleClassification | None:
-    """Evaluate and enforce G27 source-comment lifecycle before or across action entry."""
-    if run.caller.accounting.action is None and not verify_before_intent:
+    """Evaluate and enforce G27/G32 source lifecycle before or across action entry."""
+    evidence_obj: NoBusinessDispatchEvidence | None = None
+    actions_ev: ApiRunActionsEvidence | None = None
+    if unstarted_recovery is not None:
+        evidence_obj = unstarted_recovery.validate_preconditions()
+        if unstarted_recovery.mode != "same_run":
+            raise ReviewInputError(
+                "in-run source lifecycle reconciliation requires same_run recovery gate"
+            )
+        if run.caller.run.run_id != unstarted_recovery.target_run_id:
+            raise ReviewInputError(
+                "same-run unstarted recovery gate target_run_id conflicts with active run"
+            )
+        if unstarted_recovery.use_actions_evidence:
+            if not isinstance(run.actions_token, str) or not run.actions_token.strip():
+                raise ReviewInputError(
+                    "same-run unstarted recovery requires authenticated actions_token"
+                )
+            actions_ev = ApiRunActionsEvidence(
+                run.http,
+                token=run.actions_token,
+                command_run_id=str(run.caller.run.run_id),
+                job=run.caller.job,
+            )
+    elif run.caller.accounting.action is None and not verify_before_intent:
         return None
     loaded = run.ledger.load(run.identity)
     record = loaded.record if loaded.status == "ok" else None
@@ -79,7 +254,26 @@ def reconcile_action_source_lifecycle(
         candidate_source=candidate_source,
         event_delivery=event_delivery,
         has_pending_receipt=has_pending_receipt,
+        mode="same_run",
+        actions_evidence=actions_ev,
+        canonical_coordinator=(
+            None
+            if unstarted_recovery is None
+            else unstarted_recovery.canonical_coordinator
+        ),
+        canonical_token=(
+            None if unstarted_recovery is None else unstarted_recovery.canonical_token
+        ),
+        no_business_dispatch_evidence=evidence_obj,
+        require_positive_dispatch_proof=unstarted_recovery is not None,
     )
+    if (
+        unstarted_recovery is not None
+        and classification.route != "g32_unstarted_cancellation"
+    ):
+        raise ReviewInputError(
+            "unstarted recovery gate requires an unstarted mutated source action"
+        )
     return classification
 
 
@@ -375,6 +569,7 @@ def run_action(
     verify_before_intent: bool = False,
     event_delivery: Mapping[str, Any] | None = None,
     has_pending_receipt: bool = False,
+    unstarted_recovery: UnstartedCallerRecoveryGate | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(prog="review-sensei-github " + purpose + "-run")
     parser.add_argument("--policy-commit", required=True)
@@ -416,12 +611,18 @@ def run_action(
     if not args.head_sha:
         args.head_sha = None
     args.rescan = args.review_remaining = False
-    run = bootstrap(
-        args,
-        run_directory=options.run_directory,
-        policy_commit=options.policy_commit,
-        purpose=purpose,
-        source=source,
+    with _cross_run_unstarted_rollover_guard(unstarted_recovery):
+        run = bootstrap(
+            args,
+            run_directory=options.run_directory,
+            policy_commit=options.policy_commit,
+            purpose=purpose,
+            source=source,
+        )
+    same_run_gate = (
+        unstarted_recovery
+        if (unstarted_recovery is not None and unstarted_recovery.mode == "same_run")
+        else None
     )
     lifecycle = reconcile_action_source_lifecycle(
         run,
@@ -431,8 +632,12 @@ def run_action(
         verify_before_intent=(
             verify_before_intent or options.verify_source_before_intent
         ),
+        unstarted_recovery=same_run_gate,
     )
     if lifecycle is not None and lifecycle.route == "preserve_terminal_no_replay":
+        return 0
+    if lifecycle is not None and lifecycle.route == "g32_unstarted_cancellation":
+        print("Unstarted action canceled after source change")
         return 0
     if purpose == "command":
         return execute_command(run, args)
