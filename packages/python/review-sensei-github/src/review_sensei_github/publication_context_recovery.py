@@ -318,7 +318,9 @@ def bundle_from_reconstructed_contexts(
 
     accounting_version = ACCOUNTING_VERSION
     if isinstance(record.api_run_accounting, Mapping):
-        raw_version = record.api_run_accounting.get("schema_version")
+        raw_version = record.api_run_accounting.get(
+            "version", record.api_run_accounting.get("schema_version")
+        )
         if isinstance(raw_version, str):
             accounting_version = raw_version
 

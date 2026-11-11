@@ -11,16 +11,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import test_trusted_publication_recovery as trusted_recovery
 from review_sensei_github.publication_context_recovery import (
     bundle_from_reconstructed_contexts,
     reconstruct_or_prescribe_publication_contexts,
     reconstruct_publication_contexts,
 )
 from test_publication_recovery import BASE, HEAD, IDENTITY
-from test_trusted_publication_recovery import (
-    TrustedPublicationRecoveryTests,
-    _FailedPublication,
-)
 
 from review_sensei.api_work import (
     ACCOUNTING_VERSION,
@@ -536,7 +533,12 @@ class PreEffectBudgetAndHandoffStoreTests(unittest.TestCase):
             self.assertEqual(len(all_mismatch.missing_or_invalid), 6)
 
 
-class EndToEndFreshProcessRecoveryG17Tests(TrustedPublicationRecoveryTests):
+_FailedPublication = trusted_recovery._FailedPublication
+
+
+class EndToEndFreshProcessRecoveryG17Tests(
+    trusted_recovery.TrustedPublicationRecoveryTests
+):
     def test_fresh_process_zero_inference_handoff_and_decision_drift_recovery(
         self,
     ) -> None:

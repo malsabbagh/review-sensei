@@ -188,8 +188,12 @@ def ensure_not_observation_only_evidence(candidate: object) -> None:
     if isinstance(candidate, Mapping) and (
         candidate.get("schema_version") == "caller-action-result-v1"
         or candidate.get("accounting_version") == PARTITIONED_ACTION_ACCOUNTING_VERSION
+        or candidate.get("version") == PARTITIONED_ACTION_ACCOUNTING_VERSION
     ):
-        if candidate.get("accounting_version") == PARTITIONED_ACTION_ACCOUNTING_VERSION:
+        if (
+            candidate.get("accounting_version") == PARTITIONED_ACTION_ACCOUNTING_VERSION
+            or candidate.get("version") == PARTITIONED_ACTION_ACCOUNTING_VERSION
+        ):
             raise ReviewInputError(
                 "unsupported_v3_writer: caller-requests-v3 is reader-only and cannot enroll recovery writes"
             )
