@@ -160,6 +160,45 @@ class CallerWorkflowTests(unittest.TestCase):
                     self.assertNotIn("--oidc-token", document["args"])
                     self.assertNotIn("--session-attestation", document["args"])
 
+    def test_artifact_upload_has_independent_workflow_gates(self):
+        from strict_workflow_yaml import load_workflow
+
+        workflow = load_workflow(
+            Path(".github/workflows/review-sensei-run.yml").read_text()
+        )
+        steps = [
+            step
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("name") == "Upload diagnostics artifact"
+        ]
+        self.assertEqual(len(steps), 2)
+        for step in steps:
+            condition = step["if"]
+            for gate in (
+                "!cancelled()",
+                "inputs.operation == 'review'",
+                "needs.bootstrap.outputs.artifacts == 'diagnostics'",
+                "steps.provider-review.outputs.result_ready == 'true'",
+                "steps.provider-review.outputs.checkpoint_workspace_clean == 'true'",
+                "hashFiles('checkpoint-evidence.json') != ''",
+            ):
+                self.assertIn(gate, condition)
+        # Controlled restarts use the review operation's same provider step;
+        # command kind is not the workflow operation and implies no upload.
+        text = Path(".github/workflows/review-sensei-run.yml").read_text()
+        self.assertEqual(text.count("lifecycle_command[1]=restart-run"), 2)
+        review_steps = [
+            step
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("name") in {"Run hosted review", "Run local review"}
+        ]
+        self.assertEqual(len(review_steps), 2)
+        for step in review_steps:
+            self.assertIn("inputs.operation == 'review'", step["if"])
+            self.assertIn("lifecycle_command[1]=restart-run", step["run"])
+
     def test_review_steps_own_publication_and_cleanup(self):
         text = Path(".github/workflows/review-sensei-run.yml").read_text()
         for name in ("Run hosted review", "Run local review"):

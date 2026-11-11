@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator, Mapping
 
+from review_sensei.failure_observation import exception_kind, observe_cli_failures
+
 PREFIX = "review-sensei: lifecycle "
 MAX_LINE_BYTES = 4096
 _ACTIVE: ContextVar[LifecycleDiagnostics | None] = ContextVar(
@@ -82,6 +84,14 @@ _DIAGNOSTICS = {
     "qualification_unverified",
     "transaction-publication-complete",
 }
+_ERROR_KINDS = {
+    "interrupted",
+    "input_or_protocol",
+    "os",
+    "value",
+    "system_exit",
+    "unexpected",
+}
 
 
 def _hex(value: object, size: int) -> str | None:
@@ -144,6 +154,8 @@ class LifecycleDiagnostics:
         self.publication: dict[str, object] | None = None
         self.caller: Any = None
         self.exception_kind: str | None = None
+        self.primary_exception_kind: str | None = None
+        self.cleanup_exception_kind: str | None = None
         self.broker: dict[str, object] | None = None
 
     def returned(self, code: int) -> int:
@@ -172,7 +184,6 @@ class LifecycleDiagnostics:
 
     def failed(self, error: BaseException) -> None:
         from review_sensei.broker_diagnostics import BrokerDiagnostic
-        from review_sensei.errors import ReviewSenseiError
 
         if isinstance(error, KeyboardInterrupt):
             # The outer hosted CLI maps this interruption to exit 130.
@@ -189,19 +200,9 @@ class LifecycleDiagnostics:
                 "correlation_id": diagnostic.correlation_id,
             }
 
-        self.exception_kind = (
-            "interrupted"
-            if isinstance(error, KeyboardInterrupt)
-            else "input_or_protocol"
-            if isinstance(error, ReviewSenseiError)
-            else "os"
-            if isinstance(error, OSError)
-            else "value"
-            if isinstance(error, ValueError)
-            else "system_exit"
-            if isinstance(error, SystemExit)
-            else "unexpected"
-        )
+        self.exception_kind = exception_kind(error)
+        if self.primary_exception_kind is None:
+            self.primary_exception_kind = self.exception_kind
         self.reason = (
             "predecessor_admission_failed"
             if self.phase == "bootstrap"
@@ -209,6 +210,12 @@ class LifecycleDiagnostics:
             and self.predecessor is not None
             else self.phase + "_failed"
         )
+
+    def classified_failure(self, primary: str, cleanup: str | None) -> None:
+        if self.primary_exception_kind is None:
+            self.primary_exception_kind = _label(primary, _ERROR_KINDS) or "unexpected"
+        if cleanup is not None and self.cleanup_exception_kind is None:
+            self.cleanup_exception_kind = _label(cleanup, _ERROR_KINDS) or "unexpected"
 
     def _caller_view(self) -> dict[str, object]:
         caller = self.caller
@@ -246,6 +253,12 @@ class LifecycleDiagnostics:
                 "step": _label(self.step, _STEPS),
                 "reason": reason,
                 "exit_code": _number(self.exit_code),
+                "primary_exception_kind": _label(
+                    self.primary_exception_kind, _ERROR_KINDS
+                ),
+                "cleanup_exception_kind": _label(
+                    self.cleanup_exception_kind, _ERROR_KINDS
+                ),
                 "authority": False,
             },
             sort_keys=True,
@@ -255,6 +268,10 @@ class LifecycleDiagnostics:
     def emit(self) -> None:
         # Logging must not mask the original operation or expose opaque objects.
         try:
+            artifacts = (
+                _label(os.environ.get("ARTIFACTS"), {"none", "diagnostics"})
+                or "unavailable"
+            )
             value = {
                 "schema_version": "review-lifecycle-outcome-v1",
                 "kind": self.kind,
@@ -263,42 +280,62 @@ class LifecycleDiagnostics:
                 "reason": self.reason,
                 "exit_code": self.exit_code,
                 "exception_kind": self.exception_kind,
+                "primary_exception_kind": self.primary_exception_kind,
+                "cleanup_exception_kind": self.cleanup_exception_kind,
                 "broker": self.broker,
                 "scope": self.scope,
                 "predecessor": self.predecessor,
                 "publication": self.publication,
                 "caller": self._caller_view(),
-                "artifacts": _label(
-                    os.environ.get("ARTIFACTS"), {"none", "all", "errors"}
-                )
-                or "unavailable",
+                "artifacts": artifacts,
+                "artifact_policy_state": (
+                    "disabled"
+                    if artifacts == "none"
+                    else "unavailable"
+                    if artifacts == "unavailable"
+                    else "skipped"
+                    if self.kind in {"command", "reply"}
+                    else "eligible"
+                    if self.kind in {"review", "restart"}
+                    else "unavailable"
+                ),
+                # The CLI emits before the workflow's separate upload step.
+                "artifact_upload_state": "unavailable",
                 "recovery_classification": "not_evaluated",
                 "authority": False,
             }
             line = PREFIX + json.dumps(value, sort_keys=True, separators=(",", ":"))
-        except Exception:
+        except BaseException:
             line = self._minimal("diagnostic_unavailable")
         if len((line + "\n").encode()) > MAX_LINE_BYTES:
             line = self._minimal("diagnostic_size_limit")
         try:
             sys.stderr.write(line + "\n")
-        except Exception:
+        except BaseException:
             # Sink failure does not settle, retry or fail business work.
             pass
 
 
 @contextmanager
 def lifecycle(kind: str) -> Iterator[LifecycleDiagnostics]:
+
     value = LifecycleDiagnostics(kind)
     token = _ACTIVE.set(value)
     try:
-        yield value
+        with observe_cli_failures(value.classified_failure):
+            yield value
     except BaseException as error:
-        value.failed(error)
+        try:
+            value.failed(error)
+        except BaseException:
+            pass
         raise
     finally:
         try:
-            value.emit()
+            try:
+                value.emit()
+            except BaseException:
+                pass
         finally:
             _ACTIVE.reset(token)
 
