@@ -822,9 +822,31 @@ class ClassifyLifecycleMatrixTests(unittest.TestCase):
             )
             self.assertEqual(cls_empty_q.phase, "unstarted_intent")
 
-            # Queue with pending item_count > 0 enters pending_receipt
-            pending_q_rec = record.evolve(
+            # Unstarted action on a PR with prior open assessment items (item_count > 0,
+            # active_operation=None) stays unstarted_intent so G32 remains reachable (RS-A54860).
+            stale_q_rec = record.evolve(
                 assessment_queue=_queue_root_document(item_count=2)
+            )
+            cls_stale_q = classify_source_comment_lifecycle(
+                caller=f.accounted,
+                ledger=ledger,
+                identity=IDENTITY,
+                record=stale_q_rec,
+            )
+            self.assertEqual(cls_stale_q.phase, "unstarted_intent")
+            self.assertEqual(cls_stale_q.route, "g32_unstarted_cancellation")
+            self.assertTrue(cls_stale_q.g32_eligible)
+
+            # Started action with queued assessment items (item_count > 0) enters pending_receipt.
+            started_acc = ApiRunAccounting.from_document(record.api_run_accounting)
+            assert started_acc.action is not None
+            started_with_q_doc = replace(
+                started_acc,
+                action={**started_acc.action, "execution_started": True},
+            ).to_document()
+            pending_q_rec = record.evolve(
+                api_run_accounting=started_with_q_doc,
+                assessment_queue=_queue_root_document(item_count=2),
             )
             cls_q = classify_source_comment_lifecycle(
                 caller=f.accounted,
@@ -1329,6 +1351,79 @@ class ExecuteLifecycleRouteAndReviewRecoveryTests(unittest.TestCase):
             self.assertEqual(f.invoke(), 0, f.error)
             self.assertGreater(len(f.reviews), initial_reviews)
             self.assertEqual(controlled_restart.registrations(), [])
+
+    def test_toctou_action_starting_during_or_after_observation_refuses_g32_cancellation(
+        self,
+    ) -> None:
+        """RS-809117: action starting during source GET or before cancel_unstarted_action holds fail-closed."""
+        from unittest.mock import patch
+
+        from review_sensei_github.unstarted_action_recovery import (
+            authenticate_unstarted_cancellation,
+        )
+
+        # 1. Action starts concurrently during observe_live_source_revision GET -> re-check
+        #    promotes phase to started_work and refuses G32 cancellation!
+        with tempfile.TemporaryDirectory() as d:
+            f, _, ledger, ev, _, intent, record = _prepare_fixture(d)
+            f.source_status = 404
+            orig_observe = observe_live_source_revision
+
+            def observe_then_start(**kwargs):
+                res = orig_observe(**kwargs)
+                f.accounted.begin_action_effect(ledger, IDENTITY, intent)
+                return res
+
+            with patch(
+                "review_sensei_github.source_comment_lifecycle.observe_live_source_revision",
+                side_effect=observe_then_start,
+            ):
+                cls = classify_source_comment_lifecycle(
+                    caller=f.accounted,
+                    ledger=ledger,
+                    identity=IDENTITY,
+                    record=record,
+                )
+                self.assertEqual(cls.phase, "started_work")
+                self.assertEqual(cls.route, "hold_started_work")
+                self.assertFalse(cls.g32_eligible)
+
+        # 2. Action starts after classify_source_comment_lifecycle (during witness issuance)
+        #    immediately before cancel_unstarted_action -> re-check refuses fail-closed!
+        with tempfile.TemporaryDirectory() as d2:
+            f2, _, ledger2, ev2, _, intent2, record2 = _prepare_fixture(d2)
+            f2.source_status = 404
+            orig_auth = authenticate_unstarted_cancellation
+
+            def auth_then_start(**kwargs):
+                witness = orig_auth(**kwargs)
+                f2.accounted.begin_action_effect(ledger2, IDENTITY, intent2)
+                return witness
+
+            with (
+                patch(
+                    "review_sensei_github.source_comment_lifecycle.authenticate_unstarted_cancellation",
+                    side_effect=auth_then_start,
+                ),
+                self.assertRaisesRegex(
+                    ReviewInputError,
+                    "action transitioned to started_work before G32 cancellation",
+                ),
+            ):
+                execute_source_lifecycle_route(
+                    caller=f2.accounted,
+                    ledger=ledger2,
+                    identity=IDENTITY,
+                    record=record2,
+                    actions_evidence=ev2,
+                    mode="same_run",
+                )
+            after_rec = parse_session_comment(f2.comment["body"], identity=IDENTITY)
+            assert after_rec is not None
+            after_state = ApiRunAccounting.from_document(after_rec.api_run_accounting)
+            assert after_state.action is not None
+            self.assertEqual(after_state.action["phase"], "pending")
+            self.assertTrue(after_state.action["execution_started"])
 
 
 if __name__ == "__main__":

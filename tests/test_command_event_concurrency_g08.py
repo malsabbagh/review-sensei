@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import tempfile
@@ -9,7 +10,7 @@ import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request
 
 from fake_github_http import json_response, make_http
@@ -93,7 +94,7 @@ class BarrierCoordinator:
         with self._lock:
             self.timeline.append((actor, barrier_name))
         self.entered[barrier_name].set()
-        if not self.released[barrier_name].wait(timeout=10):
+        if not self.released[barrier_name].wait(timeout=5):
             raise TimeoutError(f"{actor} timed out at barrier {barrier_name}")
 
     def enter_writer(self, writer_id: str) -> None:
@@ -153,6 +154,62 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
         )
         return caller, native
 
+    def _join_cleanly(self, thread: threading.Thread, barrier_name: str) -> None:
+        self.coordinator.release(barrier_name)
+        thread.join(timeout=5)
+        self.assertFalse(
+            thread.is_alive(),
+            f"background worker thread leaked at barrier {barrier_name}",
+        )
+
+    def _new_readonly_contender_caller(
+        self,
+        f: LifecycleFixture,
+        directory: Path,
+        *,
+        run_id: int,
+        job: str = "hosted",
+    ) -> tuple[ApiRunRequestTransport, GitHubIssueCommentSessionLedger]:
+        """Create an isolated contender transport that reads comment snapshots without mutating ``f``."""
+        run_dir = directory / f"contender-{run_id}-{job}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        comment_snapshot = copy.deepcopy(f.comment)
+        extra_snapshot = copy.deepcopy(f.extra_comments)
+
+        def snapshot_open(request: Request, timeout: float = 5.0):
+            target = urlsplit(request.full_url)
+            path = target.path
+            bot = {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"}
+            if path == "/user":
+                return json_response(bot)
+            if path.endswith("/issues/7/comments") and request.method == "GET":
+                query = parse_qs(target.query)
+                size = int(query.get("per_page", [100])[0])
+                page = int(query.get("page", [1])[0])
+                rows = ([comment_snapshot] if comment_snapshot else []) + list(
+                    extra_snapshot.values()
+                )
+                return json_response(
+                    copy.deepcopy(rows[(page - 1) * size : page * size])
+                )
+            if path.endswith("/issues/comments/1000000") and request.method == "GET":
+                return json_response(copy.deepcopy(comment_snapshot))
+            raise AssertionError(f"unexpected contender HTTP {request.method} {path}")
+
+        caller = ApiRunRequestTransport(
+            directory=run_dir,
+            run=ApiRunIdentity(123, run_id),
+            plan=f.plan,
+            attempt=1,
+            job=job,
+            opener=snapshot_open,
+        )
+        http = GitHubHttp(api_url="https://api.github.test", opener=caller.open)
+        native = GitHubIssueCommentSessionLedger(
+            http, token="synthetic", app_slug="reviewsensei[bot]"
+        )
+        return caller, native
+
     def test_a_review_vs_command_interleaving_across_barriers_and_recovery(
         self,
     ) -> None:
@@ -162,7 +219,7 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
         config = f.accounted.accounting.configuration
 
         self.coordinator.arm("physical_dispatch")
-        review_errors: list[BaseException] = []
+        review_errors: list[Exception] = []
 
         def run_hosted_review() -> None:
             self.coordinator.enter_writer("run-456-hosted")
@@ -216,62 +273,66 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
                 f.accounted.finish_review_run(
                     review_ledger, IDENTITY, published.transaction
                 )
-            except BaseException as exc:  # pragma: no cover - asserted empty
+            except Exception as exc:  # pragma: no cover - asserted empty
                 review_errors.append(exc)
             finally:
                 self.coordinator.exit_writer("run-456-hosted")
 
         review_thread = threading.Thread(target=run_hosted_review)
         review_thread.start()
-        self.assertTrue(self.coordinator.entered["physical_dispatch"].wait(timeout=5))
-
-        # While hosted review is paused at physical_dispatch:
-        # 1. Cross-run command sees active predecessor run 456 and refuses rollover.
-        active_routes = [
-            (
-                lambda req: urlsplit(req.full_url).path.endswith("/actions/runs/456"),
-                lambda _req: json_response(
-                    {
-                        "id": 456,
-                        "run_attempt": 1,
-                        "status": "in_progress",
-                        "repository": {"id": 123, "full_name": "owner/repo"},
-                    }
-                ),
-            )
-        ]
-        ev_http, _ = make_http([], routes=active_routes)
-        cmd_evidence = ApiRunActionsEvidence(
-            ev_http, token="actions-read", command_run_id="457", job="command"
-        )
-        with self.assertRaisesRegex(
-            ReviewInputError, "previous Actions run has not ceased"
-        ):
-            cmd_evidence.ceased_run_owner(
-                IDENTITY, 456, ApiExecutionOwner(1, "hosted", 0)
+        try:
+            self.assertTrue(
+                self.coordinator.entered["physical_dispatch"].wait(timeout=5)
             )
 
-        # 2. Direct action admission against an active review reservation is also refused.
-        with self.assertRaisesRegex(
-            ReviewInputError, "caller action conflicts with a review reservation"
-        ):
-            f.accounted.admit_action(
-                review_ledger,
-                IDENTITY,
-                purpose="command",
-                source={
-                    "kind": "issue_comment",
-                    "id": 51,
-                    "updated_at": "2026-10-25T12:00:00Z",
-                    "body_sha256": "1" * 64,
-                },
-                head_sha=HEAD,
-                operation_key="2" * 64,
+            # While hosted review is paused at physical_dispatch:
+            # 1. Cross-run command sees active predecessor run 456 and refuses rollover.
+            active_routes = [
+                (
+                    lambda req: urlsplit(req.full_url).path.endswith(
+                        "/actions/runs/456"
+                    ),
+                    lambda _req: json_response(
+                        {
+                            "id": 456,
+                            "run_attempt": 1,
+                            "status": "in_progress",
+                            "repository": {"id": 123, "full_name": "owner/repo"},
+                        }
+                    ),
+                )
+            ]
+            ev_http, _ = make_http([], routes=active_routes)
+            cmd_evidence = ApiRunActionsEvidence(
+                ev_http, token="actions-read", command_run_id="457", job="command"
             )
+            with self.assertRaisesRegex(
+                ReviewInputError, "previous Actions run has not ceased"
+            ):
+                cmd_evidence.ceased_run_owner(
+                    IDENTITY, 456, ApiExecutionOwner(1, "hosted", 0)
+                )
 
-        # Release hosted review to complete cleanly.
-        self.coordinator.release("physical_dispatch")
-        review_thread.join(timeout=5)
+            # 2. Direct action admission against an active review reservation is also refused.
+            with self.assertRaisesRegex(
+                ReviewInputError, "caller action conflicts with a review reservation"
+            ):
+                f.accounted.admit_action(
+                    review_ledger,
+                    IDENTITY,
+                    purpose="command",
+                    source={
+                        "kind": "issue_comment",
+                        "id": 51,
+                        "updated_at": "2026-10-25T12:00:00Z",
+                        "body_sha256": "1" * 64,
+                    },
+                    head_sha=HEAD,
+                    operation_key="2" * 64,
+                )
+        finally:
+            # Release hosted review to complete cleanly.
+            self._join_cleanly(review_thread, "physical_dispatch")
         self.assertEqual(review_errors, [])
 
         # Now Run 457 (hosted/command rollover) succeeds deterministically and executes command!
@@ -365,7 +426,7 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
             claim_review_startup(slot_dir, ApiRunIdentity(123, 456), 1, "command")
 
         self.coordinator.arm("result_retention")
-        reply_errors: list[BaseException] = []
+        reply_errors: list[Exception] = []
         reply_holders: dict[str, SessionRecord] = {}
 
         def run_reply_worker() -> None:
@@ -399,26 +460,25 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
                 reply_holders["root"] = f.accounted.close_action(
                     reply_ledger, IDENTITY, proof
                 )
-            except BaseException as exc:  # pragma: no cover - asserted empty
+            except Exception as exc:  # pragma: no cover - asserted empty
                 reply_errors.append(exc)
             finally:
                 self.coordinator.exit_writer("run-456-reply")
 
         worker = threading.Thread(target=run_reply_worker)
         worker.start()
-        self.assertTrue(self.coordinator.entered["result_retention"].wait(timeout=5))
-
-        # Concurrent command run attempting rollover while reply is pending fails closed.
-        mid_root = parse_session_comment(f.comment["body"], identity=IDENTITY)
-        assert mid_root is not None
-        early_caller, early_native = self._new_run_caller(
-            f, self.dir / "case-b-early", run_id=457, job="hosted"
-        )
-        saved_accounted = f.accounted
-        saved_trace = list(f.trace)
-        f.trace = []
-        f.accounted = early_caller
         try:
+            self.assertTrue(
+                self.coordinator.entered["result_retention"].wait(timeout=5)
+            )
+
+            # Concurrent command run attempting rollover while reply is pending fails closed
+            # without mutating ``f.accounted`` or ``f.trace`` while ``worker`` is live.
+            mid_root = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert mid_root is not None
+            early_caller, early_native = self._new_readonly_contender_caller(
+                f, self.dir / "case-b-early", run_id=457, job="hosted"
+            )
             early_native.load(IDENTITY)
             with self.assertRaisesRegex(
                 ReviewInputError, "previous caller run is not terminal"
@@ -432,12 +492,8 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
                     lambda: None,
                 )
         finally:
-            f.accounted = saved_accounted
-            f.trace = saved_trace
-
-        # Release reply to finish terminal write; command run 458 then rolls over cleanly.
-        self.coordinator.release("result_retention")
-        worker.join(timeout=5)
+            # Release reply to finish terminal write; command run 458 then rolls over cleanly.
+            self._join_cleanly(worker, "result_retention")
         self.assertEqual(reply_errors, [])
         reply_root = reply_holders["root"]
 
@@ -479,6 +535,8 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
             "hosted_conclusion": None,
             "local_status": "in_progress",
             "local_conclusion": None,
+            "command_status": "completed",
+            "command_conclusion": "skipped",
         }
 
         def routes():
@@ -501,7 +559,7 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
                     lambda req: "/attempts/1/jobs" in urlsplit(req.full_url).path,
                     lambda _req: json_response(
                         {
-                            "total_count": 2,
+                            "total_count": 3,
                             "jobs": [
                                 {
                                     "id": 5001,
@@ -529,6 +587,19 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
                                         else None
                                     ),
                                 },
+                                {
+                                    "id": 5003,
+                                    "run_id": 500,
+                                    "run_attempt": 1,
+                                    "name": "ReviewSensei / command",
+                                    "status": state["command_status"],
+                                    "conclusion": state["command_conclusion"],
+                                    "completed_at": (
+                                        "2026-10-26T00:04:00Z"
+                                        if state["command_status"] == "completed"
+                                        else None
+                                    ),
+                                },
                             ],
                         }
                     ),
@@ -550,35 +621,48 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
             ):
                 ev.current_owner(IDENTITY, attempt=1, generation=0)
 
-        # 2. Hosted completed while sibling local is still in_progress or queued -> ceased_owner refuses!
+        # 2. Hosted completed while sibling local is in_progress, queued, waiting, or
+        #    completed without a terminal conclusion -> ceased_owner refuses and names the job!
         state["hosted_status"] = "completed"
         state["hosted_conclusion"] = "success"
-        for sibling_status in ("in_progress", "queued"):
+        for sibling_status, sibling_conclusion in (
+            ("in_progress", None),
+            ("queued", None),
+            ("waiting", None),
+            ("completed", None),
+        ):
             state["local_status"] = sibling_status
-            with self.assertRaisesRegex(
-                ReviewInputError, "API predecessor has not ceased"
-            ):
+            state["local_conclusion"] = sibling_conclusion
+            with self.assertRaises(ReviewInputError) as err_ctx:
                 hosted_ev.ceased_owner(IDENTITY, ApiExecutionOwner(1, "hosted", 0))
+            self.assertIn("API predecessor has not ceased", str(err_ctx.exception))
+            self.assertIn(
+                f"ReviewSensei / local={sibling_status}/{sibling_conclusion}",
+                str(err_ctx.exception),
+            )
 
-        # 3. Once sibling local also completes (skipped), cessation proof succeeds cleanly!
+        # 3. Conditional sibling jobs that never ran on GitHub Actions report
+        #    status="completed" with conclusion="skipped" (and cancelled siblings report
+        #    status="completed" with conclusion="cancelled"): both permit clean handover!
         state["run_status"] = "completed"
-        state["local_status"] = "completed"
-        state["local_conclusion"] = "skipped"
-        job_id, stamp, conclusion = hosted_ev.ceased_owner(
-            IDENTITY, ApiExecutionOwner(1, "hosted", 0)
-        )
-        self.assertEqual(
-            (job_id, stamp, conclusion), (5001, "2026-10-26T00:05:00Z", "success")
-        )
-        successor_ev = ApiRunActionsEvidence(
-            http, token="actions-read", command_run_id="501", job="local"
-        )
-        self.assertEqual(
-            successor_ev.ceased_run_owner(
-                IDENTITY, 500, ApiExecutionOwner(1, "hosted", 0)
-            )[0],
-            500,
-        )
+        for terminal_sibling_conclusion in ("skipped", "cancelled"):
+            state["local_status"] = "completed"
+            state["local_conclusion"] = terminal_sibling_conclusion
+            job_id, stamp, conclusion = hosted_ev.ceased_owner(
+                IDENTITY, ApiExecutionOwner(1, "hosted", 0)
+            )
+            self.assertEqual(
+                (job_id, stamp, conclusion), (5001, "2026-10-26T00:05:00Z", "success")
+            )
+            successor_ev = ApiRunActionsEvidence(
+                http, token="actions-read", command_run_id="501", job="local"
+            )
+            self.assertEqual(
+                successor_ev.ceased_run_owner(
+                    IDENTITY, 500, ApiExecutionOwner(1, "hosted", 0)
+                )[0],
+                500,
+            )
 
     def test_d_cancelled_worker_delayed_write_fencing_and_unknown_preservation(
         self,
@@ -716,7 +800,7 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
             writer_route="actions_hosted",
         )
         self.coordinator.arm("terminal_write")
-        cancelled_errors: list[BaseException] = []
+        cancelled_errors: list[Exception] = []
 
         def cancelled_worker() -> None:
             try:
@@ -737,37 +821,40 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
                     },
                     reservation_sha256="7" * 64,
                 )
-            except BaseException as exc:
+            except Exception as exc:
                 cancelled_errors.append(exc)
 
         thread = threading.Thread(target=cancelled_worker)
         thread.start()
-        self.assertTrue(self.coordinator.entered["terminal_write"].wait(timeout=5))
+        try:
+            self.assertTrue(self.coordinator.entered["terminal_write"].wait(timeout=5))
 
-        tok2, _ = containment.advance_epoch(
-            predecessor_token=tok1,
-            successor_access=replace(base_access, run_id=601, caller_sha256="2" * 64),
-            writer_route="actions_hosted",
-            predecessor_ceased=True,
-        )
-        successor_rec = initial.evolve(
-            generation=2, operator_paused=False, now=FIXED_NOW
-        )
-        containment.fenced_http_mutation(
-            tok2,
-            dispatch_id="successor-clean-patch",
-            operation="session_patch",
-            method="PATCH",
-            target="/repos/example/repo/issues/comments/701",
-            payload={
-                "body": render_session_comment(
-                    repository_id=123, pull_request=7, record=successor_rec
-                )
-            },
-            reservation_sha256="8" * 64,
-        )
-        self.coordinator.release("terminal_write")
-        thread.join(timeout=5)
+            tok2, _ = containment.advance_epoch(
+                predecessor_token=tok1,
+                successor_access=replace(
+                    base_access, run_id=601, caller_sha256="2" * 64
+                ),
+                writer_route="actions_hosted",
+                predecessor_ceased=True,
+            )
+            successor_rec = initial.evolve(
+                generation=2, operator_paused=False, now=FIXED_NOW
+            )
+            containment.fenced_http_mutation(
+                tok2,
+                dispatch_id="successor-clean-patch",
+                operation="session_patch",
+                method="PATCH",
+                target="/repos/example/repo/issues/comments/701",
+                payload={
+                    "body": render_session_comment(
+                        repository_id=123, pull_request=7, record=successor_rec
+                    )
+                },
+                reservation_sha256="8" * 64,
+            )
+        finally:
+            self._join_cleanly(thread, "terminal_write")
 
         self.assertEqual(len(cancelled_errors), 1)
         self.assertIsInstance(cancelled_errors[0], AuthorityRefusal)
@@ -784,7 +871,10 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
         from types import SimpleNamespace
 
         from review_sensei_github.api_run_host import ApiRunReviewHooks
-        from review_sensei_github.conversation import ConversationPublisher
+        from review_sensei_github.conversation import (
+            ConversationPublisher,
+            PreparedConversation,
+        )
 
         sha1 = "1" * 40
         sha2 = "2" * 40
@@ -840,11 +930,26 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
                         "number": 7,
                         "state": "open",
                         "draft": False,
+                        "title": "PR 7",
+                        "body": "",
                         "head": {
                             "sha": sha3,
-                            "repo": {"id": 123, "fork": False},
+                            "ref": "feature",
+                            "repo": {
+                                "id": 123,
+                                "full_name": "owner/repo",
+                                "fork": False,
+                            },
                         },
-                        "base": {"sha": BASE, "repo": {"id": 123}},
+                        "base": {
+                            "sha": BASE,
+                            "ref": "main",
+                            "repo": {
+                                "id": 123,
+                                "full_name": "owner/repo",
+                                "fork": False,
+                            },
+                        },
                     }
                 ),
             ),
@@ -869,47 +974,65 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
         )
         next_ledger = ApiRunSessionLedger(next_native, next_caller, IDENTITY)
 
+        policy_file = self.dir / "case-e" / "frozen-policy.yml"
+        policy_file.write_bytes(f.config_bytes)
+        args = SimpleNamespace(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            repository_id=IDENTITY.repository_id,
+            base_sha=BASE,
+            config=policy_file,
+        )
+
+        def attempt_queued_dispatch(candidate_sha: str) -> str:
+            reply_check = conversation.prepare_context(
+                token="synthetic",
+                repository=IDENTITY.repository,
+                pull_request=IDENTITY.pull_request,
+                source_comment_id=77,
+                source_updated_at="2026-10-25T12:15:00Z",
+                app_slug="reviewsensei[bot]",
+                source_kind="issue",
+                expected_head_sha=candidate_sha,
+                defer_evidence=True,
+            )
+            hooks = ApiRunReviewHooks(
+                next_ledger,
+                IDENTITY,
+                base_sha=BASE,
+                head_sha=candidate_sha,
+            )
+            try:
+                admitted_ledger = hooks.resolve_ledger(args, resolved_head_sha=sha3)
+            except ReviewInputError as exc:
+                self.assertEqual(
+                    getattr(reply_check, "status", None), "skipped_stale_head"
+                )
+                self.assertIn("caller hosted admission scope conflicts", str(exc))
+                return "skipped_stale_head"
+            self.assertIsInstance(reply_check, PreparedConversation)
+            assert isinstance(reply_check, PreparedConversation)
+            self.assertEqual(reply_check.head_sha, sha3)
+            hooks.begin_provider_phase(admitted_ledger)
+            self.coordinator.record_paid_dispatch(
+                "run-457-hosted", f"review:{candidate_sha}"
+            )
+            dispatched_shas.append(candidate_sha)
+            next_ledger.replace(
+                IDENTITY,
+                lambda cur: cur.evolve(generation=cur.generation + 1),
+            )
+            return "dispatched"
+
         # Non-FIFO wakeup order across queued jobs: SHA_2 (stale), SHA_3 (current), SHA_1 (late stale).
-        for candidate_sha in (sha2, sha3, sha1):
-            if candidate_sha != sha3:
-                reply_check = conversation.prepare_context(
-                    token="synthetic",
-                    repository=IDENTITY.repository,
-                    pull_request=IDENTITY.pull_request,
-                    source_comment_id=77,
-                    source_updated_at="2026-10-25T12:15:00Z",
-                    app_slug="reviewsensei[bot]",
-                    source_kind="issue",
-                    expected_head_sha=candidate_sha,
-                    defer_evidence=True,
-                )
-                self.assertEqual(reply_check.status, "skipped_stale_head")
-                hooks = ApiRunReviewHooks(
-                    next_ledger,
-                    IDENTITY,
-                    base_sha=BASE,
-                    head_sha=candidate_sha,
-                )
-                args = SimpleNamespace(
-                    repository=IDENTITY.repository,
-                    pull_request=IDENTITY.pull_request,
-                    repository_id=IDENTITY.repository_id,
-                    base_sha=BASE,
-                    config=None,
-                )
-                with self.assertRaisesRegex(
-                    ReviewInputError, "caller hosted admission scope conflicts"
-                ):
-                    hooks.resolve_ledger(args, resolved_head_sha=sha3)
-            else:
-                self.coordinator.record_paid_dispatch(
-                    "run-457-hosted", f"review:{candidate_sha}"
-                )
-                dispatched_shas.append(candidate_sha)
-                next_ledger.replace(
-                    IDENTITY,
-                    lambda cur: cur.evolve(generation=cur.generation + 1),
-                )
+        outcomes = [
+            attempt_queued_dispatch(candidate_sha)
+            for candidate_sha in (sha2, sha3, sha1)
+        ]
+        self.assertEqual(
+            outcomes,
+            ["skipped_stale_head", "dispatched", "skipped_stale_head"],
+        )
 
         converged = parse_session_comment(f.comment["body"], identity=IDENTITY)
         assert converged is not None
@@ -936,7 +1059,7 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
         # concurrent manual command #102 attempts to mutate the same session comment.
         self.coordinator.arm("terminal_write")
         cmd1_holder: dict[str, SessionRecord] = {}
-        cmd1_errors: list[BaseException] = []
+        cmd1_errors: list[Exception] = []
 
         def run_manual_command_1() -> None:
             self.coordinator.enter_writer("manual-cmd-101")
@@ -976,26 +1099,23 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
                 cmd1_holder["root"] = f.accounted.close_action(
                     cmd1_ledger, IDENTITY, proof1
                 )
-            except BaseException as exc:  # pragma: no cover - asserted empty
+            except Exception as exc:  # pragma: no cover - asserted empty
                 cmd1_errors.append(exc)
             finally:
                 self.coordinator.exit_writer("manual-cmd-101")
 
         t1 = threading.Thread(target=run_manual_command_1)
         t1.start()
-        self.assertTrue(self.coordinator.entered["terminal_write"].wait(timeout=5))
-
-        # Concurrent manual command #102 arriving before #101 closes is refused cleanly.
-        mid_record = parse_session_comment(f.comment["body"], identity=IDENTITY)
-        assert mid_record is not None
-        early_cmd2_caller, early_cmd2_native = self._new_run_caller(
-            f, self.dir / "case-f-early2", run_id=457, job="hosted"
-        )
-        saved = f.accounted
-        saved_trace = list(f.trace)
-        f.trace = []
-        f.accounted = early_cmd2_caller
         try:
+            self.assertTrue(self.coordinator.entered["terminal_write"].wait(timeout=5))
+
+            # Concurrent manual command #102 arriving before #101 closes is refused cleanly
+            # without mutating ``f.accounted`` or ``f.trace`` while ``t1`` is live.
+            mid_record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert mid_record is not None
+            early_cmd2_caller, early_cmd2_native = self._new_readonly_contender_caller(
+                f, self.dir / "case-f-early2", run_id=457, job="hosted"
+            )
             early_cmd2_native.load(IDENTITY)
             with self.assertRaisesRegex(
                 ReviewInputError, "previous caller run is not terminal"
@@ -1009,12 +1129,8 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
                     lambda: None,
                 )
         finally:
-            f.accounted = saved
-            f.trace = saved_trace
-
-        # Release #101 to finish terminal_write.
-        self.coordinator.release("terminal_write")
-        t1.join(timeout=5)
+            # Release #101 to finish terminal_write.
+            self._join_cleanly(t1, "terminal_write")
         self.assertEqual(cmd1_errors, [])
         cmd1_root = cmd1_holder["root"]
         self.assertTrue(cmd1_root.operator_paused)

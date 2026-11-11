@@ -177,7 +177,7 @@ def observe_live_source_revision(
 
     if phase not in LIFECYCLE_PHASES:
         raise ReviewInputError("source lifecycle phase is unsupported")
-    caller._require_ledger(ledger, identity)
+    caller.observe_action_transport_state(ledger, identity)
     bound = _validate_source_descriptor(original_source, label="original source")
     delivered = (
         None
@@ -279,7 +279,10 @@ def observe_live_source_revision(
 
 
 def _has_durable_pending_receipt(
-    record: SessionRecord, *, explicit_pending_receipt: bool
+    record: SessionRecord,
+    *,
+    explicit_pending_receipt: bool,
+    action_started: bool,
 ) -> bool:
     if explicit_pending_receipt or record.publication_staging is not None:
         return True
@@ -287,7 +290,11 @@ def _has_durable_pending_receipt(
         if record.assessment_queue.get("active_operation") is not None:
             return True
         manifest = record.assessment_queue.get("state_manifest")
-        if isinstance(manifest, Mapping) and int(manifest.get("item_count", 0)) > 0:
+        if (
+            action_started
+            and isinstance(manifest, Mapping)
+            and int(manifest.get("item_count", 0)) > 0
+        ):
             return True
     return False
 
@@ -295,11 +302,13 @@ def _has_durable_pending_receipt(
 def _determine_phase_and_source(
     *,
     caller: ApiRunRequestTransport,
+    ledger: GitHubIssueCommentSessionLedger,
     identity: SessionIdentity,
     record: SessionRecord | None,
     candidate_source: Mapping[str, Any] | None,
     has_pending_receipt: bool,
 ) -> tuple[str, dict[str, Any]]:
+    transport_state = caller.observe_action_transport_state(ledger, identity)
     if record is None:
         if candidate_source is None:
             raise ReviewInputError(
@@ -341,17 +350,12 @@ def _determine_phase_and_source(
             )
     if action["phase"] == "terminal":
         return "terminal_completed", bound_source
-    if _has_durable_pending_receipt(
-        record, explicit_pending_receipt=has_pending_receipt
-    ):
-        return "pending_receipt", bound_source
     same_caller_unresolved = (
-        caller._state is not None
+        transport_state.is_activated
         and state.identity == caller.run
         and (
-            caller._action_unresolved()
-            or caller._action_effect_boundary is not None
-            or caller._action_result_proof is not None
+            transport_state.has_unresolved_or_started_work
+            or transport_state.has_live_started_accounting
         )
     )
     has_conflicting_review_work = (
@@ -365,14 +369,45 @@ def _determine_phase_and_source(
         or state.analysis_abort is not None
         or state.terminal_transaction is not None
     )
-    if (
-        action["execution_started"]
+    action_started = (
+        bool(action["execution_started"])
         or state.uncertain > 0
         or same_caller_unresolved
         or has_conflicting_review_work
+    )
+    if _has_durable_pending_receipt(
+        record,
+        explicit_pending_receipt=has_pending_receipt,
+        action_started=action_started,
     ):
+        return "pending_receipt", bound_source
+    if action_started:
         return "started_work", bound_source
     return "unstarted_intent", bound_source
+
+
+def _require_still_unstarted_before_g32(
+    *,
+    caller: ApiRunRequestTransport,
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    record: SessionRecord,
+    candidate_source: Mapping[str, Any] | None,
+    has_pending_receipt: bool,
+) -> None:
+    current_phase, _ = _determine_phase_and_source(
+        caller=caller,
+        ledger=ledger,
+        identity=identity,
+        record=record,
+        candidate_source=candidate_source,
+        has_pending_receipt=has_pending_receipt,
+    )
+    if current_phase != "unstarted_intent":
+        raise ReviewInputError(
+            f"action transitioned to {current_phase} before G32 cancellation; "
+            "hold fail-closed with prior charges preserved"
+        )
 
 
 def classify_source_comment_lifecycle(
@@ -387,16 +422,17 @@ def classify_source_comment_lifecycle(
 ) -> SourceLifecycleClassification:
     """Classify source-comment mutation across all five action lifecycle phases."""
 
-    caller._require_ledger(ledger, identity)
     phase, original_source = _determine_phase_and_source(
         caller=caller,
+        ledger=ledger,
         identity=identity,
         record=record,
         candidate_source=candidate_source,
         has_pending_receipt=has_pending_receipt,
     )
     if phase == "terminal_completed":
-        assert record is not None
+        if record is None:
+            raise ReviewInputError("terminal source lifecycle requires a record")
         read_action_result(ledger, identity, record)
 
     observation = observe_live_source_revision(
@@ -407,6 +443,15 @@ def classify_source_comment_lifecycle(
         phase=phase,
         event_delivery=event_delivery,
     )
+    if record is not None and phase == "unstarted_intent":
+        phase, _ = _determine_phase_and_source(
+            caller=caller,
+            ledger=ledger,
+            identity=identity,
+            record=record,
+            candidate_source=candidate_source,
+            has_pending_receipt=has_pending_receipt,
+        )
     mut = observation.mutation_state
     disp = observation.delivery_disposition
 
@@ -575,13 +620,24 @@ def execute_source_lifecycle_route(
         return classification, record
 
     if route == "g32_unstarted_cancellation":
-        assert record is not None
+        if record is None:
+            raise ReviewInputError(
+                "unstarted cancellation route requires a durable session record"
+            )
         if (
             actions_evidence is None
             and canonical_coordinator is None
             and canonical_token is None
         ):
             raise ReviewInputError(classification.guidance)
+        _require_still_unstarted_before_g32(
+            caller=caller,
+            ledger=ledger,
+            identity=identity,
+            record=record,
+            candidate_source=candidate_source,
+            has_pending_receipt=has_pending_receipt,
+        )
         if mode == "same_run":
             witness = authenticate_unstarted_cancellation(
                 caller=caller,
@@ -593,6 +649,14 @@ def execute_source_lifecycle_route(
                 canonical_token=canonical_token,
                 mode="same_run",
             )
+            _require_still_unstarted_before_g32(
+                caller=caller,
+                ledger=ledger,
+                identity=identity,
+                record=record,
+                candidate_source=candidate_source,
+                has_pending_receipt=has_pending_receipt,
+            )
             settled = caller.cancel_unstarted_action(ledger, identity, witness)
             return classification, settled
         if mode == "cross_run":
@@ -600,13 +664,17 @@ def execute_source_lifecycle_route(
                 raise ReviewInputError(
                     "cross-run unstarted recovery requires configuration and owner"
                 )
-            activated = caller.rollover_unstarted_and_activate(
-                ledger,
-                identity,
-                rollover_configuration,
-                rollover_owner,
-                record,
-                lambda current: authenticate_unstarted_cancellation(
+
+            def _authenticate_current(current: SessionRecord):
+                _require_still_unstarted_before_g32(
+                    caller=caller,
+                    ledger=ledger,
+                    identity=identity,
+                    record=current,
+                    candidate_source=candidate_source,
+                    has_pending_receipt=has_pending_receipt,
+                )
+                return authenticate_unstarted_cancellation(
                     caller=caller,
                     ledger=ledger,
                     identity=identity,
@@ -615,7 +683,15 @@ def execute_source_lifecycle_route(
                     canonical_coordinator=canonical_coordinator,
                     canonical_token=canonical_token,
                     mode="cross_run",
-                ),
+                )
+
+            activated = caller.rollover_unstarted_and_activate(
+                ledger,
+                identity,
+                rollover_configuration,
+                rollover_owner,
+                record,
+                _authenticate_current,
             )
             return classification, activated
         raise ReviewInputError("unstarted recovery mode is unsupported")

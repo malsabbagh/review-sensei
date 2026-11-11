@@ -18,6 +18,19 @@ from review_sensei.session import SessionIdentity
 from .reservation_recovery import ActionsReservationEvidence, _stamp
 
 BUSINESS_WRITER_JOBS: Final[tuple[str, ...]] = ("hosted", "local", "command")
+_TERMINAL_JOB_CONCLUSIONS: Final[frozenset[str]] = frozenset(
+    {
+        "success",
+        "failure",
+        "cancelled",
+        "timed_out",
+        "action_required",
+        "neutral",
+        "skipped",
+        "startup_failure",
+        "stale",
+    }
+)
 
 
 def claim_review_startup(
@@ -325,31 +338,35 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         matching = [j for j in jobs if _writer_name(j.get("name"), predecessor.job)]
         if len(matching) != 1:
             raise ReviewInputError("API predecessor job is missing or ambiguous")
+        # On the GitHub Actions REST API, conditional sibling writer jobs whose
+        # `if:` guard evaluated to false report `status == "completed"` with
+        # `conclusion == "skipped"`. Any writer job with `status != "completed"`
+        # (for example `queued`, `in_progress`, `waiting`, `pending`, or
+        # `requested`) or without a terminal conclusion has not ceased.
         incomplete_writers = [
             j
             for j in jobs
-            if j.get("status") != "completed"
-            and any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
+            if any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
+            and (
+                j.get("status") != "completed"
+                or not isinstance(j.get("conclusion"), str)
+                or j["conclusion"] not in _TERMINAL_JOB_CONCLUSIONS
+            )
         ]
         if incomplete_writers:
-            raise ReviewInputError("API predecessor has not ceased")
+            details = ", ".join(
+                f"{j.get('name', '<unnamed>')}={j.get('status', '<unknown>')}/{j.get('conclusion')}"
+                for j in incomplete_writers
+            )
+            raise ReviewInputError(
+                f"API predecessor has not ceased (incomplete writer jobs: {details})"
+            )
         job = matching[0]
         conclusion = job.get("conclusion")
         if (
             job.get("status") != "completed"
             or not isinstance(conclusion, str)
-            or conclusion
-            not in {
-                "success",
-                "failure",
-                "cancelled",
-                "timed_out",
-                "action_required",
-                "neutral",
-                "skipped",
-                "startup_failure",
-                "stale",
-            }
+            or conclusion not in _TERMINAL_JOB_CONCLUSIONS
         ):
             raise ReviewInputError("API predecessor has not ceased")
         stamp = job.get("completed_at")

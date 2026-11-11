@@ -26,7 +26,6 @@ import re
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from review_sensei.api_work import (
@@ -43,10 +42,15 @@ from review_sensei.bounded_evidence import (
 )
 from review_sensei.errors import ReviewInputError
 from review_sensei.recovery_authority import AuthorityRefusal
-from review_sensei.session import SessionIdentity, SessionRecord
+from review_sensei.session import (
+    SessionIdentity,
+    SessionRecord,
+    _parse_aware_datetime,
+)
 from review_sensei.writer_containment import (
     ContainedForwardingCoordinator,
     IssuedWriterToken,
+    extract_unsettled_dispatches,
 )
 
 from .api_run_history import (
@@ -200,6 +204,12 @@ def _observe_mutated_source(
         raise ReviewInputError("live action source payload is malformed")
     observed_updated_at = payload["updated_at"]
     observed_body_sha256 = hashlib.sha256(payload["body"].encode("utf-8")).hexdigest()
+    # Every admitted source revision is bound by the full tuple
+    # `(kind, id, updated_at, body_sha256)`. Under G27, editing a comment and
+    # later restoring its original text (`edit_restored_body`, where `updated_at`
+    # advanced while `body_sha256` matches) is intentionally a distinct comment
+    # revision rather than a replay of the original revision, so any divergence
+    # in `(updated_at, body_sha256)` authorizes narrow G32 unstarted supersession.
     if (
         observed_updated_at == source["updated_at"]
         and observed_body_sha256 == source["body_sha256"]
@@ -297,6 +307,7 @@ def _authenticate_authority_proof(
                 pull_request=identity.pull_request,
             )
             snapshot = canonical_coordinator.candidate.snapshot(canonical_token)
+            unsettled = extract_unsettled_dispatches(snapshot)
         except AuthorityRefusal as exc:
             raise ReviewInputError(
                 f"canonical writer fence refused unstarted cancellation: {exc}"
@@ -309,11 +320,6 @@ def _authenticate_authority_proof(
             or active_epoch != canonical_token.epoch
         ):
             raise ReviewInputError("canonical writer fence scope or epoch conflicts")
-        unsettled = [
-            dispatch_id
-            for dispatch_id, item in snapshot.document()["dispatches"].items()
-            if item["phase"] in {"forwarded", "effect-confirmed"}
-        ]
         if unsettled:
             raise ReviewInputError(
                 "canonical writer epoch has unsettled dispatches; cannot cancel as unstarted"
@@ -328,7 +334,10 @@ def _authenticate_authority_proof(
         proof_payload["canonical_epoch"] = canonical_token.epoch
         proof_payload["canonical_grant_id"] = canonical_token.grant_id
 
-    assert selected_mode is not None
+    if selected_mode is None:
+        raise ReviewInputError(
+            "unstarted action cancellation requires owner cessation or canonical fence proof"
+        )
     return selected_mode, _sha256_json(proof_payload)
 
 
@@ -346,12 +355,8 @@ def authenticate_unstarted_cancellation(
 ) -> UnstartedCancellationWitness:
     """Authenticate live source mutation and writer exclusion for an unstarted action."""
 
-    caller._require_ledger(ledger, identity)
-    if (
-        caller._action_unresolved()
-        or caller._action_effect_boundary is not None
-        or caller._action_result_proof is not None
-    ):
+    transport_state = caller.observe_action_transport_state(ledger, identity)
+    if transport_state.has_unresolved_or_started_work:
         raise ReviewInputError(
             "caller transport has started or unresolved work; cannot cancel as unstarted"
         )
@@ -362,14 +367,16 @@ def authenticate_unstarted_cancellation(
     )
     if mode == "same_run":
         if (
-            caller._state is None
-            or caller._root != record.record_sha256
+            not transport_state.is_activated
+            or transport_state.root_sha256 != record.record_sha256
             or state.identity != caller.run
-            or state.owner != caller.accounting.owner
+            or state.owner != transport_state.owner
         ):
             raise ReviewInputError(
                 "same-run unstarted cancellation requires the active owning transport"
             )
+        if transport_state.has_live_started_accounting:
+            raise ReviewInputError("started action cannot be canceled as unstarted")
     elif mode == "cross_run":
         if (
             state.identity == caller.run
@@ -523,7 +530,7 @@ def settle_unstarted_record(
         producer=producer,
         witness=verified,
     )
-    preserved_now = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+    preserved_now = _parse_aware_datetime(record.updated_at, label="updated_at")
     return record.evolve(
         generation=record.generation + 1,
         now=preserved_now,

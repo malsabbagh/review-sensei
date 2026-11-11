@@ -14,6 +14,7 @@ native authority whenever any bypass token path remains active.
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 import threading
 import weakref
@@ -59,15 +60,50 @@ ALL_WRITER_ROUTES: Final[frozenset[str]] = (
 )
 
 _ISSUED_TOKENS: weakref.WeakSet[IssuedWriterToken] = weakref.WeakSet()
+_SHA256_HEX_RE: Final[re.Pattern[str]] = re.compile(r"^[a-f0-9]{64}$")
 
 
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _is_sha256_hex(value: object) -> bool:
+    return isinstance(value, str) and _SHA256_HEX_RE.fullmatch(value) is not None
+
+
 def _require_containment(condition: bool, reason: str) -> None:
     if not condition:
         raise AuthorityRefusal(reason)
+
+
+def extract_unsettled_dispatches(snapshot: Snapshot) -> list[str]:
+    """Validate canonical snapshot dispatch schema and list unsettled dispatch IDs."""
+
+    _require_containment(
+        isinstance(snapshot, Snapshot),
+        "canonical snapshot is invalid",
+    )
+    try:
+        doc = snapshot.document()
+    except (ValueError, UnicodeError, TypeError) as exc:
+        raise AuthorityRefusal("canonical snapshot document is malformed") from exc
+    _require_containment(
+        isinstance(doc, Mapping) and isinstance(doc.get("dispatches"), Mapping),
+        "canonical snapshot dispatches map is malformed",
+    )
+    dispatches = doc["dispatches"]
+    unsettled: list[str] = []
+    for dispatch_id, item in dispatches.items():
+        _require_containment(
+            isinstance(dispatch_id, str)
+            and bool(dispatch_id)
+            and isinstance(item, Mapping)
+            and isinstance(item.get("phase"), str),
+            "canonical snapshot dispatch entry is malformed",
+        )
+        if item["phase"] in {"forwarded", "effect-confirmed"}:
+            unsettled.append(dispatch_id)
+    return unsettled
 
 
 def derive_epoch_store_id(
@@ -196,6 +232,7 @@ class ContainedForwardingCoordinator(AuthorityHost):
         now_ms: int = 1000,
         live_cutover_enabled: bool = LIVE_CANONICAL_CUTOVER_ENABLED,
         synthetic_qualification: bool = False,
+        allow_synthetic_overrides: bool = False,
     ) -> None:
         _require_containment(
             isinstance(posture, WriterContainmentPosture),
@@ -208,10 +245,12 @@ class ContainedForwardingCoordinator(AuthorityHost):
         self.posture = posture
         self._wire_forwarder = wire_forwarder
         self._now_ms = now_ms
-        self._live_cutover_enabled = live_cutover_enabled
-        self._synthetic_qualification = synthetic_qualification
+        self._live_cutover_enabled = bool(live_cutover_enabled)
+        self._synthetic_qualification = bool(synthetic_qualification)
+        self._allow_synthetic_overrides = bool(allow_synthetic_overrides)
         self._lock = threading.RLock()
         self._grants: dict[str, Access] = {}
+        self._attempted_dispatches: set[str] = set()
         self._wire_outcomes: dict[str, WireDispatchOutcome] = {}
         self._custom_receipts: dict[str, Receipt | None] = {}
         with closing(self._connect_frontier()) as db:
@@ -223,10 +262,20 @@ class ContainedForwardingCoordinator(AuthorityHost):
                 );
                 CREATE TABLE IF NOT EXISTS scope_epochs(
                     scope_key TEXT PRIMARY KEY,
+                    base_store_id TEXT NOT NULL,
+                    repository_id INTEGER NOT NULL,
+                    pull_request INTEGER NOT NULL,
                     active_epoch INTEGER NOT NULL,
+                    active_epoch_store_id TEXT NOT NULL,
                     legacy_locked INTEGER NOT NULL,
-                    legacy_blob BLOB
+                    legacy_blob BLOB,
+                    CHECK (
+                        (legacy_locked = 0 AND legacy_blob IS NULL)
+                        OR (legacy_locked = 1 AND legacy_blob IS NOT NULL)
+                    )
                 );
+                CREATE INDEX IF NOT EXISTS idx_scope_epochs_pr
+                    ON scope_epochs(repository_id, pull_request);
                 """
             )
         self.candidate = SqliteAuthorityCandidate(self.authority_path, self)
@@ -234,9 +283,37 @@ class ContainedForwardingCoordinator(AuthorityHost):
     def _connect_frontier(self) -> sqlite3.Connection:
         return sqlite3.connect(self.frontier_path, isolation_level=None, timeout=5)
 
+    def _cleanup_unactivated_epoch_state(self, epoch_key: str) -> None:
+        try:
+            with closing(self._connect_frontier()) as db:
+                db.execute("DELETE FROM frontier WHERE key=?", (epoch_key,))
+                db.commit()
+        except sqlite3.Error:
+            pass
+        try:
+            with closing(sqlite3.connect(self.authority_path, timeout=5)) as db:
+                db.execute("DELETE FROM roots WHERE key=?", (epoch_key,))
+                db.execute("DELETE FROM history WHERE key=?", (epoch_key,))
+                db.commit()
+        except sqlite3.Error:
+            pass
+
     @staticmethod
     def _scope_key(base_store_id: str, repository_id: int, pull_request: int) -> str:
+        _require_containment(
+            _is_sha256_hex(base_store_id),
+            "base writer store_id must be a 64-hex sha256 digest",
+        )
         return f"{base_store_id}:{repository_id}:{pull_request}"
+
+    @staticmethod
+    def _require_legacy_invariant(
+        legacy_locked: bool, legacy_blob: bytes | None
+    ) -> None:
+        _require_containment(
+            legacy_locked == (legacy_blob is not None),
+            "writer epoch legacy lock invariant conflicts with stored legacy blob",
+        )
 
     def _require_cutover_gate(
         self, *, native_exclusive: bool, writer_route: str
@@ -262,9 +339,21 @@ class ContainedForwardingCoordinator(AuthorityHost):
             self._now_ms = value
 
     def set_observation_override(
-        self, dispatch_id: str, receipt: Receipt | None
+        self,
+        dispatch_id: str,
+        receipt: Receipt | None,
+        *,
+        token: IssuedWriterToken,
     ) -> None:
+        _require_containment(
+            self._synthetic_qualification
+            and self._allow_synthetic_overrides
+            and not self._live_cutover_enabled,
+            "synthetic observation overrides are disabled outside qualification",
+        )
         with self._lock:
+            access = self._authenticate_token(token)
+            self._require_active_epoch(access, operation="observation")
             self._custom_receipts[dispatch_id] = receipt
 
     def enroll_initial_writer(
@@ -286,6 +375,8 @@ class ContainedForwardingCoordinator(AuthorityHost):
                 legacy is None,
                 "legacy identity requires explicit migration or reset before exclusive authority",
             )
+        legacy_locked = legacy is not None
+        self._require_legacy_invariant(legacy_locked, legacy)
         scope_key = self._scope_key(
             base_access.store_id,
             base_access.repository_id,
@@ -315,36 +406,50 @@ class ContainedForwardingCoordinator(AuthorityHost):
         )
         with self._lock:
             with closing(self._connect_frontier()) as db:
-                db.execute("BEGIN IMMEDIATE")
-                try:
-                    existing = db.execute(
-                        "SELECT active_epoch FROM scope_epochs WHERE scope_key=?",
-                        (scope_key,),
-                    ).fetchone()
-                    _require_containment(
-                        existing is None,
-                        "PR writer scope is already enrolled; use advance_epoch",
-                    )
-                    db.execute(
-                        "INSERT INTO scope_epochs VALUES(?,?,?,?)",
-                        (scope_key, epoch, int(legacy is not None), legacy),
-                    )
-                    db.commit()
-                except BaseException:
-                    db.rollback()
-                    raise
+                existing = db.execute(
+                    "SELECT active_epoch FROM scope_epochs WHERE scope_key=?",
+                    (scope_key,),
+                ).fetchone()
+                _require_containment(
+                    existing is None,
+                    "PR writer scope is already enrolled; use advance_epoch",
+                )
             self._grants[grant_id] = bound_access
             _ISSUED_TOKENS.add(token)
             try:
                 snapshot = self.candidate.initialize(token, legacy=legacy)
+                with closing(self._connect_frontier()) as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    try:
+                        existing = db.execute(
+                            "SELECT active_epoch FROM scope_epochs WHERE scope_key=?",
+                            (scope_key,),
+                        ).fetchone()
+                        _require_containment(
+                            existing is None,
+                            "PR writer scope is already enrolled; use advance_epoch",
+                        )
+                        db.execute(
+                            "INSERT INTO scope_epochs VALUES(?,?,?,?,?,?,?,?)",
+                            (
+                                scope_key,
+                                base_access.store_id,
+                                base_access.repository_id,
+                                base_access.pull_request,
+                                epoch,
+                                epoch_store_id,
+                                int(legacy_locked),
+                                legacy,
+                            ),
+                        )
+                        db.commit()
+                    except BaseException:
+                        db.rollback()
+                        raise
             except BaseException:
                 self._grants.pop(grant_id, None)
-                with closing(self._connect_frontier()) as db:
-                    db.execute(
-                        "DELETE FROM scope_epochs WHERE scope_key=? AND active_epoch=1",
-                        (scope_key,),
-                    )
-                    db.commit()
+                _ISSUED_TOKENS.discard(token)
+                self._cleanup_unactivated_epoch_state(bound_access.key)
                 raise
             return token, snapshot
 
@@ -375,7 +480,8 @@ class ContainedForwardingCoordinator(AuthorityHost):
             "predecessor writer cessation is unproven; cancellation is not cessation",
         )
         _require_containment(
-            successor_access.repository == predecessor_access.repository
+            _is_sha256_hex(successor_access.store_id)
+            and successor_access.repository == predecessor_access.repository
             and successor_access.repository_id == predecessor_access.repository_id
             and successor_access.pull_request == predecessor_access.pull_request
             and successor_access.store_id == predecessor_token.base_store_id,
@@ -387,12 +493,7 @@ class ContainedForwardingCoordinator(AuthorityHost):
         )
         with self._lock:
             predecessor_snapshot = self.candidate.snapshot(predecessor_token)
-            dispatches = predecessor_snapshot.document()["dispatches"]
-            unsettled = [
-                dispatch_id
-                for dispatch_id, item in dispatches.items()
-                if item["phase"] in {"forwarded", "effect-confirmed"}
-            ]
+            unsettled = extract_unsettled_dispatches(predecessor_snapshot)
             _require_containment(
                 not unsettled,
                 "predecessor epoch has unsettled physical dispatch; reconcile or hold required",
@@ -403,34 +504,34 @@ class ContainedForwardingCoordinator(AuthorityHost):
                 predecessor_token.pull_request,
             )
             with closing(self._connect_frontier()) as db:
-                db.execute("BEGIN IMMEDIATE")
-                try:
-                    row = db.execute(
-                        "SELECT active_epoch, legacy_locked, legacy_blob "
-                        "FROM scope_epochs WHERE scope_key=?",
-                        (scope_key,),
-                    ).fetchone()
-                    _require_containment(
-                        row is not None and int(row[0]) == predecessor_token.epoch,
-                        "predecessor token does not own active writer epoch",
-                    )
-                    legacy_locked = bool(row[1])
-                    carried_legacy = None if row[2] is None else bytes(row[2])
-                    if legacy_locked and successor_access.native_exclusive:
-                        raise AuthorityRefusal(
-                            "legacy identity cannot transition to exclusive native authority "
-                            "without migration or reset"
-                        )
-                    next_epoch = int(row[0]) + 1
-                    db.execute(
-                        "UPDATE scope_epochs SET active_epoch=? WHERE scope_key=?",
-                        (next_epoch, scope_key),
-                    )
-                    db.commit()
-                except BaseException:
-                    db.rollback()
-                    raise
-
+                row = db.execute(
+                    "SELECT base_store_id, active_epoch, legacy_locked, legacy_blob "
+                    "FROM scope_epochs WHERE scope_key=? AND repository_id=? AND pull_request=?",
+                    (
+                        scope_key,
+                        predecessor_token.repository_id,
+                        predecessor_token.pull_request,
+                    ),
+                ).fetchone()
+            _require_containment(
+                row is not None
+                and str(row[0]) == predecessor_token.base_store_id
+                and int(row[1]) == predecessor_token.epoch,
+                "predecessor token does not own active writer epoch",
+            )
+            if row is None:
+                raise AuthorityRefusal(
+                    "predecessor token does not own active writer epoch"
+                )
+            legacy_locked = bool(row[2])
+            carried_legacy = None if row[3] is None else bytes(row[3])
+            self._require_legacy_invariant(legacy_locked, carried_legacy)
+            if legacy_locked and successor_access.native_exclusive:
+                raise AuthorityRefusal(
+                    "legacy identity cannot transition to exclusive native authority "
+                    "without migration or reset"
+                )
+            next_epoch = int(row[1]) + 1
             epoch_store_id = derive_epoch_store_id(
                 predecessor_token.base_store_id,
                 predecessor_token.repository_id,
@@ -456,19 +557,52 @@ class ContainedForwardingCoordinator(AuthorityHost):
             )
             self._grants[grant_id] = bound_access
             _ISSUED_TOKENS.add(successor_token)
-            snapshot = self.candidate.initialize(successor_token, legacy=carried_legacy)
+            try:
+                snapshot = self.candidate.initialize(
+                    successor_token, legacy=carried_legacy
+                )
+                with closing(self._connect_frontier()) as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    try:
+                        updated = db.execute(
+                            "UPDATE scope_epochs "
+                            "SET active_epoch=?, active_epoch_store_id=? "
+                            "WHERE scope_key=? AND active_epoch=?",
+                            (
+                                next_epoch,
+                                epoch_store_id,
+                                scope_key,
+                                predecessor_token.epoch,
+                            ),
+                        )
+                        _require_containment(
+                            updated.rowcount == 1,
+                            "predecessor token does not own active writer epoch",
+                        )
+                        db.commit()
+                    except BaseException:
+                        db.rollback()
+                        raise
+            except BaseException:
+                self._grants.pop(grant_id, None)
+                _ISSUED_TOKENS.discard(successor_token)
+                self._cleanup_unactivated_epoch_state(bound_access.key)
+                raise
             return successor_token, snapshot
 
     def active_epoch(
         self, *, base_store_id: str, repository_id: int, pull_request: int
     ) -> int:
         scope_key = self._scope_key(base_store_id, repository_id, pull_request)
-        with closing(self._connect_frontier()) as db:
+        with self._lock, closing(self._connect_frontier()) as db:
             row = db.execute(
-                "SELECT active_epoch FROM scope_epochs WHERE scope_key=?",
-                (scope_key,),
+                "SELECT active_epoch FROM scope_epochs "
+                "WHERE scope_key=? AND base_store_id=? AND repository_id=? AND pull_request=?",
+                (scope_key, base_store_id, repository_id, pull_request),
             ).fetchone()
         _require_containment(row is not None, "PR writer scope is not enrolled")
+        if row is None:
+            raise AuthorityRefusal("PR writer scope is not enrolled")
         return int(row[0])
 
     def reattach_active_writer(
@@ -492,14 +626,24 @@ class ContainedForwardingCoordinator(AuthorityHost):
         with self._lock:
             with closing(self._connect_frontier()) as db:
                 row = db.execute(
-                    "SELECT active_epoch, legacy_locked FROM scope_epochs "
-                    "WHERE scope_key=?",
-                    (scope_key,),
+                    "SELECT base_store_id, active_epoch, active_epoch_store_id, "
+                    "legacy_locked, legacy_blob FROM scope_epochs "
+                    "WHERE scope_key=? AND repository_id=? AND pull_request=?",
+                    (scope_key, base_access.repository_id, base_access.pull_request),
                 ).fetchone()
             _require_containment(row is not None, "PR writer scope is not enrolled")
-            assert row is not None
-            active_epoch = int(row[0])
-            legacy_locked = bool(row[1])
+            if row is None:
+                raise AuthorityRefusal("PR writer scope is not enrolled")
+            stored_base_store_id = str(row[0])
+            active_epoch = int(row[1])
+            stored_epoch_store_id = str(row[2])
+            legacy_locked = bool(row[3])
+            legacy_blob = None if row[4] is None else bytes(row[4])
+            self._require_legacy_invariant(legacy_locked, legacy_blob)
+            _require_containment(
+                stored_base_store_id == base_access.store_id,
+                "reattach base store_id conflicts with enrolled PR scope",
+            )
             if legacy_locked and base_access.native_exclusive:
                 raise AuthorityRefusal(
                     "legacy identity requires explicit migration or reset before exclusive authority"
@@ -509,6 +653,10 @@ class ContainedForwardingCoordinator(AuthorityHost):
                 base_access.repository_id,
                 base_access.pull_request,
                 active_epoch,
+            )
+            _require_containment(
+                epoch_store_id == stored_epoch_store_id,
+                "enrolled writer epoch store derivation conflicts",
             )
             bound_access = replace(
                 base_access, store_id=epoch_store_id, epoch=active_epoch
@@ -533,6 +681,7 @@ class ContainedForwardingCoordinator(AuthorityHost):
                 self.candidate.snapshot(token)
             except BaseException:
                 self._grants.pop(grant_id, None)
+                _ISSUED_TOKENS.discard(token)
                 raise
             return token
 
@@ -543,34 +692,59 @@ class ContainedForwardingCoordinator(AuthorityHost):
             and authorization._issuer_id == id(self),
             "unqualified caller",
         )
-        assert isinstance(authorization, IssuedWriterToken)
+        if not isinstance(authorization, IssuedWriterToken):
+            raise AuthorityRefusal("unqualified caller")
         access = self._grants.get(authorization.grant_id)
-        _require_containment(access is not None, "unqualified caller")
-        assert access is not None
+        if access is None:
+            raise AuthorityRefusal("unqualified caller")
         return access
 
     def _require_active_epoch(self, access: Access, *, operation: str) -> None:
         with closing(self._connect_frontier()) as db:
-            row = db.execute(
-                "SELECT scope_key, active_epoch, legacy_locked FROM scope_epochs "
-                "WHERE scope_key LIKE ?",
-                (f"%:{access.repository_id}:{access.pull_request}",),
+            rows = db.execute(
+                "SELECT scope_key, base_store_id, active_epoch, active_epoch_store_id, "
+                "legacy_locked, legacy_blob FROM scope_epochs "
+                "WHERE repository_id=? AND pull_request=?",
+                (access.repository_id, access.pull_request),
             ).fetchall()
-        matched: tuple[str, int, int] | None = None
-        for scope_key, active_epoch, legacy_locked in row:
-            base_store_id = str(scope_key).split(":", 1)[0]
+        matched: tuple[str, int, bool, bytes | None] | None = None
+        for (
+            scope_key,
+            base_store_id,
+            active_epoch,
+            active_epoch_store_id,
+            legacy_locked,
+            legacy_blob,
+        ) in rows:
+            blob = None if legacy_blob is None else bytes(legacy_blob)
+            if access.epoch == int(active_epoch) and access.store_id == str(
+                active_epoch_store_id
+            ):
+                matched = (
+                    str(scope_key),
+                    int(active_epoch),
+                    bool(legacy_locked),
+                    blob,
+                )
+                break
             expected_store = derive_epoch_store_id(
-                base_store_id,
+                str(base_store_id),
                 access.repository_id,
                 access.pull_request,
                 access.epoch,
             )
             if expected_store == access.store_id:
-                matched = (str(scope_key), int(active_epoch), int(legacy_locked))
+                matched = (
+                    str(scope_key),
+                    int(active_epoch),
+                    bool(legacy_locked),
+                    blob,
+                )
                 break
-        _require_containment(matched is not None, "writer epoch scope is unknown")
-        assert matched is not None
-        _scope_key, active_epoch, legacy_locked = matched
+        if matched is None:
+            raise AuthorityRefusal("writer epoch scope is unknown")
+        _scope_key, active_epoch, legacy_locked, legacy_blob_bytes = matched
+        self._require_legacy_invariant(legacy_locked, legacy_blob_bytes)
         _require_containment(
             access.epoch == active_epoch,
             "stale writer epoch fenced before physical dispatch",
@@ -592,7 +766,7 @@ class ContainedForwardingCoordinator(AuthorityHost):
             return self._now_ms
 
     def frontier(self, key: str) -> Snapshot | None:
-        with closing(self._connect_frontier()) as db:
+        with self._lock, closing(self._connect_frontier()) as db:
             row = db.execute("SELECT body FROM frontier WHERE key=?", (key,)).fetchone()
             return None if row is None else Snapshot(bytes(row[0]))
 
@@ -624,7 +798,8 @@ class ContainedForwardingCoordinator(AuthorityHost):
             self._require_active_epoch(access, operation=str(binding["operation"]))
             dispatch_id = str(binding["dispatch_id"])
             _require_containment(
-                dispatch_id not in self._wire_outcomes,
+                dispatch_id not in self._attempted_dispatches
+                and dispatch_id not in self._wire_outcomes,
                 "physical dispatch already forwarded",
             )
             request_bytes = canonical_bytes(binding["body"])
@@ -632,25 +807,41 @@ class ContainedForwardingCoordinator(AuthorityHost):
                 _sha256_hex(request_bytes) == binding["request_sha256"],
                 "forwarded request payload diverged from canonical binding",
             )
+            self._attempted_dispatches.add(dispatch_id)
         outcome = self._wire_forwarder(
             str(binding["method"]),
             str(binding["target"]),
             request_bytes,
             dict(binding),
         )
+        _require_containment(
+            isinstance(outcome, WireDispatchOutcome),
+            "wire dispatch outcome is invalid",
+        )
         with self._lock:
+            self._custom_receipts.pop(dispatch_id, None)
             self._wire_outcomes[dispatch_id] = outcome
 
     def observe(self, access: Access, binding: dict[str, Any]) -> Receipt | None:
         dispatch_id = str(binding["dispatch_id"])
         with self._lock:
-            if dispatch_id in self._custom_receipts:
+            self._require_active_epoch(access, operation="observation")
+            if (
+                self._synthetic_qualification
+                and self._allow_synthetic_overrides
+                and not self._live_cutover_enabled
+                and dispatch_id in self._custom_receipts
+            ):
                 return self._custom_receipts[dispatch_id]
             outcome = self._wire_outcomes.get(dispatch_id)
         if outcome is None:
             return None
         binding_digest = _sha256_hex(canonical_bytes(binding))
-        if not outcome.response_complete:
+        if (
+            not outcome.response_complete
+            or not outcome.effect_confirmed
+            or outcome.usage_calls is None
+        ):
             return Receipt(
                 binding_sha256=binding_digest,
                 effect_confirmed=outcome.effect_confirmed,
@@ -664,9 +855,9 @@ class ContainedForwardingCoordinator(AuthorityHost):
         )
         return Receipt(
             binding_sha256=binding_digest,
-            effect_confirmed=outcome.effect_confirmed,
+            effect_confirmed=True,
             response_complete=True,
-            usage_calls=1 if outcome.usage_calls is None else outcome.usage_calls,
+            usage_calls=outcome.usage_calls,
             response_bytes=len(outcome.response_body),
         )
 
@@ -705,7 +896,18 @@ class ContainedForwardingCoordinator(AuthorityHost):
         current = self.candidate.snapshot(token)
         prepared = self.candidate.prepare(token, current, request)
         forwarded = self.candidate.forward(token, prepared, request)
-        settled = self.candidate.reconcile(token, forwarded, dispatch_id)
         with self._lock:
-            outcome = self._wire_outcomes[dispatch_id]
+            outcome = self._wire_outcomes.get(dispatch_id)
+        _require_containment(
+            outcome is not None
+            and outcome.response_complete
+            and outcome.effect_confirmed
+            and outcome.usage_calls is not None,
+            "wire mutation outcome is incomplete or unconfirmed; hold and reconcile required",
+        )
+        if outcome is None:
+            raise AuthorityRefusal(
+                "wire mutation outcome is incomplete or unconfirmed; hold and reconcile required"
+            )
+        settled = self.candidate.reconcile(token, forwarded, dispatch_id)
         return outcome, settled

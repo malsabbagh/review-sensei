@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -41,6 +42,7 @@ from review_sensei.writer_containment import (
     IssuedWriterToken,
     WireDispatchOutcome,
     WriterContainmentPosture,
+    extract_unsettled_dispatches,
 )
 
 try:
@@ -59,10 +61,21 @@ PR_IDENTITY = SessionIdentity(
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _child_env() -> dict[str, str]:
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["REVIEWSENSEI_ALLOW_CHECKOUT_IMPORT"] = "1"
+    search_paths = [
+        str(REPO_ROOT / "src"),
+        str(REPO_ROOT / "packages/python/review-sensei-github/src"),
+    ]
+    existing = env.get("PYTHONPATH")
+    if existing:
+        search_paths.append(existing)
+    env["PYTHONPATH"] = os.pathsep.join(search_paths)
     return env
 
 
@@ -337,8 +350,15 @@ class StaleLedgerFencingG02Tests(unittest.TestCase):
                         writer_route="actions_hosted",
                     )
 
-    def test_advisory_generation_readback_cannot_stop_delayed_wire_patch(self) -> None:
-        """Prove G02 threat: old read -> successor commits -> delayed old wire PATCH clobbers GitHub."""
+    def test_negative_characterization_unfenced_broker_allows_delayed_wire_rollback(
+        self,
+    ) -> None:
+        """Negative threat characterization (pre-cutover): unfenced raw-token PATCH clobbers GitHub.
+
+        This test intentionally characterizes why advisory read-before-write on raw
+        broker tokens cannot stop a delayed network PATCH; positive fencing closure is
+        verified in ``test_contained_coordinator_fences_delayed_stale_ledger_patch``.
+        """
 
         initial = SessionRecord.create(PR_IDENTITY, now=FIXED_NOW).evolve(
             generation=1, now=FIXED_NOW
@@ -398,29 +418,41 @@ class StaleLedgerFencingG02Tests(unittest.TestCase):
         self.assertTrue(server.current_record().operator_paused)
         self.assertEqual(server.patch_history, [2, 3, 2])
 
-    def test_coordinator_beside_unfenced_broker_cannot_fence_bypass_token_writer(
+    def test_negative_characterization_unfenced_sidecar_refused_and_unrevoked_bypass_documented(
         self,
     ) -> None:
-        """Prove a coordinator beside a raw-token broker fails both policy check and wire containment."""
+        """Negative threat characterization: unfenced/undrained posture refuses cutover; raw bypass clobbers.
+
+        Verifies both that ``WriterContainmentPosture`` refuses exclusive enrollment when
+        broker raw tokens are enabled OR pre-cutover in-flight writers are undrained, and
+        documents why physical credential containment is mandatory rather than optional.
+        """
 
         initial = SessionRecord.create(PR_IDENTITY, now=FIXED_NOW).evolve(
             generation=1, now=FIXED_NOW
         )
         server = StatefulGitHubCommentServer(initial)
-        unfenced = WriterContainmentPosture.unfenced_broker()
-        coordinator = ContainedForwardingCoordinator(
-            self.dir / "unfenced-sidecar",
-            posture=unfenced,
-            wire_forwarder=self._wire_forwarder(server),
-            synthetic_qualification=True,
-        )
-        with self.assertRaisesRegex(
-            AuthorityRefusal, "defeats canonical writer containment"
+        for bad_posture in (
+            WriterContainmentPosture.unfenced_broker(),
+            replace(
+                WriterContainmentPosture.fully_contained(),
+                pre_cutover_inflight_drained=False,
+            ),
         ):
-            coordinator.enroll_initial_writer(
-                base_access=_make_access(native_exclusive=True),
-                writer_route="actions_hosted",
+            coordinator = ContainedForwardingCoordinator(
+                self.dir
+                / f"unfenced-sidecar-{bad_posture.pre_cutover_inflight_drained}",
+                posture=bad_posture,
+                wire_forwarder=self._wire_forwarder(server),
+                synthetic_qualification=True,
             )
+            with self.assertRaisesRegex(
+                AuthorityRefusal, "defeats canonical writer containment"
+            ):
+                coordinator.enroll_initial_writer(
+                    base_access=_make_access(native_exclusive=True),
+                    writer_route="actions_hosted",
+                )
 
         # Even if a successor uses a fenced coordinator, an old worker still holding a
         # broker-issued raw token bypasses the coordinator and overwrites the comment.
@@ -637,6 +669,7 @@ class StaleLedgerFencingG02Tests(unittest.TestCase):
             posture=WriterContainmentPosture.fully_contained(),
             wire_forwarder=uncertain_wire,
             synthetic_qualification=True,
+            allow_synthetic_overrides=True,
         )
         token1, root1 = coordinator.enroll_initial_writer(
             base_access=_make_access(run_id=41, caller_tag="1"),
@@ -696,6 +729,7 @@ class StaleLedgerFencingG02Tests(unittest.TestCase):
                 usage_calls=2,
                 response_bytes=18,
             ),
+            token=token1,
         )
         settled = coordinator.candidate.reconcile(token1, effect_only, req.dispatch_id)
         self.assertEqual(
@@ -860,12 +894,9 @@ class StaleLedgerFencingG02Tests(unittest.TestCase):
         prepared = coord.candidate.prepare(token, root, req)
         debited_held_calls = prepared.document()["held_calls"]
 
-        repo_root = Path(__file__).resolve().parents[1]
         script = """
 import json, os, signal, sys
 from pathlib import Path
-repo = Path(sys.argv[2])
-sys.path[:0] = [str(repo / "src"), str(repo / "packages/python/review-sensei-github/src"), str(repo / "tests")]
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.recovery_authority import Access, Dispatch, Funding
 from review_sensei.writer_containment import ContainedForwardingCoordinator, WriterContainmentPosture
@@ -917,15 +948,20 @@ req = Dispatch(
 coord.candidate.forward(tok, coord.candidate.snapshot(tok), req)
 """
         proc = subprocess.run(
-            [sys.executable, "-c", script, str(kill_dir), str(repo_root)],
+            [sys.executable, "-c", script, str(kill_dir)],
             env=_child_env(),
             capture_output=True,
             timeout=15,
             check=False,
         )
-        self.assertEqual(
+        expected_codes = (
+            {79}
+            if os.name == "nt"
+            else {-int(signal.SIGKILL), 128 + int(signal.SIGKILL)}
+        )
+        self.assertIn(
             proc.returncode,
-            79 if os.name == "nt" else -9,
+            expected_codes,
             proc.stderr.decode("utf-8"),
         )
         self.assertTrue((kill_dir / "physical_effect.json").is_file())
@@ -965,6 +1001,7 @@ coord.candidate.forward(tok, coord.candidate.snapshot(tok), req)
                 usage_calls=None,
             ),
             synthetic_qualification=True,
+            allow_synthetic_overrides=True,
         )
         token, root = coord.enroll_initial_writer(
             base_access=_make_access(run_id=81),
@@ -1001,8 +1038,8 @@ coord.candidate.forward(tok, coord.candidate.snapshot(tok), req)
                 replace(req, dispatch_id="dup-2"),
             )
 
-        coord.set_observation_override("dup-1", None)
         forwarded = coord.candidate.forward(token, prepared_once, req)
+        coord.set_observation_override("dup-1", None, token=token)
         obs1 = coord.candidate.reconcile(token, forwarded, "dup-1")
         obs2 = coord.candidate.reconcile(token, obs1, "dup-1")
         self.assertEqual(obs2.document()["dispatches"]["dup-1"]["observations"], 2)
@@ -1083,6 +1120,225 @@ coord.candidate.forward(tok, coord.candidate.snapshot(tok), req)
             legacy_coord.candidate.snapshot(token)
         with self.assertRaisesRegex(AuthorityRefusal, "unqualified caller"):
             legacy_coord.candidate.snapshot({"forged": True})
+
+    def test_containment_hardening_atomic_cutover_dedup_reconcile_and_scope_invariants(
+        self,
+    ) -> None:
+        from review_sensei.recovery_authority import Snapshot
+
+        # 1. RS-0F1549: advance_epoch rolls back cleanly when candidate.initialize fails.
+        atom_coord = ContainedForwardingCoordinator(
+            self.dir / "atomic-advance",
+            posture=WriterContainmentPosture.fully_contained(),
+            wire_forwarder=lambda *_: WireDispatchOutcome(200, b"{}"),
+            synthetic_qualification=True,
+        )
+        tok1, _ = atom_coord.enroll_initial_writer(
+            base_access=_make_access(run_id=101, caller_tag="1"),
+            writer_route="actions_hosted",
+        )
+        with (
+            patch.object(
+                atom_coord.candidate,
+                "initialize",
+                side_effect=AuthorityRefusal("simulated init failure"),
+            ),
+            self.assertRaisesRegex(AuthorityRefusal, "simulated init failure"),
+        ):
+            atom_coord.advance_epoch(
+                predecessor_token=tok1,
+                successor_access=_make_access(run_id=102, caller_tag="2"),
+                writer_route="actions_hosted",
+                predecessor_ceased=True,
+            )
+        self.assertEqual(
+            atom_coord.active_epoch(
+                base_store_id="a" * 64, repository_id=123, pull_request=7
+            ),
+            1,
+        )
+        # Predecessor remains active and subsequent unmocked advance_epoch succeeds.
+        atom_coord.fenced_http_mutation(
+            tok1,
+            dispatch_id="still-active-ep1",
+            operation="reply",
+            method="POST",
+            target="/repos/example/repo/issues/7/comments",
+            payload={"body": "ok"},
+            reservation_sha256="1" * 64,
+        )
+        tok2, _ = atom_coord.advance_epoch(
+            predecessor_token=tok1,
+            successor_access=_make_access(run_id=102, caller_tag="2"),
+            writer_route="actions_hosted",
+            predecessor_ceased=True,
+        )
+        self.assertEqual(tok2.epoch, 2)
+
+        # 2. RS-936BBC: concurrent duplicate dispatch_id on forward permits at most 1 wire call.
+        wire_entered = threading.Event()
+        wire_release = threading.Event()
+        self.addCleanup(wire_release.set)
+        wire_count = 0
+        wire_lock = threading.Lock()
+
+        def slow_wire(
+            method: str, target: str, request_bytes: bytes, binding: dict[str, object]
+        ) -> WireDispatchOutcome:
+            nonlocal wire_count
+            with wire_lock:
+                wire_count += 1
+            wire_entered.set()
+            wire_release.wait(timeout=5)
+            return WireDispatchOutcome(200, b"{}")
+
+        dup_coord = ContainedForwardingCoordinator(
+            self.dir / "concurrent-dup-forward",
+            posture=WriterContainmentPosture.fully_contained(),
+            wire_forwarder=slow_wire,
+            synthetic_qualification=True,
+        )
+        dup_tok, _ = dup_coord.enroll_initial_writer(
+            base_access=_make_access(run_id=111, caller_tag="3"),
+            writer_route="actions_hosted",
+        )
+        dup_access = dup_coord.authenticate(dup_tok)
+        body_obj = {"body": "dedup"}
+        dup_binding = {
+            "dispatch_id": "race-dup-1",
+            "operation": "reply",
+            "method": "POST",
+            "target": "/repos/example/repo/issues/7/comments",
+            "body": body_obj,
+            "request_sha256": hashlib.sha256(canonical_bytes(body_obj)).hexdigest(),
+        }
+        race_errors: list[Exception] = []
+
+        def run_first_forward() -> None:
+            try:
+                dup_coord.forward(dup_access, dup_binding)
+            except Exception as exc:  # pragma: no cover
+                race_errors.append(exc)
+
+        t_first = threading.Thread(target=run_first_forward)
+        t_first.start()
+        try:
+            self.assertTrue(wire_entered.wait(timeout=5))
+            with self.assertRaisesRegex(
+                AuthorityRefusal, "physical dispatch already forwarded"
+            ):
+                dup_coord.forward(dup_access, dup_binding)
+        finally:
+            wire_release.set()
+            t_first.join(timeout=5)
+        self.assertEqual(race_errors, [])
+        self.assertEqual(wire_count, 1)
+
+        # 3. RS-68E73A: fenced_http_mutation refuses incomplete/unconfirmed wire outcomes.
+        for bad_outcome in (
+            WireDispatchOutcome(
+                504,
+                b"",
+                effect_confirmed=True,
+                response_complete=False,
+                usage_calls=None,
+            ),
+            WireDispatchOutcome(
+                502, b"", effect_confirmed=False, response_complete=True, usage_calls=1
+            ),
+            WireDispatchOutcome(
+                200,
+                b"{}",
+                effect_confirmed=True,
+                response_complete=True,
+                usage_calls=None,
+            ),
+        ):
+            inc_coord = ContainedForwardingCoordinator(
+                self.dir
+                / f"inc-{bad_outcome.status_code}-{bad_outcome.effect_confirmed}",
+                posture=WriterContainmentPosture.fully_contained(),
+                wire_forwarder=lambda *_, out=bad_outcome: out,
+                synthetic_qualification=True,
+            )
+            inc_tok, _ = inc_coord.enroll_initial_writer(
+                base_access=_make_access(run_id=121),
+                writer_route="actions_hosted",
+            )
+            with self.assertRaisesRegex(
+                AuthorityRefusal, "wire mutation outcome is incomplete or unconfirmed"
+            ):
+                inc_coord.fenced_http_mutation(
+                    inc_tok,
+                    dispatch_id="inc-dispatch",
+                    operation="reply",
+                    method="POST",
+                    target="/repos/example/repo/issues/7/comments",
+                    payload={"body": "incomplete"},
+                    reservation_sha256="2" * 64,
+                )
+            snap_after = inc_coord.candidate.snapshot(inc_tok)
+            self.assertEqual(
+                snap_after.document()["dispatches"]["inc-dispatch"]["phase"],
+                "forwarded",
+            )
+
+        # 4. RS-7945D2: set_observation_override is disabled by default & requires active token.
+        with self.assertRaisesRegex(
+            AuthorityRefusal, "synthetic observation overrides are disabled"
+        ):
+            atom_coord.set_observation_override("x", None, token=tok2)
+        override_coord = ContainedForwardingCoordinator(
+            self.dir / "override-auth",
+            posture=WriterContainmentPosture.fully_contained(),
+            wire_forwarder=lambda *_: WireDispatchOutcome(200, b"{}"),
+            synthetic_qualification=True,
+            allow_synthetic_overrides=True,
+        )
+        ov_tok1, _ = override_coord.enroll_initial_writer(
+            base_access=_make_access(run_id=131, caller_tag="4"),
+            writer_route="actions_hosted",
+        )
+        ov_tok2, _ = override_coord.advance_epoch(
+            predecessor_token=ov_tok1,
+            successor_access=_make_access(run_id=132, caller_tag="5"),
+            writer_route="actions_hosted",
+            predecessor_ceased=True,
+        )
+        with self.assertRaisesRegex(AuthorityRefusal, "stale writer epoch fenced"):
+            override_coord.set_observation_override("x", None, token=ov_tok1)
+        override_coord.set_observation_override("x", None, token=ov_tok2)
+
+        # 5. RS-429DFB, RS-67293A, RS-E3E38A, RS-0E02EA: snapshot schema, store_id, and legacy check.
+        for bad_bytes in (
+            b"not-json",
+            canonical_bytes({"dispatches": []}),
+            canonical_bytes({"dispatches": {"d1": {"phase": 123}}}),
+        ):
+            with self.assertRaises(AuthorityRefusal):
+                extract_unsettled_dispatches(Snapshot(bad_bytes))
+
+        with self.assertRaisesRegex(
+            AuthorityRefusal, "base writer store_id must be a 64-hex sha256 digest"
+        ):
+            override_coord.enroll_initial_writer(
+                base_access=replace(_make_access(), store_id="%_" + "a" * 62),
+                writer_route="actions_hosted",
+            )
+        with self.assertRaisesRegex(
+            AuthorityRefusal, "PR writer scope is not enrolled"
+        ):
+            override_coord.reattach_active_writer(
+                base_access=replace(_make_access(), store_id="b" * 64),
+                writer_route="actions_hosted",
+            )
+        with self.assertRaisesRegex(
+            AuthorityRefusal, "legacy lock invariant conflicts"
+        ):
+            ContainedForwardingCoordinator._require_legacy_invariant(False, b"blob")
+        with closing(sqlite3.connect(override_coord.frontier_path)) as db:
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("UPDATE scope_epochs SET legacy_locked=1, legacy_blob=NULL")
 
 
 if __name__ == "__main__":

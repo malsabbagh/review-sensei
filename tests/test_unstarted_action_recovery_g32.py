@@ -1108,6 +1108,160 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
                     witness=valid_witness,  # same_owner_active is not cross-run
                 )
 
+    def test_rollover_failure_preserves_fail_closed_transport_and_terminal_witness_root_binding(
+        self,
+    ) -> None:
+        from review_sensei.api_work import FrozenApiConfiguration
+
+        # 1. RS-4B95FB: terminal branch of cancel_unstarted_action binds witness target_root_sha256.
+        with tempfile.TemporaryDirectory() as directory:
+            f, _native, ledger, evidence, _cfg, _intent = self._prepare(directory)
+            f.source_status = 404
+            f.source_payload = {"message": "Not Found"}
+            r0 = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            witness_r0 = authenticate_unstarted_cancellation(
+                caller=f.accounted,
+                ledger=ledger,
+                identity=IDENTITY,
+                record=r0,
+                actions_evidence=evidence,
+            )
+            # Advance root generation (R0 -> R0b) while keeping the same pending unstarted intent.
+            r0b = ledger.replace(
+                IDENTITY, lambda rec: rec.evolve(generation=rec.generation + 1)
+            )
+            self.assertNotEqual(r0.record_sha256, r0b.record_sha256)
+            with self.assertRaisesRegex(
+                ReviewInputError, "unstarted cancellation root changed"
+            ):
+                f.accounted.cancel_unstarted_action(ledger, IDENTITY, witness_r0)
+
+            witness_r0b = authenticate_unstarted_cancellation(
+                caller=f.accounted,
+                ledger=ledger,
+                identity=IDENTITY,
+                record=r0b,
+                actions_evidence=evidence,
+            )
+            settled = f.accounted.cancel_unstarted_action(ledger, IDENTITY, witness_r0b)
+            # Same witness succeeds idempotently; stale witness_r0 from R0 is rejected!
+            self.assertEqual(
+                f.accounted.cancel_unstarted_action(
+                    ledger, IDENTITY, witness_r0b
+                ).record_sha256,
+                settled.record_sha256,
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError,
+                "caller action terminal receipt does not match witness target root",
+            ):
+                f.accounted.cancel_unstarted_action(ledger, IDENTITY, witness_r0)
+
+        # 2. RS-49E71A & RS-6CF594: failed rollover_unstarted_and_activate keeps transport
+        #    unstarted (_reservation_started=False, _producer=None, evidence_budget restored).
+        with tempfile.TemporaryDirectory() as directory:
+            f, _native, _ledger, _ev, config, _intent = self._prepare(directory)
+            f.recover_lifecycle()
+            stranded = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            f.source_status = 404
+            f.source_payload = {"message": "Not Found"}
+            f.past_runs[456] = (2, "hosted", "completed")
+            f.past_runs[457] = (1, "hosted", "in_progress")
+            f.run_id = 457
+            f.attempt = 1
+            f.trace = []
+
+            run457_dir = Path(directory) / "run457-rollback"
+            run457_dir.mkdir()
+            caller_457 = ApiRunRequestTransport(
+                directory=run457_dir,
+                run=ApiRunIdentity(123, 457),
+                plan=f.plan,
+                attempt=1,
+                opener=f._external_open,
+            )
+            f.accounted = caller_457
+            http_457 = GitHubHttp(
+                api_url="https://api.github.test", opener=caller_457.open
+            )
+            native_457 = GitHubIssueCommentSessionLedger(
+                http_457, token="synthetic", app_slug="reviewsensei[bot]"
+            )
+            native_457.load(IDENTITY)
+            self.assertIsNone(native_457.evidence_budget)
+
+            # Invalid or underfunded configuration fails before any GitHub write.
+            patches_before = sum(m == "PATCH" for _, m, _ in f.trace)
+            with self.assertRaisesRegex(
+                ReviewInputError, "new caller run configuration is invalid"
+            ):
+                caller_457.rollover_unstarted_and_activate(
+                    native_457,
+                    IDENTITY,
+                    "not-a-config",
+                    ApiExecutionOwner(1, "hosted", 0),
+                    stranded,
+                    lambda _rec: None,
+                )
+            underfunded_cfg = FrozenApiConfiguration(BASE, config.digest, 128)
+            with self.assertRaisesRegex(
+                ReviewInputError, "operation allocation is unfunded"
+            ):
+                caller_457.rollover_unstarted_and_activate(
+                    native_457,
+                    IDENTITY,
+                    underfunded_cfg,
+                    ApiExecutionOwner(1, "hosted", 0),
+                    stranded,
+                    lambda _rec: None,
+                )
+            self.assertEqual(sum(m == "PATCH" for _, m, _ in f.trace), patches_before)
+            self.assertFalse(caller_457._reservation_started)
+            self.assertIsNone(caller_457._producer)
+            self.assertIsNone(native_457.evidence_budget)
+
+            # Failing authenticate callback inside settle_prepare rolls back cleanly too.
+            with self.assertRaisesRegex(ReviewInputError, "simulated auth refusal"):
+                caller_457.rollover_unstarted_and_activate(
+                    native_457,
+                    IDENTITY,
+                    config,
+                    ApiExecutionOwner(1, "hosted", 0),
+                    stranded,
+                    lambda _rec: (_ for _ in ()).throw(
+                        ReviewInputError("simulated auth refusal")
+                    ),
+                )
+            self.assertFalse(caller_457._reservation_started)
+            self.assertIsNone(caller_457._producer)
+            self.assertIsNone(native_457.evidence_budget)
+
+            # Subsequent valid rollover on the clean transport succeeds!
+            ev_457 = ApiRunActionsEvidence(
+                http_457,
+                token="synthetic-actions",
+                command_run_id="457",
+                job="hosted",
+            )
+            activated = caller_457.rollover_unstarted_and_activate(
+                native_457,
+                IDENTITY,
+                config,
+                ApiExecutionOwner(1, "hosted", 0),
+                stranded,
+                lambda current: authenticate_unstarted_cancellation(
+                    caller=caller_457,
+                    ledger=native_457,
+                    identity=IDENTITY,
+                    record=current,
+                    actions_evidence=ev_457,
+                    mode="cross_run",
+                ),
+            )
+            self.assertEqual(activated.identity.run_id, 457)
+            self.assertTrue(caller_457._reservation_started)
+            self.assertIsNotNone(caller_457._producer)
+
 
 if __name__ == "__main__":
     unittest.main()
