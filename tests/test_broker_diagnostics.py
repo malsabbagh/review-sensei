@@ -20,6 +20,7 @@ from review_sensei.broker_diagnostics import (
     MAX_DIAGNOSTIC_BYTES,
     BrokerDiagnostic,
     exception_broker_diagnostic,
+    outcome_broker_diagnostic,
     parse_broker_diagnostic,
 )
 from review_sensei.cli import _report_broker_failure, main
@@ -57,6 +58,110 @@ def http_error(body, status=403, ray=RAY):
 
 
 class BrokerDiagnosticTests(unittest.TestCase):
+    def test_pr_lookup_metadata_survives_the_real_client_error_without_retry(self):
+        body = payload("github_pull_request_lookup_failed")
+        body["pull_request_lookup"] = {
+            "outcome": "http",
+            "upstream_status": 502,
+            "requested_capability": "review_publish",
+            "worker_version": "abcde123-1234-1234-1234-123456789abc",
+        }
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request)
+            raise http_error(json.dumps(body).encode())
+
+        client = BrokerClient(opener=opener, authority=current_authority())
+        with self.assertRaises(GitHubBrokerClientError) as raised:
+            client.exchange("synthetic-oidc")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(type(raised.exception), GitHubBrokerClientError)
+        diagnostic = exception_broker_diagnostic(raised.exception)
+        self.assertEqual(diagnostic.code, "github_pull_request_lookup_failed")
+        self.assertEqual(
+            diagnostic.metadata()["broker.pr_lookup_upstream_status"], "502"
+        )
+        self.assertEqual(
+            diagnostic.metadata()["broker.pr_lookup_requested_capability"],
+            "review_publish",
+        )
+        self.assertNotIn(SECRET, str(raised.exception))
+
+    def test_pr_lookup_metadata_reaches_cli_outcome_and_summary(self):
+        body = payload("github_pull_request_lookup_failed")
+        body["pull_request_lookup"] = {
+            "outcome": "malformed",
+            "upstream_status": 200,
+            "requested_capability": "thread_resolve",
+        }
+        diagnostic = parse_broker_diagnostic(http_error(json.dumps(body).encode()))
+        self.assertEqual(
+            outcome_broker_diagnostic("broker_rejected", diagnostic.metadata()),
+            diagnostic,
+        )
+        outcome = RunOutcome(
+            status="action_required",
+            diagnostic="broker_rejected",
+            stage_summary=diagnostic.metadata(),
+        )
+        validate_public_document(outcome.to_dict(), "run-outcome")
+        summary = render_actions_summary(outcome)
+        self.assertIn("broker.pr_lookup_outcome=malformed", summary)
+        self.assertIn("broker.pr_lookup_upstream_status=200", summary)
+        self.assertNotIn(SECRET, summary)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "outcome.json"
+            stderr = io.StringIO()
+            error = GitHubBrokerClientError(SECRET, broker_diagnostic=diagnostic)
+            with patch.dict(os.environ, {}, clear=True), redirect_stderr(stderr):
+                self.assertTrue(
+                    _report_broker_failure(error, SimpleNamespace(outcome=target))
+                )
+            self.assertNotIn(SECRET, stderr.getvalue() + target.read_text())
+            self.assertEqual(
+                json.loads(target.read_text())["stage_summary"], diagnostic.metadata()
+            )
+
+    def test_pr_lookup_invalid_metadata_never_replaces_the_original_rejection(self):
+        valid = {
+            "outcome": "http",
+            "upstream_status": 502,
+            "requested_capability": "review_publish",
+        }
+        invalid = [
+            None,
+            [],
+            {},
+            {**valid, "headers": SECRET},
+            {**valid, "outcome": SECRET},
+            {**valid, "upstream_status": True},
+            {**valid, "upstream_status": 600},
+            {**valid, "upstream_status": "502"},
+            {**valid, "requested_capability": SECRET},
+            {**valid, "worker_version": "https://private.invalid/" + SECRET},
+            {**valid, "worker_version": "a" * 40},
+        ]
+        for extra in invalid:
+            with self.subTest(extra=extra):
+                body = payload("github_pull_request_lookup_failed")
+                body["pull_request_lookup"] = extra
+                result = parse_broker_diagnostic(http_error(json.dumps(body).encode()))
+                self.assertEqual(result.code, "github_pull_request_lookup_failed")
+                self.assertEqual(result.pull_request_lookup, ())
+                self.assertNotIn(SECRET, result.message())
+        body = payload("github_pull_request_lookup_failed")
+        body["pull_request_lookup"] = {**valid, "worker_version": SECRET * 1000}
+        result = parse_broker_diagnostic(http_error(json.dumps(body).encode()))
+        self.assertEqual(result.code, "broker_unknown")
+        self.assertNotIn(SECRET, result.message())
+        for extra in ["headers", "outcome", "upstream_status", "worker_version"]:
+            metadata = {
+                **BrokerDiagnostic("github_pull_request_lookup_failed").metadata(),
+                "broker.pr_lookup_" + extra: SECRET,
+            }
+            self.assertIsNone(outcome_broker_diagnostic("broker_rejected", metadata))
+
     def test_temporary_lookup_reaches_exchange_and_grant_callers_without_replay(self):
         for operation in ("exchange", "session-grant"):
             for upstream, lookup in (

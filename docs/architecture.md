@@ -821,6 +821,13 @@ Worker exchanges/upstreams stop at 25s/10s or earlier caller/control deadlines.
 Abort I/O; cache completed JWKS only. No POST replay; allowlisted diagnostics only,
 never secrets or remote text.
 
+[Proposed ADR 0129](adr/0129-bounded-pull-request-lookup-diagnostics.md) adds
+optional bounded PR-lookup evidence to token-error responses and caller outcomes.
+Status, failure class and requested capability remain observations; an optional
+platform version UUID is absent without a genuine runtime binding. Source refs
+are distinct from deployed identity. Existing request handling, accounting and retry semantics
+stay unchanged, and historical missing evidence is not reconstructed.
+
 ```text
 GitHub Actions OIDC id_token (audience=sts.reviewsensei.dev, id-token: write)
     -> OIDCBroker.exchange

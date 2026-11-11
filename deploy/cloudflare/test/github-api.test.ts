@@ -744,3 +744,56 @@ describe("GitHubApi pull-request head lookup", () => {
     ).rejects.toThrow("github_pull_request_forbidden");
   });
 });
+
+
+describe("bounded pull-request lookup evidence", () => {
+  it.each([502, 200])("retains status %s without copying upstream content", async status => {
+    const client = api();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      status === 200 ? "[]" : JSON.stringify({ message: "ghs_private_body_canary" }),
+      { status, headers: { "authorization": "Bearer ghs_private_header_canary" } },
+    ));
+    try {
+      const error = await client.pullRequestHead("acme/widgets", 7, "ghs_private_token_canary").catch(error => error);
+      expect(error.message).toBe("github_pull_request_lookup_failed");
+      expect(error.pullRequestLookup).toEqual({ outcome: status === 200 ? "malformed" : "http", upstream_status: status });
+      expect(JSON.stringify(error)).not.toContain("canary");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally { fetchMock.mockRestore(); }
+  });
+});
+
+
+describe("pull-request lookup exact failure handling", () => {
+  it.each([
+    [403, "{}", "github_pull_request_forbidden", "http"],
+    [200, "{}", "github_pull_request_response_invalid", "malformed"],
+    [502, "not JSON: ghs_body_canary", "github_response_invalid", "malformed"],
+    [200, new Uint8Array(524289), "github_response_too_large", "oversized"],
+  ])("preserves status %s/code %s and the real bounded decoder", async (status, body, code, outcome) => {
+    const client = api();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status }));
+    try {
+      const error = await client.pullRequestHead("acme/widgets", 7, "ghs_token_canary").catch(error => error);
+      expect(error.message).toBe(code);
+      expect(error.pullRequestLookup).toEqual({ outcome, upstream_status: status });
+      expect(JSON.stringify(error)).not.toContain("canary");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally { fetchMock.mockRestore(); }
+  });
+
+  it("keeps 404 absence, exact success, and pre-response control refusals unchanged", async () => {
+    const client = api();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response("{}", { status: 404 })).mockResolvedValueOnce(new Response(JSON.stringify({ head: { sha: SHA } })));
+    try {
+      await expect(client.pullRequestHead("acme/widgets", 7, "token")).resolves.toBeNull();
+      await expect(client.pullRequestHead("acme/widgets", 7, "token")).resolves.toBe(SHA);
+      const call = vi.spyOn(client, "request");
+      for (const refusal of [new Error("broker_control_budget_exhausted"), new TypeError("ghs_transport_canary"), new Error("broker_upstream_timeout")]) {
+        call.mockRejectedValueOnce(refusal);
+        await expect(client.pullRequestHead("acme/widgets", 7, "token")).rejects.toBe(refusal);
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally { fetchMock.mockRestore(); }
+  });
+});

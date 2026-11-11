@@ -1,3 +1,4 @@
+import { PullRequestLookupError, type PullRequestLookupOutcome } from "./pull-request-lookup-diagnostic";
 import { WorkflowLookupError, lookupFailure, lookupHeaders, type LookupDiagnostic } from "./broker-lookup-diagnostic";
 import { BrokerLifetime, type BrokerUpstream } from "./broker-lifetime";
 import type { BrokerDispatchControl } from "./broker-dispatch-control";
@@ -558,27 +559,33 @@ export class GitHubApi {
     if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) {
       throw new Error("github_pull_request_invalid");
     }
-    const response = await this.request(
-      "GET",
-      `${repositoryPath(repository)}/pulls/${pullRequest}`,
-      token,
-    );
+    let response: GitHubApiResponse;
+    try {
+      response = await this.request("GET", `${repositoryPath(repository)}/pulls/${pullRequest}`, token);
+    } catch (error) {
+      if (!(error instanceof GitHubResponseError)) throw error;
+      const outcomes: Record<string, PullRequestLookupOutcome> = {
+        github_response_invalid: "malformed", github_response_too_large: "oversized",
+        broker_upstream_timeout: "timeout", github_response_unavailable: "transport",
+      };
+      throw new PullRequestLookupError(error.message, outcomes[error.message] ?? "unknown", error.status);
+    }
     // A 403 on this read is a permission, installation-scope, or rate-limit
     // problem, not a missing or stale pull request. Reporting it as an absent
     // head would send the operator after the wrong failure, so it keeps its
     // own diagnosis instead of collapsing into the 404 result.
     if (response.status === 403) {
-      throw new Error("github_pull_request_forbidden");
+      throw new PullRequestLookupError("github_pull_request_forbidden", "http", response.status);
     }
     if (response.status === 404) {
       return null;
     }
     if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
-      throw new Error("github_pull_request_lookup_failed");
+      throw new PullRequestLookupError("github_pull_request_lookup_failed", response.status < 200 || response.status >= 300 ? "http" : "malformed", response.status);
     }
     const head = response.data.head;
     if (!isObject(head) || typeof head.sha !== "string" || !PUBLIC_WORKFLOW_SHA_PATTERN.test(head.sha)) {
-      throw new Error("github_pull_request_response_invalid");
+      throw new PullRequestLookupError("github_pull_request_response_invalid", "malformed", response.status);
     }
     return head.sha;
   }

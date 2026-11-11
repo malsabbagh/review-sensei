@@ -1,3 +1,4 @@
+import { pullRequestLookupEvidence } from "./pull-request-lookup-diagnostic";
 import { BrokerObservation } from "./broker-observation";
 import { WorkflowLookupError, temporaryWorkflowLookup } from "./broker-lookup-diagnostic";
 import { BrokerDispatchControl } from "./broker-dispatch-control";
@@ -90,6 +91,8 @@ export function setupErrorCode(error: unknown): string {
 
 const BROKER_CAPABILITIES = new Set([
   "review_publish",
+  "thread_resolve",
+  "review_actions",
   "check_publish",
   "review_session",
   "review_status",
@@ -291,7 +294,9 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
     const diagnostic = brokerDiagnostic(error, rayId);
     const lookup =
       error instanceof WorkflowLookupError ? error.lookup : undefined;
+    const pullRequestLookup = pullRequestLookupEvidence(error, brokerCapability(body), env);
     console.error("github_broker_failed", {
+      ...(pullRequestLookup === undefined ? {} : { pull_request_lookup: pullRequestLookup }),
       ...(lookup === undefined ? {} : { lookup }),
       error_code: diagnostic.code,
       stage: diagnostic.stage,
@@ -310,6 +315,7 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
       {
         error: errorCode,
         diagnostic,
+        ...(pullRequestLookup === undefined ? {} : { pull_request_lookup: pullRequestLookup }),
         ...(lookup === undefined ? {} : { lookup }),
       },
       status,

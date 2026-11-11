@@ -9,6 +9,7 @@ vi.mock("../src/token-broker", () => ({
   },
 }));
 
+import { PullRequestLookupError } from "../src/pull-request-lookup-diagnostic";
 import type { WorkerEnv } from "../src/env";
 import worker, { brokerErrorCode, setupErrorCode } from "../src/worker";
 import { brokerDiagnostic } from "../src/broker-diagnostics";
@@ -507,5 +508,99 @@ describe("bounded broker operation telemetry", () => {
     } finally {
       log.mockRestore();
     }
+  });
+});
+
+
+describe("pull-request lookup error serialization", () => {
+  it("retains bounded status/capability/runtime identity without changing refusal or leaking content", async () => {
+    const error = new PullRequestLookupError("github_pull_request_lookup_failed", "http", 502);
+    Object.assign(error, { headers: { authorization: "ghs_header_canary" }, body: "ghs_body_canary", url: "https://private.invalid/canary" });
+    broker.exchange.mockRejectedValueOnce(error);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await worker.fetch(request({ oidc_token: "ghs_oidc_canary", capability: "review_actions", worker_version: "ghs_source_canary" } as never, { "cf-ray": "0123456789abcdef-YYZ" }), {
+        ...env, CF_VERSION_METADATA: { id: "abcde123-1234-1234-1234-123456789abc", tag: "ghs_tag_canary", timestamp: "ghs_time_canary" },
+      } as WorkerEnv);
+      expect(result.status).toBe(403);
+      expect(result.headers.get("cache-control")).toBe("no-store");
+      const body = await result.json();
+      expect(body).toEqual({ error: "capability_not_issued", diagnostic: brokerDiagnostic(error, "0123456789abcdef-YYZ"),
+        pull_request_lookup: { outcome: "http", upstream_status: 502, requested_capability: "review_actions", worker_version: "abcde123-1234-1234-1234-123456789abc" } });
+      expect(JSON.stringify([body, log.mock.calls])).not.toContain("canary");
+      expect(JSON.stringify(body).length).toBeLessThan(600);
+      expect(broker.exchange).toHaveBeenCalledTimes(1);
+    } finally { log.mockRestore(); }
+  });
+});
+
+
+describe("pull-request lookup malformed metadata refusal", () => {
+  it.each([
+    [undefined, undefined, { outcome: "unknown" }],
+    [true, "ghs_canary", { outcome: "unknown" }],
+    [600, "x".repeat(5000), { outcome: "unknown" }],
+    [NaN, "https://private.invalid/canary", { outcome: "unknown" }],
+  ])("drops malformed status %s and runtime identity without echoing them", async (status, version, expected) => {
+    const error = new PullRequestLookupError("github_pull_request_lookup_failed", "unknown", status as never);
+    Object.assign(error, { pullRequestLookup: { outcome: "ghs_canary", upstream_status: status, body: "ghs_canary" } });
+    broker.exchange.mockRejectedValueOnce(error);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await worker.fetch(request({ oidc_token: "ghs_canary", capability: "ghs_canary", worker_version: "abcde123-1234-1234-1234-123456789abc" } as never), { ...env, CF_VERSION_METADATA: { id: version } } as WorkerEnv);
+      const body = await result.json() as { pull_request_lookup: object };
+      expect(result.status).toBe(403);
+      expect(body.pull_request_lookup).toEqual(expected);
+      expect(JSON.stringify([body, log.mock.calls])).not.toContain("canary");
+      expect(broker.exchange).toHaveBeenCalledTimes(1);
+    } finally { log.mockRestore(); }
+  });
+
+  it.each([new Error("github_pull_request_lookup_failed"), { message: "github_pull_request_lookup_failed", pullRequestLookup: { outcome: "http", upstream_status: 502 } }])("does not fabricate evidence for an untyped error", async error => {
+    broker.exchange.mockRejectedValueOnce(error);
+    const result = await worker.fetch(request(), env);
+    expect(result.status).toBe(403);
+    expect(await result.json()).not.toHaveProperty("pull_request_lookup");
+  });
+
+  it("keeps unknown version absent and includes no caller-provided identity", async () => {
+    broker.exchange.mockRejectedValueOnce(new PullRequestLookupError("github_pull_request_lookup_failed", "http", 503));
+    const result = await worker.fetch(request({ oidc_token: "signed", worker_version: "abcde123-1234-1234-1234-123456789abc" } as never), env);
+    const body = await result.json() as { pull_request_lookup: object };
+    expect(body.pull_request_lookup).toEqual({ outcome: "http", upstream_status: 503, requested_capability: "review_publish" });
+  });
+
+  it("does not attach lookup evidence to a changed control-error code", async () => {
+    const error = new PullRequestLookupError("github_pull_request_lookup_failed", "http", 502);
+    error.message = "broker_control_budget_exhausted";
+    broker.exchange.mockRejectedValueOnce(error);
+    const result = await worker.fetch(request(), env);
+    expect(result.status).toBe(403);
+    const body = await result.json() as { diagnostic: { code: string } };
+    expect(body.diagnostic.code).toBe("broker_control_budget_exhausted");
+    expect(body).not.toHaveProperty("pull_request_lookup");
+  });
+});
+
+
+describe("supplementary lookup failures preserve the business refusal", () => {
+  it.each(["exception", "binding", "version"])("omits evidence when the %s metadata getter fails", async surface => {
+    const error = new PullRequestLookupError("github_pull_request_lookup_failed", "http", 502);
+    const runtime = { ...env, CF_VERSION_METADATA: { id: "abcde123-1234-1234-1234-123456789abc" } } as WorkerEnv;
+    const fails = { get() { throw new Error("ghs_getter_canary"); } };
+    if (surface === "exception") Object.defineProperty(error, "pullRequestLookup", fails);
+    if (surface === "binding") Object.defineProperty(runtime, "CF_VERSION_METADATA", fails);
+    if (surface === "version") Object.defineProperty(runtime.CF_VERSION_METADATA, "id", fails);
+    broker.exchange.mockRejectedValueOnce(error);
+    const logs = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await worker.fetch(request(), runtime);
+      expect(result.status).toBe(403);
+      const body = await result.json() as { diagnostic: { code: string } };
+      expect(body.diagnostic.code).toBe("github_pull_request_lookup_failed");
+      expect(body).not.toHaveProperty("pull_request_lookup");
+      expect(JSON.stringify([body, logs.mock.calls])).not.toContain("canary");
+      expect(broker.exchange).toHaveBeenCalledTimes(1);
+    } finally { logs.mockRestore(); }
   });
 });
