@@ -90,3 +90,23 @@ Editing a comment and later restoring its exact original body bytes advances `up
 - `LIVE_CANONICAL_CUTOVER_ENABLED` remains `False`; live runtime authority cutover continues to require the Section 8.3 service-host, credential-containment, frontier, and canary gates.
 - `controlled_restarts.json` remains empty (`[]`), and no historical ledger or open PR state is mutated by these source modules.
 - Reverting the additive schema enum `"canceled_unstarted"` and companion recovery modules restores unconditional pending-action holds without affecting legacy or completed session records.
+
+### Independent-host cutover preflight invalidation
+
+Cutover now revalidates the predecessor's exact frontier snapshot inside the same
+`frontier.sqlite` `BEGIN IMMEDIATE` transaction that advances the active epoch.
+A second host's durable `forwarded` intent therefore invalidates an earlier clean
+preflight, even while its physical wire request remains delayed. If cutover wins
+first, the predecessor's active-epoch authorization refuses forwarding instead.
+The failed cutover preserves the predecessor epoch, dispatch intent, and original
+held request liability; it does not refund, resend, or infer cessation.
+
+The G02 regression uses a separate Python process and coordinator sharing the
+local stores, with the wire held open across the cutover attempt. This qualifies
+that interleaving, not distributed storage, simultaneous successor enrollment,
+credential containment, or an authenticated external epoch witness. No new schema
+or live host is introduced. `verify_external_epoch_floor` remains a diagnostic
+comparison against a supplied integer, not an authenticated witness producer.
+SQLite locking and durable nonrollback frontier hosting remain deployment gates;
+unsupported or conflicting storage must refuse rather than fall back to an
+in-process lock. `LIVE_CANONICAL_CUTOVER_ENABLED` remains `False`.

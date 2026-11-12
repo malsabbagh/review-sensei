@@ -564,6 +564,22 @@ class ContainedForwardingCoordinator(AuthorityHost):
                 with closing(self._connect_frontier()) as db:
                     db.execute("BEGIN IMMEDIATE")
                     try:
+                        # Physical dispatch intent advances this same durable
+                        # frontier before the wire call. Revalidate under the
+                        # epoch-update transaction: a process-local lock cannot
+                        # exclude another host forwarding after our preflight.
+                        # If cutover wins first, the old host's subsequent
+                        # active-epoch authorization refuses the wire instead.
+                        predecessor_frontier = db.execute(
+                            "SELECT body FROM frontier WHERE key=?",
+                            (predecessor_access.key,),
+                        ).fetchone()
+                        _require_containment(
+                            predecessor_frontier is not None
+                            and bytes(predecessor_frontier[0])
+                            == predecessor_snapshot.encoded,
+                            "predecessor frontier changed during cutover; reconcile or hold required",
+                        )
                         updated = db.execute(
                             "UPDATE scope_epochs "
                             "SET active_epoch=?, active_epoch_store_id=? "

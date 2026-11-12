@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import closing
 from dataclasses import replace
@@ -653,6 +654,125 @@ class StaleLedgerFencingG02Tests(unittest.TestCase):
         ):
             coordinator.candidate.forward(token1, prepared1, req1)
         self.assertEqual(server.patch_history, [])
+
+    def test_independent_process_forward_invalidates_cutover_preflight(self) -> None:
+        """A different host may dispatch after cutover's initial snapshot."""
+        state_dir = self.dir / "concurrent-cutover"
+        coord = ContainedForwardingCoordinator(
+            state_dir,
+            posture=WriterContainmentPosture.fully_contained(),
+            wire_forwarder=lambda *_: WireDispatchOutcome(200, b"{}"),
+            synthetic_qualification=True,
+        )
+        access = _make_access()
+        token, root = coord.enroll_initial_writer(
+            base_access=access, writer_route="actions_hosted"
+        )
+        request = Dispatch(
+            dispatch_id="concurrent-forward",
+            operation="reply",
+            method="POST",
+            target="/repos/example/repo/issues/7/comments",
+            body=canonical_bytes({"body": "once"}),
+            effect_sha256="5" * 64,
+            reservation_sha256="6" * 64,
+            liability_calls=9,
+            deadline_ms=90000,
+        )
+        prepared = coord.candidate.prepare(token, root, request)
+        script = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from test_stale_ledger_fencing_g02 import _make_access
+from review_sensei.bounded_evidence import canonical_bytes
+from review_sensei.recovery_authority import Dispatch
+from review_sensei.writer_containment import (
+    ContainedForwardingCoordinator, WriterContainmentPosture, WireDispatchOutcome,
+)
+directory = Path(sys.argv[1])
+def delayed_wire(*args):
+    (directory / "wire-entered").write_text("1", encoding="ascii")
+    if sys.stdin.readline() != "release\n":
+        raise RuntimeError("wire release missing")
+    return WireDispatchOutcome(504, b"", response_complete=False, usage_calls=None)
+coord = ContainedForwardingCoordinator(
+    directory, posture=WriterContainmentPosture.fully_contained(),
+    wire_forwarder=delayed_wire, synthetic_qualification=True,
+)
+token = coord.reattach_active_writer(
+    base_access=_make_access(), writer_route="actions_hosted",
+)
+request = Dispatch(
+    dispatch_id="concurrent-forward", operation="reply", method="POST",
+    target="/repos/example/repo/issues/7/comments",
+    body=canonical_bytes({"body": "once"}), effect_sha256="5" * 64,
+    reservation_sha256="6" * 64, liability_calls=9, deadline_ms=90000,
+)
+coord.candidate.forward(token, coord.candidate.snapshot(token), request)
+"""
+        initialize = coord.candidate.initialize
+        processes = []
+
+        def interleaved_initialize(*args, **kwargs):
+            successor = initialize(*args, **kwargs)
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    script,
+                    str(state_dir),
+                    str(REPO_ROOT / "tests"),
+                ],
+                env=_child_env(),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            processes.append(proc)
+            deadline = time.monotonic() + 15
+            while not (state_dir / "wire-entered").exists():
+                if proc.poll() is not None or time.monotonic() >= deadline:
+                    self.fail("independent host did not enter the physical wire")
+                time.sleep(0.01)
+            return successor
+
+        try:
+            with patch.object(coord.candidate, "initialize", interleaved_initialize):
+                with self.assertRaisesRegex(AuthorityRefusal, "predecessor.*changed"):
+                    coord.advance_epoch(
+                        predecessor_token=token,
+                        successor_access=_make_access(run_id=42, caller_tag="2"),
+                        writer_route="actions_hosted",
+                        predecessor_ceased=True,
+                    )
+            self.assertEqual(
+                coord.active_epoch(
+                    base_store_id=access.store_id,
+                    repository_id=123,
+                    pull_request=7,
+                ),
+                1,
+            )
+            current = coord.candidate.snapshot(token)
+            self.assertEqual(
+                current.document()["held_calls"], prepared.document()["held_calls"]
+            )
+            self.assertEqual(
+                current.document()["dispatches"][request.dispatch_id]["phase"],
+                "forwarded",
+            )
+            self.assertTrue(extract_unsettled_dispatches(current))
+        finally:
+            for proc in processes:
+                try:
+                    _, stderr = proc.communicate("release\n", timeout=15)
+                    self.assertEqual(proc.returncode, 0, stderr)
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.communicate()
 
     def test_unsettled_inflight_dispatch_blocks_epoch_cutover_until_settled(
         self,
