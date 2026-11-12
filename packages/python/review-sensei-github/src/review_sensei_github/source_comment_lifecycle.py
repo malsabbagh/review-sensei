@@ -201,6 +201,8 @@ def admit_event_comment_source(
 ) -> dict[str, Any]:
     """Validate an incoming runner/webhook comment event before action admission."""
 
+    if event_name not in {"issue_comment", "pull_request_review_comment"}:
+        raise ReviewInputError("unsupported source comment event")
     if not isinstance(event_payload, Mapping):
         raise ReviewInputError("action source does not match the original event")
     raw_action = event_payload.get("action")

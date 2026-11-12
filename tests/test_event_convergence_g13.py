@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -670,6 +671,24 @@ class EventConvergenceG13Tests(unittest.TestCase):
             made_progress=False,
         )
         self.assertEqual(MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS, 2)
+
+        # Completed retained review reuse is not a newly scheduled attempt.
+        retained_records = tuple(
+            replace(record, operation_kind="review")
+            for record in (no_prog_1, no_prog_2)
+        )
+        reused = reconcile_event_convergence(
+            "workflow_dispatch",
+            {"inputs": {"pull_request_number": 42}},
+            live_target=live_h2,
+            records=retained_records,
+            current_state_fingerprint="fp-v1",
+        )
+        self.assertEqual(reused.status, "converged_reused")
+        self.assertFalse(reused.stopped_no_progress)
+        self.assertEqual(reused.recovery_command, reused.routing.recovery_command)
+        self.assertFalse(reused.schedules_new_inference)
+        self.assertFalse(reused.schedules_native_reconciliation)
 
         # At >= MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS on unchanged state, all admitted
         # reconciliation routes halt deterministically without paid retries or background loops.

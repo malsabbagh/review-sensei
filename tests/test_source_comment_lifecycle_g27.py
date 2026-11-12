@@ -1427,6 +1427,31 @@ class ExecuteLifecycleRouteAndReviewRecoveryTests(unittest.TestCase):
 
 
 class OrdinaryCallerIntegrationG27Tests(unittest.TestCase):
+    def test_unknown_source_event_refuses_before_descriptor_creation(self):
+        from review_sensei_github.source_comment_lifecycle import (
+            admit_event_comment_source,
+        )
+
+        with self.assertRaisesRegex(
+            ReviewInputError, "unsupported source comment event"
+        ):
+            admit_event_comment_source(
+                {
+                    "action": "created",
+                    "issue": {"number": 7},
+                    "comment": {
+                        "id": 9,
+                        "body": "status",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                    },
+                },
+                pull_request=7,
+                source_comment_id=9,
+                purpose="command",
+                event_name="issue_comment_created",
+                expected_body="status",
+            )
+
     """Qualify ordinary caller integration across webhooks.py, comment_intent.py, and action_run.py."""
 
     def setUp(self) -> None:

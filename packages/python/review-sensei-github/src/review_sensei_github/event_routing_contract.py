@@ -2915,7 +2915,7 @@ def reconcile_event_convergence(
             )
 
     if unchanged_attempts >= max_no_progress_attempts and (
-        routing.admitted or routing.reused_retained_snapshot
+        routing.admitted and not routing.reused_retained_snapshot
     ):
         return ConvergenceDecision(
             status="stopped_no_progress",

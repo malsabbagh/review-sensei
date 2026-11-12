@@ -24,6 +24,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlsplit
 from urllib.request import Request
 
@@ -40,6 +41,7 @@ from review_sensei_github.api_run_requests import (
     ApiRunRequestTransport,
     ApiRunSessionLedger,
 )
+from review_sensei_github.conversation import reply_marker
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.session_ledger import (
     GitHubIssueCommentSessionLedger,
@@ -1273,6 +1275,29 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
 
 
 class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
+    def test_owned_native_marker_parser_refuses_ambiguous_metadata(self):
+        from review_sensei_github.unstarted_action_recovery import (
+            _native_artifact_matches,
+        )
+
+        for marker in (
+            '<!-- reviewsensei:operation:v1 {"run_id": 1, "run_id": 2} -->',
+            "<!-- reviewsensei:reply:v1 comment=1 comment=2 -->",
+            "<!-- reviewsensei:reply:v1 comment=1",
+            "<!-- reviewsensei:reply:v1 updated=abc -->",
+            "<!-- reviewsensei:reply:v1 comment=0 -->",
+        ):
+            with (
+                self.subTest(marker=marker),
+                self.assertRaisesRegex(ReviewInputError, "marker is malformed"),
+            ):
+                _native_artifact_matches(marker, source_id=1, run_id=1)
+        self.assertFalse(
+            _native_artifact_matches(
+                'explanation: {"source_comment_id": 1}', source_id=1, run_id=1
+            )
+        )
+
     """Qualify ordinary caller integration and strict positive non-dispatch gate in action_run.py."""
 
     def setUp(self) -> None:
@@ -1628,6 +1653,12 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
                 "body": "spoof " + spoof_marker,
                 "user": {"id": 42, "login": "mallory", "type": "User"},
             }
+            # A different owned source with this numeric prefix is not this action.
+            f.extra_comments[88803] = {
+                "id": 88803,
+                "body": f"<!-- reviewsensei:reply:v1 source={f.SOURCE_ID}0 -->",
+                "user": {"id": f.selected.ledger._evidence_author_id, "type": "Bot"},
+            }
             proof_digest = verify_no_business_dispatch_evidence(
                 caller=f.selected.caller,
                 ledger=f.selected.ledger,
@@ -1639,10 +1670,24 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
             )
             self.assertEqual(len(proof_digest), 64)
 
+            with patch.object(f.selected.ledger, "_evidence_author_id", None):
+                with self.assertRaisesRegex(ReviewInputError, "app author identity"):
+                    verify_no_business_dispatch_evidence(
+                        caller=f.selected.caller,
+                        ledger=f.selected.ledger,
+                        identity=IDENTITY,
+                        state=ApiRunAccounting.from_document(
+                            after_a2_rec.api_run_accounting
+                        ),
+                        intent=stranded_state.action["intent"],
+                        intent_sha256=valid_dispatch_ev.intent_sha256,
+                        evidence=valid_dispatch_ev,
+                    )
+
             bot_author_id = f.selected.ledger._evidence_author_id
             f.extra_comments[88802] = {
                 "id": 88802,
-                "body": "real receipt " + spoof_marker,
+                "body": f"<!-- reviewsensei:command-receipt:v1 digest={'a' * 64} source={f.SOURCE_ID}--> ",
                 "user": {
                     "id": bot_author_id,
                     "login": "reviewsensei[bot]",
@@ -2157,7 +2202,7 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
                     "id": 9991,
                     "commit_id": HEAD,
                     "state": "COMMENTED",
-                    "body": f'<!-- reviewsensei:disposition {{"command_id":"{f.SOURCE_ID}"}} -->',
+                    "body": f'<!-- reviewsensei:disposition {{"command_id":\n "{f.SOURCE_ID}"}} -->',
                     "user": {"id": bot_id, "login": "reviewsensei[bot]", "type": "Bot"},
                 }
             )
@@ -2192,7 +2237,13 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
             f_rc.inline.append(
                 {
                     "id": 4444,
-                    "body": f"<!-- reviewsensei:reply:v1 source={SOURCE_ID} --> reply text",
+                    "body": reply_marker(
+                        source_comment_id=SOURCE_ID,
+                        source_updated_digest="a" * 64,
+                        pull_request=7,
+                        head_sha=HEAD,
+                    )
+                    + " reply text",
                     "user": {
                         "id": native_rc._evidence_author_id,
                         "login": "reviewsensei[bot]",

@@ -22,6 +22,7 @@ Every transition requires:
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import weakref
 from collections.abc import Mapping
@@ -413,10 +414,78 @@ def _owned_bot_artifact_body(
     user_obj = item.get("user")
     if not isinstance(user_obj, Mapping) or user_obj.get("type") != "Bot":
         return None
-    if type(app_author_id) is int and user_obj.get("id") != app_author_id:
+    if type(app_author_id) is not int or app_author_id <= 0:
+        raise ReviewInputError(
+            "native effect fence requires authenticated app author identity"
+        )
+    if user_obj.get("id") != app_author_id:
         return None
     body = item.get("body")
     return body if isinstance(body, str) else None
+
+
+def _native_artifact_matches(body: str, *, source_id: int, run_id: int) -> bool:
+    """Inspect owned, structured markers, never quoted JSON or numeric prefixes.
+
+    Malformed recognized metadata cannot establish absence of an effect.
+    Both legacy source= and the production reply comment= binding are accepted.
+    """
+    pattern = r"<!--\s*reviewsensei:(command-receipt:v\d+|reply:v\d+|operation:[^\s]+|disposition)\s+([\s\S]*?)-->"
+    markers = list(re.finditer(pattern, body))
+    recognized = list(
+        re.finditer(
+            r"<!--\s*reviewsensei:(?:command-receipt:|reply:|operation:|disposition\b)",
+            body,
+        )
+    )
+    if len(markers) != len(recognized):
+        raise ReviewInputError("owned native artifact marker is malformed")
+
+    def unique_fields(pairs):
+        fields = {}
+        for key, value in pairs:
+            if key in fields:
+                raise ValueError("duplicate marker field")
+            fields[key] = value
+        return fields
+
+    for match in markers:
+        family, payload = match.groups()
+        try:
+            if payload.lstrip().startswith("{"):
+                fields = json.loads(payload, object_pairs_hook=unique_fields)
+                if not isinstance(fields, dict):
+                    raise ValueError("marker must be an object")
+            else:
+                fields = {}
+                for token in payload.split():
+                    key, value = token.split("=", 1)
+                    if not key or not value or key in fields:
+                        raise ValueError("invalid marker field")
+                    fields[key] = value
+            keys = {"source", "source_comment_id", "command_id"}
+            if family.startswith("reply:"):
+                keys.add("comment")
+            keys |= {"run_id"} if family.startswith("operation:") else set()
+            if not keys.intersection(fields):
+                raise ValueError("marker source identity is unavailable")
+            for key in keys:
+                if key not in fields:
+                    continue
+                value = fields[key]
+                if type(value) is int:
+                    identifier = value
+                elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+                    identifier = int(value)
+                else:
+                    raise ValueError("invalid marker identifier")
+                if identifier <= 0:
+                    raise ValueError("invalid marker identifier")
+                if identifier == (run_id if key == "run_id" else source_id):
+                    return True
+        except (ValueError, TypeError) as exc:
+            raise ReviewInputError("owned native artifact marker is malformed") from exc
+    return False
 
 
 def verify_no_business_dispatch_evidence(
@@ -511,8 +580,11 @@ def verify_no_business_dispatch_evidence(
         )
 
     source_id = int(intent["source"]["id"])
-    run_id_str = str(state.identity.run_id)
     app_author_id = getattr(ledger, "_evidence_author_id", None)
+    if type(app_author_id) is not int or app_author_id <= 0:
+        raise ReviewInputError(
+            "native effect fence requires authenticated app author identity"
+        )
     comments_path = ledger.http.repository_path(
         identity.repository, f"/issues/{identity.pull_request}/comments"
     )
@@ -522,21 +594,8 @@ def verify_no_business_dispatch_evidence(
         body = _owned_bot_artifact_body(comment, app_author_id=app_author_id)
         if body is None:
             continue
-        compact = body.replace(" ", "")
-        if (
-            f"<!-- reviewsensei:command-receipt:v1 source={source_id} " in body
-            or (
-                "<!-- reviewsensei:command-receipt:v1" in body
-                and f'"source_comment_id":{source_id}' in compact
-            )
-            or ("<!-- reviewsensei:reply:v" in body and f"source={source_id}" in body)
-            or (
-                "<!-- reviewsensei:operation:" in body
-                and (
-                    f'"run_id":"{run_id_str}"' in compact
-                    or f'"source_comment_id":{source_id}' in compact
-                )
-            )
+        if _native_artifact_matches(
+            body, source_id=source_id, run_id=state.identity.run_id
         ):
             raise ReviewInputError(
                 "live GitHub native effect or accepted operation artifact exists for action; "
@@ -555,15 +614,8 @@ def verify_no_business_dispatch_evidence(
             body = _owned_bot_artifact_body(item, app_author_id=app_author_id)
             if body is None:
                 continue
-            compact = body.replace(" ", "")
-            if (
-                "<!-- reviewsensei:reply:v" in body and f"source={source_id}" in body
-            ) or (
-                "<!-- reviewsensei:operation:" in body
-                and (
-                    f'"run_id":"{run_id_str}"' in compact
-                    or f'"source_comment_id":{source_id}' in compact
-                )
+            if _native_artifact_matches(
+                body, source_id=source_id, run_id=state.identity.run_id
             ):
                 raise ReviewInputError(
                     "live GitHub native effect or accepted operation artifact exists for action; "
@@ -580,10 +632,8 @@ def verify_no_business_dispatch_evidence(
             body = _owned_bot_artifact_body(review_item, app_author_id=app_author_id)
             if body is None:
                 continue
-            compact = body.replace(" ", "")
-            if (
-                f'"command_id":"{source_id}"' in compact
-                or f'"source_comment_id":{source_id}' in compact
+            if _native_artifact_matches(
+                body, source_id=source_id, run_id=state.identity.run_id
             ):
                 raise ReviewInputError(
                     "live GitHub native effect or accepted operation artifact exists for action; "
