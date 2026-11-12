@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from typing import Any
@@ -12,15 +13,24 @@ from review_sensei_github.session_ledger import parse_session_comment
 from test_action_reply_entry import ReplyEntryFixture
 from test_action_run import CommandEntryFixture
 from test_api_work_persistence import BASE, HEAD, IDENTITY
-from test_review_run import EntryFixture
+from test_review_run import EntryFixture, fixture_process_environment
 
 from review_sensei.errors import ReviewInputError
-from review_sensei.models import ProviderRequest, ProviderResponse, ReviewRequest
+from review_sensei.models import (
+    ConversationContext,
+    ProviderRequest,
+    ProviderResponse,
+    ReviewRequest,
+)
 from review_sensei.operational_boundaries import (
+    CONVERSATION_CONTEXT_MAX_TITLE_BYTES,
+    CONVERSATION_PUBLISHER_TITLE_CAP_BYTES,
     DIRECT_CORE_MAX_TITLE_BYTES,
     HOSTED_BOOTSTRAP_MAX_TITLE_BYTES,
     TitleByteLimitEvaluation,
+    TitleConstantContract,
     evaluate_title_byte_limit,
+    inspect_title_constant_contracts,
 )
 from review_sensei.service import ReviewService
 from review_sensei.stages import Stage
@@ -395,6 +405,224 @@ class TitleByteLimitsG20Tests(unittest.TestCase):
                 recovery_instruction=None,
                 diagnostic="routing preflight cannot claim validation",
             )
+
+    def test_real_entry_point_utf8_limit_minus_1_exact_limit_plus_1_and_multibyte_straddles(
+        self,
+    ) -> None:
+        """Exercise real hosted (review/command/reply) and core CLI/ConversationContext entry points at exact byte boundaries."""
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import test_review_transaction as tx
+        from review_sensei_github.conversation import MAX_CONTEXT_PR_TITLE_BYTES
+
+        from review_sensei import cli as core_cli
+
+        # 1. Verify source-level constants across all surfaces match live runtime symbols.
+        contracts = {c.surface_id: c for c in inspect_title_constant_contracts()}
+        self.assertEqual(len(contracts), 5)
+        self.assertIsNone(contracts["routing_preflight"].limit_bytes)
+        self.assertEqual(
+            contracts["hosted_bootstrap_review_command_reply"].limit_bytes, 256
+        )
+        self.assertEqual(
+            contracts["hosted_conversation_publisher"].limit_bytes,
+            MAX_CONTEXT_PR_TITLE_BYTES,
+        )
+        self.assertEqual(CONVERSATION_PUBLISHER_TITLE_CAP_BYTES, 2048)
+        self.assertEqual(
+            contracts["direct_core_review_request_and_cli"].limit_bytes, 4096
+        )
+        self.assertEqual(
+            contracts["direct_core_conversation_context"].limit_bytes,
+            CONVERSATION_CONTEXT_MAX_TITLE_BYTES,
+        )
+        with self.assertRaises(ReviewInputError):
+            TitleConstantContract(
+                surface_id="forged",
+                limit_bytes=256,
+                enforces_utf8_bytes=True,
+                truncates_silently=True,
+                source_symbol="forged",
+            )
+        with self.assertRaises(ReviewInputError):
+            TitleConstantContract(
+                surface_id="forged_mismatch",
+                limit_bytes=None,
+                enforces_utf8_bytes=True,
+                truncates_silently=False,
+                source_symbol="forged",
+            )
+
+        # 2. Real hosted review-run, command-run, and reply-run at 255 (limit-1), 256 (exact),
+        #    257 (limit+1), and 2/3/4-byte codepoints straddling the 256-byte boundary.
+        hosted_boundary_matrix: list[tuple[str, str, int, bool]] = [
+            ("limit-minus-1-multibyte-255", ("a" * 251) + "🧪", 255, True),
+            ("exact-limit-multibyte-256", ("a" * 252) + "🧪", 256, True),
+            ("limit-plus-1-ascii-257", "a" * 257, 257, False),
+            ("straddle-2b-255-to-257", ("a" * 255) + "é", 257, False),
+            ("straddle-3b-255-to-258", ("a" * 255) + "漢", 258, False),
+            ("straddle-4b-255-to-259", ("a" * 255) + "🧪", 259, False),
+        ]
+        for label, title_sample, byte_count, should_admit in hosted_boundary_matrix:
+            self.assertEqual(len(title_sample.encode("utf-8")), byte_count)
+            with self.subTest(surface="review-run", label=label):
+                with tempfile.TemporaryDirectory() as rev_dir:
+                    rev_f = _TitleReviewFixture(rev_dir)
+                    rev_f.live_title = title_sample
+                    rc = rev_f.invoke()
+                    if should_admit:
+                        self.assertEqual(rc, 0, rev_f.error)
+                        self.assertEqual(rev_f.selected.title, title_sample)
+                        self.assertEqual(rev_f.provider_calls, 1)
+                    else:
+                        self.assertEqual(rc, 1)
+                        self.assertIn("256-byte bound", rev_f.error)
+                        self.assertEqual(rev_f.provider_calls, 0)
+                        self.assertIsNone(rev_f.comment)
+
+            with self.subTest(surface="reply-run", label=label):
+                with tempfile.TemporaryDirectory() as rep_dir:
+                    rep_f = _TitleReplyFixture(rep_dir)
+                    rep_f.live_title = title_sample
+                    rc = rep_f.invoke_reply()
+                    if should_admit:
+                        self.assertEqual(rc, 0, rep_f.error)
+                        self.assertEqual(len(rep_f.provider_requests), 1)
+                        self.assertIn(title_sample, rep_f.provider_requests[0].prompt)
+                        self.assertEqual(rep_f.reply_posts, 1)
+                    else:
+                        self.assertEqual(rc, 1)
+                        self.assertIn("256-byte bound", rep_f.error)
+                        self.assertEqual(len(rep_f.provider_requests), 0)
+                        self.assertEqual(rep_f.reply_posts, 0)
+
+        with tempfile.TemporaryDirectory() as cmd_dir:
+            cmd_f = _TitleCommandFixture(cmd_dir)
+            cmd_f.live_title = "Seed title"
+            self.assertEqual(cmd_f.invoke(), 0, cmd_f.error)
+            toggle_commands = [
+                "@reviewsensei review pause",
+                "@reviewsensei review continue",
+            ]
+            admitted_idx = 0
+            for (
+                label,
+                title_sample,
+                _byte_count,
+                should_admit,
+            ) in hosted_boundary_matrix:
+                with self.subTest(surface="command-run", label=label):
+                    prior_body = cmd_f.comment["body"]
+                    cmd_text = toggle_commands[admitted_idx % 2]
+                    cmd_f.select_command(cmd_text, new_run=True)
+                    cmd_f.live_title = title_sample
+                    rc = cmd_f.invoke_command()
+                    if should_admit:
+                        self.assertEqual(rc, 0, cmd_f.error)
+                        admitted_idx += 1
+                    else:
+                        self.assertEqual(rc, 1)
+                        self.assertIn("256-byte bound", cmd_f.error)
+                        self.assertEqual(cmd_f.comment["body"], prior_body)
+
+        # 3. Real core CLI (`review_sensei.cli.main`) & ConversationContext at 4095, 4096, 4097+
+        #    including 2/3/4-byte UTF-8 boundary straddles, with zero silent truncation.
+        core_entry_matrix: list[tuple[str, str, int, bool]] = [
+            ("core-limit-minus-1-4095", ("🧪" * 1023) + "abc", 4095, True),
+            ("core-exact-limit-4096", ("漢" * 1364) + "🧪", 4096, True),
+            ("core-limit-plus-1-ascii-4097", "a" * 4097, 4097, False),
+            ("core-straddle-2b-4095-to-4097", ("a" * 4095) + "é", 4097, False),
+            ("core-straddle-3b-4095-to-4098", ("a" * 4095) + "漢", 4098, False),
+            ("core-straddle-4b-4095-to-4099", ("a" * 4095) + "🧪", 4099, False),
+        ]
+        with tempfile.TemporaryDirectory() as cli_dir:
+            diff_path = Path(cli_dir) / "change.patch"
+            config_path = Path(cli_dir) / ".reviewsensei.yml"
+            config_path.write_text(
+                "schema: 1\ninference:\n  backend: local-ollama\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            diff_path.write_text(
+                "diff --git a/src/app.py b/src/app.py\n"
+                "--- a/src/app.py\n"
+                "+++ b/src/app.py\n"
+                "@@ -1 +1,2 @@\n"
+                " x = 1\n"
+                "+y = 2\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            for label, sample, byte_count, should_admit in core_entry_matrix:
+                self.assertEqual(len(sample.encode("utf-8")), byte_count)
+                with self.subTest(surface="core-cli-and-conversation", label=label):
+                    if should_admit:
+                        ctx = ConversationContext(
+                            pull_request_number=7,
+                            base_sha=BASE,
+                            head_sha=HEAD,
+                            pull_request_title=sample,
+                        )
+                        self.assertEqual(ctx.pull_request_title, sample)
+                    else:
+                        with self.assertRaisesRegex(
+                            ReviewInputError,
+                            "conversation pull request title exceeds the configured size limit",
+                        ):
+                            ConversationContext(
+                                pull_request_number=7,
+                                base_sha=BASE,
+                                head_sha=HEAD,
+                                pull_request_title=sample,
+                            )
+
+                    cli_provider = _RecordingProvider()
+                    err_buf = io.StringIO()
+                    with (
+                        patch.dict(
+                            os.environ, fixture_process_environment(), clear=True
+                        ),
+                        patch(
+                            "review_sensei.cli.default_registry",
+                            return_value=tx.HostedAnalysisCliTests._Registry(
+                                cli_provider
+                            ),
+                        ),
+                        redirect_stdout(io.StringIO()),
+                        redirect_stderr(err_buf),
+                    ):
+                        rc = core_cli.main(
+                            [
+                                "--diff",
+                                str(diff_path),
+                                "--config",
+                                str(config_path),
+                                "--repository",
+                                "owner/repo",
+                                "--pull-request",
+                                "7",
+                                "--base-sha",
+                                BASE,
+                                "--head-sha",
+                                HEAD,
+                                "--no-learning-proposals",
+                                f"--title={sample}",
+                            ]
+                        )
+                    if should_admit:
+                        self.assertEqual(rc, 0, err_buf.getvalue())
+                        self.assertEqual(len(cli_provider.requests), 1)
+                        self.assertIn(sample, cli_provider.requests[0].prompt)
+                    else:
+                        self.assertNotEqual(rc, 0)
+                        self.assertEqual(len(cli_provider.requests), 0)
+                        self.assertIn(
+                            "review title exceeds the configured size limit",
+                            err_buf.getvalue(),
+                        )
 
 
 if __name__ == "__main__":

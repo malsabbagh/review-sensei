@@ -179,6 +179,7 @@ def publish_partitioned(
         REVIEW_POLICY_MODES,
         ReviewApprovalFinalizer,
         ReviewPublisher,
+        _CheckObservationContext,
         restrict_result_qualification,
         review_result_digest,
     )
@@ -395,12 +396,16 @@ def publish_partitioned(
         head_sha=head_sha,
         app_slug=app_slug,
     )
+    check_observation_context = _CheckObservationContext(
+        repository, repository_id, pull_request, base_sha, head_sha, plan.result_digest
+    )
     check_diagnostic = checked_publisher._check_state_or_diagnostic(
-        **check_arguments, outcome=None
+        **check_arguments, outcome=None, observation_context=check_observation_context
     )
     if check_diagnostic is None:
         check_diagnostic = checked_publisher._check_state_or_diagnostic(
             **check_arguments,
+            observation_context=check_observation_context,
             outcome=check_outcome_for_result(
                 result,
                 policy=effective_policy,

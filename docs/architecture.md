@@ -81,6 +81,11 @@ Writers default to at most 64 findings; readers accept 250. Only trusted `github
 The packaged v5 schema validates structure; explicit rescan uses the trusted reader
 and one original command read allowance.
 
+## G17 private recovery-store platform boundary
+
+Optional original-context handoff requires POSIX ownership/mode enforcement; non-POSIX opt-in refuses before key access/storage, while unconfigured operation remains available. Require bounded reads, exact HMAC encoding and preservation of unauthenticated/malformed cache evidence during expiry pruning. No ACL qualification, writer authority, schema migration, budget expansion or historical settlement follows (ADR 0131; ADR 0135 stabilization addendum).
+References: [ADR 0131](adr/0131-provenance-retention-representability-and-capacity-envelope.md) and [ADR 0135 stabilization addendum](adr/0135-branch-state-lifecycle.md#g17-private-store-stabilization-on-pr-451).
+
 ## Explicit human file review (local, opt-in)
 
 [Human file review](human-file-review.md) binds an owned exact result/root, complete inventory, regular base/head blobs and current authorized source. Hosted composition reads canonical retained state after broker authorization. V1 parts keep 32 files; groups keep 32 KiB and exact union coverage. Media keeps caller accounting and independent Worker check ceilings.
@@ -1025,7 +1030,11 @@ A missing or malformed inventory cannot establish the engine boundary.
 Opt-in aggregate review triage is described in [review decisions](review-decisions.md)
 and proposed [ADR 0124](adr/0124-review-engine-decision-providers.md).
 
-## G17 private recovery-store platform boundary
 
-Optional original-context handoff requires POSIX ownership/mode enforcement; non-POSIX opt-in refuses before key access/storage, while unconfigured operation remains available. Require bounded reads, exact HMAC encoding and preservation of unauthenticated/malformed cache evidence during expiry pruning. No ACL qualification, writer authority, schema migration, budget expansion or historical settlement follows (ADR 0131; ADR 0135 stabilization addendum).
-References: [ADR 0131](adr/0131-provenance-retention-representability-and-capacity-envelope.md) and [ADR 0135 stabilization addendum](adr/0135-branch-state-lifecycle.md#g17-private-store-stabilization-on-pr-451).
+## Check projection receipts are not artifact authority
+
+Ordinary, replayed and explicit partitioned publishers bind check observations to
+immutable numeric repository/PR, base/head and result identity. A successful native
+response survives optional observation failure without duplicate dispatch; later
+approval is held for that invocation. The projection receipt expressly does not
+evaluate durable authority. See [ADR 0134](adr/0134-bounded-active-findings-and-artifact-authority.md).
