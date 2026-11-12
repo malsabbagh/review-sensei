@@ -103,6 +103,24 @@ and provider/API budgets remain unchanged. No automatic polling, background
 reconciler, live branch-protection change, or historical ledger settlement is
 introduced.
 
+### Delivery receipts are not completed operations
+
+The comment and event-routing verifier records a delivery observation only after
+validation and route construction succeed. A failure while classifying or
+executing the lifecycle leaves the delivery eligible for bounded reinspection;
+any native-effect uncertainty remains owned by the authenticated session and
+caller accounting, not by the delivery cache.
+
+A duplicate delivery flag alone cannot declare convergence or suppress admission:
+a caller can fail after receiving a route and before accepting the operation.
+Redelivery therefore re-evaluates current source/session state and accepted
+operation history. Completed matching work is reused, pending/uncertain work
+holds, and unadmitted work may reach the existing admission gate. Route selection
+never itself dispatches inference or establishes terminal native completion.
+This correction does not introduce durable webhook processing storage, relax
+original budgets, or replace the G02/G08 writer fence and G13 durable-history
+integration requirements. Legacy installation/setup verification is unchanged.
+
 ## Consequences
 
 Every GitHub pull-request lifecycle event has a deterministic, tested outcome

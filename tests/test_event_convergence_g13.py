@@ -846,6 +846,29 @@ class SubscribedCallerToHandlerJourneyG13Tests(unittest.TestCase):
             guard.start()
             self.addCleanup(guard.stop)
 
+    def test_failed_convergence_does_not_consume_delivery(self):
+        verifier = WebhookVerifier(app_id=123, secret_source=_StaticSecret())
+        body, signature = self._sign(_pr_sync_payload(head_sha=HEAD_SHA_2))
+        arguments = dict(
+            body=body,
+            signature=signature,
+            event="pull_request",
+            delivery_id="failed-convergence",
+            live_target=_live_target(),
+        )
+        with patch(
+            "review_sensei_github.event_routing_contract.reconcile_event_convergence",
+            side_effect=RuntimeError("synthetic route failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "synthetic route failure"):
+                verifier.verify_event_route(**arguments)
+        self.assertFalse(
+            verifier.ledger.is_known(app_id=123, delivery_id="failed-convergence")
+        )
+        retried = verifier.verify_event_route(**arguments)
+        self.assertFalse(retried.duplicate_delivery_id)
+        self.assertTrue(retried.convergence.schedules_new_inference)
+
     @staticmethod
     def _sign(
         payload: dict[str, Any], secret: bytes = b"g13-webhook-secret"
@@ -928,7 +951,8 @@ class SubscribedCallerToHandlerJourneyG13Tests(unittest.TestCase):
                 first_h2.convergence.reconciliation_owner, "hosted_review_admission"
             )
 
-            # Exact duplicate webhook redelivery (before any session record exists) is suppressed!
+            # Model a caller interruption after receipt but before admission: no
+            # accepted history exists, so redelivery must reconsider admission.
             dup_h2 = verifier.verify_event_route(
                 body=raw_h2,
                 signature=sig_h2,
@@ -938,11 +962,30 @@ class SubscribedCallerToHandlerJourneyG13Tests(unittest.TestCase):
             )
             self.assertTrue(dup_h2.duplicate_delivery_id)
             assert dup_h2.convergence is not None
-            self.assertEqual(dup_h2.convergence.status, "converged_reused")
-            self.assertEqual(
-                dup_h2.convergence.outcome_code, "duplicate_delivery_reused"
+            self.assertTrue(dup_h2.convergence.schedules_new_inference)
+            self.assertEqual(dup_h2.convergence, first_h2.convergence)
+
+            uncertain_redelivery = verifier.verify_event_route(
+                body=raw_h2,
+                signature=sig_h2,
+                event="pull_request",
+                delivery_id="deliv-h2-live",
+                live_target=live_h2,
+                records=(
+                    AcceptedOperationRecord(
+                        operation_id="op-h2-uncertain",
+                        operation_kind="review",
+                        target_base_sha=BASE_SHA_1,
+                        target_head_sha=HEAD_SHA_2,
+                        lifecycle_phase="uncertain_dispatch",
+                    ),
+                ),
             )
-            self.assertFalse(dup_h2.convergence.schedules_new_inference)
+            self.assertTrue(uncertain_redelivery.duplicate_delivery_id)
+            self.assertEqual(
+                uncertain_redelivery.convergence.status, "held_uncertain_operation"
+            )
+            self.assertFalse(uncertain_redelivery.convergence.schedules_new_inference)
 
             # Delayed out-of-order synchronize(H1) arriving when live PR is already at H2
             h1_payload = {
@@ -971,6 +1014,20 @@ class SubscribedCallerToHandlerJourneyG13Tests(unittest.TestCase):
                 lifecycle_phase="completed",
                 open_finding_ids=("rs-carry-h2",),
             )
+            accepted_redelivery = verifier.verify_event_route(
+                body=raw_h2,
+                signature=sig_h2,
+                event="pull_request",
+                delivery_id="deliv-h2-live",
+                live_target=live_h2,
+                records=(completed_h2,),
+            )
+            self.assertTrue(accepted_redelivery.duplicate_delivery_id)
+            self.assertFalse(accepted_redelivery.convergence.schedules_new_inference)
+            self.assertEqual(
+                accepted_redelivery.convergence.reused_operation_id, "op-h2-done"
+            )
+
             dispatch_cli = self._run_trigger_cli(
                 tmp_dir,
                 event_name="workflow_dispatch",

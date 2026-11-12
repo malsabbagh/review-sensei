@@ -1340,3 +1340,15 @@ A missing or malformed inventory cannot establish the engine boundary.
 
 Opt-in aggregate review triage is described in [review decisions](review-decisions.md)
 and proposed [ADR 0124](adr/0124-review-engine-decision-providers.md).
+
+## Webhook receipt and lifecycle completion
+
+The prospective comment/event routing contract in [ADR 0136](adr/0136-event-routing-convergence-and-queue-boundaries.md)
+keeps verified receipt separate from accepted operations and native completion.
+Delivery observations are recorded after successful route construction, but a
+seen delivery ID cannot suppress work that was never admitted. Reinspection uses
+current authenticated lifecycle state and accepted-operation history: terminal
+work is reused and pending/uncertain work holds without new inference or funding.
+The delivery cache is not durable operation authority; downstream admission,
+accounting and writer fences remain required. Legacy installation/setup
+verification retains its existing deduplication contract.

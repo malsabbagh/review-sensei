@@ -1773,7 +1773,7 @@ class OrdinaryCallerIntegrationG27Tests(unittest.TestCase):
         self.assertIsNone(plain_verified.lifecycle_classification)
         self.assertEqual(plain_verified.repository_id, 123)
 
-        # 2. Before admission: created admits, duplicate delivery_id refuses,
+        # 2. Before admission: created admits, duplicate receipt reclassifies,
         #    edited & deleted refuse before admission without session writes.
         with tempfile.TemporaryDirectory() as d:
             f = G27LifecycleFixture(str(Path(d) / "pre"), limit=1024)
@@ -1800,18 +1800,22 @@ class OrdinaryCallerIntegrationG27Tests(unittest.TestCase):
                 "admit_current_revision",
             )
 
-            # Duplicate delivery_id before admission refuses.
-            with self.assertRaisesRegex(GitHubWebhookError, "already processed"):
-                verifier.verify_comment_lifecycle(
-                    body=c_body,
-                    signature=c_sig,
-                    event="issue_comment",
-                    delivery_id="deliv-c1",
-                    caller=f.accounted,
-                    session_ledger=ledger,
-                    identity=IDENTITY,
-                    record=actionless,
-                )
+            # A verified receipt is not admission: reclassify from live state.
+            redelivery = verifier.verify_comment_lifecycle(
+                body=c_body,
+                signature=c_sig,
+                event="issue_comment",
+                delivery_id="deliv-c1",
+                caller=f.accounted,
+                session_ledger=ledger,
+                identity=IDENTITY,
+                record=actionless,
+            )
+            self.assertTrue(redelivery.duplicate_delivery_id)
+            self.assertEqual(
+                redelivery.lifecycle_classification.route, "admit_current_revision"
+            )
+            self.assertEqual(redelivery.lifecycle_outcome, actionless)
 
             # Edited & deleted webhooks before admission refuse on execute_route=True and classify on False.
             for act, deliv_id in (
@@ -2010,18 +2014,38 @@ class OrdinaryCallerIntegrationG27Tests(unittest.TestCase):
                 body=del_body,
                 signature=del_sig,
                 event="issue_comment",
-                delivery_id="deliv-pr-del",  # even duplicate delivery_id after terminal!
+                delivery_id="deliv-pr-del",  # failed processing did not accept this delivery
                 caller=f_st.accounted,
                 session_ledger=ledger_st,
                 identity=IDENTITY,
                 record=rec_term,
                 execute_route=True,
             )
-            self.assertTrue(term_del.duplicate_delivery_id)
+            self.assertFalse(term_del.duplicate_delivery_id)
             assert term_del.lifecycle_classification is not None
             self.assertEqual(
                 term_del.lifecycle_classification.route,
                 "preserve_terminal_no_replay",
+            )
+
+            terminal_redelivery = verifier.verify_comment_lifecycle(
+                body=del_body,
+                signature=del_sig,
+                event="issue_comment",
+                delivery_id="deliv-pr-del",
+                caller=f_st.accounted,
+                session_ledger=ledger_st,
+                identity=IDENTITY,
+                record=rec_term,
+                execute_route=True,
+            )
+            self.assertTrue(terminal_redelivery.duplicate_delivery_id)
+            self.assertEqual(
+                terminal_redelivery.lifecycle_classification.route,
+                "preserve_terminal_no_replay",
+            )
+            self.assertEqual(
+                terminal_redelivery.lifecycle_outcome, term_del.lifecycle_outcome
             )
 
     def test_action_run_entry_enforces_lifecycle_before_intent_before_effect_and_across_reentry(

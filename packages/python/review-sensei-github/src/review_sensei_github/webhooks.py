@@ -8,7 +8,7 @@ import json
 import os
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from review_sensei.api_work import ApiRunAccounting
@@ -349,8 +349,6 @@ class WebhookVerifier:
         duplicate_delivery_id = self.ledger.is_known(
             app_id=self.app_id, delivery_id=delivery_id
         )
-        if duplicate_delivery_id and not has_admitted_action:
-            raise GitHubWebhookError("GitHub webhook delivery was already processed")
 
         payload = self._parse_json_object(body)
         action = payload.get("action")
@@ -442,9 +440,6 @@ class WebhookVerifier:
         body_changed = normalized_action == "edited" or (
             isinstance(changes_obj, Mapping) and "body" in changes_obj
         )
-        if not duplicate_delivery_id:
-            self.ledger.record(app_id=self.app_id, delivery_id=delivery_id)
-
         classification: SourceLifecycleClassification | None = None
         outcome: SessionRecord | ApiRunAccounting | None = None
         if caller is not None or session_ledger is not None or identity is not None:
@@ -544,7 +539,7 @@ class WebhookVerifier:
         digest = hashlib.sha256(
             bytes(json.dumps(payload, sort_keys=True), "utf-8")
         ).hexdigest()
-        return VerifiedCommentLifecycleDelivery(
+        delivery = VerifiedCommentLifecycleDelivery(
             app_id=self.app_id,
             event=normalized_event,
             action=normalized_action,
@@ -564,6 +559,9 @@ class WebhookVerifier:
             lifecycle_classification=classification,
             lifecycle_outcome=outcome,
         )
+        if not duplicate_delivery_id:
+            self.ledger.record(app_id=self.app_id, delivery_id=delivery_id)
+        return delivery
 
     def verify_event_route(
         self,
@@ -586,7 +584,6 @@ class WebhookVerifier:
         from .event_routing_contract import (
             evaluate_github_event,
             reconcile_event_convergence,
-            resolve_reconciliation_owner,
         )
 
         self._verify_signed_envelope(
@@ -605,8 +602,6 @@ class WebhookVerifier:
             app_id=self.app_id,
             delivery_id=delivery_id,
         )
-        self.ledger.record(app_id=self.app_id, delivery_id=delivery_id)
-
         raw_action = payload.get("action")
         action = (
             raw_action.strip()
@@ -650,21 +645,13 @@ class WebhookVerifier:
                 current_state_fingerprint=current_state_fingerprint,
                 max_no_progress_attempts=max_no_progress_attempts,
             )
-            if duplicate_delivery_id and convergence.schedules_new_inference:
-                convergence = replace(
-                    convergence,
-                    status="converged_reused",
-                    outcome_code="duplicate_delivery_reused",
-                    schedules_new_inference=False,
-                    schedules_native_reconciliation=False,
-                    reconciliation_owner=resolve_reconciliation_owner(
-                        routing, status="converged_reused"
-                    ),
-                )
+        # Seeing a delivery is not proof that its route was admitted or completed.
+        # Only accepted-operation history may suppress work on redelivery; a
+        # caller can fail after receiving this routing decision and before admission.
         digest = hashlib.sha256(
             bytes(json.dumps(payload, sort_keys=True), "utf-8")
         ).hexdigest()
-        return VerifiedEventRouteDelivery(
+        delivery = VerifiedEventRouteDelivery(
             app_id=self.app_id,
             event=normalized_event,
             action=action,
@@ -676,6 +663,9 @@ class WebhookVerifier:
             routing=routing,
             convergence=convergence,
         )
+        if not duplicate_delivery_id:
+            self.ledger.record(app_id=self.app_id, delivery_id=delivery_id)
+        return delivery
 
     def _signature_for(self, body: bytes) -> str:
         secret = self.secret_source.load_webhook_secret()
