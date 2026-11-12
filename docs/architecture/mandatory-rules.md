@@ -1,4 +1,4 @@
-missing producer/result proof never establishes settlement. Positive-cost
+Offline historical packets require positive terminal-result authentication; absent producer/result proof never establishes settlement. Positive-cost continuation requires known sufficient original allowance; zero-request checks leave unavailable allowance unknown (ADR 0133).
 installed registration binds the complete original/refused execution census,
 Retain future storage; admit full native tails before effects. Unknown writes never refund. Guarded readers share a cold cursor.
 Quarantine registry: append-only, empty; workflow disabled until reviewed exact one-shot registration. Release grants no activation.
