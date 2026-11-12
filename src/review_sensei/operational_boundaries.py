@@ -12,6 +12,20 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from .api_work import (
+    DEFAULT_API_REQUEST_LIMIT,
+    MAX_API_REQUEST_LIMIT,
+    ApiRunAccounting,
+    FrozenApiConfiguration,
+)
+from .budgets import (
+    COMPLETE_TEXT_CONTRACT,
+    LEGACY_ASSESSMENT_PROMPT_BYTES,
+    MAX_TOTAL_OUTPUT_BYTES,
+    MAX_TOTAL_PROMPT_BYTES,
+    ProviderCapabilities,
+    ReviewWorkBudgets,
+)
 from .concurrency import ReviewConcurrencyPlan
 from .context import PromptContextOverflow
 from .coverage import COVERAGE_OUTCOMES, COVERAGE_REASONS, CoverageManifest
@@ -19,10 +33,17 @@ from .diff import DiffAnalysis, DiffFileRecord, DiffHunk
 from .disposition import incomplete_coverage_from_result
 from .document_context import DocumentSelectionReport
 from .errors import ReviewInputError
-from .models import ReviewRequest, ReviewResult
+from .models import ConversationContext, ReviewRequest, ReviewResult
+from .outcomes import (
+    DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS,
+    RESOURCE_BUDGET_MAX_PROVIDER_CALLS_CEILING,
+    ResourceBudget,
+)
 from .planning import LargeChangePlan, ReviewWorkPlan
+from .session import SessionRecord
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
+    ReviewLimits,
     utf8_size,
     validate_bounded_text,
     validate_repository_path,
@@ -799,6 +820,125 @@ def classify_work_plan_unprocessed(
     return tuple(classified)
 
 
+@dataclass(frozen=True)
+class IndivisibleBoundaryContract:
+    """Verified G09 byte, token, or provider-call ceiling for indivisible work."""
+
+    boundary_id: str
+    ceiling_value: int
+    unit: str
+    truncates_silently: bool
+    raises_limit: bool
+    source_symbol: str
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.boundary_id, 128, label="boundary_id", allow_empty=False
+        )
+        _positive_int(self.ceiling_value, label="ceiling_value")
+        if self.unit not in {"utf8_bytes", "tokens", "provider_calls"}:
+            raise ReviewInputError("indivisible boundary unit is unsupported")
+        if not isinstance(self.truncates_silently, bool) or not isinstance(
+            self.raises_limit, bool
+        ):
+            raise ReviewInputError("indivisible boundary flags must be booleans")
+        if self.truncates_silently or self.raises_limit:
+            raise ReviewInputError(
+                "indivisible boundaries must never truncate silently or raise limits"
+            )
+        validate_bounded_text(
+            self.source_symbol, 256, label="source_symbol", allow_empty=False
+        )
+
+
+def inspect_indivisible_boundary_contracts() -> tuple[IndivisibleBoundaryContract, ...]:
+    """Verify source-level G09 byte, token-window, and call ceilings at runtime."""
+
+    limits = ReviewLimits()
+    work_budgets = ReviewWorkBudgets(mode="unified")
+    resource = ResourceBudget.create()
+    if (
+        limits.max_diff_bytes != 1_048_576
+        or limits.max_prompt_bytes != 4_194_304
+        or LEGACY_ASSESSMENT_PROMPT_BYTES != 49_152
+        or work_budgets.batch_diff_bytes != 131_072
+        or work_budgets.batch_prompt_bytes != 262_144
+        or MAX_TOTAL_PROMPT_BYTES != 2_097_152
+        or MAX_TOTAL_OUTPUT_BYTES != 1_048_576
+        or resource.max_provider_calls != DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS
+        or DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS != 8
+    ):
+        raise ReviewInputError("G09 source ceilings drifted from approved bounds")
+
+    # Verify ProviderCapabilities.fits exact reserve math at limit-1, exact, limit+1:
+    cap = ProviderCapabilities(
+        context_tokens=4096,
+        max_output_tokens=512,
+        qualified=True,
+        framing_tokens=256,
+        provider_name="fixture",
+        model="fixture-model",
+        endpoint="https://fixture.example/api",
+        completion_contract=COMPLETE_TEXT_CONTRACT,
+    )
+    exact_token_input = 4096 - 256 - 512 - max(512, (4096 + 19) // 20)
+    if (
+        not cap.fits("a" * (exact_token_input - 1))
+        or not cap.fits("a" * exact_token_input)
+        or cap.fits("a" * (exact_token_input + 1))
+    ):
+        raise ReviewInputError(
+            "ProviderCapabilities.fits failed exact token-window boundary invariant"
+        )
+
+    return (
+        IndivisibleBoundaryContract(
+            boundary_id="per_request_diff_bytes",
+            ceiling_value=limits.max_diff_bytes,
+            unit="utf8_bytes",
+            truncates_silently=False,
+            raises_limit=False,
+            source_symbol="review_sensei.validation.ReviewLimits.max_diff_bytes:1048576",
+        ),
+        IndivisibleBoundaryContract(
+            boundary_id="legacy_unqualified_prompt_bytes",
+            ceiling_value=LEGACY_ASSESSMENT_PROMPT_BYTES,
+            unit="utf8_bytes",
+            truncates_silently=False,
+            raises_limit=False,
+            source_symbol="review_sensei.budgets.LEGACY_ASSESSMENT_PROMPT_BYTES:49152",
+        ),
+        IndivisibleBoundaryContract(
+            boundary_id="unified_batch_prompt_bytes",
+            ceiling_value=work_budgets.batch_prompt_bytes,
+            unit="utf8_bytes",
+            truncates_silently=False,
+            raises_limit=False,
+            source_symbol="review_sensei.budgets.ReviewWorkBudgets.batch_prompt_bytes:262144",
+        ),
+        IndivisibleBoundaryContract(
+            boundary_id="qualified_token_window_input_ceiling",
+            ceiling_value=4_194_304,
+            unit="tokens",
+            truncates_silently=False,
+            raises_limit=False,
+            source_symbol="review_sensei.budgets.ProviderCapabilities.fits:context_tokens",
+        ),
+        IndivisibleBoundaryContract(
+            boundary_id="per_run_provider_calls",
+            ceiling_value=DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS,
+            unit="provider_calls",
+            truncates_silently=False,
+            raises_limit=False,
+            source_symbol=(
+                "review_sensei.outcomes.DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS:"
+                f"{DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS}"
+                f"..{RESOURCE_BUDGET_MAX_PROVIDER_CALLS_CEILING}"
+            ),
+        ),
+    )
+
+
 TITLE_LIFECYCLE_PHASES = frozenset(
     {
         "before_admission",
@@ -1137,6 +1277,8 @@ def verify_published_title_attribution(
 
 HOSTED_BOOTSTRAP_MAX_TITLE_BYTES = 256
 DIRECT_CORE_MAX_TITLE_BYTES = DEFAULT_REVIEW_LIMITS.max_title_bytes
+CONVERSATION_CONTEXT_MAX_TITLE_BYTES = DEFAULT_REVIEW_LIMITS.max_title_bytes
+CONVERSATION_PUBLISHER_TITLE_CAP_BYTES = 2048
 TITLE_ENTRY_SURFACES = frozenset(
     {
         "routing_preflight",
@@ -1145,6 +1287,112 @@ TITLE_ENTRY_SURFACES = frozenset(
     }
 )
 HOSTED_ENTRY_PURPOSES = frozenset({"review", "command", "reply"})
+
+
+@dataclass(frozen=True)
+class TitleConstantContract:
+    """Verified source-level UTF-8 byte bound for one ReviewSensei title surface."""
+
+    surface_id: str
+    limit_bytes: int | None
+    enforces_utf8_bytes: bool
+    truncates_silently: bool
+    source_symbol: str
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.surface_id, 128, label="surface_id", allow_empty=False
+        )
+        if self.limit_bytes is not None:
+            _positive_int(self.limit_bytes, label="limit_bytes")
+        if not isinstance(self.enforces_utf8_bytes, bool) or not isinstance(
+            self.truncates_silently, bool
+        ):
+            raise ReviewInputError("title constant contract flags must be booleans")
+        if self.truncates_silently:
+            raise ReviewInputError("silent title truncation is forbidden")
+        if (self.limit_bytes is not None) != self.enforces_utf8_bytes:
+            raise ReviewInputError(
+                "limit_bytes presence must match enforces_utf8_bytes"
+            )
+        validate_bounded_text(
+            self.source_symbol, 256, label="source_symbol", allow_empty=False
+        )
+
+
+def inspect_title_constant_contracts() -> tuple[TitleConstantContract, ...]:
+    """Check core limits and return pinned hosted title contracts.
+
+    The ConversationContext probe intentionally detects changes in models.py.
+    Core cannot import its optional GitHub adapter: hosted constant equality is
+    verified by the G20 integration test against the installed adapter symbols.
+    """
+
+    live_core_limit = ReviewLimits().max_title_bytes
+    if (
+        live_core_limit != 4096
+        or DEFAULT_REVIEW_LIMITS.max_title_bytes != 4096
+        or DIRECT_CORE_MAX_TITLE_BYTES != 4096
+        or CONVERSATION_CONTEXT_MAX_TITLE_BYTES != 4096
+    ):
+        raise ReviewInputError("core title byte-limit constants drifted from 4096B")
+    if HOSTED_BOOTSTRAP_MAX_TITLE_BYTES != 256:
+        raise ReviewInputError(
+            "hosted bootstrap title byte-limit constant drifted from 256B"
+        )
+    if CONVERSATION_PUBLISHER_TITLE_CAP_BYTES != 2048:
+        raise ReviewInputError(
+            "conversation publisher title cap constant drifted from 2048B"
+        )
+    # Probe ConversationContext runtime enforcement at 4096 vs 4097 UTF-8 bytes.
+    ConversationContext(pull_request_title="a" * CONVERSATION_CONTEXT_MAX_TITLE_BYTES)
+    try:
+        ConversationContext(
+            pull_request_title="a" * (CONVERSATION_CONTEXT_MAX_TITLE_BYTES + 1)
+        )
+    except ReviewInputError:
+        pass
+    else:  # pragma: no cover - defensive runtime invariant
+        raise ReviewInputError(
+            "ConversationContext failed to enforce 4096-byte UTF-8 title bound"
+        )
+    return (
+        TitleConstantContract(
+            surface_id="routing_preflight",
+            limit_bytes=None,
+            enforces_utf8_bytes=False,
+            truncates_silently=False,
+            source_symbol=".github/workflows/review-sensei-run.yml:preflight",
+        ),
+        TitleConstantContract(
+            surface_id="hosted_bootstrap_review_command_reply",
+            limit_bytes=HOSTED_BOOTSTRAP_MAX_TITLE_BYTES,
+            enforces_utf8_bytes=True,
+            truncates_silently=False,
+            source_symbol="review_sensei_github.review_run.bootstrap:256",
+        ),
+        TitleConstantContract(
+            surface_id="hosted_conversation_publisher",
+            limit_bytes=CONVERSATION_PUBLISHER_TITLE_CAP_BYTES,
+            enforces_utf8_bytes=True,
+            truncates_silently=False,
+            source_symbol="review_sensei_github.conversation.MAX_CONTEXT_PR_TITLE_BYTES:2048",
+        ),
+        TitleConstantContract(
+            surface_id="direct_core_review_request_and_cli",
+            limit_bytes=DIRECT_CORE_MAX_TITLE_BYTES,
+            enforces_utf8_bytes=True,
+            truncates_silently=False,
+            source_symbol="review_sensei.validation.ReviewLimits.max_title_bytes:4096",
+        ),
+        TitleConstantContract(
+            surface_id="direct_core_conversation_context",
+            limit_bytes=CONVERSATION_CONTEXT_MAX_TITLE_BYTES,
+            enforces_utf8_bytes=True,
+            truncates_silently=False,
+            source_symbol="review_sensei.models.ConversationContext.pull_request_title:4096",
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -1638,6 +1886,125 @@ def classify_policy_commit_drift(
     )
 
 
+@dataclass(frozen=True)
+class PolicyFundingPreservationProof:
+    """Proof that consecutive policy-drift refusals preserve original run funding."""
+
+    baseline_record_sha256: str
+    frozen_policy_commit: str
+    frozen_policy_digest: str
+    frozen_request_limit: int
+    startup_liability: int
+    completed_receipt_count: int
+    remaining_allowance: int
+    refusal_count: int
+    zero_funding_mutation: bool
+    zero_receipt_erasure: bool
+    same_run_rebind_refused: bool
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.baseline_record_sha256,
+            64,
+            label="baseline_record_sha256",
+            allow_empty=False,
+        )
+        _validate_sha(self.frozen_policy_commit, label="frozen_policy_commit")
+        validate_bounded_text(
+            self.frozen_policy_digest,
+            64,
+            label="frozen_policy_digest",
+            allow_empty=False,
+        )
+        _positive_int(self.frozen_request_limit, label="frozen_request_limit")
+        _positive_int(
+            self.startup_liability, label="startup_liability", allow_zero=True
+        )
+        _positive_int(
+            self.completed_receipt_count,
+            label="completed_receipt_count",
+            allow_zero=True,
+        )
+        _positive_int(
+            self.remaining_allowance, label="remaining_allowance", allow_zero=True
+        )
+        _positive_int(self.refusal_count, label="refusal_count")
+        for flag_name, flag_val in (
+            ("zero_funding_mutation", self.zero_funding_mutation),
+            ("zero_receipt_erasure", self.zero_receipt_erasure),
+            ("same_run_rebind_refused", self.same_run_rebind_refused),
+        ):
+            if not isinstance(flag_val, bool) or not flag_val:
+                raise ReviewInputError(f"{flag_name} must be verified True")
+
+
+def verify_policy_drift_funding_preservation(
+    baseline_record: SessionRecord,
+    post_refusal_records: Sequence[SessionRecord],
+    *,
+    drifted_configuration: FrozenApiConfiguration,
+) -> PolicyFundingPreservationProof:
+    """Verify original SessionRecord and ApiRunAccounting survive policy-drift races."""
+
+    if not isinstance(baseline_record, SessionRecord):
+        raise ReviewInputError("baseline_record must be a SessionRecord")
+    if baseline_record.api_run_accounting is None:
+        raise ReviewInputError("baseline_record lacks api_run_accounting")
+    if not isinstance(drifted_configuration, FrozenApiConfiguration):
+        raise ReviewInputError("drifted_configuration must be a FrozenApiConfiguration")
+    if not post_refusal_records or any(
+        not isinstance(rec, SessionRecord) for rec in post_refusal_records
+    ):
+        raise ReviewInputError(
+            "post_refusal_records must be a non-empty sequence of SessionRecord"
+        )
+
+    baseline_acc = ApiRunAccounting.from_document(baseline_record.api_run_accounting)
+    if drifted_configuration == baseline_acc.configuration:
+        raise ReviewInputError(
+            "drifted_configuration must differ from baseline FrozenApiConfiguration"
+        )
+
+    for observed in post_refusal_records:
+        if observed.record_sha256 != baseline_record.record_sha256:
+            raise ReviewInputError(
+                "policy-drift refusal mutated durable SessionRecord root"
+            )
+        if observed.api_run_accounting is None:
+            raise ReviewInputError(
+                "policy-drift refusal erased durable api_run_accounting"
+            )
+        observed_acc = ApiRunAccounting.from_document(observed.api_run_accounting)
+        if observed_acc != baseline_acc:
+            raise ReviewInputError(
+                "policy-drift refusal mutated original run funding or receipts"
+            )
+
+    rebind_refused = False
+    try:
+        baseline_acc.require_binding(baseline_acc.identity, drifted_configuration)
+    except ReviewInputError:
+        rebind_refused = True
+    if not rebind_refused:  # pragma: no cover - defensive runtime invariant
+        raise ReviewInputError(
+            "ApiRunAccounting failed to refuse drifted FrozenApiConfiguration rebind"
+        )
+
+    return PolicyFundingPreservationProof(
+        baseline_record_sha256=baseline_record.record_sha256,
+        frozen_policy_commit=baseline_acc.configuration.commit,
+        frozen_policy_digest=baseline_acc.configuration.digest,
+        frozen_request_limit=baseline_acc.configuration.limit,
+        startup_liability=baseline_acc.startup.liability,
+        completed_receipt_count=len(baseline_acc.completed),
+        remaining_allowance=baseline_acc.remaining,
+        refusal_count=len(post_refusal_records),
+        zero_funding_mutation=True,
+        zero_receipt_erasure=True,
+        same_run_rebind_refused=True,
+    )
+
+
 WORKFLOW_PROVIDER_GROUP_PREFIX = "reviewsensei-provider-review"
 QUOTA_OWNERSHIP_SCOPES = frozenset(
     {
@@ -1979,7 +2346,117 @@ def classify_quota_throttle_recovery(
     )
 
 
+@dataclass(frozen=True)
+class ResourceOwnerBoundary:
+    """Verified G25 resource-owner contract across PR, repository, and manual paths."""
+
+    boundary_id: str
+    owner_scope: str
+    default_limit: int | None
+    hard_ceiling: int | None
+    invents_new_service: bool
+    expands_allowance: bool
+    source_symbol: str
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.boundary_id, 128, label="boundary_id", allow_empty=False
+        )
+        if self.owner_scope not in {
+            "single_pull_request",
+            "single_caller_run_with_reserved_successor",
+            "single_hosted_operation",
+            "github_installation_or_repository_token",
+            "operator_provider_account_or_local_host",
+        }:
+            raise ReviewInputError("resource owner_scope is unsupported")
+        if self.default_limit is not None:
+            _positive_int(self.default_limit, label="default_limit")
+        if self.hard_ceiling is not None:
+            _positive_int(self.hard_ceiling, label="hard_ceiling")
+        if (
+            self.default_limit is not None
+            and self.hard_ceiling is not None
+            and self.default_limit > self.hard_ceiling
+        ):
+            raise ReviewInputError("default_limit cannot exceed hard_ceiling")
+        if not isinstance(self.invents_new_service, bool) or not isinstance(
+            self.expands_allowance, bool
+        ):
+            raise ReviewInputError("resource owner flags must be booleans")
+        if self.invents_new_service or self.expands_allowance:
+            raise ReviewInputError(
+                "G25 resource-owner boundaries must never invent services or expand allowances"
+            )
+        validate_bounded_text(
+            self.source_symbol, 256, label="source_symbol", allow_empty=False
+        )
+
+
+def inspect_resource_owner_boundaries() -> tuple[ResourceOwnerBoundary, ...]:
+    """Check core constants and return the pinned G25 owner inventory.
+
+    The optional GitHub adapter's broker body ceiling is pinned here to avoid
+    reversing the dependency. G25 integration tests compare it with the actual
+    adapter constant; this helper alone does not inspect a deployed broker.
+    """
+
+    if DEFAULT_API_REQUEST_LIMIT != 512 or MAX_API_REQUEST_LIMIT != (1 << 53) - 1:
+        raise ReviewInputError(
+            "caller API request limit constants drifted from approved bounds"
+        )
+    return (
+        ResourceOwnerBoundary(
+            boundary_id="per_pr_workflow_group",
+            owner_scope="single_pull_request",
+            default_limit=1,
+            hard_ceiling=1,
+            invents_new_service=False,
+            expands_allowance=False,
+            source_symbol=".github/workflows/review-sensei-run.yml:concurrency",
+        ),
+        ResourceOwnerBoundary(
+            boundary_id="per_run_caller_http_allowance",
+            owner_scope="single_caller_run_with_reserved_successor",
+            default_limit=DEFAULT_API_REQUEST_LIMIT,
+            hard_ceiling=MAX_API_REQUEST_LIMIT,
+            invents_new_service=False,
+            expands_allowance=False,
+            source_symbol="review_sensei.api_work.DEFAULT_API_REQUEST_LIMIT:512",
+        ),
+        ResourceOwnerBoundary(
+            boundary_id="per_operation_broker_control_budget",
+            owner_scope="single_hosted_operation",
+            default_limit=262_144,
+            hard_ceiling=262_144,
+            invents_new_service=False,
+            expands_allowance=False,
+            source_symbol="review_sensei_github.broker_client.MAX_BROKER_BODY_BYTES:262144",
+        ),
+        ResourceOwnerBoundary(
+            boundary_id="github_installation_rate_limit",
+            owner_scope="github_installation_or_repository_token",
+            default_limit=None,
+            hard_ceiling=None,
+            invents_new_service=False,
+            expands_allowance=False,
+            source_symbol="review_sensei_github.http.GitHubHttp",
+        ),
+        ResourceOwnerBoundary(
+            boundary_id="provider_account_or_local_endpoint",
+            owner_scope="operator_provider_account_or_local_host",
+            default_limit=DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS,
+            hard_ceiling=RESOURCE_BUDGET_MAX_PROVIDER_CALLS_CEILING,
+            invents_new_service=False,
+            expands_allowance=False,
+            source_symbol="review_sensei.outcomes.ResourceBudget.max_provider_calls:8",
+        ),
+    )
+
+
 __all__ = [
+    "CONVERSATION_CONTEXT_MAX_TITLE_BYTES",
+    "CONVERSATION_PUBLISHER_TITLE_CAP_BYTES",
     "DEFERRED_FITTING_UNIT_KINDS",
     "DIRECT_CORE_MAX_TITLE_BYTES",
     "HOSTED_BOOTSTRAP_MAX_TITLE_BYTES",
@@ -1996,12 +2473,16 @@ __all__ = [
     "TITLE_LIFECYCLE_PHASES",
     "WORKFLOW_PROVIDER_GROUP_PREFIX",
     "CrossPrConcurrencyComparison",
+    "IndivisibleBoundaryContract",
     "IndivisibleWorkReport",
     "IndivisibleWorkUnit",
     "PolicyDriftClassification",
+    "PolicyFundingPreservationProof",
     "QuotaThrottleRecoveryPlan",
+    "ResourceOwnerBoundary",
     "TitleAttributionRecord",
     "TitleByteLimitEvaluation",
+    "TitleConstantContract",
     "TitleFreshnessDecision",
     "classify_change_coverage",
     "classify_mandatory_prompt_overflow",
@@ -2010,6 +2491,10 @@ __all__ = [
     "classify_work_plan_unprocessed",
     "evaluate_title_byte_limit",
     "evaluate_title_freshness",
+    "inspect_indivisible_boundary_contracts",
+    "inspect_resource_owner_boundaries",
+    "inspect_title_constant_contracts",
     "plan_cross_pr_concurrency",
+    "verify_policy_drift_funding_preservation",
     "verify_published_title_attribution",
 ]

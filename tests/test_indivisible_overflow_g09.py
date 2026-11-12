@@ -5,14 +5,26 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
+import tempfile
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import patch
 
 from review_sensei_github.approval import approval_eligibility_from_result
 from review_sensei_github.checks import review_check_outcome
+from test_review_run import fixture_process_environment
+from test_review_run_rescan import partial_fixture, request
 
-from review_sensei.budgets import LEGACY_ASSESSMENT_PROMPT_BYTES, ReviewWorkBudgets
+from review_sensei import cli as core_cli
+from review_sensei.budgets import (
+    COMPLETE_TEXT_CONTRACT,
+    LEGACY_ASSESSMENT_PROMPT_BYTES,
+    ProviderCapabilities,
+    ReviewWorkBudgets,
+)
 from review_sensei.context import PromptContextOverflow, admit_prompt_context
 from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
 from review_sensei.diff import analyze_diff
@@ -39,11 +51,13 @@ from review_sensei.operational_boundaries import (
     DEFERRED_FITTING_UNIT_KINDS,
     PERMITTED_RECOVERY_ROUTES,
     RECOVERY_COMMAND_TEMPLATES,
+    IndivisibleBoundaryContract,
     IndivisibleWorkReport,
     IndivisibleWorkUnit,
     classify_change_coverage,
     classify_mandatory_prompt_overflow,
     classify_work_plan_unprocessed,
+    inspect_indivisible_boundary_contracts,
 )
 from review_sensei.outcomes import ResourceBudget
 from review_sensei.planning import (
@@ -53,7 +67,7 @@ from review_sensei.planning import (
     plan_change,
     plan_work,
 )
-from review_sensei.service import ReviewService
+from review_sensei.service import _PROVIDER_OUTPUT_CORRECTION, ReviewService
 from review_sensei.session import InMemorySessionLedger, SessionIdentity
 from review_sensei.stages import ReviewCategory, Stage
 from review_sensei.validation import ReviewLimits
@@ -123,7 +137,8 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
         self.assertEqual(plan.coverage.approval_state(), "partial")
 
         # Even hunk subdivision preserves the single giant line intact rather than truncating.
-        record = (plan.analysis.file_records or ())[0]
+        assert plan.analysis.file_records is not None
+        record = plan.analysis.file_records[0]
         hunk = record.hunks[0]
         snapshot = EvidenceSnapshot()
         fragments = subdivide_hunk(
@@ -177,7 +192,8 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
             work_budget=TotalWorkBudget(max_chunks=32),
         )
         self.assertEqual(plan.chunks, ())
-        record = (plan.analysis.file_records or ())[0]
+        assert plan.analysis.file_records is not None
+        record = plan.analysis.file_records[0]
         self.assertEqual(record.hunks, ())
         self.assertEqual(
             [(fcov.path, fcov.outcome, fcov.reason) for fcov in plan.coverage.files],
@@ -945,6 +961,350 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
         self.assertTrue(report_2.fully_reviewed)
         self.assertEqual(report_2.approval_state, "reviewed")
         self.assertEqual(report_2.units, ())
+
+    def test_exact_byte_token_and_call_boundaries_across_planner_service_cli_and_hosted(
+        self,
+    ) -> None:
+        """Exercise exact limit-1 / exact / limit+1 diff, prompt, token, and call ceilings on real entry points."""
+        contracts = {c.boundary_id: c for c in inspect_indivisible_boundary_contracts()}
+        self.assertEqual(
+            set(contracts),
+            {
+                "per_request_diff_bytes",
+                "legacy_unqualified_prompt_bytes",
+                "unified_batch_prompt_bytes",
+                "qualified_token_window_input_ceiling",
+                "per_run_provider_calls",
+            },
+        )
+        for contract in contracts.values():
+            self.assertFalse(contract.truncates_silently)
+            self.assertFalse(contract.raises_limit)
+        self.assertEqual(contracts["per_request_diff_bytes"].ceiling_value, 1_048_576)
+        with self.assertRaises(ReviewInputError):
+            IndivisibleBoundaryContract(
+                boundary_id="bad",
+                ceiling_value=100,
+                unit="utf8_bytes",
+                truncates_silently=True,
+                raises_limit=False,
+                source_symbol="bad:100",
+            )
+        with self.assertRaises(ReviewInputError):
+            IndivisibleBoundaryContract(
+                boundary_id="bad_unit",
+                ceiling_value=100,
+                unit="lines",
+                truncates_silently=False,
+                raises_limit=False,
+                source_symbol="bad:100",
+            )
+
+        # 1. Exact per-request diff-byte boundary (limit-1, exact, limit+1):
+        def _single_hunk_diff(payload_len: int) -> str:
+            return (
+                "diff --git a/src/bound.py b/src/bound.py\n"
+                "--- /dev/null\n"
+                "+++ b/src/bound.py\n"
+                "@@ -0,0 +1 @@\n"
+                f"+{'x' * payload_len}\n"
+            )
+
+        diff_exact = _single_hunk_diff(80)
+        exact_diff_limit = len(diff_exact.encode("utf-8"))
+        diff_minus_1 = _single_hunk_diff(79)
+        diff_plus_1 = _single_hunk_diff(81)
+        self.assertEqual(len(diff_minus_1.encode("utf-8")), exact_diff_limit - 1)
+        self.assertEqual(len(diff_plus_1.encode("utf-8")), exact_diff_limit + 1)
+        diff_limits = ReviewLimits(max_diff_bytes=exact_diff_limit)
+
+        for label, d_text, should_fit in (
+            ("limit_minus_1", diff_minus_1, True),
+            ("exact", diff_exact, True),
+            ("limit_plus_1", diff_plus_1, False),
+        ):
+            with self.subTest(diff_boundary=label):
+                prov_plain = _RecordingProvider()
+                svc_plain = ReviewService(
+                    prov_plain,
+                    stages=(Stage("review", "Diff:\n{diff}", ("summary", "comments")),),
+                )
+                if should_fit:
+                    p_plain = plan_change(d_text, limits=diff_limits, orchestrate=False)
+                    self.assertEqual(len(p_plain.chunks), 1)
+                    r_plain = svc_plain.run(
+                        ReviewRequest(
+                            diff=d_text,
+                            limits=diff_limits,
+                            orchestrate_large_changes=False,
+                        )
+                    )
+                    assert r_plain.result is not None
+                    self.assertEqual(r_plain.result.review_status, "complete")
+                    self.assertEqual(len(prov_plain.requests), 1)
+                else:
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "diff exceeds the configured byte limit"
+                    ):
+                        plan_change(d_text, limits=diff_limits, orchestrate=False)
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "diff exceeds the configured byte limit"
+                    ):
+                        svc_plain.run(
+                            ReviewRequest(
+                                diff=d_text,
+                                limits=diff_limits,
+                                orchestrate_large_changes=False,
+                            )
+                        )
+                    self.assertEqual(len(prov_plain.requests), 0)
+
+                prov_orch = _RecordingProvider()
+                svc_orch = ReviewService(
+                    prov_orch,
+                    stages=(Stage("review", "Diff:\n{diff}", ("summary", "comments")),),
+                )
+                p_orch = plan_change(d_text, limits=diff_limits, orchestrate=True)
+                r_orch = svc_orch.run(
+                    ReviewRequest(
+                        diff=d_text,
+                        limits=diff_limits,
+                        orchestrate_large_changes=True,
+                    )
+                )
+                assert r_orch.result is not None and r_orch.result.coverage is not None
+                if should_fit:
+                    self.assertEqual(len(p_orch.chunks), 1)
+                    self.assertEqual(r_orch.result.review_status, "complete")
+                    self.assertTrue(r_orch.result.coverage.fully_reviewed)
+                    self.assertEqual(len(prov_orch.requests), 1)
+                else:
+                    self.assertEqual(len(p_orch.chunks), 0)
+                    self.assertEqual(r_orch.result.review_status, "incomplete")
+                    self.assertFalse(r_orch.result.coverage.fully_reviewed)
+                    self.assertEqual(len(prov_orch.requests), 0)
+                    cov_rep = classify_change_coverage(p_orch, result=r_orch.result)
+                    self.assertFalse(cov_rep.fully_reviewed)
+                    self.assertEqual(cov_rep.units[0].unit_kind, "oversized_hunk")
+
+        # 2. Exact unqualified prompt-byte boundary (LEGACY_ASSESSMENT_PROMPT_BYTES = 49,152)
+        # AND 3. Exact qualified token-window boundary (ProviderCapabilities.fits)
+        # with mandatory pinned context (`reason="pinned"`):
+        small_diff = (
+            "diff --git a/src/app.py b/src/app.py\n"
+            "--- a/src/app.py\n"
+            "+++ b/src/app.py\n"
+            "@@ -1 +1,2 @@\n"
+            " keep\n"
+            "+change\n"
+        )
+        cat = ReviewCategory(
+            id="architecture",
+            title="Architecture",
+            focus=("Enforce mandatory architecture rules.",),
+        )
+        stage = Stage(
+            "review",
+            "Categories:\n{review_categories}\nRules:\n{review_context}\nDiff:\n{diff}",
+            ("summary", "comments"),
+            categories=(cat,),
+        )
+
+        def _req_with_pinned_len(n_bytes: int) -> ReviewRequest:
+            doc = _doc("docs/architecture/mandatory-rules.md", "R" * n_bytes)
+            lens = ReviewLensContext(
+                "architecture",
+                documents=(doc,),
+                document_selection=DocumentSelectionReport(
+                    (_decision(doc, reason="pinned"),)
+                ),
+            )
+            return ReviewRequest(
+                diff=small_diff,
+                repository="owner/repo",
+                pull_request_number=19,
+                base_sha="1" * 40,
+                head_sha="2" * 40,
+                active_category_ids=("architecture",),
+                lens_contexts=(lens,),
+            )
+
+        def _measure_framed(
+            n_bytes: int, *, caps: ProviderCapabilities | None = None
+        ) -> int:
+            probe_prov = _RecordingProvider()
+            probe_svc = ReviewService(
+                probe_prov,
+                stages=(stage,),
+                budget=ResourceBudget.create(max_provider_calls=2),
+                work_budgets=ReviewWorkBudgets(mode="unified"),
+                capabilities=caps,
+            )
+            probe_run = probe_svc.run(_req_with_pinned_len(n_bytes))
+            assert probe_run.result is not None
+            self.assertEqual(probe_run.result.review_status, "complete")
+            return len(
+                (
+                    probe_prov.requests[-1].prompt
+                    + "\n\n"
+                    + _PROVIDER_OUTPUT_CORRECTION
+                ).encode("utf-8")
+            )
+
+        def _calibrate_exact_pinned(
+            target_ceiling: int, *, caps: ProviderCapabilities | None = None
+        ) -> int:
+            measured_small = _measure_framed(16, caps=caps)
+            # Probe 16 bytes below target so digit-length growth (+1..4 bytes) stays < target_ceiling:
+            near_target = target_ceiling - (measured_small - 16) - 16
+            measured_near = _measure_framed(near_target, caps=caps)
+            return target_ceiling - (measured_near - near_target)
+
+        # 2a. Unqualified LEGACY_ASSESSMENT_PROMPT_BYTES (49,151 / 49,152 / 49,153 UTF-8 bytes):
+        exact_pinned_legacy = _calibrate_exact_pinned(LEGACY_ASSESSMENT_PROMPT_BYTES)
+        for delta, should_admit in ((-1, True), (0, True), (1, False)):
+            p_prov = _RecordingProvider()
+            p_svc = ReviewService(
+                p_prov,
+                stages=(stage,),
+                budget=ResourceBudget.create(max_provider_calls=2),
+                work_budgets=ReviewWorkBudgets(mode="unified"),
+            )
+            req_cand = _req_with_pinned_len(exact_pinned_legacy + delta)
+            res_cand = p_svc.run(req_cand)
+            assert res_cand.result is not None
+            if should_admit:
+                self.assertEqual(res_cand.result.review_status, "complete")
+                self.assertEqual(len(p_prov.requests), 1)
+                framed_len = len(
+                    (
+                        p_prov.requests[-1].prompt
+                        + "\n\n"
+                        + _PROVIDER_OUTPUT_CORRECTION
+                    ).encode("utf-8")
+                )
+                self.assertEqual(framed_len, LEGACY_ASSESSMENT_PROMPT_BYTES + delta)
+                self.assertIn(
+                    "R" * (exact_pinned_legacy + delta), p_prov.requests[-1].prompt
+                )
+            else:
+                self.assertEqual(res_cand.result.review_status, "partial")
+                self.assertEqual(len(p_prov.requests), 0)
+                self.assertIn(
+                    "mandatory-context-and-evidence-oversized",
+                    res_cand.result.summary,
+                )
+
+        # 3a. Qualified ProviderCapabilities token-window ceiling (limit-1 / exact / limit+1):
+        qual_cap = ProviderCapabilities(
+            context_tokens=8192,
+            max_output_tokens=512,
+            qualified=True,
+            framing_tokens=256,
+            provider_name="fixture",
+            model="fixture-model",
+            endpoint="https://fixture.example/api",
+            completion_contract=COMPLETE_TEXT_CONTRACT,
+        )
+        token_input_ceiling = 8192 - 256 - 512 - max(512, (8192 + 19) // 20)
+        self.assertEqual(token_input_ceiling, 6912)
+        exact_pinned_tokens = _calibrate_exact_pinned(
+            token_input_ceiling, caps=qual_cap
+        )
+        self.assertGreater(exact_pinned_tokens, 10)
+        for delta, should_admit in ((-1, True), (0, True), (1, False)):
+            t_prov = _RecordingProvider()
+            t_svc = ReviewService(
+                t_prov,
+                stages=(stage,),
+                budget=ResourceBudget.create(max_provider_calls=2),
+                work_budgets=ReviewWorkBudgets(mode="unified"),
+                capabilities=qual_cap,
+            )
+            req_tok = _req_with_pinned_len(exact_pinned_tokens + delta)
+            res_tok = t_svc.run(req_tok)
+            assert res_tok.result is not None
+            if should_admit:
+                self.assertEqual(res_tok.result.review_status, "complete")
+                self.assertEqual(len(t_prov.requests), 1)
+                framed_tok_len = len(
+                    (
+                        t_prov.requests[-1].prompt
+                        + "\n\n"
+                        + _PROVIDER_OUTPUT_CORRECTION
+                    ).encode("utf-8")
+                )
+                self.assertEqual(framed_tok_len, token_input_ceiling + delta)
+            else:
+                self.assertEqual(res_tok.result.review_status, "partial")
+                self.assertEqual(len(t_prov.requests), 0)
+                self.assertIn(
+                    "mandatory-context-and-evidence-oversized",
+                    res_tok.result.summary,
+                )
+
+        # 4. Real core CLI (`review_sensei.cli.main`) and hosted `EntryFixture` (`review remaining`)
+        # keep incomplete indivisible coverage strictly distinct from completion:
+        binary_and_code_diff = (
+            small_diff + "diff --git a/assets/blob.bin b/assets/blob.bin\n"
+            "new file mode 100644\n"
+            "index 0000000..1111111\n"
+            "Binary files /dev/null and b/assets/blob.bin differ\n"
+        )
+        with tempfile.TemporaryDirectory() as cli_dir:
+            d_path = Path(cli_dir) / "mixed.patch"
+            f_path = Path(cli_dir) / "resp.json"
+            c_path = Path(cli_dir) / ".reviewsensei.yml"
+            o_path = Path(cli_dir) / "result.json"
+            d_path.write_text(binary_and_code_diff, encoding="utf-8", newline="\n")
+            self.assertEqual(d_path.read_bytes(), binary_and_code_diff.encode("utf-8"))
+            c_path.write_text("schema: 1\n", encoding="utf-8")
+            f_path.write_text(
+                json.dumps({"summary": "Reviewed app.py.", "comments": []}),
+                encoding="utf-8",
+                newline="\n",
+            )
+            import contextlib
+            import io
+
+            cli_err = io.StringIO()
+            with (
+                patch.dict(os.environ, fixture_process_environment(), clear=True),
+                contextlib.redirect_stderr(cli_err),
+            ):
+                rc_cli = core_cli.main(
+                    [
+                        "--diff",
+                        str(d_path),
+                        "--config",
+                        str(c_path),
+                        "--provider",
+                        "fixture",
+                        "--model",
+                        "fixture-v1",
+                        "--fixture-response",
+                        str(f_path),
+                        "--orchestrate-large-changes",
+                        "--format",
+                        "json",
+                        "--output",
+                        str(o_path),
+                    ]
+                )
+            self.assertEqual(rc_cli, 2)
+            self.assertIn("reason=partial_coverage", cli_err.getvalue())
+            cli_result = json.loads(o_path.read_text(encoding="utf-8"))
+            self.assertEqual(cli_result["review_status"], "partial")
+            self.assertFalse(cli_result["coverage"]["fully_reviewed"])
+
+        with tempfile.TemporaryDirectory() as hosted_dir:
+            hosted, _ = partial_fixture(hosted_dir)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in hosted.reviews))
+            calls_before = hosted.provider_calls
+            request(hosted, 29, "review remaining")
+            self.assertEqual(hosted.invoke(), 1)
+            self.assertIn("no reusable partial scope", hosted.error)
+            self.assertEqual(hosted.provider_calls, calls_before)
 
 
 if __name__ == "__main__":

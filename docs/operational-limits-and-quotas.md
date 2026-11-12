@@ -33,6 +33,22 @@ deterministic recovery steps for each boundary.
   `incomplete_file_enumeration`, `call_budget_exhausted`):** Classified distinctly so
   operators know whether remaining units can fit a continuation run.
 
+### Verified source-level ceilings (`inspect_indivisible_boundary_contracts`)
+
+| Boundary ID | Enforced Ceiling | Source Symbol |
+|---|---|---|
+| `per_request_diff_bytes` | `1,048,576` UTF-8 bytes | `review_sensei.validation.ReviewLimits.max_diff_bytes` |
+| `legacy_unqualified_prompt_bytes` | `49,152` UTF-8 bytes | `review_sensei.budgets.LEGACY_ASSESSMENT_PROMPT_BYTES` |
+| `unified_batch_prompt_bytes` | `262,144` UTF-8 bytes (`131,072` diff bytes) | `review_sensei.budgets.ReviewWorkBudgets.batch_prompt_bytes` |
+| `qualified_token_window_input_ceiling` | `utf8_size(prompt) + framing_tokens + reserved_output_tokens + max(512, ceil(context_tokens / 20)) <= context_tokens` | `review_sensei.budgets.ProviderCapabilities.fits` |
+| `per_run_provider_calls` | `8` calls default (`<= RESOURCE_BUDGET_MAX_PROVIDER_CALLS_CEILING`) | `review_sensei.outcomes.DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS` |
+
+At exact `limit - 1` and `exact` UTF-8 bytes, mandatory pinned architecture rules and
+diff hunks admit without truncation; at `limit + 1` UTF-8 bytes, admission refuses
+with zero silent truncation and keeps incomplete coverage (`review_status == "partial"`,
+`fully_reviewed == False`) strictly distinct from completion across core CLI and hosted
+`review-run`.
+
 ### Why `@reviewsensei review remaining` is gated
 
 `@reviewsensei review remaining` is only offered when remaining units fit within a
@@ -92,8 +108,9 @@ Choose one of the following bounded actions:
      or Unicode NFC/NFKC normalization (hosted bootstrap omits an empty `""` title as
      `None` and binds any non-empty title byte-for-byte).
    - If the pull request title changes before `@reviewsensei review remaining`,
-     continuation fails closed (`continuation scope does not match`) rather than
-     merging chunks reviewed under two different titles.
+     continuation fails closed (`continuation scope does not match` in core
+     `ReviewService`; `no reusable partial scope` at hosted `review-run` admission)
+     rather than merging chunks reviewed under two different titles.
 
 ### Recovery runbook
 
@@ -121,7 +138,13 @@ truncation:
   codepoints (2-byte accented characters, 3-byte CJK characters, 4-byte emoji) are
   counted by encoded UTF-8 byte width.
 - **Direct local CLI / core (`direct_core`):** Enforces **`4,096` UTF-8 bytes**
-  (`DIRECT_CORE_MAX_TITLE_BYTES` / `ReviewLimits.max_title_bytes`).
+  (`DIRECT_CORE_MAX_TITLE_BYTES` / `ReviewLimits.max_title_bytes` and
+  `ConversationContext.pull_request_title`, verified by `inspect_title_constant_contracts`).
+- **Downstream reply prompt publisher (`hosted_conversation_publisher`):** After
+  hosted bootstrap enforces the `256`-byte admission cap, if a pull request title is
+  mutated mid-run above `MAX_CONTEXT_PR_TITLE_BYTES` (`2,048` UTF-8 bytes),
+  `ConversationPublisher` appends an explicit `\n[truncated]` marker on a valid UTF-8
+  codepoint boundary (never silent truncation).
 
 ### Recovery runbook
 
@@ -153,9 +176,23 @@ ref object is not a valid 40-hex commit SHA.
 
 ### Pre-work safety guarantees
 
-- Refusal occurs in `_configuration()` before session enrollment or provider spend.
-- Existing settled approvals and pending session transactions on the pull request
-  remain byte-for-byte intact, and old run accounting is never rebound to `P_live`.
+- Refusal occurs before session enrollment or provider spend across hosted
+  `review-run`, `command-run`, and `reply-run` (`default_policy_ref`), and
+  `action_reply._configuration` additionally verifies that the checked-out
+  `.reviewsensei.yml` SHA-256 matches `run.caller.accounting.configuration.digest`
+  mid-run.
+- Existing settled approvals, `FrozenApiConfiguration`, `startup.liability`,
+  `completed` receipts, `blocks`, and `remaining` allowances on the pull request
+  remain byte-for-byte intact across one or multiple consecutive default-branch races
+  (`P0 -> P1 -> P2`, verified by `verify_policy_drift_funding_preservation`), and old
+  run accounting is never rebound within a run (`ApiRunAccounting.require_binding`).
+  When a subsequent run pinned to `P_live` rolls over a terminal predecessor, the
+  predecessor's exact accounting is archived in `caller-run-root-v1` without refunding
+  consumed or uncertain liability.
+- In direct core execution, `RepositoryContextStore` and `load_configuration` bind
+  context document SHA-256 digests into `ReviewService.context_cache_key` and
+  `_continuation_scope_digest`, refusing stale `prior_partial` continuations when
+  pinned context bytes change.
 
 ### Recovery runbook
 
@@ -189,6 +226,16 @@ ref object is not a valid 40-hex commit SHA.
   capability tokens (`repr=False` on `BrokerSession` and `BrokerSessionGrant`) and
   issues single physical broker requests (`retry_count=0`, zero duplicate dispatch
   storms).
+
+### Read-only resource-owner inventory (`inspect_resource_owner_boundaries`)
+
+| Boundary ID | Resource Owner Scope | Enforced Bound | Source Symbol |
+|---|---|---|---|
+| `per_pr_workflow_group` | Single pull request (`review` / `command` / `reply`) | `1` active workflow run (`cancel-in-progress: false`) | `.github/workflows/review-sensei-run.yml:concurrency` |
+| `per_run_caller_http_allowance` | Single caller run + reserved successor on PR ledger | `DEFAULT_API_REQUEST_LIMIT = 512` (`startup + first_total + successor_total == limit`; `EvidenceBudgetExhausted` on exhaustion) | `review_sensei.api_work.DEFAULT_API_REQUEST_LIMIT` / `owner_allocations` |
+| `per_operation_broker_control_budget` | Single hosted operation | `MAX_BROKER_BODY_BYTES = 262,144` bytes; `retry_count = 0` | `review_sensei_github.broker_client.MAX_BROKER_BODY_BYTES` |
+| `github_installation_rate_limit` | GitHub App installation / `GITHUB_TOKEN` | External GitHub API rate limit; fail-closed on HTTP `429`/`503` | `review_sensei_github.http.GitHubHttp` |
+| `provider_account_or_local_endpoint` | Hosted provider account or manual CLI (`review_sensei.cli.main`) provider / local Ollama host | `DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS = 8`; non-zero exit without partial-as-complete output on HTTP `429`/`503` | `review_sensei.outcomes.ResourceBudget` / `review_sensei.providers` |
 
 ### Stage-specific recovery runbook after HTTP `429` / `503`
 

@@ -8,6 +8,7 @@ workflow's existing PR concurrency serialization. This module adds no allocator.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
@@ -374,3 +375,85 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
             raise ReviewInputError("API predecessor completion is unavailable")
         _stamp(stamp)
         return job["id"], stamp, conclusion
+
+    def inspect_concurrency_posture(
+        self,
+        identity: SessionIdentity,
+        *,
+        attempt: int,
+        event: str | None = None,
+        previous_run_id: int | None = None,
+        predecessor: ApiExecutionOwner | None = None,
+    ) -> OwnerConcurrencyPosture:
+        """Inspect Actions job exclusivity, cessation, and non-FIFO delivery.
+
+        This is not ledger-generation or canonical-writer authority. The owner
+        generation passed below only constructs a discarded owner value; job
+        identity/exclusivity is checked against the Actions run and jobs API.
+        Unavailable job evidence raises rather than reporting an empty job set.
+        """
+
+        current_run_int = int(self.command_run_id)
+        non_fifo = previous_run_id is not None and previous_run_id > current_run_int
+        # Missing jobs evidence is not evidence of writer absence. In particular,
+        # a transient first read must not become an empty/clean overlap report
+        # even if current_owner's later independent read succeeds.
+        jobs = self._jobs(identity, attempt)
+        active_writer_jobs = tuple(
+            str(j.get("name", ""))
+            for j in jobs
+            if j.get("status") == "in_progress"
+            and any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
+        )
+        exclusive_owner = False
+        refusal_reason: str | None = None
+        try:
+            self.current_owner(identity, attempt=attempt, generation=0, event=event)
+            exclusive_owner = True
+        except ReviewInputError as exc:
+            refusal_reason = str(exc)
+        predecessor_ceased: bool | None = None
+        if previous_run_id is not None and predecessor is not None:
+            try:
+                self.ceased_run_owner(identity, previous_run_id, predecessor)
+                predecessor_ceased = True
+            except ReviewInputError as exc:
+                predecessor_ceased = False
+                if refusal_reason is None:
+                    refusal_reason = str(exc)
+        elif predecessor is not None:
+            try:
+                self.ceased_owner(identity, predecessor)
+                predecessor_ceased = True
+            except ReviewInputError as exc:
+                predecessor_ceased = False
+                if refusal_reason is None:
+                    refusal_reason = str(exc)
+        return OwnerConcurrencyPosture(
+            command_run_id=current_run_int,
+            job=self.job,
+            attempt=attempt,
+            active_writer_jobs=active_writer_jobs,
+            overlapping_active_writers=len(active_writer_jobs) > 1,
+            exclusive_active_owner=exclusive_owner,
+            previous_run_id=previous_run_id,
+            non_fifo_run_order=non_fifo,
+            predecessor_ceased=predecessor_ceased,
+            refusal_reason=refusal_reason,
+        )
+
+
+@dataclass(frozen=True)
+class OwnerConcurrencyPosture:
+    """Read-only concurrency qualification snapshot for one Actions writer owner."""
+
+    command_run_id: int
+    job: str
+    attempt: int
+    active_writer_jobs: tuple[str, ...]
+    overlapping_active_writers: bool
+    exclusive_active_owner: bool
+    previous_run_id: int | None
+    non_fifo_run_order: bool
+    predecessor_ceased: bool | None
+    refusal_reason: str | None
