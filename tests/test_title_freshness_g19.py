@@ -829,7 +829,7 @@ class TitleFreshnessG19Tests(unittest.TestCase):
             self.assertEqual(rep_f.reply_posts, 1)
             self.assertIn(post_bootstrap_title, rep_f.provider_requests[0].prompt)
 
-            # Mid-run edit exceeding ConversationPublisher 2048-byte cap refuses without silent truncation:
+            # Mid-run edit exceeding the publisher cap is explicitly truncated:
             with tempfile.TemporaryDirectory() as rep_over_dir:
                 rep_over = ReplyEntryFixture(rep_over_dir)
                 over_base_ext = rep_over.external
@@ -859,7 +859,10 @@ class TitleFreshnessG19Tests(unittest.TestCase):
                 self.assertEqual(len(rep_over.provider_requests), 1)
                 self.assertEqual(rep_over.reply_posts, 1)
                 # Post-bootstrap mid-run overflow is explicitly marked `[truncated]`, never silent:
-                self.assertIn("[truncated]", rep_over.provider_requests[0].prompt)
+                self.assertIn(
+                    ("é" * 1018) + "\n[truncated]",
+                    rep_over.provider_requests[0].prompt,
+                )
                 self.assertNotIn("é" * 1025, rep_over.provider_requests[0].prompt)
 
         # 4. Direct core CLI (`review_sensei.cli.main`) binds exact multibyte `--title` without truncation:

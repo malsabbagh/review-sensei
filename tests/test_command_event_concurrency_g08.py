@@ -10,6 +10,7 @@ import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request
 
@@ -1371,6 +1372,26 @@ class CommandEventConcurrencyG08Tests(unittest.TestCase):
             predecessor=ApiExecutionOwner(1, "command", 0),
         )
         self.assertTrue(posture_same_run.predecessor_ceased)
+
+    def test_concurrency_inspection_refuses_unobserved_jobs(self) -> None:
+        evidence = ApiRunActionsEvidence(
+            GitHubHttp(api_url="https://api.github.test"),
+            token="fixture-only",
+            command_run_id="249",
+            job="command",
+        )
+        with (
+            patch.object(
+                evidence, "_jobs", side_effect=ReviewInputError("jobs unavailable")
+            ),
+            patch.object(
+                evidence,
+                "current_owner",
+                return_value=ApiExecutionOwner(1, "command", 0),
+            ),
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "jobs unavailable"):
+                evidence.inspect_concurrency_posture(IDENTITY, attempt=1)
 
     def test_case_h_duplicate_admission_unknown_commit_and_action_guard_fencing(
         self,

@@ -655,6 +655,41 @@ class StaleLedgerFencingG02Tests(unittest.TestCase):
             coordinator.candidate.forward(token1, prepared1, req1)
         self.assertEqual(server.patch_history, [])
 
+    def test_external_floor_reads_one_database_snapshot(self) -> None:
+        coord = ContainedForwardingCoordinator(
+            self.dir / "floor-read-snapshot",
+            posture=WriterContainmentPosture.fully_contained(),
+            wire_forwarder=lambda *_: WireDispatchOutcome(200, b"{}"),
+            synthetic_qualification=True,
+        )
+        access = _make_access()
+        coord.enroll_initial_writer(base_access=access, writer_route="actions_hosted")
+        connect = coord._connect_frontier
+        observed_transactions = []
+
+        def traced_connect():
+            db = connect()
+            db.set_trace_callback(
+                lambda sql: (
+                    observed_transactions.append(db.in_transaction)
+                    if sql.lstrip().upper().startswith("SELECT")
+                    else None
+                )
+            )
+            return db
+
+        with patch.object(coord, "_connect_frontier", traced_connect):
+            self.assertEqual(
+                coord.verify_external_epoch_floor(
+                    base_store_id=access.store_id,
+                    repository_id=123,
+                    pull_request=7,
+                    observed_external_epoch=1,
+                ),
+                1,
+            )
+        self.assertEqual(observed_transactions, [True, True])
+
     def test_independent_process_forward_invalidates_cutover_preflight(self) -> None:
         """A different host may dispatch after cutover's initial snapshot."""
         state_dir = self.dir / "concurrent-cutover"
@@ -1667,7 +1702,8 @@ coord.candidate.forward(tok, coord.candidate.snapshot(tok), req)
         pre_snap = fixture.accounted.containment_and_budget_snapshot()
         self.assertFalse(pre_snap.is_activated)
         self.assertFalse(pre_snap.live_cutover_enabled)
-        self.assertTrue(pre_snap.conservation_holds)
+        self.assertFalse(pre_snap.conservation_holds)
+        self.assertFalse(pre_snap.legacy_accounting_overlap_refused)
 
         fixture.accounted.initialize_and_activate(native1, IDENTITY, config, owner1)
         ledger1 = ApiRunSessionLedger(native1, fixture.accounted, IDENTITY)
@@ -1755,12 +1791,11 @@ coord.candidate.forward(tok, coord.candidate.snapshot(tok), req)
         run2_trace = list(fixture.trace)
 
         # Delayed old writer from Run 456 attempting replace_checkpoint through its
-        # ApiRunSessionLedger is rejected on optimistic root_sha256 mismatch.
+        # ApiRunSessionLedger is rejected on the optimistic root_sha256 mismatch.
+        # Pin this branch rather than accepting an unrelated terminal refusal.
         fixture.trace[:] = run1_trace
         fixture.accounted = ledger1.caller
-        with self.assertRaisesRegex(
-            ReviewInputError, "caller checkpoint root changed|caller terminal"
-        ):
+        with self.assertRaisesRegex(ReviewInputError, "caller checkpoint root changed"):
             ledger1.replace(
                 IDENTITY,
                 lambda rec: rec.evolve(

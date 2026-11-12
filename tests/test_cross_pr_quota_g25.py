@@ -656,7 +656,13 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
         self,
     ) -> None:
         """Exercise G25 resource-owner contracts, caller HTTP tranche conservation, entry-route isolation, and manual CLI 429/503 fail-closed behavior."""
+        from review_sensei_github.broker_client import MAX_BROKER_BODY_BYTES
+
         boundaries = {b.boundary_id: b for b in inspect_resource_owner_boundaries()}
+        self.assertEqual(
+            boundaries["per_operation_broker_control_budget"].hard_ceiling,
+            MAX_BROKER_BODY_BYTES,
+        )
         self.assertEqual(
             set(boundaries),
             {
@@ -847,8 +853,12 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
                             "operational",
                         ]
                     )
-                self.assertNotEqual(rc_manual, 0)
+                self.assertEqual(rc_manual, 1)  # documented operational failure
+                # Independent pinned default: the CLI uses ResourceBudget.create
+                # with no retry override here; observed counters below measure
+                # the actual run rather than this fresh object's usage.
                 budget = ResourceBudget.create()
+                self.assertEqual(budget.max_retry_attempts, 2)
                 self.assertEqual(attempts, 1 + budget.max_retry_attempts)
                 outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
                 self.assertEqual(outcome["provider_calls"], attempts)

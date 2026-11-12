@@ -292,7 +292,7 @@ class ApiRunRequestTransport:
                 live_cutover_enabled=LIVE_CANONICAL_CUTOVER_ENABLED,
                 is_activated=False,
                 accounting_version=None,
-                legacy_accounting_overlap_refused=True,
+                legacy_accounting_overlap_refused=False,
                 startup_dispatches=self.startup_dispatches,
                 startup_liability=self.plan.liability,
                 configured_limit=None,
@@ -305,7 +305,8 @@ class ApiRunRequestTransport:
                 terminal_claimed=self._terminal_reason is not None,
                 has_action_effect_boundary=self._action_effect_boundary is not None,
                 has_action_result_proof=self._action_result_proof is not None,
-                conservation_holds=self.startup_dispatches <= len(self._slot.requests),
+                # No active accounting exists to establish full conservation.
+                conservation_holds=False,
             )
         guarantee = evaluate_physical_budget_guarantees(
             configured_limit=state.configuration.limit,

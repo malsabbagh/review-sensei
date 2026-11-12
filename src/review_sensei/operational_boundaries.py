@@ -1321,7 +1321,12 @@ class TitleConstantContract:
 
 
 def inspect_title_constant_contracts() -> tuple[TitleConstantContract, ...]:
-    """Verify actual title byte-limit constants across core and hosted surfaces."""
+    """Check core limits and return pinned hosted title contracts.
+
+    The ConversationContext probe intentionally detects changes in models.py.
+    Core cannot import its optional GitHub adapter: hosted constant equality is
+    verified by the G20 integration test against the installed adapter symbols.
+    """
 
     live_core_limit = ReviewLimits().max_title_bytes
     if (
@@ -2389,7 +2394,12 @@ class ResourceOwnerBoundary:
 
 
 def inspect_resource_owner_boundaries() -> tuple[ResourceOwnerBoundary, ...]:
-    """Return the read-only G25 resource-owner inventory verified against constants."""
+    """Check core constants and return the pinned G25 owner inventory.
+
+    The optional GitHub adapter's broker body ceiling is pinned here to avoid
+    reversing the dependency. G25 integration tests compare it with the actual
+    adapter constant; this helper alone does not inspect a deployed broker.
+    """
 
     if DEFAULT_API_REQUEST_LIMIT != 512 or MAX_API_REQUEST_LIMIT != (1 << 53) - 1:
         raise ReviewInputError(

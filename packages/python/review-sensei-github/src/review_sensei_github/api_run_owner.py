@@ -385,21 +385,26 @@ class ApiRunActionsEvidence(ActionsReservationEvidence):
         previous_run_id: int | None = None,
         predecessor: ApiExecutionOwner | None = None,
     ) -> OwnerConcurrencyPosture:
-        """Evaluate live writer exclusivity, predecessor cessation, and non-FIFO ordering."""
+        """Inspect Actions job exclusivity, cessation, and non-FIFO delivery.
+
+        This is not ledger-generation or canonical-writer authority. The owner
+        generation passed below only constructs a discarded owner value; job
+        identity/exclusivity is checked against the Actions run and jobs API.
+        Unavailable job evidence raises rather than reporting an empty job set.
+        """
 
         current_run_int = int(self.command_run_id)
         non_fifo = previous_run_id is not None and previous_run_id > current_run_int
-        active_writer_jobs: tuple[str, ...] = ()
-        try:
-            jobs = self._jobs(identity, attempt)
-            active_writer_jobs = tuple(
-                str(j.get("name", ""))
-                for j in jobs
-                if j.get("status") == "in_progress"
-                and any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
-            )
-        except ReviewInputError:
-            active_writer_jobs = ()
+        # Missing jobs evidence is not evidence of writer absence. In particular,
+        # a transient first read must not become an empty/clean overlap report
+        # even if current_owner's later independent read succeeds.
+        jobs = self._jobs(identity, attempt)
+        active_writer_jobs = tuple(
+            str(j.get("name", ""))
+            for j in jobs
+            if j.get("status") == "in_progress"
+            and any(_writer_name(j.get("name"), n) for n in BUSINESS_WRITER_JOBS)
+        )
         exclusive_owner = False
         refusal_reason: str | None = None
         try:

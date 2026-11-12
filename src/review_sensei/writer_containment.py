@@ -629,7 +629,12 @@ class ContainedForwardingCoordinator(AuthorityHost):
         pull_request: int,
         observed_external_epoch: int,
     ) -> int:
-        """Refuse local frontier/authority state rolled back behind an external witness."""
+        """Compare one local snapshot against a supplied epoch floor.
+
+        This diagnostic does not authenticate the supplied integer or establish
+        writer authority. A deployment must obtain an authenticated witness
+        separately; the local checkpoint belongs to the observed local epoch.
+        """
 
         _require_containment(
             type(observed_external_epoch) is int and observed_external_epoch >= 1,
@@ -637,6 +642,9 @@ class ContainedForwardingCoordinator(AuthorityHost):
         )
         scope_key = self._scope_key(base_store_id, repository_id, pull_request)
         with self._lock, closing(self._connect_frontier()) as db:
+            # One read transaction prevents mixing epochs across independent
+            # hosts. Closing the connection releases the snapshot on refusal.
+            db.execute("BEGIN")
             row = db.execute(
                 "SELECT active_epoch, active_epoch_store_id FROM scope_epochs "
                 "WHERE scope_key=? AND base_store_id=? AND repository_id=? AND pull_request=?",
@@ -666,6 +674,7 @@ class ContainedForwardingCoordinator(AuthorityHost):
                 checkpoint_row is not None,
                 "enrolled writer frontier checkpoint is missing",
             )
+            db.commit()
         return active_epoch
 
     def reattach_active_writer(
@@ -1322,7 +1331,13 @@ def evaluate_side_coordinator_fencing_proof(
 
 @dataclass(frozen=True)
 class PhysicalBudgetGuaranteeSpec:
-    """Verified physical caller-budget conservation and tail-protection report."""
+    """Verified conservation plus a policy minimum, not a funding grant.
+
+    ``write_confirmation_tail`` is the required request cost of a future write
+    and its confirmation reads. It is not an observed reservation or available
+    capacity. Admission must independently reserve it from original funds.
+    Fully consumed terminal states can conserve requests with no capacity left.
+    """
 
     configured_limit: int
     startup_liability: int
@@ -1347,7 +1362,11 @@ def evaluate_physical_budget_guarantees(
     remaining_unallocated: int,
     write_confirmation_tail: int = 3,
 ) -> PhysicalBudgetGuaranteeSpec:
-    """Verify exact request conservation and permanent debit of uncertain writes."""
+    """Verify conservation, not admission or availability of confirmation funds.
+
+    The compatibility field ``write_confirmation_tail`` describes a policy
+    minimum only. No reservation is created or inferred by this diagnostic.
+    """
 
     for label, value in (
         ("configured_limit", configured_limit),
