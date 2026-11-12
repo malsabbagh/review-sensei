@@ -71,6 +71,11 @@ def observe_selected_action(
     """
     if not isinstance(record, SessionRecord) or record.identity() != identity:
         raise ReviewInputError("accepted action record scope conflicts")
+    # Frozen records still expose nested mappings. Revalidate and detach the
+    # selected snapshot so post-construction mutation cannot keep the old root
+    # label while changing the observed action. This is integrity, not native
+    # discovery, freshness, writer exclusion or recovery authority.
+    record = SessionRecord.from_dict(record.to_dict())
     if record.api_run_accounting is None:
         raise ReviewInputError("accepted action record lacks caller accounting")
     state = ApiRunAccounting.from_document(record.api_run_accounting)
@@ -89,7 +94,7 @@ def observe_selected_action(
     return AcceptedActionObservation(
         root_sha256=record.record_sha256,
         accounting_sha256=hashlib.sha256(
-            canonical_bytes(state.to_document())
+            canonical_bytes(record.api_run_accounting)
         ).hexdigest(),
         run_id=state.identity.run_id,
         operation_key=intent["operation_key"],

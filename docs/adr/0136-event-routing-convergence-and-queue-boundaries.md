@@ -139,9 +139,14 @@ and terminal-result writer are the durable producer for ordinary command/reply
 actions. `accepted_action` now provides a typed observation of those exact
 accounting bytes, source revision, operation key, head, phase, uncertainty and
 terminal outcome. Ordinary source lifecycle classification consumes the same
-normalizer rather than independently interpreting the action mapping. Terminal
-normalization uses the existing retained-result decoder and exact operation /
-producer binding before returning a result digest.
+normalizer rather than independently interpreting the action mapping. The
+selected record is locally integrity-checked and detached before normalization:
+post-construction mutation of its nested accounting cannot retain the old root
+hash while changing the observation. The accounting digest hashes the canonical
+stored mapping directly, not a second model serialization. Neither check
+authenticates an arbitrary copied/evolved record or establishes native freshness.
+Terminal normalization uses the existing retained-result decoder and exact
+operation / producer binding before returning a result digest.
 
 `read_current_action` is a separate read-only entry point for a fresh process.
 It requires configured Bot ownership and the existing native read budget, loads

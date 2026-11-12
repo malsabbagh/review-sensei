@@ -29,8 +29,13 @@ from review_sensei_github.source_comment_lifecycle import (
 from test_api_work_persistence import HEAD, IDENTITY
 from test_source_comment_lifecycle_g27 import SOURCE, _prepare_fixture
 
-from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
+from review_sensei.bounded_evidence import (
+    MAX_PART_READS,
+    EvidenceReadBudget,
+    canonical_bytes,
+)
 from review_sensei.errors import ReviewInputError
+from review_sensei.session import SessionRecord
 
 
 class AcceptedActionTests(unittest.TestCase):
@@ -69,6 +74,36 @@ class AcceptedActionTests(unittest.TestCase):
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(budget.calls, 1)
 
+    def test_expired_or_exhausted_budget_refuses_without_http_or_replacement(self):
+        for mode in ("expired", "exhausted"):
+            with self.subTest(mode=mode):
+                clock = [0.0]
+                budget = EvidenceReadBudget(clock=lambda: clock[0])
+                if mode == "expired":
+                    clock[0] = budget.deadline
+                else:
+                    budget.calls = MAX_PART_READS
+                snapshot = budget.snapshot()
+                http, calls = make_http([])
+                reader = GitHubIssueCommentSessionLedger(
+                    http,
+                    token="synthetic-read-only",
+                    app_slug="reviewsensei[bot]",
+                    evidence_budget=budget,
+                )
+                with (
+                    patch.object(
+                        EvidenceReadBudget,
+                        "__init__",
+                        side_effect=AssertionError("no replacement read allowance"),
+                    ),
+                    self.assertRaisesRegex(ReviewInputError, "exhausted"),
+                ):
+                    read_current_action(reader, IDENTITY)
+                self.assertEqual(calls, [])
+                self.assertIs(reader.evidence_budget, budget)
+                self.assertEqual(budget.snapshot(), snapshot)
+
     def test_pending_observation_is_detached_and_does_not_prove_non_dispatch(self):
         with tempfile.TemporaryDirectory() as directory:
             f, _, ledger, _, _, intent, record = _prepare_fixture(directory)
@@ -100,6 +135,26 @@ class AcceptedActionTests(unittest.TestCase):
             ):
                 self.assertFalse(hasattr(observation, absent))
             self.assertEqual(f.accounted.accounting.action["phase"], "pending")
+
+    def test_selected_snapshot_rejects_nested_mutation_under_original_root_hash(self):
+        for field, value in (("operation_key", "e" * 64), ("head_sha", "f" * 40)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                f, _, ledger, _, _, _, record = _prepare_fixture(directory)
+                root = record.record_sha256
+                original_comment = copy.deepcopy(f.comment)
+                # SessionRecord is frozen, but its nested mapping is not.
+                record.api_run_accounting["action"]["intent"][field] = value
+                count = len(f.trace)
+                with self.assertRaisesRegex(ReviewInputError, "integrity check failed"):
+                    observe_selected_action(ledger, IDENTITY, record)
+                self.assertEqual(record.record_sha256, root)
+                self.assertEqual(f.comment, original_comment)
+                self.assertEqual(len(f.trace), count)
+                # Re-reading the actual stored root is unaffected and does not
+                # inherit the caller's mutated in-memory value.
+                current = read_current_action(ledger, IDENTITY)
+                self.assertEqual(current.root_sha256, root)
+                self.assertNotEqual(getattr(current, field), value)
 
     def test_ordinary_lifecycle_consumes_observation_without_extra_requests(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -210,11 +265,13 @@ print(json.dumps({"observation": asdict(observation), "calls": calls}))
             )
             # Valid root structure is insufficient when retained result binding
             # names another operation's authenticated producer.
-            document = closed.to_dict()
+            document = copy.deepcopy(closed.to_dict())
             document["api_run_accounting"]["action"]["result"]["binding"][
                 "producer"
             ] = "github-bot:1234"
-            forged = closed.evolve(api_run_accounting=document["api_run_accounting"])
+            forged = SessionRecord.create(IDENTITY).evolve(
+                api_run_accounting=document["api_run_accounting"]
+            )
             with self.assertRaises(ReviewInputError):
                 observe_selected_action(ledger, IDENTITY, forged)
             before = copy.deepcopy(f.comment)
