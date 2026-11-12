@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -661,6 +662,7 @@ def bootstrap(
     source: Mapping[str, object] | None = None,
     quarantine_predecessor_comment_id: int | None = None,
     restart_id: str | None = None,
+    rollover_service: Callable[..., Any] | None = None,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
     lifecycle_diagnostics.phase("bootstrap")
@@ -1111,14 +1113,25 @@ def bootstrap(
                         native, identity, frozen, owner, previous_root, authenticate
                     )
                 else:
-                    caller.rollover_and_activate(
-                        native,
-                        identity,
-                        frozen,
-                        owner,
-                        previous_root,
-                        require_cessation,
-                    )
+                    if rollover_service is None:
+                        caller.rollover_and_activate(
+                            native,
+                            identity,
+                            frozen,
+                            owner,
+                            previous_root,
+                            require_cessation,
+                        )
+                    else:
+                        rollover_service(
+                            caller,
+                            native,
+                            identity,
+                            frozen,
+                            owner,
+                            previous_root,
+                            require_cessation,
+                        )
             else:
                 raise ReviewInputError("previous caller root cannot be authenticated")
         except GitHubPublicationTransientError:

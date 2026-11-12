@@ -2058,8 +2058,9 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ReviewInputError, "requires a predecessor accounting record"
             ):
-                with _cross_run_unstarted_rollover_guard(cross_gate):
-                    ApiRunRequestTransport.rollover_and_activate(
+                with _cross_run_unstarted_rollover_guard(cross_gate) as rollover:
+                    assert rollover is not None
+                    rollover(
                         f.accounted,
                         f.selected.ledger,
                         IDENTITY,
@@ -2069,6 +2070,47 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
                         lambda: None,
                     )
 
+            # An overlapping ordinary request must not inherit the recovery gate,
+            # and same-thread nested work must retain the ordinary transport too.
+            from concurrent.futures import ThreadPoolExecutor
+            from threading import Barrier
+
+            original_rollover = ApiRunRequestTransport.rollover_and_activate
+            rendezvous = Barrier(2)
+
+            def ordinary_request():
+                rendezvous.wait(timeout=5)
+                with _cross_run_unstarted_rollover_guard(None) as ordinary:
+                    return ordinary, ApiRunRequestTransport.rollover_and_activate
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                ordinary_result = executor.submit(ordinary_request)
+                with self.assertRaisesRegex(
+                    ReviewInputError, "requires a predecessor accounting record"
+                ):
+                    with _cross_run_unstarted_rollover_guard(cross_gate) as scoped:
+                        assert scoped is not None
+                        rendezvous.wait(timeout=5)
+                        dependency, transport_method = ordinary_result.result(timeout=5)
+                        self.assertIsNone(dependency)
+                        self.assertIs(transport_method, original_rollover)
+                        self.assertIs(
+                            ApiRunRequestTransport.rollover_and_activate,
+                            original_rollover,
+                        )
+                        scoped(
+                            f.accounted,
+                            f.selected.ledger,
+                            IDENTITY,
+                            None,
+                            None,
+                            None,
+                            lambda: None,
+                        )
+            self.assertIs(
+                ApiRunRequestTransport.rollover_and_activate, original_rollover
+            )
+
             wrong_cross_gate = UnstartedCallerRecoveryGate(
                 target_run_id=f.run_id + 1,
                 no_business_dispatch_evidence=mismatch_ev,
@@ -2076,8 +2118,9 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
                 use_actions_evidence=True,
             )
             with self.assertRaisesRegex(ReviewInputError, "conflicts with predecessor"):
-                with _cross_run_unstarted_rollover_guard(wrong_cross_gate):
-                    ApiRunRequestTransport.rollover_and_activate(
+                with _cross_run_unstarted_rollover_guard(wrong_cross_gate) as rollover:
+                    assert rollover is not None
+                    rollover(
                         f.accounted,
                         f.selected.ledger,
                         IDENTITY,
@@ -2090,8 +2133,9 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ReviewInputError, "requires authenticated actions_token"
             ):
-                with _cross_run_unstarted_rollover_guard(cross_gate):
-                    ApiRunRequestTransport.rollover_and_activate(
+                with _cross_run_unstarted_rollover_guard(cross_gate) as rollover:
+                    assert rollover is not None
+                    rollover(
                         f.accounted,
                         object(),  # type: ignore[arg-type]
                         IDENTITY,

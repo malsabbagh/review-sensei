@@ -10,8 +10,7 @@ import argparse
 import hashlib
 import json
 import os
-import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -100,103 +99,97 @@ class UnstartedCallerRecoveryGate:
         return self.no_business_dispatch_evidence
 
 
-_ROLLOVER_GUARD_LOCK = threading.RLock()
-
-
 @contextmanager
 def _cross_run_unstarted_rollover_guard(
     gate: UnstartedCallerRecoveryGate | None,
-) -> Iterator[bool]:
+) -> Iterator[Callable[..., Any] | None]:
+    """Yield one explicit bootstrap dependency; never mutate shared transport methods.
+
+    Gate evidence is internal authenticated caller authority, not a CLI document.
+    Nested or concurrent ordinary bootstraps receive no recovery dependency.
+    """
     if gate is None:
-        yield False
+        yield None
         return
     evidence_obj = gate.validate_preconditions()
     if gate.mode != "cross_run":
-        yield False
+        yield None
         return
 
-    with _ROLLOVER_GUARD_LOCK:
-        original_rollover = ApiRunRequestTransport.rollover_and_activate
-        owner_thread_id = threading.get_ident()
-        applied = False
+    original_rollover = ApiRunRequestTransport.rollover_and_activate
+    applied = False
 
-        def _guarded_rollover(
-            self: ApiRunRequestTransport,
-            native: Any,
-            identity: Any,
-            frozen: Any,
-            owner: Any,
-            previous_root: Any,
-            require_cessation: Any,
-        ) -> Any:
-            nonlocal applied
-            if threading.get_ident() != owner_thread_id or applied:
-                return original_rollover(
-                    self,
-                    native,
-                    identity,
-                    frozen,
-                    owner,
-                    previous_root,
-                    require_cessation,
-                )
-            if previous_root is None or previous_root.api_run_accounting is None:
-                raise ReviewInputError(
-                    "cross-run unstarted recovery requires a predecessor accounting record"
-                )
-            prev_state = ApiRunAccounting.from_document(
-                previous_root.api_run_accounting
+    def _guarded_rollover(
+        self: ApiRunRequestTransport,
+        native: Any,
+        identity: Any,
+        frozen: Any,
+        owner: Any,
+        previous_root: Any,
+        require_cessation: Any,
+    ) -> Any:
+        nonlocal applied
+        if applied:
+            return original_rollover(
+                self,
+                native,
+                identity,
+                frozen,
+                owner,
+                previous_root,
+                require_cessation,
             )
-            if prev_state.identity.run_id != gate.target_run_id:
-                raise ReviewInputError(
-                    "cross-run unstarted recovery gate target_run_id conflicts with predecessor"
-                )
-            actions_ev: ApiRunActionsEvidence | None = None
-            if gate.use_actions_evidence:
-                origin_reader = getattr(native, "_quarantine_origin_reader", None)
-                actions_tok = getattr(origin_reader, "actions_token", None)
-                if not isinstance(actions_tok, str) or not actions_tok.strip():
-                    raise ReviewInputError(
-                        "cross-run unstarted recovery requires authenticated actions_token"
-                    )
-                actions_ev = ApiRunActionsEvidence(
-                    native.http,
-                    token=actions_tok,
-                    command_run_id=str(self.run.run_id),
-                    job=self.job,
-                )
-            require_cessation()
-            classification, activated = execute_source_lifecycle_route(
-                caller=self,
-                ledger=native,
-                identity=identity,
-                record=previous_root,
-                candidate_source=None,
-                mode="cross_run",
-                actions_evidence=actions_ev,
-                canonical_coordinator=gate.canonical_coordinator,
-                canonical_token=gate.canonical_token,
-                no_business_dispatch_evidence=evidence_obj,
-                require_positive_dispatch_proof=True,
-                rollover_configuration=frozen,
-                rollover_owner=owner,
-            )
-            if classification.route != "g32_unstarted_cancellation":
-                raise ReviewInputError(
-                    f"cross-run unstarted recovery refused on route {classification.route!r}"
-                )
-            applied = True
-            return activated
-
-        setattr(ApiRunRequestTransport, "rollover_and_activate", _guarded_rollover)
-        try:
-            yield True
-        finally:
-            setattr(ApiRunRequestTransport, "rollover_and_activate", original_rollover)
-        if not applied:
+        if previous_root is None or previous_root.api_run_accounting is None:
             raise ReviewInputError(
-                "cross-run unstarted recovery gate did not settle a stranded predecessor"
+                "cross-run unstarted recovery requires a predecessor accounting record"
             )
+        prev_state = ApiRunAccounting.from_document(previous_root.api_run_accounting)
+        if prev_state.identity.run_id != gate.target_run_id:
+            raise ReviewInputError(
+                "cross-run unstarted recovery gate target_run_id conflicts with predecessor"
+            )
+        actions_ev: ApiRunActionsEvidence | None = None
+        if gate.use_actions_evidence:
+            origin_reader = getattr(native, "_quarantine_origin_reader", None)
+            actions_tok = getattr(origin_reader, "actions_token", None)
+            if not isinstance(actions_tok, str) or not actions_tok.strip():
+                raise ReviewInputError(
+                    "cross-run unstarted recovery requires authenticated actions_token"
+                )
+            actions_ev = ApiRunActionsEvidence(
+                native.http,
+                token=actions_tok,
+                command_run_id=str(self.run.run_id),
+                job=self.job,
+            )
+        require_cessation()
+        classification, activated = execute_source_lifecycle_route(
+            caller=self,
+            ledger=native,
+            identity=identity,
+            record=previous_root,
+            candidate_source=None,
+            mode="cross_run",
+            actions_evidence=actions_ev,
+            canonical_coordinator=gate.canonical_coordinator,
+            canonical_token=gate.canonical_token,
+            no_business_dispatch_evidence=evidence_obj,
+            require_positive_dispatch_proof=True,
+            rollover_configuration=frozen,
+            rollover_owner=owner,
+        )
+        if classification.route != "g32_unstarted_cancellation":
+            raise ReviewInputError(
+                f"cross-run unstarted recovery refused on route {classification.route!r}"
+            )
+        applied = True
+        return activated
+
+    yield _guarded_rollover
+    if not applied:
+        raise ReviewInputError(
+            "cross-run unstarted recovery gate did not settle a stranded predecessor"
+        )
 
 
 def event_source(args: Any, *, purpose: str) -> dict[str, object]:
@@ -724,13 +717,14 @@ def run_action(
     if not args.head_sha:
         args.head_sha = None
     args.rescan = args.review_remaining = False
-    with _cross_run_unstarted_rollover_guard(unstarted_recovery):
+    with _cross_run_unstarted_rollover_guard(unstarted_recovery) as rollover_service:
         run = bootstrap(
             args,
             run_directory=options.run_directory,
             policy_commit=options.policy_commit,
             purpose=purpose,
             source=source,
+            rollover_service=rollover_service,
         )
     same_run_gate = (
         unstarted_recovery
