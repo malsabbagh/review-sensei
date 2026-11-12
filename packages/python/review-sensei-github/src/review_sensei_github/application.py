@@ -9,6 +9,13 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, TypedDict, cast
 
+from review_sensei.active_finding_window import (
+    ActiveWindowRoundState,
+    AuthorizedCoverageAcceptance,
+    AuthorizedHumanOverride,
+    ConfirmedFixEvidence,
+    assert_no_deferred_leakage,
+)
 from review_sensei.baseline import ReviewBaseline
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.budgets import ReviewWorkBudgets
@@ -26,11 +33,17 @@ from review_sensei.coverage import coverage_approval_state
 from review_sensei.diff import analyze_diff
 from review_sensei.disposition import MaintainerCommand
 from review_sensei.errors import ReviewInputError
+from review_sensei.finding_drift import (
+    DriftEvaluationResult,
+    FileDriftDescriptor,
+    project_drift_review_result,
+)
 from review_sensei.human_assessment import (
     MAX_HUMAN_FINDINGS,
     HumanAssessmentDecision,
     HumanAssessmentReply,
     HumanAssessmentService,
+    finding_instance_fingerprint,
 )
 from review_sensei.models import ConversationReply, ReviewResult, ReviewTransaction
 from review_sensei.outcomes import (
@@ -41,6 +54,7 @@ from review_sensei.outcomes import (
 from review_sensei.planning import related_paths_for_change
 from review_sensei.providers.base import ReviewProvider
 from review_sensei.reassessment_work import HumanAssessmentWork, reassess
+from review_sensei.rescan import AuthorizedRescan
 from review_sensei.scope import ContextRequest
 
 if TYPE_CHECKING:
@@ -49,6 +63,8 @@ if TYPE_CHECKING:
 from review_sensei.session import (
     SessionIdentity,
     SessionLedger,
+    SessionLoadError,
+    SessionLoadReason,
     admission_diagnostic,
     blocker_set_digest,
     complete_review_publication,
@@ -72,6 +88,15 @@ from .approval import (
     has_human_adjudication_findings,
     qualification_state_for_publication,
 )
+from .artifact_authority import (
+    ArchiveChainPartRef,
+    ArtifactEvaluationDecision,
+    ObservedGitHubArtifact,
+    OperatorReenrollReceipt,
+    OperatorReenrollRequest,
+    evaluate_operator_reenroll,
+    execute_restricted_operator_reenroll,
+)
 from .broker_client import BrokerClient
 from .check_diagnostics import CheckCapability, check_failure, observed_http_status
 from .checks import REVIEW_POLICY_MODES
@@ -93,6 +118,13 @@ from .publication import (
     ReviewApprovalFinalizer,
     ReviewPublisher,
     prepare_publication_review,
+)
+from .session_ledger import GitHubIssueCommentSessionLedger, _marker_shaped
+from .trust_transitions import (
+    AuthenticatedTrustMigration,
+    AuthenticatedTrustSnapshot,
+    TrustMigrationReceipt,
+    TrustTransitionDecision,
 )
 
 
@@ -121,6 +153,18 @@ class GitHubWriteOptions:
     github_session_ledger: bool = False
     operation_entry: str = "enabled"
     complete_inventory: bool = False
+    max_active_findings: int | None = None
+    enable_drift_tracking: bool = False
+
+    def __post_init__(self) -> None:
+        if self.max_active_findings is not None and (
+            isinstance(self.max_active_findings, bool)
+            or not isinstance(self.max_active_findings, int)
+            or self.max_active_findings < 1
+        ):
+            raise ReviewInputError("max_active_findings must be a positive integer")
+        if not isinstance(self.enable_drift_tracking, bool):
+            raise ReviewInputError("enable_drift_tracking must be a boolean")
 
     def review_policy(self) -> str:
         """Return the effective review policy mode for this invocation."""
@@ -504,21 +548,349 @@ class GitHubApplication:
         """
         from .publication_recovery import recover_retained_review_result
 
-        return recover_retained_review_result(
-            http=self.http,
-            token=token,
-            repository=repository,
+        try:
+            recovered = recover_retained_review_result(
+                http=self.http,
+                token=token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                ledger=ledger,
+                configuration_context=configuration_context,
+                evidence_context=evidence_context,
+                convergence_policy=convergence_policy,
+                budget=budget,
+                recovery_phase=recovery_phase,
+            )
+        except (ReviewInputError, GitHubPublicationError) as exc:
+            if isinstance(self.reviewer, ReviewPublisher):
+                msg_lower = str(exc).lower()
+                missing_part = any(
+                    word in msg_lower
+                    for word in ("missing", "absent", "not found", "unavailable")
+                )
+                self.reviewer.observe_artifact(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    observed=ObservedGitHubArtifact(
+                        artifact_kind="retained_result_part",
+                        artifact_id=f"retained:{pull_request}:{head_sha}",
+                        present=not missing_part,
+                        duplicate_count=0 if missing_part else 1,
+                        edited_by_human=not missing_part,
+                    ),
+                )
+            raise
+        if isinstance(self.reviewer, ReviewPublisher):
+            digest = recovered.content_digest()
+            self.reviewer.observe_artifact(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                observed=ObservedGitHubArtifact(
+                    artifact_kind="retained_result_part",
+                    artifact_id=f"retained:{pull_request}:{head_sha}",
+                    present=True,
+                    expected_sha256=digest,
+                    observed_sha256=digest,
+                ),
+            )
+        return recovered
+
+    def active_window_state(
+        self, *, repository_id: int, pull_request: int
+    ) -> ActiveWindowRoundState | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.active_window_state(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return None
+
+    def active_window_public_status(
+        self, *, repository_id: int, pull_request: int
+    ) -> dict[str, object] | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.active_window_public_status(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return None
+
+    def reconcile_active_window_slot(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        target: str,
+        resolved_state: str,
+        proof_sha256: str,
+    ) -> ActiveWindowRoundState:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError(
+                "active window reconciliation requires a ReviewPublisher"
+            )
+        return self.reviewer.reconcile_active_window_slot(
             repository_id=repository_id,
             pull_request=pull_request,
-            base_sha=base_sha,
+            target=target,
+            resolved_state=resolved_state,
+            proof_sha256=proof_sha256,
+        )
+
+    def drift_state(
+        self, *, repository_id: int, pull_request: int
+    ) -> DriftEvaluationResult | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.drift_state(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return None
+
+    def drift_public_status(
+        self, *, repository_id: int, pull_request: int
+    ) -> dict[str, object] | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.drift_public_status(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return None
+
+    def drift_baseline(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        baseline_template: ReviewBaseline,
+    ) -> ReviewBaseline | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.drift_baseline(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                baseline_template=baseline_template,
+            )
+        return None
+
+    def reconcile_drift_thread(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        thread_id: str,
+        resolved_state: str,
+        proof_sha256: str,
+    ) -> DriftEvaluationResult:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError(
+                "drift thread reconciliation requires a ReviewPublisher"
+            )
+        return self.reviewer.reconcile_drift_thread(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            thread_id=thread_id,
+            resolved_state=resolved_state,
+            proof_sha256=proof_sha256,
+        )
+
+    def artifact_decisions(
+        self, *, repository_id: int, pull_request: int
+    ) -> tuple[ArtifactEvaluationDecision, ...]:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.artifact_decisions(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return ()
+
+    def response_loss_hold(
+        self, *, repository_id: int, pull_request: int, head_sha: str
+    ) -> ArtifactEvaluationDecision | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.response_loss_hold(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )
+        return None
+
+    def observe_artifact(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        observed: ObservedGitHubArtifact,
+        identity: SessionIdentity | None = None,
+        enrollment_witness_present: bool = False,
+        has_active_reservation: bool = False,
+    ) -> ArtifactEvaluationDecision:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError("artifact observation requires a ReviewPublisher")
+        return self.reviewer.observe_artifact(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            observed=observed,
+            identity=identity,
+            enrollment_witness_present=enrollment_witness_present,
+            has_active_reservation=has_active_reservation,
+        )
+
+    def verify_archive_chain(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        expected_chain: Sequence[ArchiveChainPartRef],
+        observed_comments: Mapping[int, ObservedGitHubArtifact],
+    ) -> ArtifactEvaluationDecision:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError(
+                "archive chain verification requires a ReviewPublisher"
+            )
+        return self.reviewer.verify_archive_chain(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            expected_chain=expected_chain,
+            observed_comments=observed_comments,
+        )
+
+    def reconcile_response_loss_hold(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        observed: ObservedGitHubArtifact | None = None,
+        absent_proof_sha256: str | None = None,
+    ) -> ArtifactEvaluationDecision:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError(
+                "response-loss reconciliation requires a ReviewPublisher"
+            )
+        return self.reviewer.reconcile_response_loss_hold(
+            repository_id=repository_id,
+            pull_request=pull_request,
             head_sha=head_sha,
-            app_slug=app_slug,
-            ledger=ledger,
-            configuration_context=configuration_context,
-            evidence_context=evidence_context,
-            convergence_policy=convergence_policy,
-            budget=budget,
-            recovery_phase=recovery_phase,
+            observed=observed,
+            absent_proof_sha256=absent_proof_sha256,
+        )
+
+    def execute_operator_reenroll(
+        self,
+        *,
+        ledger: GitHubIssueCommentSessionLedger,
+        request: OperatorReenrollRequest,
+        now: Any = None,
+    ) -> tuple[Any, OperatorReenrollReceipt]:
+        enriched = request
+        if (
+            isinstance(self.reviewer, ReviewPublisher)
+            and type(request.identity.repository_id) is int
+        ):
+            rid = request.identity.repository_id
+            pr = request.identity.pull_request
+            active_blocking = max(
+                request.active_blocking_obligations,
+                self.reviewer.active_blocking_obligations_count(
+                    repository_id=rid, pull_request=pr
+                ),
+            )
+            has_uncertain = request.has_uncertain_write or any(
+                hrid == rid and hpr == pr
+                for (hrid, hpr, _sha) in self.reviewer._response_loss_holds
+            )
+            if (
+                active_blocking != request.active_blocking_obligations
+                or has_uncertain != request.has_uncertain_write
+            ):
+                enriched = replace(
+                    request,
+                    active_blocking_obligations=active_blocking,
+                    has_uncertain_write=has_uncertain,
+                )
+        return execute_restricted_operator_reenroll(ledger, enriched, now=now)
+
+    def enroll_trust_snapshot(
+        self, *, snapshot: AuthenticatedTrustSnapshot
+    ) -> AuthenticatedTrustSnapshot:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError(
+                "trust snapshot enrollment requires a ReviewPublisher"
+            )
+        return self.reviewer.enroll_trust_snapshot(snapshot=snapshot)
+
+    def trust_snapshot(
+        self, *, repository_id: int, pull_request: int
+    ) -> AuthenticatedTrustSnapshot | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.trust_snapshot(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return None
+
+    def trust_decisions(
+        self, *, repository_id: int, pull_request: int
+    ) -> tuple[TrustTransitionDecision, ...]:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.trust_decisions(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return ()
+
+    def has_unknown_trust_effect(
+        self, *, repository_id: int, pull_request: int
+    ) -> bool:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.has_unknown_trust_effect(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return False
+
+    def reconcile_unknown_trust_effect(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        reconciled_effect_sha256: str,
+    ) -> None:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError(
+                "unknown trust effect reconciliation requires a ReviewPublisher"
+            )
+        self.reviewer.reconcile_unknown_trust_effect(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            reconciled_effect_sha256=reconciled_effect_sha256,
+        )
+
+    def migrate_trust_boundary(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        target: AuthenticatedTrustSnapshot,
+        migration: AuthenticatedTrustMigration,
+        session_record: Any | None = None,
+        inventory: Any | None = None,
+        expected_transfer_attestation_sha256: str | None = None,
+    ) -> TrustMigrationReceipt:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError("trust migration requires a ReviewPublisher")
+        resolved_session = session_record
+        if resolved_session is None and self.session_ledger is not None:
+            enrolled = self.reviewer.trust_snapshot(
+                repository_id=repository_id, pull_request=pull_request
+            )
+            if enrolled is not None:
+                loaded = self.session_ledger.load(enrolled.to_session_identity())
+                if loaded.record is not None:
+                    resolved_session = loaded.record
+        return self.reviewer.migrate_trust_boundary(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            target=target,
+            migration=migration,
+            session_record=resolved_session,
+            inventory=inventory,
+            expected_transfer_attestation_sha256=expected_transfer_attestation_sha256,
         )
 
     def publish_review(
@@ -553,6 +925,21 @@ class GitHubApplication:
         continuation_digest: str | None = None,
         source_guard: Callable[[], bool] | None = None,
         publication_budget: EvidenceReadBudget | None = None,
+        max_active_findings: int | None = None,
+        confirmed_fixes: Sequence[ConfirmedFixEvidence] = (),
+        human_overrides: Sequence[AuthorizedHumanOverride] = (),
+        coverage_acceptance: AuthorizedCoverageAcceptance | None = None,
+        authorized_rescan: AuthorizedRescan | None = None,
+        enable_drift_tracking: bool = False,
+        drift_descriptors: Sequence[FileDriftDescriptor] = (),
+        host_outdated_threads: frozenset[str] = frozenset(),
+        host_resolved_threads: frozenset[str] = frozenset(),
+        observed_artifacts: Sequence[ObservedGitHubArtifact] = (),
+        archive_chain: tuple[
+            Sequence[ArchiveChainPartRef], Mapping[int, ObservedGitHubArtifact]
+        ]
+        | None = None,
+        observed_trust: AuthenticatedTrustSnapshot | None = None,
     ) -> PublicationResult:
         reviewer = self.reviewer
         resume_thread_cleanup = (
@@ -569,6 +956,56 @@ class GitHubApplication:
             )
         if options.operation_entry not in {"enabled", "disabled"}:
             raise GitHubPublicationError("operation entry mode is invalid")
+        if isinstance(reviewer, ReviewPublisher):
+            trust_adm = reviewer.check_trust_boundary(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                phase="before_admission",
+                operation="review",
+                observed=observed_trust,
+                repository_slug=repository,
+                head_sha=head_sha,
+                has_prior_charges=bool(
+                    self.session_ledger is not None or options.github_session_ledger
+                ),
+            )
+            if trust_adm is not None and not trust_adm.allowed:
+                raise GitHubPublicationError(
+                    f"repository trust transition refused ({trust_adm.phase}): {trust_adm.reason_code}"
+                )
+            if (
+                reviewer.response_loss_hold(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                )
+                is not None
+            ):
+                raise GitHubPublicationError(
+                    "review publication held uncertain after response loss; reconcile before retrying"
+                )
+            for observed_item in observed_artifacts:
+                obs_decision = reviewer.observe_artifact(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    observed=observed_item,
+                )
+                if not obs_decision.authority_intact:
+                    raise GitHubPublicationError(
+                        f"review artifact integrity refused: {obs_decision.reason_code}"
+                    )
+            if archive_chain is not None:
+                expected_refs, observed_map = archive_chain
+                chain_decision = reviewer.verify_archive_chain(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    expected_chain=expected_refs,
+                    observed_comments=observed_map,
+                )
+                if not chain_decision.authority_intact:
+                    raise GitHubPublicationError(
+                        f"archive chain integrity refused: {chain_decision.reason_code}"
+                    )
         prior_budget = (
             reviewer.finalizer.evidence_budget or reviewer.finalizer._operation_budget
             if isinstance(reviewer, ReviewPublisher)
@@ -796,7 +1233,22 @@ class GitHubApplication:
             app_slug=app_slug,
             evidence_budget=budget,
         )
-        present_loaded = _require_present_marker(ledger, identity, session_state)
+        reviewer_had_prior_round = isinstance(reviewer, ReviewPublisher) and (
+            (repository_id, pull_request) in reviewer._active_window_states
+            or (repository_id, pull_request) in reviewer._drift_states
+        )
+        effective_marker_state = (
+            "known"
+            if session_state == "known"
+            or (
+                reviewer_had_prior_round
+                and isinstance(ledger, GitHubIssueCommentSessionLedger)
+            )
+            else session_state
+        )
+        present_loaded = _require_present_marker(
+            ledger, identity, effective_marker_state, reviewer=reviewer
+        )
         if (
             transaction_record is None
             and ledger is not None
@@ -920,6 +1372,31 @@ class GitHubApplication:
                     ],
                     latest_head_reviewed=flags["latest_head_reviewed"],
                 )
+                if isinstance(ledger, GitHubIssueCommentSessionLedger) and isinstance(
+                    reviewer, ReviewPublisher
+                ):
+                    for cid, citem in ledger._comments_by_id.items():
+                        cbody = citem.get("body")
+                        if (
+                            isinstance(cbody, str)
+                            and _marker_shaped(cbody)
+                            and citem.get("edited_by_human") is True
+                        ):
+                            reviewer.observe_artifact(
+                                repository_id=repository_id,
+                                pull_request=pull_request,
+                                observed=ObservedGitHubArtifact(
+                                    artifact_kind="session_ledger_marker",
+                                    artifact_id=str(cid),
+                                    present=True,
+                                    edited_by_human=True,
+                                ),
+                                identity=identity,
+                                has_active_reservation=True,
+                            )
+                            raise GitHubPublicationError(
+                                "session ledger marker was edited by a human"
+                            )
                 if should_skip_automation(prepared.decision, inference=False):
                     return _with_shadow(
                         PublicationResult(
@@ -929,6 +1406,53 @@ class GitHubApplication:
                         _shadow_observation(_shadow_state(prepared, flags)),
                     )
             except BaseException as preparation_error:
+                if isinstance(reviewer, ReviewPublisher) and isinstance(
+                    preparation_error, (SessionLoadError, ReviewInputError)
+                ):
+                    err_text = str(preparation_error)
+                    if (
+                        isinstance(preparation_error, SessionLoadError)
+                        and preparation_error.reason == SessionLoadReason.CONFLICT
+                    ) or "session ledger load failed: conflict" in err_text:
+                        reviewer.observe_artifact(
+                            repository_id=repository_id,
+                            pull_request=pull_request,
+                            observed=ObservedGitHubArtifact(
+                                artifact_kind="session_ledger_marker",
+                                artifact_id=f"session:{repository_id}:{pull_request}",
+                                present=True,
+                                duplicate_count=2,
+                            ),
+                            identity=identity,
+                        )
+                    elif "session ledger load failed: expired" in err_text:
+                        reviewer.observe_artifact(
+                            repository_id=repository_id,
+                            pull_request=pull_request,
+                            observed=ObservedGitHubArtifact(
+                                artifact_kind="session_ledger_marker",
+                                artifact_id=f"session:{repository_id}:{pull_request}",
+                                present=True,
+                                stale_generation=True,
+                            ),
+                            identity=identity,
+                        )
+                    elif (
+                        isinstance(preparation_error, SessionLoadError)
+                        and preparation_error.reason
+                        == SessionLoadReason.INTEGRITY_FAILED
+                    ) or "session ledger load failed: integrity-failed" in err_text:
+                        reviewer.observe_artifact(
+                            repository_id=repository_id,
+                            pull_request=pull_request,
+                            observed=ObservedGitHubArtifact(
+                                artifact_kind="session_ledger_marker",
+                                artifact_id=f"session:{repository_id}:{pull_request}",
+                                present=True,
+                                edited_by_human=True,
+                            ),
+                            identity=identity,
+                        )
                 cleanup_error = self._abort_held_session_reservation(
                     ledger, identity, reservation
                 )
@@ -1139,8 +1663,6 @@ class GitHubApplication:
         publisher_started = False
         admission_recovery_held = False
         try:
-            from .session_ledger import GitHubIssueCommentSessionLedger
-
             unwrapped_ledger = getattr(ledger, "ledger", ledger)
             retention_context_required = (
                 validated_transaction_recovery
@@ -1528,6 +2050,50 @@ class GitHubApplication:
                 "evidence_confirmed_concerns": evidence_confirmed_concerns,
                 "authorized_dispositions": authorized_dispositions,
             }
+            effective_max_active = (
+                max_active_findings
+                if max_active_findings is not None
+                else options.max_active_findings
+            )
+            effective_drift = enable_drift_tracking or options.enable_drift_tracking
+            if (
+                isinstance(reviewer, ReviewPublisher)
+                or effective_max_active is not None
+                or confirmed_fixes
+                or human_overrides
+                or coverage_acceptance is not None
+                or authorized_rescan is not None
+                or effective_drift
+                or drift_descriptors
+                or host_outdated_threads
+                or host_resolved_threads
+            ):
+                publisher_arguments.update(
+                    max_active_findings=effective_max_active,
+                    confirmed_fixes=confirmed_fixes,
+                    human_overrides=human_overrides,
+                    coverage_acceptance=coverage_acceptance,
+                    authorized_rescan=authorized_rescan,
+                    enable_drift_tracking=effective_drift,
+                    drift_descriptors=drift_descriptors,
+                    host_outdated_threads=host_outdated_threads,
+                    host_resolved_threads=host_resolved_threads,
+                    **(
+                        {"observed_trust": observed_trust}
+                        if isinstance(reviewer, ReviewPublisher)
+                        and observed_trust is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "observed_artifacts": observed_artifacts,
+                            "archive_chain": archive_chain,
+                        }
+                        if not isinstance(reviewer, ReviewPublisher)
+                        and (observed_artifacts or archive_chain is not None)
+                        else {}
+                    ),
+                )
             if (
                 not options.complete_inventory
                 and admitted_inventory_store is not None
@@ -1826,6 +2392,14 @@ class GitHubApplication:
             )
         if isinstance(reviewer, ReviewPublisher):
             publication = reviewer._finish_thread_cleanup(publication)
+            window_after = reviewer.active_window_state(
+                repository_id=repository_id, pull_request=pull_request
+            )
+            if (
+                window_after is not None
+                and not window_after.approval_eligibility.approved
+            ):
+                flags["independently_approval_eligible"] = False
         if (
             isinstance(result, ReviewResult)
             and result.coverage_only_partial
@@ -1964,6 +2538,8 @@ class GitHubApplication:
         operation_parts: object | None = None,
         reviews_policy: str | None = None,
         convergence_policy: ReviewConvergencePolicy | None = None,
+        actor_id: int | None = None,
+        observed_trust: AuthenticatedTrustSnapshot | None = None,
     ):
         """Apply a maintainer command through its applicable authority boundary.
 
@@ -1986,6 +2562,70 @@ class GitHubApplication:
         typed_priors = cast(
             Sequence[tuple[str, Sequence[FindingIdentity]]], prior_inventories
         )
+        if (
+            typed_inventory is None
+            and not finding_fingerprints
+            and isinstance(self.reviewer, ReviewPublisher)
+        ):
+            window_state = self.reviewer.active_window_state(
+                repository_id=repository_id, pull_request=pull_request
+            )
+            if window_state is not None and window_state.head_sha == head_sha:
+                displayed_ids = {
+                    entry.obligation_id
+                    for entry in window_state.display_active_findings.entries
+                }
+                typed_inventory = tuple(
+                    FindingIdentity(
+                        instance=finding_instance_fingerprint(ob.comment),
+                        concern=ob.fingerprint,
+                        overridable=ob.required,
+                    )
+                    for ob in window_state.authoritative_decision_inventory.obligations
+                    if ob.obligation_id in displayed_ids
+                    and ob.unresolved
+                    and ob.comment is not None
+                )
+            else:
+                drift_state = self.reviewer.drift_state(
+                    repository_id=repository_id, pull_request=pull_request
+                )
+                if drift_state is not None and drift_state.head_sha == head_sha:
+                    projected_drift = project_drift_review_result(
+                        ReviewResult(
+                            summary="drift-command-inventory",
+                            comments=(),
+                            provider="internal",
+                            review_status=(
+                                "complete" if drift_state.review_complete else "partial"
+                            ),
+                        ),
+                        drift_state,
+                    )
+                    by_oid = {
+                        ob.obligation_id: ob for ob in drift_state.inventory.obligations
+                    }
+                    drift_identities: list[FindingIdentity] = []
+                    seen_drift_inst: set[str] = set()
+                    for entry, p_comment in zip(
+                        drift_state.active_entries,
+                        projected_drift.comments,
+                        strict=False,
+                    ):
+                        ob = by_oid.get(entry.obligation_id)
+                        if ob is None or not ob.unresolved:
+                            continue
+                        inst = finding_instance_fingerprint(p_comment)
+                        if inst not in seen_drift_inst:
+                            seen_drift_inst.add(inst)
+                            drift_identities.append(
+                                FindingIdentity(
+                                    instance=inst,
+                                    concern=ob.criterion.original_fingerprint,
+                                    overridable=ob.blocks_approval_now,
+                                )
+                            )
+                    typed_inventory = tuple(drift_identities)
 
         # Parse only the command spelling before choosing an authority path.
         # This placeholder deliberately prevents untrusted event actor/head
@@ -1998,6 +2638,50 @@ class GitHubApplication:
                 operator_paused=False,
                 summary="not-a-command",
             )
+        if (
+            isinstance(self.reviewer, ReviewPublisher)
+            and parsed_command.action != "status"
+        ):
+            cmd_op = (
+                "override"
+                if (
+                    parsed_command.action
+                    in {
+                        "accept-risk",
+                        "dismiss",
+                        "defer",
+                        "accept-coverage-uncertainty",
+                        "approve-media",
+                        "reenroll",
+                    }
+                    or parsed_command.finding_reference
+                    or parsed_command.finding_references
+                )
+                else "command"
+            )
+            cmd_trust = self.reviewer.check_trust_boundary(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                phase="before_admission",
+                operation=cmd_op,
+                observed=observed_trust,
+                repository_slug=repository,
+                head_sha=head_sha,
+                actor_id=actor_id,
+                actor_login=actor_login,
+                actor_association=association,
+                actor_permission=actor_permission,
+                has_prior_charges=bool(
+                    self.session_ledger is not None or options.github_session_ledger
+                ),
+            )
+            if cmd_trust is not None and not cmd_trust.allowed:
+                return MaintainerCommandResult(
+                    action=parsed_command.action,
+                    applied=False,
+                    operator_paused=False,
+                    summary=cmd_trust.reason_code,
+                )
         from .run_authority import VerifiedRunAction
 
         current_mutation = isinstance(current_action, VerifiedRunAction)
@@ -2533,6 +3217,34 @@ class GitHubApplication:
             )
             if pre_effect_refusal is not None:
                 return pre_effect_refusal
+        if command.action == "reenroll" and isinstance(self.reviewer, ReviewPublisher):
+            active_blocking = self.reviewer.active_blocking_obligations_count(
+                repository_id=repository_id, pull_request=pull_request
+            )
+            has_uncertain = any(
+                hrid == repository_id and hpr == pull_request
+                for (hrid, hpr, _sha) in self.reviewer._response_loss_holds
+            )
+            if active_blocking > 0 or has_uncertain:
+                reenroll_check = evaluate_operator_reenroll(
+                    OperatorReenrollRequest(
+                        identity=identity,
+                        head_sha=head_sha,
+                        operator_login=command.actor,
+                        association=attested_association or "OWNER",
+                        permission=actor_permission,
+                        reason=command.reason or "maintainer reenroll request",
+                        active_blocking_obligations=active_blocking,
+                        has_uncertain_write=has_uncertain,
+                    ),
+                    ledger_status="missing",
+                )
+                return MaintainerCommandResult(
+                    action="reenroll",
+                    applied=False,
+                    operator_paused=True,
+                    summary=reenroll_check.reason_code,
+                )
         if (
             command.action == "verify"
             and operation_entry == "enabled"
@@ -2985,22 +3697,72 @@ class GitHubApplication:
         head_sha: str,
         base_branch: str,
         base_sha: str,
-        artifact: RecoveryArtifact,
+        artifact: RecoveryArtifact | None,
         diff: str,
         app_slug: str,
         now=None,
         convergence_policy: ReviewConvergencePolicy | None = None,
         configuration_context: Mapping[str, object] | None = None,
+        expected_result_sha256: str | None = None,
+        edited_by_human: bool = False,
     ) -> PublicationResult:
         """Publish a retained result without invoking a model or writing learnings."""
 
-        artifact.validate(
-            repository=repository,
-            pull_request_number=pull_request,
-            base_sha=base_sha,
-            head_sha=head_sha,
-            now=now,
-        )
+        if artifact is None:
+            if isinstance(self.reviewer, ReviewPublisher):
+                self.reviewer.observe_artifact(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    observed=ObservedGitHubArtifact(
+                        artifact_kind="retained_result_part",
+                        artifact_id=f"recovery:{repository_id}:{pull_request}:{head_sha}",
+                        present=False,
+                        duplicate_count=0,
+                    ),
+                )
+            raise ReviewInputError(
+                "recovery artifact is missing",
+                diagnostic="recovery_artifact_missing",
+            )
+        try:
+            artifact.validate(
+                repository=repository,
+                pull_request_number=pull_request,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                now=now,
+            )
+        except ReviewInputError:
+            if isinstance(self.reviewer, ReviewPublisher):
+                self.reviewer.observe_artifact(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    observed=ObservedGitHubArtifact(
+                        artifact_kind="retained_result_part",
+                        artifact_id=f"recovery:{repository_id}:{pull_request}:{head_sha}",
+                        present=True,
+                        edited_by_human=True,
+                    ),
+                )
+            raise
+        if isinstance(self.reviewer, ReviewPublisher):
+            part_decision = self.reviewer.observe_artifact(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                observed=ObservedGitHubArtifact(
+                    artifact_kind="retained_result_part",
+                    artifact_id=f"recovery:{repository_id}:{pull_request}:{head_sha}",
+                    present=True,
+                    edited_by_human=edited_by_human,
+                    expected_sha256=(expected_result_sha256 or artifact.result_sha256),
+                    observed_sha256=artifact.result_sha256,
+                ),
+            )
+            if not part_decision.authority_intact:
+                raise ReviewInputError(
+                    f"retained recovery artifact refused: {part_decision.reason_code}",
+                    diagnostic="recovery_artifact_tampered",
+                )
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
         result = ReviewResult.from_dict(artifact.result)
@@ -3530,11 +4292,31 @@ class GitHubApplication:
         operation_parts: object | None = None,
         evidence_budget: EvidenceReadBudget | None = None,
         current_action: object | None = None,
+        observed_trust: AuthenticatedTrustSnapshot | None = None,
     ) -> ReplyResult:
         """Authorize, generate, validate, and publish one mention reply."""
 
         if not options.github_writes or not options.mention_replies:
             return ReplyResult(status="disabled")
+        if (
+            isinstance(self.reviewer, ReviewPublisher)
+            and type(repository_id) is int
+            and repository_id > 0
+        ):
+            reply_trust = self.reviewer.check_trust_boundary(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                phase="before_admission",
+                operation="reply",
+                observed=observed_trust,
+                repository_slug=repository,
+                head_sha=expected_head_sha,
+                has_prior_charges=bool(self.session_ledger is not None),
+            )
+            if reply_trust is not None and not reply_trust.allowed:
+                raise GitHubPublicationError(
+                    f"repository trust transition refused ({reply_trust.phase}): {reply_trust.reason_code}"
+                )
         if current_action is not None:
             from .run_authority import VerifiedRunAction
 
@@ -4151,12 +4933,37 @@ def _require_present_marker(
     ledger: SessionLedger | None,
     identity: SessionIdentity,
     session_state: str | None,
+    *,
+    reviewer: Any = None,
 ) -> Any:
     """Fail closed when the broker witnessed a marker the ledger cannot find."""
 
     if ledger is not None and session_state == "known":
         loaded = ledger.load(identity)
+        rid = identity.repository_id
+        pr = identity.pull_request
+        can_record = (
+            isinstance(reviewer, ReviewPublisher)
+            and type(rid) is int
+            and rid > 0
+            and type(pr) is int
+            and pr > 0
+        )
         if loaded.status == "missing":
+            if can_record:
+                assert isinstance(rid, int)
+                reviewer.observe_artifact(
+                    repository_id=rid,
+                    pull_request=pr,
+                    observed=ObservedGitHubArtifact(
+                        artifact_kind="session_ledger_marker",
+                        artifact_id=f"session:{rid}:{pr}",
+                        present=False,
+                        duplicate_count=0,
+                    ),
+                    identity=identity,
+                    enrollment_witness_present=True,
+                )
             # The broker's authenticated witness says this session already
             # exists, so a missing marker means the comment was deleted. Fail
             # closed before any ledger call below can re-create it, and name
@@ -4165,6 +4972,104 @@ def _require_present_marker(
                 "session ledger marker is missing; authenticated recovery is "
                 "required: a maintainer must comment `@reviewsensei review reenroll` "
                 "to re-establish this session"
+            )
+        if loaded.status == "conflict":
+            if can_record:
+                assert isinstance(rid, int)
+                reviewer.observe_artifact(
+                    repository_id=rid,
+                    pull_request=pr,
+                    observed=ObservedGitHubArtifact(
+                        artifact_kind="session_ledger_marker",
+                        artifact_id=f"session:{rid}:{pr}",
+                        present=True,
+                        duplicate_count=2,
+                    ),
+                    identity=identity,
+                    enrollment_witness_present=True,
+                )
+            raise GitHubPublicationError(
+                "session ledger marker conflict; duplicate session markers detected"
+            )
+        if loaded.status == "integrity-failed":
+            if can_record:
+                assert isinstance(rid, int)
+                reviewer.observe_artifact(
+                    repository_id=rid,
+                    pull_request=pr,
+                    observed=ObservedGitHubArtifact(
+                        artifact_kind="session_ledger_marker",
+                        artifact_id=f"session:{rid}:{pr}",
+                        present=True,
+                        edited_by_human=True,
+                    ),
+                    identity=identity,
+                    enrollment_witness_present=True,
+                )
+            raise GitHubPublicationError(
+                "session ledger marker integrity failed; authority refused"
+            )
+        if loaded.status == "expired":
+            if can_record:
+                assert isinstance(rid, int)
+                reviewer.observe_artifact(
+                    repository_id=rid,
+                    pull_request=pr,
+                    observed=ObservedGitHubArtifact(
+                        artifact_kind="session_ledger_marker",
+                        artifact_id=f"session:{rid}:{pr}",
+                        present=True,
+                        stale_generation=True,
+                    ),
+                    identity=identity,
+                    enrollment_witness_present=True,
+                )
+            raise GitHubPublicationError(
+                "session ledger marker expired; authenticated recovery is required"
+            )
+        if isinstance(ledger, GitHubIssueCommentSessionLedger):
+            edited_cid: int | None = None
+            for cid, citem in ledger._comments_by_id.items():
+                cbody = citem.get("body")
+                if (
+                    isinstance(cbody, str)
+                    and _marker_shaped(cbody)
+                    and citem.get("edited_by_human") is True
+                ):
+                    edited_cid = cid
+                    break
+            if edited_cid is not None:
+                if can_record:
+                    assert isinstance(rid, int)
+                    reviewer.observe_artifact(
+                        repository_id=rid,
+                        pull_request=pr,
+                        observed=ObservedGitHubArtifact(
+                            artifact_kind="session_ledger_marker",
+                            artifact_id=str(edited_cid),
+                            present=True,
+                            edited_by_human=True,
+                        ),
+                        identity=identity,
+                        enrollment_witness_present=True,
+                    )
+                raise GitHubPublicationError(
+                    "session ledger marker was edited by a human; authority refused"
+                )
+        if can_record and loaded.record is not None:
+            assert isinstance(rid, int)
+            reviewer.observe_artifact(
+                repository_id=rid,
+                pull_request=pr,
+                observed=ObservedGitHubArtifact(
+                    artifact_kind="session_ledger_marker",
+                    artifact_id=f"session:{rid}:{pr}",
+                    present=True,
+                    expected_sha256=loaded.record.record_sha256,
+                    observed_sha256=loaded.record.record_sha256,
+                ),
+                identity=identity,
+                enrollment_witness_present=True,
             )
         return loaded
     return None
@@ -4239,6 +5144,7 @@ def _with_shadow(
 ) -> PublicationResult:
     if not shadow:
         return result
+    assert_no_deferred_leakage(shadow)
     from .action_completion import rebind_publication_metadata
 
     updated = replace(result, shadow=dict(shadow))

@@ -1340,3 +1340,12 @@ A missing or malformed inventory cannot establish the engine boundary.
 
 Opt-in aggregate review triage is described in [review decisions](review-decisions.md)
 and proposed [ADR 0124](adr/0124-review-engine-decision-providers.md).
+
+
+## Check projection receipts are not artifact authority
+
+Ordinary, replayed and explicit partitioned publishers bind check observations to
+immutable numeric repository/PR, base/head and result identity. A successful native
+response survives optional observation failure without duplicate dispatch; later
+approval is held for that invocation. The projection receipt expressly does not
+evaluate durable authority. See [ADR 0134](adr/0134-bounded-active-findings-and-artifact-authority.md).

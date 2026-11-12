@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from .baseline import (
@@ -37,7 +37,7 @@ from .decision_provider import digest as decision_digest
 from .disposition import _require_reason, authorized_override
 from .errors import ReviewInputError
 from .human_assessment import finding_instance_fingerprint
-from .models import ReviewComment, ReviewResult
+from .models import FindingLifecycleRecord, ReviewComment, ReviewResult
 from .publication_selection import PublishedSlot
 from .rescan import AuthorizedRescan
 from .review_decision_receipt import validate_decision_receipt
@@ -1895,6 +1895,233 @@ def baseline_from_active_window(
     )
 
 
+def project_display_review_result(
+    result: ReviewResult,
+    state: ActiveWindowRoundState,
+) -> ReviewResult:
+    """Project a ``ReviewResult`` onto ``DisplayActiveWindow`` with zero deferred leakage."""
+
+    if not isinstance(result, ReviewResult):
+        raise ReviewInputError("project_display_review_result requires a ReviewResult")
+    if not isinstance(state, ActiveWindowRoundState):
+        raise ReviewInputError(
+            "project_display_review_result requires an ActiveWindowRoundState"
+        )
+    assert_no_deferred_leakage(state.to_public_status())
+    obligations_by_id = {
+        item.obligation_id: item
+        for item in state.authoritative_decision_inventory.obligations
+    }
+    display_comments: list[ReviewComment] = []
+    display_lifecycles: list[FindingLifecycleRecord] = []
+    seen_fingerprints: set[str] = set()
+    current_gen = max(0, state.round_number - 1)
+    for entry in state.display_active_findings.entries:
+        ob = obligations_by_id.get(entry.obligation_id)
+        if ob is None or ob.comment is None:
+            continue
+        base_comment = ob.comment
+        projected = replace(
+            base_comment,
+            path=ob.path or base_comment.path,
+            line=ob.line if ob.line is not None else base_comment.line,
+            side=ob.side,
+            symbol=ob.symbol if ob.symbol is not None else base_comment.symbol,
+            needs_human=ob.needs_human,
+            effective_blocking=(
+                True
+                if (
+                    ob.blocking
+                    or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
+                )
+                else False
+            ),
+        )
+        display_comments.append(projected)
+        fp = finding_lifecycle_for_comment(
+            projected, generation=ob.generation
+        ).fingerprint
+        if fp not in seen_fingerprints:
+            seen_fingerprints.add(fp)
+            lc_state = (
+                "uncertain"
+                if ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
+                else ("still-present" if ob.generation < current_gen else "new")
+            )
+            display_lifecycles.append(
+                FindingLifecycleRecord(fingerprint=fp, state=lc_state)
+            )
+    comments_tuple = tuple(display_comments)
+    lifecycles_tuple = tuple(display_lifecycles)
+    if (
+        comments_tuple == result.comments
+        and lifecycles_tuple == result.finding_lifecycles
+    ):
+        return result
+    return replace(
+        result,
+        comments=comments_tuple,
+        finding_lifecycles=lifecycles_tuple,
+        transaction=None,
+    )
+
+
+def apply_dispositions_to_window_state(
+    state: ActiveWindowRoundState,
+    *,
+    honored_fingerprints: Collection[str],
+    honored_instances: Collection[str],
+    actor: str,
+    head_sha: str,
+    slot_released: bool,
+    coverage_uncertainty_accepted: bool = False,
+) -> ActiveWindowRoundState:
+    """Apply honored maintainer command dispositions to a round's window state.
+
+    Only obligations displayed in ``state.display_active_findings`` may be
+    resolved by command overrides on ``head_sha``; non-displayed obligations
+    stay unresolved in ``authoritative_decision_inventory`` and continue to
+    gate ``approval_eligibility``.
+    """
+
+    if not isinstance(state, ActiveWindowRoundState):
+        raise ReviewInputError(
+            "apply_dispositions_to_window_state requires an ActiveWindowRoundState"
+        )
+    _require_commit_sha(head_sha, label="head_sha")
+    if state.head_sha != head_sha:
+        raise ReviewInputError(
+            "window disposition head_sha does not match active window"
+        )
+    if not isinstance(actor, str) or not actor.strip():
+        raise ReviewInputError("window disposition actor must be non-empty")
+    _require_bool(slot_released, label="slot_released")
+    _require_bool(coverage_uncertainty_accepted, label="coverage_uncertainty_accepted")
+
+    displayed_ids = {
+        entry.obligation_id for entry in state.display_active_findings.entries
+    }
+    honored_fp_set = frozenset(honored_fingerprints)
+    honored_inst_set = frozenset(honored_instances)
+    slot_map = {slot.target: slot for slot in state.display_active_findings.slots}
+    updated_obligations: list[AuthoritativeObligation] = []
+
+    for item in state.authoritative_decision_inventory.obligations:
+        item_instance = (
+            finding_instance_fingerprint(item.comment)
+            if item.comment is not None
+            else None
+        )
+        matched = item.obligation_id in displayed_ids and (
+            (item_instance is not None and item_instance in honored_inst_set)
+            or item.fingerprint in honored_fp_set
+        )
+        if item.unresolved and matched:
+            if item.native_target is not None:
+                existing_slot = slot_map.get(item.native_target)
+                if existing_slot is None or existing_slot.state == "uncertain":
+                    updated_obligations.append(item)
+                    continue
+                new_target_state = "released" if slot_released else "contingent"
+                proof = hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "kind": "command-override",
+                            "obligation_id": item.obligation_id,
+                            "actor": actor.strip(),
+                            "head_sha": head_sha,
+                            "slot_released": slot_released,
+                        }
+                    )
+                ).hexdigest()
+                slot_map[item.native_target] = PublishedSlot(
+                    target=item.native_target,
+                    state=new_target_state,
+                    proof_sha256=proof,
+                )
+                updated_obligations.append(
+                    replace(
+                        item,
+                        lifecycle_state="authorized-override",
+                        target_state=new_target_state,
+                        target_proof_sha256=proof,
+                        resolution_proof_sha256=proof,
+                    )
+                )
+            else:
+                proof = hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "kind": "command-override",
+                            "obligation_id": item.obligation_id,
+                            "actor": actor.strip(),
+                            "head_sha": head_sha,
+                            "slot_released": slot_released,
+                        }
+                    )
+                ).hexdigest()
+                updated_obligations.append(
+                    replace(
+                        item,
+                        lifecycle_state="authorized-override",
+                        resolution_proof_sha256=proof,
+                    )
+                )
+        else:
+            updated_obligations.append(item)
+
+    coverage_state = state.changed_file_coverage
+    if (
+        coverage_uncertainty_accepted
+        and not coverage_state.fully_reviewed
+        and not coverage_state.coverage_uncertainty_accepted
+        and coverage_state.approval_state == "partial"
+    ):
+        cov_proof = hashlib.sha256(
+            canonical_bytes(
+                {
+                    "kind": "command-coverage-acceptance",
+                    "actor": actor.strip(),
+                    "head_sha": head_sha,
+                }
+            )
+        ).hexdigest()
+        coverage_state = replace(
+            coverage_state,
+            coverage_uncertainty_accepted=True,
+            acceptance_proof_sha256=cov_proof,
+        )
+
+    inventory = AuthoritativeDecisionInventory(obligations=tuple(updated_obligations))
+    slots = tuple(slot_map.values())
+    retained_entries = tuple(
+        entry
+        for entry in state.display_active_findings.entries
+        if any(
+            ob.obligation_id == entry.obligation_id and ob.unresolved
+            for ob in updated_obligations
+        )
+    )
+    window = DisplayActiveWindow(
+        max_active_findings=state.display_active_findings.max_active_findings,
+        entries=retained_entries,
+        slots=slots,
+    )
+    eligibility = evaluate_window_approval_eligibility(
+        changed_file_coverage=coverage_state,
+        authoritative_decision_inventory=inventory,
+        display_active_findings=window,
+        review_complete=state.review_complete,
+    )
+    return replace(
+        state,
+        changed_file_coverage=coverage_state,
+        authoritative_decision_inventory=inventory,
+        display_active_findings=window,
+        approval_eligibility=eligibility,
+    )
+
+
 __all__ = [
     "AUTHORITATIVE_WINDOW_SCHEMA_VERSION",
     "ActiveWindowApprovalEligibility",
@@ -1920,6 +2147,7 @@ __all__ = [
     "RESOLVED_LIFECYCLE_STATES",
     "UNRESOLVED_LIFECYCLE_STATES",
     "WITHHELD_REASON_CODES",
+    "apply_dispositions_to_window_state",
     "assert_no_deferred_leakage",
     "baseline_from_active_window",
     "commit_window_publication",
@@ -1927,6 +2155,7 @@ __all__ = [
     "evaluate_window_approval_eligibility",
     "extract_decision_proposals",
     "obligation_from_comment",
+    "project_display_review_result",
     "reconcile_uncertain_slot",
     "select_display_active_window",
 ]

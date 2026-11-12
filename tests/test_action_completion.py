@@ -94,6 +94,146 @@ def expected_authority(state):
 
 
 class SourceCompletionTests(unittest.TestCase):
+    def test_check_observation_target_mismatch_refuses_before_dispatch(self):
+        from review_sensei_github.publication import _CheckObservationContext
+
+        from review_sensei.errors import ReviewInputError
+
+        state = State(prior(blocking=True))
+        publisher = ReviewPublisher(http=state.http)
+        context = _CheckObservationContext("owner/repo", 1, 1, BASE, "a" * 40, "f" * 64)
+        with self.assertRaisesRegex(ReviewInputError, "observation target changed"):
+            publisher._publish_check_state(
+                check_token="check",
+                repository="owner/repo",
+                head_sha=HEAD,
+                app_slug=APP,
+                outcome=None,
+                observation_context=context,
+            )
+        self.assertEqual(state.calls, [])
+
+    def test_carried_check_context_cannot_leak_to_another_invocation(self):
+        from review_sensei_github.publication import _CheckObservationContext
+
+        from review_sensei.errors import ReviewInputError
+
+        state = State(prior(blocking=True))
+        publisher = ReviewPublisher(http=state.http)
+        publisher._carried_context = dict(
+            token="synthetic", repository="foreign/repo", pull_request=1, head_sha=HEAD
+        )
+        context = _CheckObservationContext("owner/repo", 1, 1, BASE, HEAD, "f" * 64)
+        with self.assertRaisesRegex(
+            ReviewInputError, "carried check observation target changed"
+        ):
+            publisher._publish_check_state(
+                check_token="check",
+                repository="owner/repo",
+                head_sha=HEAD,
+                app_slug=APP,
+                outcome=review_check_outcome(
+                    policy="auto-approve",
+                    review_status="complete",
+                    required_fixes=False,
+                    required_decisions=False,
+                ),
+                observation_context=context,
+            )
+        self.assertEqual(state.calls, [])
+        with self.assertRaisesRegex(ReviewInputError, "binding is invalid"):
+            _CheckObservationContext("owner/repo", 1, 1, "a" * 41, HEAD, "f" * 64)
+
+    def test_observer_failure_preserves_check_receipt_and_prevents_finalizer(self):
+        from review_sensei_github.publication import _CheckObservationContext
+
+        state = State(prior(blocking=True))
+        publisher = ReviewPublisher(http=state.http)
+        context = _CheckObservationContext("owner/repo", 1, 1, BASE, HEAD, "f" * 64)
+        outcome = review_check_outcome(
+            policy="auto-approve",
+            review_status="complete",
+            required_fixes=True,
+            required_decisions=True,
+        )
+        with patch.object(
+            publisher, "_observe_confirmed_check", side_effect=RuntimeError("observer")
+        ):
+            diagnostic = publisher._check_state_or_diagnostic(
+                check_token="check",
+                repository="owner/repo",
+                head_sha=HEAD,
+                app_slug=APP,
+                outcome=outcome,
+                observation_context=context,
+            )
+        self.assertEqual(diagnostic, "approval_withheld")
+        self.assertIsNotNone(publisher._confirmed_check)
+        self.assertFalse(getattr(publisher, "_check_accounting_unknown", False))
+        with patch.object(publisher.finalizer, "finalize") as finalize:
+            publication = publisher._finalize_after_publication(
+                token="review",
+                repository="owner/repo",
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+                eligibility=state.eligibility,
+                check_diagnostic=diagnostic,
+                status="published",
+                review_id=50,
+            )
+        finalize.assert_not_called()
+        self.assertEqual(publication.status, "published")
+        self.assertEqual(publication.diagnostic, "approval_withheld")
+        self.assertFalse(finalization_confirmed(publication))
+
+    def test_observer_hold_does_not_hide_later_unknown_native_check_write(self):
+        from review_sensei_github.errors import GitHubHTTPTransientError
+        from review_sensei_github.publication import _CheckObservationContext
+
+        state = State(prior(blocking=True))
+        publisher = ReviewPublisher(http=state.http)
+        context = _CheckObservationContext("owner/repo", 1, 1, BASE, HEAD, "f" * 64)
+        outcome = review_check_outcome(
+            policy="auto-approve",
+            review_status="complete",
+            required_fixes=True,
+            required_decisions=True,
+        )
+        with patch.object(
+            publisher, "_observe_confirmed_check", side_effect=RuntimeError("observer")
+        ):
+            self.assertEqual(
+                publisher._check_state_or_diagnostic(
+                    check_token="check",
+                    repository="owner/repo",
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    outcome=outcome,
+                    observation_context=context,
+                ),
+                "approval_withheld",
+            )
+        confirmed = publisher._confirmed_check
+        complete = publisher.checks.complete
+
+        def lose_response(**arguments):
+            complete(**arguments)
+            raise GitHubHTTPTransientError("response lost")
+
+        with patch.object(publisher.checks, "complete", side_effect=lose_response):
+            diagnostic = publisher._check_state_or_diagnostic(
+                check_token="check",
+                repository="owner/repo",
+                head_sha=HEAD,
+                app_slug=APP,
+                outcome=outcome,
+                observation_context=context,
+            )
+        self.assertEqual(diagnostic, "check_temporarily_unavailable")
+        self.assertTrue(publisher._check_accounting_unknown)
+        self.assertEqual(publisher._confirmed_check, confirmed)
+
     def test_review_publication_requires_confirmed_check_then_explicit_cleanup(self):
         state = State(prior(blocking=True))
         publisher = ReviewPublisher(http=state.http)

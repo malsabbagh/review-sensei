@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import unittest
 from dataclasses import replace
+from typing import Any
 
 from review_sensei.active_finding_window import (
     PUBLIC_WINDOW_SCHEMA_VERSION,
@@ -372,7 +374,9 @@ class ActiveWindowLifecycleG10Tests(unittest.TestCase):
         # Verify public status NEVER leaks deferred count or deferred findings!
         pub1 = r1.to_public_status()
         self.assertEqual(pub1["schema_version"], PUBLIC_WINDOW_SCHEMA_VERSION)
-        self.assertEqual(len(pub1["active_findings"]), 2)
+        active_list = pub1["active_findings"]
+        assert isinstance(active_list, list)
+        self.assertEqual(len(active_list), 2)
         self.assertFalse(pub1["approval_eligible"])
         self.assertEqual(pub1["outcome"], "withheld")
         for forbidden in (
@@ -724,7 +728,7 @@ class ActiveWindowLifecycleG10Tests(unittest.TestCase):
             req,
             raw_result,
             provider=adapter,
-            review_provider=_StubReviewProvider(),
+            review_provider=_StubReviewProvider(),  # type: ignore[arg-type]
             settings=DecisionConfiguration(
                 enabled=True,
                 provider="fixture",
@@ -1597,6 +1601,952 @@ class ActiveWindowLifecycleG10Tests(unittest.TestCase):
                 prior_inventory=colliding_inv,
                 slots=(PublishedSlot("thread-login", "active", _sha("claimed")),),
             )
+
+
+ORDINARY_DIFF = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1,1 +1,15 @@
+-old_app
++line_1
++line_2
++line_3
++line_4
++line_5
++line_6
++line_7
++line_8
++line_9
++line_10
++line_11
++line_12
++line_13
++line_14
++line_15
+diff --git a/src/db.py b/src/db.py
+--- a/src/db.py
++++ b/src/db.py
+@@ -1,1 +1,35 @@
+-old_db
++db_1
++db_2
++db_3
++db_4
++db_5
++db_6
++db_7
++db_8
++db_9
++db_10
++db_11
++db_12
++db_13
++db_14
++db_15
++db_16
++db_17
++db_18
++db_19
++db_20
++db_21
++db_22
++db_23
++db_24
++db_25
++db_26
++db_27
++db_28
++db_29
++db_30
++db_31
++db_32
++db_33
++db_34
++db_35
+"""
+
+
+class _WindowFakeBroker:
+    def request_oidc_token(self) -> str:
+        return "oidc-window-test"
+
+    def exchange(self, _oidc: str, *, capability: str) -> str:
+        return f"tok-{capability}"
+
+
+class _WindowGitHubHost:
+    """Stateful fake GitHub host exercising real ReviewPublisher & GitHubApplication."""
+
+    def __init__(
+        self,
+        *,
+        head_sha: str = HEAD_1,
+        base_sha: str = BASE_SHA,
+        app_slug: str = "reviewsensei[bot]",
+    ) -> None:
+        from review_sensei_github import GitHubHttp
+
+        self.head_sha = head_sha
+        self.base_sha = base_sha
+        self.app_slug = app_slug
+        self.reviews: list[dict[str, Any]] = []
+        self.threads: list[dict[str, Any]] = []
+        self.check_runs: list[dict[str, Any]] = []
+        self.issue_comments: list[dict[str, Any]] = []
+        self.fail_next_review_post_transient = False
+        self.calls: list[tuple[str, str, object]] = []
+        self.http = GitHubHttp(api_url="https://api.github.test", opener=self._open)
+
+    def _resp(self, payload: object, status: int = 200):
+        from tests.fake_github_http import json_response
+
+        return json_response(payload, status)
+
+    def _open(self, request, timeout=None):
+        from urllib.parse import urlparse
+
+        from review_sensei_github.errors import GitHubHTTPTransientError
+
+        parsed = urlparse(request.full_url)
+        path = parsed.path
+        body = json.loads(request.data.decode("utf-8")) if request.data else None
+        self.calls.append((request.method, path, body))
+
+        if request.method == "GET":
+            if path.endswith("/pulls/1"):
+                return self._resp(
+                    {
+                        "state": "open",
+                        "draft": False,
+                        "changed_files": 2,
+                        "user": {"login": "dev-author", "type": "User"},
+                        "head": {
+                            "sha": self.head_sha,
+                            "ref": "feature",
+                            "repo": {"full_name": "owner/repo", "fork": False},
+                        },
+                        "base": {
+                            "sha": self.base_sha,
+                            "ref": "main",
+                            "repo": {"id": 1, "full_name": "owner/repo", "fork": False},
+                        },
+                    }
+                )
+            if path.endswith("/pulls/1/reviews"):
+                return self._resp(list(self.reviews))
+            if "/reviews/" in path and path.endswith("/comments"):
+                rid = int(path.split("/reviews/")[1].split("/")[0])
+                matched = [
+                    c
+                    for t in self.threads
+                    for c in t["comments"]["nodes"]
+                    if c.get("pull_request_review_id") == rid
+                ]
+                return self._resp(matched)
+            if path.endswith("/pulls/1/comments"):
+                return self._resp([])
+            if "/pulls/comments/" in path:
+                cid = int(path.rsplit("/", 1)[-1])
+                for t in self.threads:
+                    for c in t["comments"]["nodes"]:
+                        if c.get("databaseId") == cid:
+                            return self._resp(
+                                {
+                                    "id": cid,
+                                    "body": c["body"],
+                                    "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/1",
+                                    "user": {
+                                        "id": 9001,
+                                        "login": self.app_slug,
+                                        "type": "Bot",
+                                    },
+                                }
+                            )
+                return self._resp({"message": "Not Found"}, 404)
+            if path.endswith("/issues/1/comments"):
+                return self._resp(list(self.issue_comments))
+            if path.endswith("/check-runs"):
+                matching = [
+                    r for r in self.check_runs if r.get("head_sha") == self.head_sha
+                ]
+                return self._resp({"check_runs": matching})
+            if "/rules/branches/" in path:
+                return self._resp([])
+            if path.endswith("/protection"):
+                return self._resp({"message": "Not Found"}, 404)
+            if path == "/user" or path.startswith("/users/"):
+                return self._resp({"id": 9001, "login": self.app_slug, "type": "Bot"})
+            if "/collaborators/" in path and path.endswith("/permission"):
+                return self._resp({"permission": "maintain"})
+
+        if request.method == "POST":
+            if path.endswith("/pulls/1/reviews"):
+                if self.fail_next_review_post_transient:
+                    self.fail_next_review_post_transient = False
+                    raise GitHubHTTPTransientError("simulated review POST timeout")
+                assert isinstance(body, dict)
+                review_id = 100 + len(self.reviews)
+                state_map = {
+                    "APPROVE": "APPROVED",
+                    "REQUEST_CHANGES": "CHANGES_REQUESTED",
+                    "COMMENT": "COMMENTED",
+                }
+                ev = str(body.get("event", "COMMENT"))
+                record = {
+                    "id": review_id,
+                    "commit_id": body["commit_id"],
+                    "state": state_map.get(ev, "COMMENTED"),
+                    "body": body.get("body", ""),
+                    "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/1",
+                    "user": {"id": 9001, "login": self.app_slug, "type": "Bot"},
+                }
+                self.reviews.append(record)
+                for idx, comment in enumerate(body.get("comments") or ()):
+                    thread_id = f"PRRT_{review_id}_{idx}"
+                    self.threads.append(
+                        {
+                            "id": thread_id,
+                            "isResolved": False,
+                            "path": comment["path"],
+                            "line": comment["line"],
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "id": f"PRRC_{review_id}_{idx}",
+                                        "databaseId": review_id * 100 + idx,
+                                        "pull_request_review_id": review_id,
+                                        "body": comment["body"],
+                                        "author": {
+                                            "login": self.app_slug,
+                                            "__typename": "Bot",
+                                        },
+                                    }
+                                ]
+                            },
+                        }
+                    )
+                return self._resp(record, 200)
+            if path.endswith("/check-runs"):
+                assert isinstance(body, dict)
+                run_id = 500 + len(self.check_runs)
+                run = {
+                    "id": run_id,
+                    "name": body["name"],
+                    "head_sha": body["head_sha"],
+                    "status": body.get("status"),
+                    "conclusion": body.get("conclusion"),
+                    "output": body.get("output", {}),
+                    "app": {"slug": "reviewsensei"},
+                }
+                self.check_runs.append(run)
+                return self._resp(run, 201)
+            if path == "/graphql":
+                assert isinstance(body, dict)
+                query = str(body.get("query", ""))
+                variables = body.get("variables") or {}
+                if "resolveReviewThread" in query:
+                    tid = (variables.get("input") or {}).get(
+                        "threadId"
+                    ) or variables.get("threadId")
+                    for thread in self.threads:
+                        if thread["id"] == tid:
+                            thread["isResolved"] = True
+                            return self._resp(
+                                {
+                                    "data": {
+                                        "resolveReviewThread": {
+                                            "thread": {"id": tid, "isResolved": True}
+                                        }
+                                    }
+                                }
+                            )
+                    return self._resp(
+                        {"errors": [{"message": "thread not found"}]}, 200
+                    )
+                if body.get("operationName") == "ResolutionReadback":
+                    tid = variables.get("id")
+                    for thread in self.threads:
+                        if thread["id"] == tid:
+                            return self._resp(
+                                {
+                                    "data": {
+                                        "node": {
+                                            "id": tid,
+                                            "isResolved": thread["isResolved"],
+                                        }
+                                    }
+                                }
+                            )
+                    return self._resp({"data": {"node": None}}, 200)
+                return self._resp(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {
+                                        "nodes": list(self.threads),
+                                        "pageInfo": {
+                                            "hasNextPage": False,
+                                            "endCursor": None,
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+            if path.endswith("/issues/1/comments"):
+                assert isinstance(body, dict)
+                cid = 800 + len(self.issue_comments)
+                item = {
+                    "id": cid,
+                    "body": body["body"],
+                    "user": {"id": 9001, "login": self.app_slug, "type": "Bot"},
+                }
+                self.issue_comments.append(item)
+                return self._resp(item, 201)
+
+        if request.method == "PUT" and "/reviews/" in path:
+            assert isinstance(body, dict)
+            rid = int(path.rsplit("/", 1)[-1])
+            for rev in self.reviews:
+                if rev["id"] == rid:
+                    rev["body"] = body["body"]
+                    return self._resp(rev, 200)
+
+        if request.method == "PATCH" and "/check-runs/" in path:
+            assert isinstance(body, dict)
+            cid = int(path.rsplit("/", 1)[-1])
+            for run in self.check_runs:
+                if run["id"] == cid:
+                    run.update(body)
+                    return self._resp(run, 200)
+
+        raise AssertionError(f"Unhandled request: {request.method} {path}")
+
+
+class OrdinaryPublisherActiveWindowTests(unittest.TestCase):
+    """End-to-end ordinary ReviewPublisher & GitHubApplication G10 tests."""
+
+    def _make_app(self, host: _WindowGitHubHost, ledger_dir: str, *, cap: int = 2):
+        from pathlib import Path
+
+        from review_sensei_github import (
+            ConversationPublisher,
+            GitHubApplication,
+            GitHubWriteOptions,
+            LearningPRPublisher,
+            ReviewPublisher,
+        )
+
+        from review_sensei.session import LocalSessionLedger, SessionIdentity
+
+        publisher = ReviewPublisher(http=host.http)
+        ledger = LocalSessionLedger(Path(ledger_dir))
+        ledger.initialize(
+            SessionIdentity(repository="owner/repo", pull_request=1, repository_id=1)
+        )
+        app = GitHubApplication(
+            http=host.http,
+            broker=_WindowFakeBroker(),  # type: ignore[arg-type]
+            reviewer=publisher,
+            learner=LearningPRPublisher(http=host.http),
+            replier=ConversationPublisher(http=host.http),
+            session_ledger=None,
+        )
+        cmd_app = GitHubApplication(
+            http=host.http,
+            broker=_WindowFakeBroker(),  # type: ignore[arg-type]
+            reviewer=publisher,
+            learner=LearningPRPublisher(http=host.http),
+            replier=ConversationPublisher(http=host.http),
+            session_ledger=ledger,
+        )
+        options = GitHubWriteOptions(
+            auto_review=True,
+            auto_approve=True,
+            github_writes=True,
+            operation_entry="disabled",
+            max_active_findings=cap,
+        )
+        return app, cmd_app, publisher, options
+
+    @staticmethod
+    def _blockers(res: ReviewResult):
+        from review_sensei.convergence import derive_blocker_candidate
+
+        return tuple(
+            derive_blocker_candidate(
+                c,
+                on_changed_path=True,
+                evidence_locations_validated=True,
+                has_failure_condition=True,
+                has_actionable_remedy=True,
+                has_specific_violation=True,
+                named_mandatory_rule="SEC-01",
+                has_required_contract=True,
+            )
+            for c in res.comments
+        )
+
+    def _assert_zero_deferred_leakage_across_surfaces(
+        self,
+        *,
+        host: _WindowGitHubHost,
+        app,
+        pub_result,
+    ) -> None:
+        if pub_result.shadow is not None:
+            assert_no_deferred_leakage(pub_result.shadow)
+        status_doc = app.active_window_public_status(repository_id=1, pull_request=1)
+        self.assertIsNotNone(status_doc)
+        assert_no_deferred_leakage(status_doc)
+        forbidden_tokens = (
+            "deferred_count",
+            "deferred_findings",
+            "hidden_count",
+            "hidden_findings",
+            "remaining_count",
+            "total_obligations",
+            "unselected_count",
+        )
+        for rev in host.reviews:
+            text = str(rev.get("body", ""))
+            for tok in forbidden_tokens:
+                self.assertNotIn(tok, text)
+        for thread in host.threads:
+            for node in thread["comments"]["nodes"]:
+                for tok in forbidden_tokens:
+                    self.assertNotIn(tok, str(node.get("body", "")))
+        for run in host.check_runs:
+            out = json.dumps(run.get("output", {}))
+            for tok in forbidden_tokens:
+                self.assertNotIn(tok, out)
+
+    def test_ordinary_publisher_multi_round_bounded_cap_turnover_and_convergence(
+        self,
+    ) -> None:
+        import tempfile
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+
+        c_crit = _comment(
+            "src/app.py",
+            line=5,
+            body="Critical RCE in payload loader.",
+            severity="critical",
+            symbol="loads_payload",
+            defect_kind="rce",
+        )
+        c_high = _comment(
+            "src/app.py",
+            line=15,
+            body="High privilege escalation in role check.",
+            severity="high",
+            symbol="check_role",
+            defect_kind="authz",
+        )
+        c_med = _comment(
+            "src/db.py",
+            line=25,
+            body="Medium connection leak on exception path.",
+            severity="medium",
+            symbol="open_conn",
+            defect_kind="resource_leak",
+        )
+        c_low = _comment(
+            "src/db.py",
+            line=35,
+            body="Low unindexed query under contention.",
+            severity="low",
+            symbol="lookup_item",
+            defect_kind="perf",
+        )
+        cov = _coverage("src/app.py", "src/db.py")
+        policy = ReviewConvergencePolicy(mode="strict")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = _WindowGitHubHost(head_sha=HEAD_1)
+            app, _cmd_app, _publisher, options = self._make_app(host, tmpdir, cap=2)
+
+            # Round 1: 4 blocking findings, cap=2 -> only critical & high published!
+            res1 = _result(c_crit, c_high, c_med, c_low, coverage=cov)
+            pub1 = app.publish_review(
+                options=options,
+                oidc_token="oidc-1",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_1,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res1,
+                diff=ORDINARY_DIFF,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=self._blockers(res1),
+            )
+            self.assertEqual(pub1.status, "published")
+            self.assertEqual(pub1.diagnostic, "required_fixes_open")
+            self.assertEqual(len(host.reviews), 1)
+            self.assertEqual(host.reviews[0]["state"], "CHANGES_REQUESTED")
+            self.assertEqual(len(host.threads), 2)
+            thread_bodies_r1 = [t["comments"]["nodes"][0]["body"] for t in host.threads]
+            self.assertTrue(any("Critical RCE" in b for b in thread_bodies_r1))
+            self.assertTrue(any("High privilege" in b for b in thread_bodies_r1))
+            self.assertFalse(any("Medium connection" in b for b in thread_bodies_r1))
+            self.assertFalse(any("Low unindexed" in b for b in thread_bodies_r1))
+            self.assertEqual(host.check_runs[-1]["conclusion"], "failure")
+
+            state1 = app.active_window_state(repository_id=1, pull_request=1)
+            assert state1 is not None
+            self.assertEqual(
+                len(state1.authoritative_decision_inventory.obligations), 4
+            )
+            self.assertEqual(len(state1.display_active_findings.entries), 2)
+            self._assert_zero_deferred_leakage_across_surfaces(
+                host=host, app=app, pub_result=pub1
+            )
+
+            by_symbol = {
+                o.symbol: o for o in state1.authoritative_decision_inventory.obligations
+            }
+            high_slot_r1 = by_symbol["check_role"].native_target
+            self.assertIsNotNone(high_slot_r1)
+
+            # Round 2 (HEAD_2): proven fix for critical -> frees 1 slot, reuses high,
+            # and deterministically promotes medium (open_conn)!
+            host.head_sha = HEAD_2
+            fix_crit = ConfirmedFixEvidence(
+                obligation_id=by_symbol["loads_payload"].obligation_id,
+                resolution_criterion=by_symbol["loads_payload"].resolution_criterion,
+                head_sha=HEAD_2,
+                evidence_sha256=_sha("fix-crit-r2"),
+                verified_paths=("src/app.py",),
+            )
+            res2 = _result(c_high, c_med, c_low, coverage=cov)
+            pub2 = app.publish_review(
+                options=options,
+                oidc_token="oidc-2",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res2,
+                diff=ORDINARY_DIFF,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=self._blockers(res2),
+                confirmed_fixes=(fix_crit,),
+            )
+            self.assertEqual(pub2.status, "published")
+            self.assertEqual(pub2.diagnostic, "required_fixes_open")
+            state2 = app.active_window_state(repository_id=1, pull_request=1)
+            assert state2 is not None
+            self.assertEqual(
+                [e.obligation_id for e in state2.display_active_findings.entries],
+                [
+                    by_symbol["check_role"].obligation_id,
+                    by_symbol["open_conn"].obligation_id,
+                ],
+            )
+            # Compatible identity/slot reuse on check_role:
+            self.assertEqual(
+                state2.display_active_findings.entries[0].native_target, high_slot_r1
+            )
+            self.assertEqual(
+                state2.display_active_findings.entries[0].target_action, "reuse"
+            )
+            self._assert_zero_deferred_leakage_across_surfaces(
+                host=host, app=app, pub_result=pub2
+            )
+
+            # Round 3 (HEAD_3): override high + fix medium -> promotes low!
+            host.head_sha = HEAD_3
+            ovr_high = AuthorizedHumanOverride(
+                obligation_id=by_symbol["check_role"].obligation_id,
+                action="accept-risk",
+                actor="lead-maint",
+                association="OWNER",
+                head_sha=HEAD_3,
+                reason="Gateway enforces role check upstream.",
+                proof_sha256=_sha("ovr-high-r3"),
+                slot_released=True,
+            )
+            fix_med = ConfirmedFixEvidence(
+                obligation_id=by_symbol["open_conn"].obligation_id,
+                resolution_criterion=by_symbol["open_conn"].resolution_criterion,
+                head_sha=HEAD_3,
+                evidence_sha256=_sha("fix-med-r3"),
+                verified_paths=("src/db.py",),
+            )
+            res3 = _result(c_low, coverage=cov)
+            pub3 = app.publish_review(
+                options=options,
+                oidc_token="oidc-3",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_3,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res3,
+                diff=ORDINARY_DIFF,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=self._blockers(res3),
+                confirmed_fixes=(fix_med,),
+                human_overrides=(ovr_high,),
+            )
+            self.assertEqual(pub3.status, "published")
+            self.assertEqual(pub3.diagnostic, "required_fixes_open")
+            state3 = app.active_window_state(repository_id=1, pull_request=1)
+            assert state3 is not None
+            self.assertEqual(
+                [e.obligation_id for e in state3.display_active_findings.entries],
+                [by_symbol["lookup_item"].obligation_id],
+            )
+
+            # Round 4 (HEAD_4): fix low -> full authoritative inventory resolved -> APPROVE!
+            head_4 = "4" * 40
+            host.head_sha = head_4
+            # Resolve prior open threads on GitHub as superseded/cleaned before clean head
+            for t in host.threads:
+                t["isResolved"] = True
+            fix_low = ConfirmedFixEvidence(
+                obligation_id=by_symbol["lookup_item"].obligation_id,
+                resolution_criterion=by_symbol["lookup_item"].resolution_criterion,
+                head_sha=head_4,
+                evidence_sha256=_sha("fix-low-r4"),
+                verified_paths=("src/db.py",),
+            )
+            pub4 = app.publish_review(
+                options=options,
+                oidc_token="oidc-4",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=head_4,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=_result(coverage=cov),
+                diff=ORDINARY_DIFF,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                confirmed_fixes=(fix_low,),
+            )
+            self.assertEqual(pub4.status, "published")
+            self.assertIsNone(pub4.diagnostic)
+            self.assertEqual(host.check_runs[-1]["conclusion"], "success")
+            self.assertTrue(
+                any(
+                    r["commit_id"] == head_4 and r["state"] == "APPROVED"
+                    for r in host.reviews
+                )
+            )
+            self._assert_zero_deferred_leakage_across_surfaces(
+                host=host, app=app, pub_result=pub4
+            )
+
+    def test_negative_control_complete_diff_coverage_omission_withholds_approval_in_publisher(
+        self,
+    ) -> None:
+        import tempfile
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+
+        c1 = _comment(
+            "src/app.py",
+            line=5,
+            body="SQL injection in query builder.",
+            severity="critical",
+            symbol="build_query",
+            defect_kind="sqli",
+        )
+        cov = _coverage("src/app.py", "src/db.py")
+        policy = ReviewConvergencePolicy()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = _WindowGitHubHost(head_sha=HEAD_1)
+            app, _cmd_app, _pub, options = self._make_app(host, tmpdir, cap=2)
+
+            res_c1 = _result(c1, coverage=cov)
+            app.publish_review(
+                options=options,
+                oidc_token="oidc-1",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_1,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res_c1,
+                diff=ORDINARY_DIFF,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=self._blockers(res_c1),
+            )
+
+            # Round 2 on HEAD_2: 100% diff coverage, 0 comments emitted by model,
+            # NO ConfirmedFixEvidence / AuthorizedHumanOverride / AuthorizedRescan!
+            host.head_sha = HEAD_2
+            for t in host.threads:
+                t["isResolved"] = True
+            pub2 = app.publish_review(
+                options=options,
+                oidc_token="oidc-2",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=_result(coverage=cov),
+                diff=ORDINARY_DIFF,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+            )
+            self.assertEqual(pub2.status, "published")
+            self.assertEqual(pub2.diagnostic, "required_fixes_open")
+            self.assertEqual(host.check_runs[-1]["conclusion"], "failure")
+            self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+            state2 = app.active_window_state(repository_id=1, pull_request=1)
+            assert state2 is not None
+            self.assertEqual(
+                state2.authoritative_decision_inventory.obligations[0].lifecycle_state,
+                "omitted-uncertain",
+            )
+            self.assertFalse(state2.approval_eligibility.approved)
+
+    def test_negative_control_maintainer_override_of_displayed_window_blocks_hidden_obligation(
+        self,
+    ) -> None:
+        import tempfile
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+
+        c_disp = _comment(
+            "src/app.py",
+            line=5,
+            body="Critical auth bypass in token check.",
+            severity="critical",
+            symbol="verify_tok",
+            defect_kind="authn",
+        )
+        c_hidden = _comment(
+            "src/db.py",
+            line=25,
+            body="High data leak in export query.",
+            severity="high",
+            symbol="export_rows",
+            defect_kind="leak",
+        )
+        cov = _coverage("src/app.py", "src/db.py")
+        policy = ReviewConvergencePolicy()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = _WindowGitHubHost(head_sha=HEAD_1)
+            app, cmd_app, _pub, options = self._make_app(host, tmpdir, cap=1)
+
+            res_pair = _result(c_disp, c_hidden, coverage=cov)
+            pub1 = app.publish_review(
+                options=options,
+                oidc_token="oidc-1",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_1,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res_pair,
+                diff=ORDINARY_DIFF,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=self._blockers(res_pair),
+            )
+            self.assertEqual(pub1.diagnostic, "required_fixes_open")
+            state1 = app.active_window_state(repository_id=1, pull_request=1)
+            assert state1 is not None
+            by_sym = {
+                o.symbol: o for o in state1.authoritative_decision_inventory.obligations
+            }
+            fp_disp = by_sym["verify_tok"].fingerprint
+            fp_hidden = by_sym["export_rows"].fingerprint
+
+            # Maintainer overrides the ONLY displayed finding on HEAD_1 via apply_maintainer_command:
+            cmd1 = cmd_app.apply_maintainer_command(
+                options=options,
+                oidc_token="oidc-cmd-1",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_1,
+                app_slug="reviewsensei[bot]",
+                actor_login="maint-lead",
+                actor_type="User",
+                association="OWNER",
+                body=f"@reviewsensei accept-risk {fp_disp} --reason Handled at edge gateway",
+            )
+            self.assertTrue(cmd1.applied)
+            # Hidden obligation MUST prevent APPROVE and keep check failing!
+            self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+            self.assertEqual(host.check_runs[-1]["conclusion"], "failure")
+
+            # Negative control: attempting to waive the non-displayed fingerprint directly
+            # on HEAD_1 MUST NOT clear the hidden obligation or approve!
+            cmd_app.apply_maintainer_command(
+                options=options,
+                oidc_token="oidc-cmd-2",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_1,
+                app_slug="reviewsensei[bot]",
+                actor_login="maint-lead",
+                actor_type="User",
+                association="OWNER",
+                body=f"@reviewsensei accept-risk {fp_hidden} --reason Attempt blind waive",
+            )
+            state_after_cmd = app.active_window_state(repository_id=1, pull_request=1)
+            assert state_after_cmd is not None
+            by_sym_after = {
+                o.symbol: o
+                for o in state_after_cmd.authoritative_decision_inventory.obligations
+            }
+            self.assertEqual(
+                by_sym_after["verify_tok"].lifecycle_state, "authorized-override"
+            )
+            self.assertEqual(
+                by_sym_after["export_rows"].lifecycle_state, "active-unresolved"
+            )
+            self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+
+            # Round 2 on HEAD_2: freed slot promotes c_hidden into the active window!
+            host.head_sha = HEAD_2
+            res_hid = _result(c_hidden, coverage=cov)
+            pub2 = app.publish_review(
+                options=options,
+                oidc_token="oidc-2",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res_hid,
+                diff=ORDINARY_DIFF,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=self._blockers(res_hid),
+            )
+            self.assertEqual(pub2.status, "published")
+            state2 = app.active_window_state(repository_id=1, pull_request=1)
+            assert state2 is not None
+            self.assertEqual(
+                [e.obligation_id for e in state2.display_active_findings.entries],
+                [by_sym["export_rows"].obligation_id],
+            )
+
+    def test_ordinary_publisher_transient_post_holds_uncertain_slot_until_reconciled(
+        self,
+    ) -> None:
+        import tempfile
+
+        from review_sensei_github.errors import GitHubPublicationTransientError
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+
+        c1 = _comment(
+            "src/app.py",
+            line=5,
+            body="Critical auth bug.",
+            severity="critical",
+            symbol="auth_check",
+            defect_kind="authn",
+        )
+        c2 = _comment(
+            "src/db.py",
+            line=25,
+            body="High query bug.",
+            severity="high",
+            symbol="run_query",
+            defect_kind="sqli",
+        )
+        cov = _coverage("src/app.py", "src/db.py")
+        policy = ReviewConvergencePolicy()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = _WindowGitHubHost(head_sha=HEAD_1)
+            host.fail_next_review_post_transient = True
+            app, _cmd_app, _pub, options = self._make_app(host, tmpdir, cap=1)
+
+            with self.assertRaises(GitHubPublicationTransientError):
+                app.publish_review(
+                    options=options,
+                    oidc_token="oidc-1",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD_1,
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    result=_result(c1, c2, coverage=cov),
+                    diff=ORDINARY_DIFF,
+                    app_slug="reviewsensei[bot]",
+                    convergence_policy=policy,
+                )
+
+            uncertain_state = app.active_window_state(repository_id=1, pull_request=1)
+            assert uncertain_state is not None
+            self.assertTrue(uncertain_state.display_active_findings.has_uncertain_slots)
+            self.assertIn(
+                "uncertain-native-slot",
+                uncertain_state.approval_eligibility.withheld_reasons,
+            )
+            uncertain_slot = uncertain_state.display_active_findings.slots[0]
+            self.assertEqual(uncertain_slot.state, "uncertain")
+
+            # Reconcile readback proving target was never created ("released"), then retry:
+            app.reconcile_active_window_slot(
+                repository_id=1,
+                pull_request=1,
+                target=uncertain_slot.target,
+                resolved_state="released",
+                proof_sha256=_sha("readback-absent"),
+            )
+            retry_pub = app.publish_review(
+                options=options,
+                oidc_token="oidc-1-retry",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_1,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=_result(c1, c2, coverage=cov),
+                diff=ORDINARY_DIFF,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+            )
+            self.assertEqual(retry_pub.status, "published")
+            reconciled_state = app.active_window_state(repository_id=1, pull_request=1)
+            assert reconciled_state is not None
+            self.assertFalse(
+                reconciled_state.display_active_findings.has_uncertain_slots
+            )
+            self.assertEqual(len(reconciled_state.display_active_findings.entries), 1)
+
+    def test_options_and_shadow_deferred_leakage_guards(self) -> None:
+        from review_sensei_github import GitHubWriteOptions, PublicationResult
+
+        with self.assertRaisesRegex(ReviewInputError, "max_active_findings"):
+            GitHubWriteOptions(max_active_findings=0)
+        with self.assertRaisesRegex(ReviewInputError, "max_active_findings"):
+            GitHubWriteOptions(max_active_findings=True)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ReviewInputError, "never expose deferred finding"):
+            PublicationResult(status="published", shadow={"deferred_count": 2})
 
 
 if __name__ == "__main__":
