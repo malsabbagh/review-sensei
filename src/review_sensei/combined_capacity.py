@@ -24,6 +24,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -2528,6 +2529,75 @@ class BoundaryInterruptionResult:
         }
 
 
+def _snapshot_reader_identity() -> dict[str, str]:
+    """Fingerprint the executing probe and public reader at their loaded origins."""
+    modules = (sys.modules[__name__], sys.modules[read_session_dispositions.__module__])
+    return {
+        str(Path(module.__file__).resolve()): hashlib.sha256(
+            Path(module.__file__).read_bytes()
+        ).hexdigest()
+        for module in modules
+        if module.__file__ is not None
+    }
+
+
+def _snapshot_probe_command() -> list[str]:
+    # -I ignores PYTHONPATH and cwd; -S prevents site startup hooks. Explicit
+    # absolute parent search paths retain installed dependencies and checkouts.
+    package = Path(__file__).resolve().parent
+    paths = [str(package.parent)] + [
+        str(Path(path).resolve())
+        for path in sys.path
+        if path and Path(path).is_absolute() and Path(path).resolve() != Path.cwd()
+    ]
+    identity = _snapshot_reader_identity()
+    bootstrap = (
+        "import sys, pathlib, hashlib; "
+        f"sys.path[:] = {paths!r}; "
+        f"expected = {identity!r}; "
+        "assert all(hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() == h "
+        "for p, h in expected.items()); "
+        "from review_sensei.combined_capacity import "
+        "_snapshot_probe_main, _snapshot_reader_identity; "
+        "assert _snapshot_reader_identity() == expected; _snapshot_probe_main()"
+    )
+    return [sys.executable, "-I", "-S", "-B", "-c", bootstrap]
+
+
+def _run_snapshot_probe(
+    command: list[str], request: bytes
+) -> subprocess.CompletedProcess[bytes]:
+    """Never retain more than 1025 output bytes; discard stderr at the OS sink."""
+    with tempfile.TemporaryFile() as input_file:
+        input_file.write(request)
+        input_file.seek(0)
+        with subprocess.Popen(
+            command, stdin=input_file, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        ) as process:
+            assert process.stdout is not None
+            output = bytearray()
+
+            def drain() -> None:
+                assert process.stdout is not None
+                output.extend(process.stdout.read(1025))
+                if len(output) > 1024:
+                    process.kill()
+
+            reader = threading.Thread(target=drain, daemon=True)
+            reader.start()
+            try:
+                process.wait(timeout=PART_READ_SECONDS)
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
+            finally:
+                reader.join()
+            return subprocess.CompletedProcess(
+                command, process.returncode, bytes(output), b""
+            )
+
+
 def _snapshot_probe_main() -> None:
     """Bounded read-only subprocess worker; emits no retained source bytes."""
     request = json.loads(sys.stdin.buffer.read(16_385))
@@ -2546,7 +2616,15 @@ def _snapshot_probe_main() -> None:
         read_session_dispositions(ledger, record)
         components.append("disposition_snapshot")
     budget.check()
-    print(json.dumps({"components": components, "physical_reads": budget.calls}))
+    print(
+        json.dumps(
+            {
+                "components": components,
+                "physical_reads": budget.calls,
+                "reader_identity": _snapshot_reader_identity(),
+            }
+        )
+    )
 
 
 def _qualify_snapshot_subprocess(
@@ -2576,18 +2654,7 @@ def _qualify_snapshot_subprocess(
     if len(request) > 16_384:
         raise ReviewInputError("retained snapshot qualification input exceeds bound")
     try:
-        process = subprocess.run(
-            [
-                sys.executable,
-                "-B",
-                "-c",
-                "from review_sensei.combined_capacity import _snapshot_probe_main; _snapshot_probe_main()",
-            ],
-            input=request,
-            capture_output=True,
-            timeout=PART_READ_SECONDS,
-            check=False,
-        )
+        process = _run_snapshot_probe(_snapshot_probe_command(), request)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ReviewInputError(
             "retained snapshot subprocess unavailable or timed out"
@@ -2602,7 +2669,8 @@ def _qualify_snapshot_subprocess(
             ["disposition_snapshot"] if record.disposition_snapshot is not None else []
         )
         if (
-            components != expected
+            observed.get("reader_identity") != _snapshot_reader_identity()
+            or components != expected
             or type(calls) is not int
             or not 0 < calls <= ORDINARY_EVIDENCE_READ_LIMIT
         ):

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -1325,7 +1327,7 @@ class CombinedCapacityG12Tests(unittest.TestCase):
             self.assertFalse(receipt.fresh_handoff_verified)
             self.assertGreater(receipt.physical_reads, 0)
             with patch(
-                "review_sensei.combined_capacity.subprocess.run",
+                "review_sensei.combined_capacity._run_snapshot_probe",
                 side_effect=subprocess.TimeoutExpired("snapshot-probe", 1),
             ):
                 with self.assertRaisesRegex(
@@ -1342,7 +1344,7 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 with (
                     self.subTest(output_size=len(output)),
                     patch(
-                        "review_sensei.combined_capacity.subprocess.run",
+                        "review_sensei.combined_capacity._run_snapshot_probe",
                         return_value=subprocess.CompletedProcess(
                             [], 0, stdout=output, stderr=b""
                         ),
@@ -1363,6 +1365,94 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                     ledger_directory=root,
                     **args,
                 )
+
+    def test_snapshot_probe_pins_reader_and_bounds_live_output(self) -> None:
+        import review_sensei.combined_capacity as capacity
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = LocalSessionLedger(root / "ledger")
+            stored = ledger.initialize(IDENTITY)
+            args = dict(
+                identity=IDENTITY,
+                interruption_stage="review_publication",
+                interruption_mode="before_dispatch",
+                ledger_directory=root / "ledger",
+            )
+            # A cwd/PYTHONPATH shadow must never execute, even if it can forge
+            # the otherwise plausible root-only receipt.
+            shadow = root / "review_sensei"
+            shadow.mkdir()
+            marker = root / "shadow-executed"
+            (shadow / "__init__.py").write_text(
+                f"from pathlib import Path; Path({str(marker)!r}).touch(); raise RuntimeError()"
+            )
+            real_popen = subprocess.Popen
+
+            def shadow_cwd(*a, **kw):
+                return real_popen(*a, **kw, cwd=root)
+
+            with (
+                patch.dict(os.environ, {"PYTHONPATH": str(root)}),
+                patch(
+                    "review_sensei.combined_capacity.subprocess.Popen",
+                    side_effect=shadow_cwd,
+                ),
+            ):
+                result = qualify_retained_interruption_replay(stored, **args)
+            self.assertEqual(result.qualification_status, "root_verified")
+            self.assertFalse(marker.exists())
+
+            identity = capacity._snapshot_reader_identity()
+            mismatched = {path: "0" * 64 for path in identity}
+            with patch.object(
+                capacity, "_snapshot_reader_identity", return_value=mismatched
+            ):
+                with self.assertRaisesRegex(ReviewInputError, "authentication failed"):
+                    qualify_retained_interruption_replay(stored, **args)
+
+            # Exercise the real bounded pipe, not a mocked CompletedProcess.
+            flood = "import os; " + "\nwhile True: os.write(1, b'x' * 4096)"
+            with patch.object(
+                capacity,
+                "_snapshot_probe_command",
+                return_value=[sys.executable, "-I", "-c", flood],
+            ):
+                with self.assertRaisesRegex(ReviewInputError, "authentication failed"):
+                    qualify_retained_interruption_replay(stored, **args)
+
+            receipt = json.dumps(
+                {
+                    "components": ["session_root"],
+                    "physical_reads": 1,
+                    "reader_identity": identity,
+                }
+            )
+            stderr = f"import os; os.write(2, b'x' * 1048576); print({receipt!r})"
+            with patch.object(
+                capacity,
+                "_snapshot_probe_command",
+                return_value=[sys.executable, "-I", "-c", stderr],
+            ):
+                result = qualify_retained_interruption_replay(stored, **args)
+                self.assertEqual(result.qualification_status, "root_verified")
+            with (
+                patch.object(capacity, "PART_READ_SECONDS", 0.1),
+                patch.object(
+                    capacity,
+                    "_snapshot_probe_command",
+                    return_value=[
+                        sys.executable,
+                        "-I",
+                        "-c",
+                        "import time; time.sleep(10)",
+                    ],
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unavailable or timed out"
+                ):
+                    qualify_retained_interruption_replay(stored, **args)
 
     def test_exact_boundary_sizes_crossed_with_interruption_and_fresh_replay(
         self,

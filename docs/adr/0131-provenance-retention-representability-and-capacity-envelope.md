@@ -81,3 +81,11 @@ No publication, provider call, mutation, schema migration or live cutover is
 performed. Rollback must retain this evidence limitation; reverting executable
 qualification must not restore unsupported success claims. Broader graph and
 ordinary-route recovery qualification remains outstanding.
+
+The snapshot probe starts with isolated Python import handling (`-I -S`), pins
+the parent package origin, and checks probe/public-reader source fingerprints
+before accepting evidence. Cwd and inherited `PYTHONPATH` cannot select a shadow
+reader. Stdout is drained with a 1,025-byte hard retention bound (excess kills
+the child); stderr goes directly to the OS discard sink. The existing deadline
+remains in force. This is scoped same-installation reader evidence, not a
+claim of whole-environment attestation or broader recovery qualification.
