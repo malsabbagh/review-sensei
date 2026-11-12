@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from typing import Any
@@ -12,7 +13,7 @@ from review_sensei_github.session_ledger import parse_session_comment
 from test_action_reply_entry import ReplyEntryFixture
 from test_action_run import CommandEntryFixture
 from test_api_work_persistence import BASE, HEAD, IDENTITY
-from test_review_run import EntryFixture
+from test_review_run import EntryFixture, fixture_process_environment
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import (
@@ -539,6 +540,12 @@ class TitleByteLimitsG20Tests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as cli_dir:
             diff_path = Path(cli_dir) / "change.patch"
+            config_path = Path(cli_dir) / ".reviewsensei.yml"
+            config_path.write_text(
+                "schema: 1\ninference:\n  backend: local-ollama\n",
+                encoding="utf-8",
+                newline="\n",
+            )
             diff_path.write_text(
                 "diff --git a/src/app.py b/src/app.py\n"
                 "--- a/src/app.py\n"
@@ -547,6 +554,7 @@ class TitleByteLimitsG20Tests(unittest.TestCase):
                 " x = 1\n"
                 "+y = 2\n",
                 encoding="utf-8",
+                newline="\n",
             )
             for label, sample, byte_count, should_admit in core_entry_matrix:
                 self.assertEqual(len(sample.encode("utf-8")), byte_count)
@@ -574,6 +582,9 @@ class TitleByteLimitsG20Tests(unittest.TestCase):
                     cli_provider = _RecordingProvider()
                     err_buf = io.StringIO()
                     with (
+                        patch.dict(
+                            os.environ, fixture_process_environment(), clear=True
+                        ),
                         patch(
                             "review_sensei.cli.default_registry",
                             return_value=tx.HostedAnalysisCliTests._Registry(
@@ -587,6 +598,8 @@ class TitleByteLimitsG20Tests(unittest.TestCase):
                             [
                                 "--diff",
                                 str(diff_path),
+                                "--config",
+                                str(config_path),
                                 "--repository",
                                 "owner/repo",
                                 "--pull-request",

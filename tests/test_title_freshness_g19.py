@@ -865,6 +865,12 @@ class TitleFreshnessG19Tests(unittest.TestCase):
         # 4. Direct core CLI (`review_sensei.cli.main`) binds exact multibyte `--title` without truncation:
         with tempfile.TemporaryDirectory() as cli_dir:
             diff_path = Path(cli_dir) / "change.patch"
+            config_path = Path(cli_dir) / ".reviewsensei.yml"
+            config_path.write_text(
+                "schema: 1\ninference:\n  backend: local-ollama\n",
+                encoding="utf-8",
+                newline="\n",
+            )
             diff_path.write_text(
                 "diff --git a/src/app.py b/src/app.py\n"
                 "--- a/src/app.py\n"
@@ -873,10 +879,12 @@ class TitleFreshnessG19Tests(unittest.TestCase):
                 " x = 1\n"
                 "+y = 2\n",
                 encoding="utf-8",
+                newline="\n",
             )
             cli_provider = _RecordingProvider()
             exact_cli_title = ("🧪" * 1023) + "é" + "a"  # 4092 + 2 + 1 = 4095B
             with (
+                patch.dict(os.environ, fixture_process_environment(), clear=True),
                 patch(
                     "review_sensei.cli.default_registry",
                     return_value=tx.HostedAnalysisCliTests._Registry(cli_provider),
@@ -888,6 +896,8 @@ class TitleFreshnessG19Tests(unittest.TestCase):
                     [
                         "--diff",
                         str(diff_path),
+                        "--config",
+                        str(config_path),
                         "--repository",
                         "owner/repo",
                         "--pull-request",

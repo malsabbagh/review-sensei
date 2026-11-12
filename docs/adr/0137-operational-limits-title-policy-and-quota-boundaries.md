@@ -211,6 +211,18 @@ and clean post-action recovery across all five boundaries:
 - `tests/test_policy_commit_drift_g21.py`
 - `tests/test_cross_pr_quota_g25.py`
 
+CLI fixtures use explicit temporary configuration and a credential-free runtime
+environment, so checkout or inherited provider settings cannot bypass the intended
+boundary. Synthetic diff files retain exact LF UTF-8 bytes on every platform.
+The G25 broker fixture sends four distinct numeric repository/PR identities through
+one shared synthetic account allowance, records every physical request (including
+holds), and retries only held identities after the fake quota window resets. It
+does not assert an ordering/fairness guarantee. Separate command/review/reply
+fixtures use the same target identity and prove route isolation only, not cross-PR
+ledger isolation. The real manual CLI adapter's HTTP 429/503 controls compare its
+run-outcome provider/retry counters with observed dispatches and bounded Retry-After
+sleeps. These fixtures do not prove live all-writer containment or deployment.
+
 ## Rollout and rollback
 
 Standard source review and deterministic CI checks apply. No workflow pin, broker

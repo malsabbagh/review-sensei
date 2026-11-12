@@ -5,14 +5,17 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from review_sensei_github.approval import approval_eligibility_from_result
 from review_sensei_github.checks import review_check_outcome
+from test_review_run import fixture_process_environment
 from test_review_run_rescan import partial_fixture, request
 
 from review_sensei import cli as core_cli
@@ -1253,17 +1256,22 @@ class IndivisibleOverflowG09Tests(unittest.TestCase):
             f_path = Path(cli_dir) / "resp.json"
             c_path = Path(cli_dir) / ".reviewsensei.yml"
             o_path = Path(cli_dir) / "result.json"
-            d_path.write_text(binary_and_code_diff, encoding="utf-8")
+            d_path.write_text(binary_and_code_diff, encoding="utf-8", newline="\n")
+            self.assertEqual(d_path.read_bytes(), binary_and_code_diff.encode("utf-8"))
             c_path.write_text("schema: 1\n", encoding="utf-8")
             f_path.write_text(
                 json.dumps({"summary": "Reviewed app.py.", "comments": []}),
                 encoding="utf-8",
+                newline="\n",
             )
             import contextlib
             import io
 
             cli_err = io.StringIO()
-            with contextlib.redirect_stderr(cli_err):
+            with (
+                patch.dict(os.environ, fixture_process_environment(), clear=True),
+                contextlib.redirect_stderr(cli_err),
+            ):
                 rc_cli = core_cli.main(
                     [
                         "--diff",

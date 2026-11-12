@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import tempfile
 import threading
 import time
@@ -10,7 +11,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from email.message import Message
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
@@ -24,7 +25,7 @@ from review_sensei_github.broker_client import BrokerSession
 from review_sensei_github.session_ledger import parse_session_comment
 from test_action_reply_entry import ReplyEntryFixture
 from test_action_run import CommandEntryFixture
-from test_review_run import IDENTITY, EntryFixture
+from test_review_run import IDENTITY, EntryFixture, fixture_process_environment
 
 from review_sensei import cli as core_cli
 from review_sensei.api_work import DEFAULT_API_REQUEST_LIMIT, MAX_API_REQUEST_LIMIT
@@ -44,6 +45,7 @@ from review_sensei.operational_boundaries import (
     inspect_resource_owner_boundaries,
     plan_cross_pr_concurrency,
 )
+from review_sensei.outcomes import ResourceBudget
 
 
 def _authority(
@@ -240,16 +242,31 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
     ) -> None:
         lock = threading.Lock()
         dispatches_by_run: dict[str, int] = {}
-        throttled_runs = {"202": 503, "303": 429}
+        # One synthetic installation/account boundary, not one limiter per PR.
+        shared_owner = 12345
+        charged_requests: list[tuple[int, int, int, str]] = []
+        remaining_owner_grants = 2
+        owner_holds = 0
 
         def shared_broker_opener(request, timeout):
+            nonlocal remaining_owner_grants, owner_holds
             del timeout
             payload = json.loads(request.data.decode("utf-8"))
             att = payload["session_attestation"]
             run_id = str(att["run_id"])
             with lock:
                 dispatches_by_run[run_id] = dispatches_by_run.get(run_id, 0) + 1
-                forced_code = throttled_runs.get(run_id)
+                charged_requests.append(
+                    (shared_owner, att["repository_id"], att["pull_request"], run_id)
+                )
+                # Synthetic account quota is shared by all four identities.
+                # Arrival order chooses admission, not a hard-coded run ID.
+                if remaining_owner_grants:
+                    remaining_owner_grants -= 1
+                    forced_code = None
+                else:
+                    owner_holds += 1
+                    forced_code = 503 if owner_holds == 1 else 429
             if forced_code == 503:
                 body = json.dumps(
                     {"error": "broker_admission_held", "temporary": True}
@@ -280,7 +297,7 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
                     "token": f"ghs_isolated_{att['repository_id']}_{att['pull_request']}_{run_id}",
                     "capability": "review_session",
                     "session_state": "known",
-                    "app_id": 12345,
+                    "app_id": shared_owner,
                     "reservation_owner": {
                         "run_id": run_id,
                         "head_sha": att["head_sha"],
@@ -328,26 +345,37 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=4) as pool:
             wave_one = dict(pool.map(execute_one, workloads))
 
-        # Unthrottled PRs across both repos succeed with isolated per-run tokens.
-        session_101 = wave_one["101"]
-        session_404 = wave_one["404"]
-        self.assertIsInstance(session_101, BrokerSession)
-        self.assertIsInstance(session_404, BrokerSession)
-        assert isinstance(session_101, BrokerSession)
-        assert isinstance(session_404, BrokerSession)
-        self.assertNotEqual(session_101.token, session_404.token)
-        self.assertNotIn("ghs_isolated_", repr(session_101))
-        self.assertNotIn("sg1.", repr(session_101))
-
-        # Throttled runs fail closed with typed exceptions and zero duplicate dispatches.
-        self.assertIsInstance(wave_one["202"], GitHubBrokerAdmissionHeldError)
-        self.assertIsInstance(wave_one["303"], GitHubHTTPTransientError)
+        # Exactly two identities consume the shared owner allowance. The other
+        # two receive typed holds; do not prescribe a cross-PR fairness order.
+        sessions = [
+            value for value in wave_one.values() if isinstance(value, BrokerSession)
+        ]
+        held_runs = {
+            run for run, value in wave_one.items() if isinstance(value, Exception)
+        }
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual(len({session.token for session in sessions}), 2)
+        self.assertEqual(remaining_owner_grants, 0)
+        self.assertEqual(owner_holds, 2)
+        self.assertEqual(
+            {type(wave_one[run]) for run in held_runs},
+            {GitHubBrokerAdmissionHeldError, GitHubHTTPTransientError},
+        )
+        for session in sessions:
+            self.assertNotIn("ghs_isolated_", repr(session))
+            self.assertNotIn("sg1.", repr(session))
         self.assertEqual(dispatches_by_run, {"101": 1, "202": 1, "303": 1, "404": 1})
 
+        self.assertEqual(
+            set(charged_requests),
+            {(shared_owner, repo_id, pr, run) for _, repo_id, pr, run, _ in workloads},
+        )
+        self.assertEqual(len(charged_requests), 4)
+
         # Recovery wave: once rate-limit window clears, throttled runs succeed cleanly.
-        throttled_runs.clear()
-        for spec in workloads[1:3]:
-            repo_name, _repo_id, pr_num, expected_run_id, _purpose = spec
+        remaining_owner_grants = 2
+        for spec in (item for item in workloads if item[3] in held_runs):
+            repo_name, repo_id, pr_num, expected_run_id, _purpose = spec
             run_id, recovered = execute_one(spec)
             self.assertEqual(run_id, expected_run_id)
             self.assertIsInstance(recovered, BrokerSession)
@@ -356,9 +384,19 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
             assert recovered.reservation_owner is not None
             self.assertEqual(recovered.attestation["run_id"], run_id)
             self.assertEqual(recovered.attestation["repository"], repo_name)
+            self.assertEqual(recovered.attestation["repository_id"], repo_id)
             self.assertEqual(recovered.attestation["pull_request"], pr_num)
             self.assertEqual(recovered.reservation_owner["run_id"], run_id)
             self.assertEqual(dispatches_by_run[run_id], 2)
+        self.assertEqual(remaining_owner_grants, 0)
+        self.assertEqual(len(charged_requests), 6)
+        self.assertEqual(
+            {key: charged_requests.count(key) for key in set(charged_requests)},
+            {
+                (shared_owner, repo_id, pr, run): (2 if run in held_runs else 1)
+                for _, repo_id, pr, run, _ in workloads
+            },
+        )
 
     def test_hosted_bootstrap_throttle_leaves_zero_ledger_state_and_recovers(
         self,
@@ -402,7 +440,8 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
 
                 pr_throttled.external = throttled_broker_external  # type: ignore[method-assign]
 
-                # Sibling PR succeeds cleanly while PR A is throttled at bootstrap.
+                # An independent same-target fixture is the unthrottled control.
+                # Distinct numeric cross-PR/repository identities are exercised above.
                 self.assertEqual(pr_sibling.invoke(), 0, pr_sibling.error)
                 self.assertEqual(pr_sibling.provider_calls, 1)
                 self.assertEqual(pr_throttled.invoke(), 1)
@@ -445,7 +484,7 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
 
             pr_a.before_publication = rate_limited_before_publish
 
-            # Sibling PR B completes normally under shared quota.
+            # Independent same-target control; this is not cross-PR quota evidence.
             self.assertEqual(pr_b.invoke(), 0, pr_b.error)
             self.assertEqual(pr_b.provider_calls, 1)
 
@@ -613,10 +652,10 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
                 diagnostic="replay without retention",
             )
 
-    def test_resource_owner_boundaries_caller_tranches_cross_pr_isolation_and_manual_cli_throttling(
+    def test_resource_owner_boundaries_caller_tranches_entry_isolation_and_manual_cli_throttling(
         self,
     ) -> None:
-        """Exercise G25 resource-owner contracts, caller HTTP tranche conservation, cross-PR isolation, and manual CLI 429/503 fail-closed behavior."""
+        """Exercise G25 resource-owner contracts, caller HTTP tranche conservation, entry-route isolation, and manual CLI 429/503 fail-closed behavior."""
         boundaries = {b.boundary_id: b for b in inspect_resource_owner_boundaries()}
         self.assertEqual(
             set(boundaries),
@@ -689,7 +728,9 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
         with self.assertRaises(EvidenceBudgetExhausted):
             finite_read_budget.consume(fence=True)
 
-        # 2. Cross-PR hosted isolation across CommandEntryFixture, EntryFixture, and ReplyEntryFixture:
+        # 2. Independent same-target command/review/reply entry fixtures.
+        # These assert route behavior, not cross-PR isolation: the shared broker
+        # test above exercises different numeric repository/PR identities.
         with (
             tempfile.TemporaryDirectory() as dir_cmd,
             tempfile.TemporaryDirectory() as dir_rev,
@@ -753,10 +794,13 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
                 diff_path = Path(cli_dir) / "change.patch"
                 cfg_path = Path(cli_dir) / ".reviewsensei.yml"
                 out_path = Path(cli_dir) / "out.json"
-                diff_path.write_text(sample_diff, encoding="utf-8")
+                outcome_path = Path(cli_dir) / "outcome.json"
+                diff_path.write_text(sample_diff, encoding="utf-8", newline="\n")
+                self.assertEqual(diff_path.read_bytes(), sample_diff.encode("utf-8"))
                 cfg_path.write_text(
                     "schema: 1\ninference:\n  backend: local-ollama\n  model: qwen2.5-coder:7b\n",
                     encoding="utf-8",
+                    newline="\n",
                 )
                 attempts = 0
 
@@ -767,21 +811,24 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
                         url = getattr(
                             req_obj, "full_url", "http://127.0.0.1:11434/api/generate"
                         )
+                        headers = Message()
+                        headers["Retry-After"] = "1"
                         raise HTTPError(
                             url,
                             status_code,
                             "throttled",
-                            hdrs=None,  # type: ignore[arg-type]
+                            hdrs=headers,
                             fp=io.BytesIO(b'{"error":"rate limited"}'),
                         )
 
                 err_buf = io.StringIO()
                 with (
+                    patch.dict(os.environ, fixture_process_environment(), clear=True),
                     patch(
                         "review_sensei.providers.ollama.build_opener",
                         return_value=_ThrottledOpener(),
                     ),
-                    patch("time.sleep", return_value=None),
+                    patch("time.sleep", return_value=None) as sleeper,
                     contextlib.redirect_stderr(err_buf),
                 ):
                     rc_manual = core_cli.main(
@@ -794,13 +841,23 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
                             "json",
                             "--output",
                             str(out_path),
+                            "--outcome",
+                            str(outcome_path),
                             "--exit-semantics",
                             "operational",
                         ]
                     )
                 self.assertNotEqual(rc_manual, 0)
-                self.assertGreaterEqual(attempts, 1)
-                self.assertLessEqual(attempts, 8)
+                budget = ResourceBudget.create()
+                self.assertEqual(attempts, 1 + budget.max_retry_attempts)
+                outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+                self.assertEqual(outcome["provider_calls"], attempts)
+                self.assertEqual(outcome["retry_attempts"], attempts - 1)
+                self.assertEqual(outcome["status"], "budget_exhausted")
+                self.assertEqual(outcome["diagnostic"], "transport_retry_exhausted")
+                self.assertEqual(
+                    sleeper.call_args_list, [call(1.0)] * budget.max_retry_attempts
+                )
                 self.assertIn(f"HTTP {status_code}", err_buf.getvalue())
                 self.assertFalse(out_path.exists())
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -25,7 +26,7 @@ from test_action_reply_entry import ReplyEntryFixture
 from test_action_run import CommandEntryFixture
 from test_api_work_persistence import BASE, HEAD, IDENTITY
 from test_review_lifecycle_diagnostics import outcome
-from test_review_run import EntryFixture
+from test_review_run import EntryFixture, fixture_process_environment
 from test_review_run_rescan import partial_fixture, request
 
 from review_sensei import cli as core_cli
@@ -1201,29 +1202,32 @@ class PolicyCommitDriftG21Tests(unittest.TestCase):
             diff_file = Path(directory) / "change.patch"
             fixture_resp = Path(directory) / "fixture.json"
             out_json = Path(directory) / "out.json"
-            diff_file.write_text(multi_file_diff, encoding="utf-8")
+            diff_file.write_text(multi_file_diff, encoding="utf-8", newline="\n")
+            self.assertEqual(diff_file.read_bytes(), multi_file_diff.encode("utf-8"))
             fixture_resp.write_text(
                 json.dumps({"summary": "CLI P2 review.", "comments": []}),
                 encoding="utf-8",
+                newline="\n",
             )
-            rc_cli = core_cli.main(
-                [
-                    "--diff",
-                    str(diff_file),
-                    "--context-root",
-                    str(repo_dir),
-                    "--config",
-                    str(repo_dir / ".reviewsensei.yml"),
-                    "--provider",
-                    "fixture",
-                    "--fixture-response",
-                    str(fixture_resp),
-                    "--format",
-                    "json",
-                    "--output",
-                    str(out_json),
-                ]
-            )
+            with patch.dict(os.environ, fixture_process_environment(), clear=True):
+                rc_cli = core_cli.main(
+                    [
+                        "--diff",
+                        str(diff_file),
+                        "--context-root",
+                        str(repo_dir),
+                        "--config",
+                        str(repo_dir / ".reviewsensei.yml"),
+                        "--provider",
+                        "fixture",
+                        "--fixture-response",
+                        str(fixture_resp),
+                        "--format",
+                        "json",
+                        "--output",
+                        str(out_json),
+                    ]
+                )
             self.assertEqual(rc_cli, 0)
             cli_payload = json.loads(out_json.read_text(encoding="utf-8"))
             self.assertEqual(cli_payload["review_status"], "complete")
