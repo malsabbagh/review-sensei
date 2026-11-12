@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -279,6 +280,7 @@ class PreEffectBudgetAndHandoffStoreTests(unittest.TestCase):
             exhausted.recovery.action, "reconcile_owned_readback_then_hold_or_dispose"
         )
 
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_handoff_store_authenticates_and_refuses_tampering_truncation_expiry(
         self,
     ) -> None:
@@ -398,11 +400,15 @@ class PreEffectBudgetAndHandoffStoreTests(unittest.TestCase):
             self.assertFalse(truncated.admitted)
             self.assertEqual(truncated.refusal_code, "truncated_or_corrupt_context")
 
-    def test_handoff_store_enforces_file_cap_and_rejects_bad_keys(self) -> None:
+    def test_handoff_store_rejects_bad_keys_without_storage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ReviewInputError, "key"):
                 RecoveryContextStore(Path(directory) / "bad", key=b"short")
+            self.assertEqual(list(Path(directory).iterdir()), [])
 
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_handoff_store_enforces_file_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
             store = RecoveryContextStore(Path(directory) / "capped", key=HANDOFF_KEY)
             for idx in range(MAX_RECOVERY_HANDOFF_FILES):
                 tx_id = f"{idx:064x}"
@@ -432,6 +438,8 @@ class PreEffectBudgetAndHandoffStoreTests(unittest.TestCase):
 
         ensure_not_observation_only_evidence(None)
 
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_signed_corrupt_handoff_envelopes(self) -> None:
         now = datetime(2026, 11, 11, 4, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
             handoff_dir = Path(directory) / "handoff"
@@ -573,6 +581,7 @@ class EndToEndFreshProcessRecoveryG17Tests(
             POLICY_COMMIT,
         )
 
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_fresh_process_zero_inference_handoff_and_decision_drift_recovery(
         self,
     ) -> None:
@@ -1348,6 +1357,15 @@ class OrdinaryEntryHostedAndCliRecoveryG17Tests(
                 resolve_recovery_context_store(
                     sroot / "handoff", None, artifacts_policy="diagnostics"
                 )
+            if os.name != "posix":
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    resolve_recovery_context_store(
+                        sroot / "handoff", key_file, artifacts_policy="diagnostics"
+                    )
+                self.assertFalse((sroot / "handoff").exists())
+                return
             open_key = sroot / "open.key"
             open_key.write_bytes(HANDOFF_KEY)
             open_key.chmod(0o644)
@@ -1369,6 +1387,7 @@ class OrdinaryEntryHostedAndCliRecoveryG17Tests(
                     sroot / "handoff", symlink_key, artifacts_policy="diagnostics"
                 )
 
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_hosted_review_run_ordinary_capture_fresh_successor_and_fail_closed_controls(
         self,
     ) -> None:
@@ -1523,6 +1542,7 @@ class OrdinaryEntryHostedAndCliRecoveryG17Tests(
             assert final_record.transaction is not None
             self.assertEqual(final_record.transaction.phase, "publication_succeeded")
 
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_cli_publish_refusal_controls_explicit_context_mode_and_retention_cleanup(
         self,
     ) -> None:
@@ -1701,6 +1721,7 @@ class OrdinaryEntryHostedAndCliRecoveryG17Tests(
             new_path = store.save(_sample_bundle(transaction_id="f" * 64))
             self.assertTrue(new_path.is_file())
 
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_cli_result_retry_does_not_overwrite_handoff_recover_from_rejection_repo_id_none_and_corrupt_accounting(
         self,
     ) -> None:
@@ -1970,6 +1991,262 @@ class OrdinaryEntryHostedAndCliRecoveryG17Tests(
             self.assertEqual(code_ok, 0, err_ok)
             self.assertIn("published", out_ok)
             self.assertEqual(handoff_path.read_bytes(), original_handoff_bytes)
+
+
+@unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+class RecoveryContextMalformedEnvelopeTests(unittest.TestCase):
+    def load(self, store, bundle):
+        return store.load_for_fresh_process(
+            bundle.transaction_id,
+            expected_repository=bundle.repository,
+            expected_pull_request=bundle.pull_request,
+            expected_base_sha=bundle.base_sha,
+            expected_head_sha=bundle.head_sha,
+            expected_policy_commit=bundle.policy_commit,
+            expected_result_sha256=bundle.accepted_result_sha256,
+        )
+
+    def test_malformed_authentication_refuses_selected_and_preserves_unrelated(self):
+        now = datetime(2026, 11, 11, 12, tzinfo=timezone.utc)
+        for authentication in ("é" * 64, "0" * 63, "G" * 64, "0" * 65, None, 1):
+            with (
+                self.subTest(authentication=authentication),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                clock = [now]
+                store = RecoveryContextStore(
+                    Path(directory) / "handoff",
+                    key=HANDOFF_KEY,
+                    ttl_seconds=1,
+                    now=lambda: clock[0],
+                )
+                bundle = _sample_bundle()
+                target = store.save(bundle)
+                envelope = json.loads(target.read_bytes())
+                envelope["authentication"] = authentication
+                target.write_text(json.dumps(envelope), encoding="utf-8")
+                retained = target.read_bytes()
+                decision = self.load(store, bundle)
+                self.assertFalse(decision.admitted)
+                self.assertEqual(decision.refusal_code, "truncated_or_corrupt_context")
+                clock[0] = now + timedelta(seconds=2)
+                self.assertEqual(store.prune_expired(), ())
+                self.assertEqual(target.read_bytes(), retained)
+
+    def test_selected_and_pruning_reads_are_bounded_before_parsing(self):
+        import io
+
+        from review_sensei.recovery_context import MAX_RECOVERY_CONTEXT_BUNDLE_BYTES
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecoveryContextStore(Path(directory) / "handoff", key=HANDOFF_KEY)
+            bundle = _sample_bundle()
+            target = store.save(bundle)
+            target.write_bytes(b"x" * (MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 20))
+            original_open = Path.open
+            reads = []
+
+            class BoundedStream(io.BytesIO):
+                def read(self, size=-1):
+                    reads.append(size)
+                    self_test.assertEqual(size, MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 1)
+                    return super().read(size)
+
+            self_test = self
+
+            def opened(path, *args, **kwargs):
+                if path == target:
+                    return BoundedStream(
+                        b"x" * (MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 20)
+                    )
+                return original_open(path, *args, **kwargs)
+
+            with patch.object(Path, "open", opened):
+                self.assertEqual(
+                    self.load(store, bundle).refusal_code,
+                    "truncated_or_corrupt_context",
+                )
+                self.assertEqual(store.prune_expired(), ())
+            self.assertEqual(reads, [MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 1] * 2)
+            self.assertTrue(target.exists())
+
+    def test_pruning_retains_untrusted_expiry_and_invalid_signed_ttl(self):
+        now = datetime(2026, 11, 11, 12, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecoveryContextStore(
+                Path(directory) / "handoff", key=HANDOFF_KEY, now=lambda: now
+            )
+            bundle = _sample_bundle()
+            target = store.save(bundle)
+            envelope = json.loads(target.read_bytes())
+            envelope["document"]["expires_at"] = (
+                now - timedelta(seconds=1)
+            ).isoformat()
+            # Old timestamp without a matching HMAC is not deletion authority.
+            target.write_text(json.dumps(envelope), encoding="utf-8")
+            self.assertEqual(store.prune_expired(), ())
+            self.assertEqual(
+                self.load(store, bundle).refusal_code,
+                "tampered_authentication_or_digest",
+            )
+            # Even an authenticated envelope with a negative TTL is malformed.
+            envelope["authentication"] = store._signature(envelope["document"])
+            target.write_text(json.dumps(envelope), encoding="utf-8")
+            retained = target.read_bytes()
+            self.assertEqual(store.prune_expired(), ())
+            self.assertEqual(target.read_bytes(), retained)
+
+    def test_unserializable_document_fails_closed_without_pruning(self):
+        for invalid in ("\ud800", float("nan")):
+            with (
+                self.subTest(invalid=repr(invalid)),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                store = RecoveryContextStore(
+                    Path(directory) / "handoff", key=HANDOFF_KEY
+                )
+                bundle = _sample_bundle()
+                target = store.save(bundle)
+                envelope = json.loads(target.read_bytes())
+                envelope["document"]["invalid"] = invalid
+                target.write_text(json.dumps(envelope), encoding="utf-8")
+                retained = target.read_bytes()
+                self.assertEqual(
+                    self.load(store, bundle).refusal_code,
+                    "truncated_or_corrupt_context",
+                )
+                self.assertEqual(store.prune_expired(), ())
+                self.assertEqual(target.read_bytes(), retained)
+
+    def test_pruning_directory_scan_is_bounded_and_preserves_all_entries_on_overflow(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecoveryContextStore(Path(directory) / "handoff", key=HANDOFF_KEY)
+            target = store.save(_sample_bundle())
+            visited = []
+
+            def entries():
+                for index in range(100):
+                    visited.append(index)
+                    yield SimpleNamespace(name=f"{index}.json")
+
+            with patch("review_sensei.recovery_context.os.scandir") as scan:
+                scan.return_value.__enter__.return_value = entries()
+                with self.assertRaisesRegex(ReviewInputError, "entry cap exceeded"):
+                    store.prune_expired()
+            self.assertEqual(len(visited), 33)
+            self.assertTrue(target.exists())
+
+    def test_unreadable_unrelated_entry_is_preserved_and_selected_load_refuses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecoveryContextStore(Path(directory) / "handoff", key=HANDOFF_KEY)
+            bundle = _sample_bundle()
+            target = store.save(bundle)
+            with patch.object(Path, "open", side_effect=PermissionError("synthetic")):
+                self.assertEqual(store.prune_expired(), ())
+                self.assertEqual(
+                    self.load(store, bundle).refusal_code,
+                    "truncated_or_corrupt_context",
+                )
+            self.assertTrue(target.exists())
+            with patch.object(Path, "is_file", side_effect=OSError("synthetic")):
+                self.assertEqual(store.prune_expired(), ())
+            self.assertTrue(target.exists())
+
+    def test_deep_or_overlong_numeric_json_refuses_without_pruning(self):
+        for raw in (
+            b"[" * 1100 + b"]" * 1100,
+            b'{"document":{"n":'
+            + b"1" * 5000
+            + b'},"authentication":"'
+            + b"0" * 64
+            + b'"}',
+        ):
+            with (
+                self.subTest(size=len(raw)),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                store = RecoveryContextStore(
+                    Path(directory) / "handoff", key=HANDOFF_KEY
+                )
+                bundle = _sample_bundle()
+                target = store.save(bundle)
+                target.write_bytes(raw)
+                self.assertEqual(
+                    self.load(store, bundle).refusal_code,
+                    "truncated_or_corrupt_context",
+                )
+                self.assertEqual(store.prune_expired(), ())
+                self.assertEqual(target.read_bytes(), raw)
+
+
+class RecoveryContextPlatformPrivacyTests(unittest.TestCase):
+    def test_non_posix_store_refuses_before_filesystem_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "handoff"
+            key_file = Path(directory) / "not-read.key"
+            store = RecoveryContextStore(root, key=HANDOFF_KEY)
+            bundle = _sample_bundle()
+            with (
+                patch("review_sensei.recovery_context.os", SimpleNamespace(name="nt")),
+                patch.object(
+                    Path,
+                    "open",
+                    side_effect=AssertionError("must not open private files"),
+                ),
+            ):
+                self.assertIsNone(
+                    resolve_recovery_context_store(
+                        None, None, artifacts_policy="diagnostics"
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    resolve_recovery_context_store(
+                        root, key_file, artifacts_policy="diagnostics"
+                    )
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    store.save(bundle)
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    store.prune_expired()
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    store.load_for_fresh_process(
+                        bundle.transaction_id,
+                        expected_repository=bundle.repository,
+                        expected_pull_request=bundle.pull_request,
+                        expected_base_sha=bundle.base_sha,
+                        expected_head_sha=bundle.head_sha,
+                        expected_policy_commit=bundle.policy_commit,
+                        expected_result_sha256=bundle.accepted_result_sha256,
+                    )
+            self.assertFalse(root.exists())
+            self.assertFalse(key_file.exists())
+
+    def test_hosted_non_posix_opt_in_refuses_before_inference_or_storage(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            tempfile.TemporaryDirectory() as secret_dir,
+        ):
+            fixture = OrdinaryEntryHostedAndCliRecoveryG17Tests._make_hosted_fixture(
+                directory, artifacts="diagnostics"
+            )
+            handoff = Path(secret_dir) / "handoff"
+            fixture.recovery_context_dir = handoff
+            fixture.recovery_context_key_file = Path(secret_dir) / "absent.key"
+            with patch("review_sensei.recovery_context.os", SimpleNamespace(name="nt")):
+                self.assertEqual(fixture.invoke(), 1)
+            self.assertIn("unsupported on this platform", fixture.error)
+            self.assertEqual(fixture.provider_calls, 0)
+            self.assertFalse(handoff.exists())
+            self.assertEqual(list(Path(secret_dir).iterdir()), [])
 
 
 if __name__ == "__main__":

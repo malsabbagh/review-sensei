@@ -172,3 +172,31 @@ persisted session-ledger comments.
   `classify_source_identity_transition` unchanged.
 - Live installed-consumer workflow pins and deployed runtime version telemetry
   remain tracked separately under `G11`.
+
+
+## G17 private-store stabilization on PR #451
+
+This is a narrow correction to the recovery handoff described by
+[ADR 0131](0131-provenance-retention-representability-and-capacity-envelope.md),
+not new writer authority or a durable lifecycle schema. Authentication must be
+exact lowercase hexadecimal HMAC-SHA256 before constant-time comparison. Selected
+invalid envelopes refuse; unrelated invalid/unreadable cache entries are preserved
+and skipped by pruning. Unauthenticated expiry fields cannot authorize deletion.
+Envelope reads and directory enumeration are bounded before parsing/sorting, with
+unchanged byte, file and request limits. Valid authenticated TTL expiry remains the
+only pruning route.
+
+The optional private context store requires POSIX ownership/mode enforcement.
+Non-POSIX opt-in refuses before private file access or creation; the unconfigured
+path remains available. This is an explicit unsupported boundary, not Windows ACL
+qualification. POSIX integration tests remain POSIX-qualified; portable tests
+exercise the non-POSIX refusal, no-byte/no-inference effects, and default behavior.
+Full Windows private-store support remains pending an independently qualified ACL
+mechanism. No production permission/ACL changes are made by this correction.
+
+Validation uses malformed/non-ASCII signatures, oversized/deep JSON, invalid
+signed TTL, unreadable files, bounded directory overflow, and actual hosted opt-in
+refusal. It does not establish genuine subprocess lifecycle reconstruction,
+installed applicability, or historical settlement. Rollback is a source revert;
+keep all existing envelopes and ledgers, and do not treat restoring the former
+permissive non-POSIX behavior as approved privacy enforcement.

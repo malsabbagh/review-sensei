@@ -17,6 +17,7 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -855,6 +856,14 @@ def price_recovery_context_admission(
     )
 
 
+def _require_private_store_platform() -> None:
+    if os.name != "posix":
+        raise ReviewInputError(
+            "private recovery context storage is unsupported on this platform; "
+            "POSIX ownership and mode enforcement are required"
+        )
+
+
 class RecoveryContextStore:
     """Private, HMAC-authenticated handoff store for original recovery bundles."""
 
@@ -889,6 +898,7 @@ class RecoveryContextStore:
         ).hexdigest()
 
     def _validate_directory(self) -> None:
+        _require_private_store_platform()
         if self.directory.is_symlink():
             raise ReviewInputError("recovery context directory must not be a symlink")
         if self.directory.exists() and os.name == "posix":
@@ -999,13 +1009,14 @@ class RecoveryContextStore:
                 "tampered_authentication_or_digest", ("symlink_handoff_rejected",)
             )
         try:
-            raw = path.read_bytes()
+            with path.open("rb") as stream:
+                raw = stream.read(MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 1)
             if not raw or len(raw) > MAX_RECOVERY_CONTEXT_BUNDLE_BYTES:
                 return _refusal_decision(
                     "truncated_or_corrupt_context", ("invalid_envelope_size",)
                 )
             envelope = json.loads(raw.decode("utf-8", errors="strict"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
             return _refusal_decision(
                 "truncated_or_corrupt_context", ("truncated_or_invalid_json",)
             )
@@ -1014,6 +1025,7 @@ class RecoveryContextStore:
             not isinstance(envelope, Mapping)
             or set(envelope.keys()) != {"document", "authentication"}
             or not isinstance(envelope.get("authentication"), str)
+            or _HEX64_RE.fullmatch(envelope["authentication"]) is None
             or not isinstance(envelope.get("document"), Mapping)
         ):
             return _refusal_decision(
@@ -1021,7 +1033,12 @@ class RecoveryContextStore:
             )
 
         document = envelope["document"]
-        expected_sig = self._signature(document)
+        try:
+            expected_sig = self._signature(document)
+        except (ValueError, UnicodeError, RecursionError):
+            return _refusal_decision(
+                "truncated_or_corrupt_context", ("malformed_handoff_document",)
+            )
         if not hmac.compare_digest(envelope["authentication"], expected_sig):
             return _refusal_decision(
                 "tampered_authentication_or_digest", ("hmac_signature_mismatch",)
@@ -1124,7 +1141,11 @@ class RecoveryContextStore:
         )
 
     def prune_expired(self) -> tuple[Path, ...]:
-        """Unlink authenticated handoff envelopes whose bounded TTL has elapsed."""
+        """Unlink only authenticated, bounded-TTL expired handoff envelopes.
+
+        Unrelated malformed/unreadable files are preserved and skipped. Their
+        untrusted timestamps never authorize deletion; selected loads refuse.
+        """
 
         self._validate_directory()
         if not self.directory.exists():
@@ -1133,38 +1154,68 @@ class RecoveryContextStore:
         if now.tzinfo is None:
             raise ReviewInputError("recovery context clock must be timezone-aware")
         removed: list[Path] = []
-        for index, entry in enumerate(sorted(self.directory.iterdir())):
-            if index >= 32:
-                raise ReviewInputError("recovery context directory entry cap exceeded")
+        try:
+            with os.scandir(self.directory) as scan:
+                entries = [self.directory / entry.name for entry in islice(scan, 33)]
+        except OSError:
+            raise ReviewInputError(
+                "recovery context directory is unavailable"
+            ) from None
+        if len(entries) > 32:
+            raise ReviewInputError("recovery context directory entry cap exceeded")
+        for entry in sorted(entries):
             if entry.suffix != ".json":
                 continue
-            if entry.is_symlink() or not entry.is_file():
-                raise ReviewInputError("recovery context directory entry is invalid")
             try:
-                raw = entry.read_bytes()
+                if entry.is_symlink() or not entry.is_file():
+                    raise ReviewInputError(
+                        "recovery context directory entry is invalid"
+                    )
+                with entry.open("rb") as stream:
+                    raw = stream.read(MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 1)
                 if not raw or len(raw) > MAX_RECOVERY_CONTEXT_BUNDLE_BYTES:
                     continue
                 envelope = json.loads(raw.decode("utf-8", errors="strict"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            except (OSError, UnicodeDecodeError, ValueError, RecursionError):
                 continue
             if (
                 not isinstance(envelope, Mapping)
                 or set(envelope.keys()) != {"document", "authentication"}
                 or not isinstance(envelope.get("authentication"), str)
+                or _HEX64_RE.fullmatch(envelope["authentication"]) is None
                 or not isinstance(envelope.get("document"), Mapping)
             ):
                 continue
             document = envelope["document"]
-            if not hmac.compare_digest(
-                envelope["authentication"], self._signature(document)
-            ):
-                continue
             try:
-                expires_at = datetime.fromisoformat(str(document.get("expires_at", "")))
-            except ValueError:
+                if not hmac.compare_digest(
+                    envelope["authentication"], self._signature(document)
+                ):
+                    continue
+                if (
+                    set(document)
+                    != {"envelope_version", "saved_at", "expires_at", "bundle"}
+                    or document["envelope_version"] != RECOVERY_HANDOFF_ENVELOPE_VERSION
+                ):
+                    continue
+                saved_at = datetime.fromisoformat(str(document["saved_at"]))
+                expires_at = datetime.fromisoformat(str(document["expires_at"]))
+            except (ValueError, UnicodeError, RecursionError):
                 continue
-            if expires_at.tzinfo is not None and now >= expires_at:
-                entry.unlink(missing_ok=True)
+            if (
+                saved_at.tzinfo is not None
+                and expires_at.tzinfo is not None
+                and 0
+                < (expires_at - saved_at).total_seconds()
+                <= MAX_RECOVERY_TTL_SECONDS
+                and now >= expires_at
+            ):
+                try:
+                    entry.unlink(missing_ok=True)
+                except OSError:
+                    raise ReviewInputError(
+                        "expired recovery context could not be removed"
+                    ) from None
                 removed.append(entry)
         return tuple(removed)
 
@@ -1190,6 +1241,7 @@ def resolve_recovery_context_store(
             "recovery context store requires paired directory and key file paths "
             "and explicit diagnostics artifact policy"
         )
+    _require_private_store_platform()
     key_path = Path(key_file)
     try:
         if key_path.is_symlink() or (
