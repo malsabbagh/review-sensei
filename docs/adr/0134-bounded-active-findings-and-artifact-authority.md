@@ -212,3 +212,36 @@ The projection receipt explicitly records `authority_evaluated=False`: it is not
 proof of durable finding inventory, trust, enrollment, or historical settlement.
 G10/G14/G15/G16 durable ordinary-path integration remains separately unqualified;
 process-local caches are not promoted to authenticated authority by this fix.
+
+## Reduced-baseline cold-process refusal (2026-11-12)
+
+A `ReviewBaseline` retains concern fingerprints, original resolution criteria and
+bounded path/symbol/blocking metadata. It is not a serialized active-window or
+drift inventory: it lacks native slot bindings, uncertain-effect holds, complete
+human/ambiguity state and their audit proofs. Loading a baseline therefore does
+not reconstruct the state described by this ADR.
+
+An opted-in active-window/drift publisher now returns
+`durable_finding_inventory_recovery_required` before native reconciliation or
+writes when the selected lifecycle has no prior state and a baseline or explicit
+later-round context is present. Incremental/fallback-full labels without a
+baseline cannot silently restart those routes; switching a live active window
+to a fresh drift tracker cannot discard its prior inventory either. Session
+dispositions, confirmed prior concerns, retained continuation eligibility and
+non-new lifecycle records also identify prior-review context. Fix/override
+proposals, the explicit-reanalysis flag, resolved/outdated host threads and
+complete file coverage do not provide the missing proof. The original baseline
+and its criteria remain unchanged. Initial full reviews and existing same-process
+lifecycle behavior remain supported.
+
+This is a fail-closed correction, not durable reconstruction or gap closure. A
+caller that labels a cold invocation as a first full review and omits all prior
+context cannot yet be distinguished from a real first review here. Command/
+`verify` reconstruction, authenticated retention of complete lifecycle state and
+ordinary producer/consumer wiring remain unqualified. Process-local state is
+still not durable authority. Do not remove the baseline, relabel coverage,
+recreate deleted projections or repeat requests to evade this handoff. Preserve
+the retained result, original criteria, receipts, accounting and uncertainty;
+qualify the full durable reconstruction contract before resuming this lifecycle
+from a new process. No live recovery, reenrollment, capacity expansion or fresh
+inference is authorized by this diagnostic.

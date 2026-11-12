@@ -7239,6 +7239,59 @@ class ReviewPublisher:
             raise GitHubPublicationError("review base sha is invalid")
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError("review result is invalid")
+        # A ReviewBaseline retains original concern criteria, but not complete
+        # active-window/drift inventories, native bindings or uncertain-effect
+        # holds. A cold publisher must not treat that reduced record (or a
+        # later-round coverage label without it) as an empty first-round state.
+        # Keep this guard before preparation, native reconciliation and writes:
+        # coverage, disposition/fix proposals and edited/deleted projections
+        # cannot supply the missing reconstruction proof.
+        finding_key = (repository_id, pull_request)
+        prior_window = self._active_window_states.get(finding_key)
+        prior_drift = self._drift_states.get(finding_key)
+        drift_requested = (
+            enable_drift_tracking
+            or prior_drift is not None
+            or bool(drift_descriptors)
+            or bool(host_outdated_threads)
+            or bool(host_resolved_threads)
+        )
+        window_requested = (
+            max_active_findings is not None
+            or prior_window is not None
+            or bool(confirmed_fixes)
+            or bool(human_overrides)
+            or coverage_acceptance is not None
+            or authorized_rescan is not None
+        )
+        prior_finding_context = (
+            baseline is not None
+            or result.coverage_mode in {"incremental", "fallback-full"}
+            or bool(host_outdated_threads)
+            or bool(host_resolved_threads)
+            or bool(authorized_dispositions)
+            or bool(evidence_confirmed_concerns)
+            or retained_eligibility is not None
+            or continuation_digest is not None
+            or any(item.state != "new" for item in result.finding_lifecycles)
+            or prior_window is not None
+            or prior_drift is not None
+            or bool(confirmed_fixes)
+            or bool(human_overrides)
+            or authorized_rescan is not None
+        )
+        selected_state_missing = (
+            prior_drift is None if drift_requested else prior_window is None
+        )
+        if (
+            (drift_requested or window_requested)
+            and prior_finding_context
+            and selected_state_missing
+        ):
+            return PublicationResult(
+                status="handoff",
+                diagnostic="durable_finding_inventory_recovery_required",
+            )
         qualification = restrict_result_qualification(result, qualification)
         _reject_conflicting_instances(result.comments)
         if retained_eligibility is not None:
