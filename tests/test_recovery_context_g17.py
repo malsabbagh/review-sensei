@@ -2249,5 +2249,236 @@ class RecoveryContextPlatformPrivacyTests(unittest.TestCase):
             self.assertEqual(list(Path(secret_dir).iterdir()), [])
 
 
+@unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+class OrdinaryRecoverySubprocessG17Tests(unittest.TestCase):
+    """Real interpreter restart using ordinary entry writers and fake native HTTP."""
+
+    CHILD = r"""
+import json, os, sys
+from pathlib import Path
+from test_recovery_context_g17 import OrdinaryEntryHostedAndCliRecoveryG17Tests
+from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_persistence import IDENTITY
+
+packet = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+# A new fixture supplies only synthetic service behavior. All retained artifacts
+# and accepted-result bytes below came from production writers in the parent.
+f = OrdinaryEntryHostedAndCliRecoveryG17Tests._make_hosted_fixture(sys.argv[2], limit=packet["limit"])
+f.root = Path(packet["root"])
+f.policy = f.policy_ref = packet["policy"]
+f.config_bytes = bytes.fromhex(packet["config_hex"])
+f.comment = packet["comment"]
+f.extra_comments = {int(k): v for k, v in packet["extra_comments"].items()}
+f.run_id = packet["run_id"]
+f.attempt = 2
+f.recovery_context_dir = Path(packet["handoff"])
+f.recovery_context_key_file = Path(packet["key_file"])
+f.override_run_directory = Path(sys.argv[3])
+def no_inference():
+    raise AssertionError("cold retained recovery invoked the provider")
+f.before_provider = no_inference
+assert f.provider_calls == 0 and f.accounted is None and f.selected is None
+code = f.invoke()
+record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+Path(sys.argv[4]).write_text(json.dumps({
+    "pid": os.getpid(), "code": code, "error": f.error,
+    "provider_calls": f.provider_calls, "record": record.to_dict(),
+    "reviews": [r["state"] for r in f.reviews], "trace": f.trace,
+    "checks": f.check_runs,
+}), encoding="utf-8")
+"""
+
+    def test_ordinary_retention_reopens_in_cold_process_without_new_inference(self):
+        import subprocess
+        import sys
+
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_api_work_persistence import IDENTITY as RUN_IDENTITY
+
+        from review_sensei.api_work import ApiRunAccounting
+        from review_sensei.session import SessionRecord
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            producer = OrdinaryEntryHostedAndCliRecoveryG17Tests._make_hosted_fixture(
+                str(source), artifacts="diagnostics", limit=384
+            )
+            handoff = root / "private-handoff"
+            key_file = root / "private.key"
+            key_file.write_bytes(HANDOFF_KEY)
+            key_file.chmod(0o600)
+            producer.recovery_context_dir = handoff
+            producer.recovery_context_key_file = key_file
+            producer.before_publication = lambda: (_ for _ in ()).throw(
+                OSError("synthetic interruption after ordinary retention")
+            )
+            self.assertEqual(producer.invoke(), 1)
+            self.assertEqual(producer.provider_calls, 1)
+            self.assertEqual(producer.reviews, [])
+            original = parse_session_comment(
+                producer.comment["body"], identity=RUN_IDENTITY
+            )
+            self.assertEqual(original.transaction.phase, "publication_pending")
+            original_accounting = ApiRunAccounting.from_document(
+                original.api_run_accounting
+            )
+            self.assertEqual(original_accounting.configuration.limit, 384)
+            self.assertGreater(original_accounting.confirmed, 0)
+            handoff_files = list(handoff.glob("*.json"))
+            self.assertEqual(len(handoff_files), 1)
+            retained_handoff = handoff_files[0].read_bytes()
+            retained_bundle = json.loads(retained_handoff)["document"]["bundle"]
+            self.assertEqual(retained_bundle["run_id"], producer.run_id)
+            self.assertEqual(
+                retained_bundle["accepted_result_sha256"],
+                original.transaction.result_sha256,
+            )
+            for name in ("configuration.json", "admission.json", "review.json"):
+                (source / name).unlink(missing_ok=True)
+            packet = root / "transport.json"
+            packet.write_text(
+                json.dumps(
+                    {
+                        "root": str(source),
+                        "policy": producer.policy,
+                        "config_hex": producer.config_bytes.hex(),
+                        "limit": 384,
+                        "comment": producer.comment,
+                        "extra_comments": producer.extra_comments,
+                        "run_id": producer.run_id,
+                        "handoff": str(handoff),
+                        "key_file": str(key_file),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            checkout = Path(__file__).resolve().parents[1]
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if key
+                in {"PATH", "HOME", "TMP", "TMPDIR", "TEMP", "SYSTEMROOT", "LANG"}
+            }
+            env["PYTHONPATH"] = os.pathsep.join(
+                str(path)
+                for path in (
+                    checkout / "tests",
+                    checkout / "src",
+                    checkout / "packages/python/review-sensei-github/src",
+                )
+            )
+            original_diff = (source / "review.patch").read_bytes()
+            original_config = (source / ".reviewsensei.yml").read_bytes()
+            cases = (
+                ("missing_handoff", "absent_context"),
+                ("tampered_handoff", "tampered_authentication_or_digest"),
+                ("malformed_handoff", "truncated_or_corrupt_context"),
+                (
+                    "changed_diff",
+                    "snapshot_or_transaction_mismatch: stored recovery context drifted on diff_sha256",
+                ),
+                ("valid", None),
+            )
+            for label, refusal in cases:
+                with self.subTest(case=label):
+                    handoff_files[0].write_bytes(retained_handoff)
+                    (source / "review.patch").write_bytes(original_diff)
+                    (source / ".reviewsensei.yml").write_bytes(original_config)
+                    for name in ("configuration.json", "admission.json", "review.json"):
+                        (source / name).unlink(missing_ok=True)
+                    if label == "missing_handoff":
+                        handoff_files[0].unlink()
+                    elif label in {"tampered_handoff", "malformed_handoff"}:
+                        envelope = json.loads(retained_handoff)
+                        envelope["authentication"] = (
+                            "0" * 64 if label == "tampered_handoff" else "é" * 64
+                        )
+                        handoff_files[0].write_text(
+                            json.dumps(envelope), encoding="utf-8"
+                        )
+                    elif label == "changed_diff":
+                        changed = original_diff.replace(b"+change", b"+different")
+                        self.assertNotEqual(changed, original_diff)
+                        (source / "review.patch").write_bytes(changed)
+                    cold_fixture = root / (label + "-fixture")
+                    cold_fixture.mkdir()
+                    cold_run = root / (label + "-run")
+                    cold_run.mkdir()
+                    output = root / (label + ".json")
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-c",
+                            self.CHILD,
+                            str(packet),
+                            str(cold_fixture),
+                            str(cold_run),
+                            str(output),
+                        ],
+                        cwd=root,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    child = json.loads(output.read_text(encoding="utf-8"))
+                    self.assertNotEqual(child["pid"], os.getpid())
+                    self.assertEqual(child["provider_calls"], 0)
+                    recovered = SessionRecord.from_dict(child["record"])
+                    self.assertEqual(
+                        recovered.transaction.result_sha256,
+                        original.transaction.result_sha256,
+                    )
+                    current = ApiRunAccounting.from_document(
+                        recovered.api_run_accounting
+                    )
+                    self.assertEqual(
+                        current.configuration, original_accounting.configuration
+                    )
+                    self.assertEqual(
+                        current.blocks[: len(original_accounting.blocks)],
+                        original_accounting.blocks,
+                    )
+                    self.assertGreaterEqual(
+                        current.confirmed, original_accounting.confirmed
+                    )
+                    self.assertLessEqual(
+                        current.remaining, original_accounting.remaining
+                    )
+                    self.assertGreaterEqual(current.remaining, 0)
+                    self.assertEqual(
+                        current.startup.liability
+                        + current.prior_nonstartup_liability
+                        + current.confirmed
+                        + current.uncertain
+                        + current.reserved_undispatched
+                        + current.remaining,
+                        384,
+                    )
+                    if refusal:
+                        self.assertEqual(child["code"], 1, child["error"])
+                        self.assertIn(refusal, child["error"])
+                        self.assertNotIn("api key", child["error"].lower())
+                        self.assertEqual(child["reviews"], [])
+                        self.assertEqual(child["checks"], [])
+                        self.assertEqual(
+                            recovered.transaction.phase, "publication_pending"
+                        )
+                        self.assertIsNone(current.terminal_transaction)
+                    else:
+                        self.assertEqual(child["code"], 0, child["error"])
+                        self.assertEqual(child["reviews"], ["COMMENTED", "APPROVED"])
+                        self.assertEqual(
+                            recovered.transaction.phase, "publication_succeeded"
+                        )
+                        self.assertIsNotNone(current.terminal_transaction)
+                        self.assertEqual(
+                            handoff_files[0].read_bytes(), retained_handoff
+                        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -200,3 +200,22 @@ refusal. It does not establish genuine subprocess lifecycle reconstruction,
 installed applicability, or historical settlement. Rollback is a source revert;
 keep all existing envelopes and ledgers, and do not treat restoring the former
 permissive non-POSIX behavior as approved privacy enforcement.
+
+### G17 ordinary-entry cold-process qualification
+
+`OrdinaryRecoverySubprocessG17Tests` now exercises the ordinary hosted entry
+route with opt-in private storage. The parent invokes production accepted-result,
+ledger and context writers, then interrupts before publication. Five fresh Python
+processes reopen those exact artifacts without diagnostic run files or inherited
+provider credentials. A provider stub fails if inference is attempted. Missing,
+tampered and malformed handoffs and changed diff bytes reach the intended context
+hold with no publication; the unchanged case publishes through synthetic native
+transport and settles the retained transaction. Every case preserves the original
+nondefault 384-request configuration, existing accounting blocks, and conservation
+of liabilities and remaining allowance. No fresh default allowance is injected.
+
+This qualifies same-run, later-attempt cold reconstruction on POSIX through the
+production transport seam, not deployed authenticated GitHub execution, distinct
+workflow-run transfer, non-POSIX private storage, or historical recovery. The
+native service and provider are fixtures; no real review or approval is submitted.
+The matrix found no further source integration defect in this bounded slice.
