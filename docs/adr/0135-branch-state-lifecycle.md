@@ -44,9 +44,15 @@ type-checked lifecycle decision module and wire live write gates across
    - Bind session state exclusively to `SessionIdentity(repository_id, pull_request)`.
    - Centralize pre-mutation live PR admission in `evaluate_live_pr_write_gate`
      and `evaluate_finalizer_pr_gate`, enforcing exact-boolean `draft` checks,
-     `state == "open"`, non-null same-repository `head.repo` / `base.repo`, and
-     exact `(base_branch, base_sha, head_sha)` matching without adding extra
+     `state == "open"`, non-null same-repository `head.repo` / `base.repo`,
+     branch-ref liveness (`branch_ref_exists`), and exact
+     `(base_branch, base_sha, head_sha)` matching without adding extra
      happy-path HTTP requests.
+   - Fence delayed review, approval-finalizer, and mention-reply effects
+     arriving after close (`skipped_pr_state`) or after changed-SHA reopen
+     (`skipped_stale_head`), and evaluate out-of-order `reopened` / `closed` /
+     `synchronize` deliveries against live authenticated GitHub PR state rather
+     than stale event snapshots.
    - Preserve prior unresolved obligations and head-scoped `failed_attempts`
      across same-PR close/reopen, minting zero fresh failed-attempt allowance on
      same-SHA reopen while isolating distinct PR numbers on recreated branches.
@@ -119,21 +125,29 @@ shared distribution manifests remain unchanged.
 
 ## Validation
 
-- `tests/test_reopen_branch_lifecycle_g05.py`: 8 end-to-end and unit tests
-  covering close/reopen, deleted/recreated branches, cold-start and base-ref
-  retarget matrix cells, PR `#7` vs. PR `#8` isolation, failed-attempt
-  conservation, duplicate/reordered deliveries, and live publisher/finalizer
-  write gates.
-- `tests/test_force_push_ancestry_g06.py`: 7 end-to-end, reconciliation-matrix,
+- `tests/test_reopen_branch_lifecycle_g05.py`: 10 end-to-end and unit tests
+  covering close/reopen, deleted/recreated branches (`head.repo=None` and
+  `branch_ref_exists=False`), cold-start and base-ref retarget matrix cells,
+  PR `#7` vs. PR `#8` isolation, failed-attempt conservation, duplicate and
+  out-of-order `reopened`/`closed`/`synchronize` deliveries, delayed review /
+  approval / mention-reply effects after close and changed-SHA reopen, and live
+  publisher/finalizer write gates (live consumer deployment telemetry remains
+  tracked separately under `G11`).
+- `tests/test_force_push_ancestry_g06.py`: 9 end-to-end, reconciliation-matrix,
   and real-Git ancestry tests covering commit-graph and combined head+base-ref
   retarget transitions, `H1 -> H2 -> H1` obligation preservation and
   `supersedes_prior_clean_review` control flow, identical-tree/diff force-pushes,
-  same-SHA `base_ref` retarget zero-inference recovery, post-`COMMENT` rewrite
-  fencing, and `G04` dirty mergeability controls.
-- `tests/test_active_draft_close_g23.py`: 6 comprehensive tests covering
+  same-SHA `base_ref` retarget zero-inference recovery, hosted `ReviewRun`
+  unrelated-history pre-inference refusal and clone-free `unavailable()`
+  confirmation, rebase/force-push delayed old-effect fencing plus `attempt=2`
+  zero-inference retained retry journeys, post-`COMMENT` rewrite fencing, and
+  `G04` dirty mergeability controls.
+- `tests/test_active_draft_close_g23.py`: 8 comprehensive tests covering
   `draft=True` and `state="closed"` across all 5 active-work phases on review
-  and reply routes, including lost-response `stored` vs. `unconfirmed`
-  accounting holds.
+  and reply routes, strict `G24` exact-boolean `draft` refusal across active
+  bootstrap/publisher/finalizer/reply gates, exact `ApiRunAccounting` caller
+  request conservation without refund, accepted-result retention, and
+  lost-response `stored` vs. `unconfirmed` accounting holds.
 - Full regression anchors (`test_g04_merge_characterization`,
   `test_draft_validation`, `test_reply_freshness_g33`,
   `test_bounded_v1_publication`, `test_github_publication`, `test_review_run`)
@@ -148,7 +162,84 @@ persisted session-ledger comments.
 
 ## Follow-up work
 
-- When hosted GitHub App workflows without a local Git checkout need commit-graph
-  classification directly, populate `GitAncestryEvidence` from GitHub's
-  authenticated compare/commit REST endpoints rather than `inspect_git_ancestry`,
-  keeping `classify_source_identity_transition` unchanged.
+- Confirmed at `07179c0f`: hosted GitHub Actions `review-run` checkouts refuse
+  unrelated histories pre-inference via `prepare_diff` while preserving session
+  obligations, and clone-free hosted paths fail closed via
+  `GitAncestryEvidence.unavailable()` without unrequested REST calls. When
+  clone-free GitHub App workflows need commit-graph classification directly,
+  populate `GitAncestryEvidence` from GitHub's authenticated compare/commit REST
+  endpoints rather than `inspect_git_ancestry`, keeping
+  `classify_source_identity_transition` unchanged.
+- Live installed-consumer workflow pins and deployed runtime version telemetry
+  remain tracked separately under `G11`.
+
+
+## G17 private-store stabilization on PR #451
+
+This is a narrow correction to the recovery handoff described by
+[ADR 0131](0131-provenance-retention-representability-and-capacity-envelope.md),
+not new writer authority or a durable lifecycle schema. Authentication must be
+exact lowercase hexadecimal HMAC-SHA256 before constant-time comparison. Selected
+invalid envelopes refuse; unrelated invalid/unreadable cache entries are preserved
+and skipped by pruning. Unauthenticated expiry fields cannot authorize deletion.
+Envelope reads and directory enumeration are bounded before parsing/sorting, with
+unchanged byte, file and request limits. Valid authenticated TTL expiry remains the
+only pruning route.
+
+The optional private context store requires POSIX ownership/mode enforcement.
+Non-POSIX opt-in refuses before private file access or creation; the unconfigured
+path remains available. This is an explicit unsupported boundary, not Windows ACL
+qualification. POSIX integration tests remain POSIX-qualified; portable tests
+exercise the non-POSIX refusal, no-byte/no-inference effects, and default behavior.
+Full Windows private-store support remains pending an independently qualified ACL
+mechanism. No production permission/ACL changes are made by this correction.
+
+Validation uses malformed/non-ASCII signatures, oversized/deep JSON, invalid
+signed TTL, unreadable files, bounded directory overflow, and actual hosted opt-in
+refusal. It does not establish genuine subprocess lifecycle reconstruction,
+installed applicability, or historical settlement. Rollback is a source revert;
+keep all existing envelopes and ledgers, and do not treat restoring the former
+permissive non-POSIX behavior as approved privacy enforcement.
+
+### G17 ordinary-entry cold-process qualification
+
+`OrdinaryRecoverySubprocessG17Tests` now exercises the ordinary hosted entry
+route with opt-in private storage. The parent invokes production accepted-result,
+ledger and context writers, then interrupts before publication. Five fresh Python
+processes reopen those exact artifacts without diagnostic run files or inherited
+provider credentials. A provider stub fails if inference is attempted. Missing,
+tampered and malformed handoffs and changed diff bytes reach the intended context
+hold with no publication; the unchanged case publishes through synthetic native
+transport and settles the retained transaction. Every case preserves the original
+nondefault 384-request configuration, existing accounting blocks, and conservation
+of liabilities and remaining allowance. No fresh default allowance is injected.
+
+This qualifies same-run, later-attempt cold reconstruction on POSIX through the
+production transport seam, not deployed authenticated GitHub execution, distinct
+workflow-run transfer, non-POSIX private storage, or historical recovery. The
+native service and provider are fixtures; no real review or approval is submitted.
+The matrix found no further source integration defect in this bounded slice.
+
+### Standalone private-context recovery accounting boundary
+
+Standalone `publish` uses an evidence-read budget, not the ordinary hosted
+caller's authenticated request-accounting transport. If its retained session
+record carries caller accounting, opt-in private-context publication/recovery now
+holds with typed `absent_context` and
+`original_caller_accounting_transport_required` guidance directing the operator to
+ordinary hosted `review-run`. This check precedes context reconstruction,
+acceptance checkpoints, handoff replacement and native business effects. CLI
+allowance flags cannot grant original-run ownership or replace its funding.
+Malformed accounting still refuses; unknown writer accounting cannot fall back
+to a fresh allowance. Local unbound CLI capture/recovery retains its existing
+explicit local budget semantics, including synthetic local capture/retry labels;
+those labels do not represent an authenticated hosted owner.
+
+The public-entry regression seeds finite metered fixture accounting (384 total,
+37 prior liability and 40 reserved) via production constructors/serialization.
+Both result retry and retained reconstruction previously published; both now
+hold without changes to the ledger or handoff, new inference, or native reviews.
+This is a supported refusal boundary, not completed standalone metered recovery.
+Integrating an authenticated original-caller transport into that standalone route
+remains open G17 work. The ordinary hosted cold-process qualification above is
+unchanged.

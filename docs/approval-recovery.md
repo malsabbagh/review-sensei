@@ -418,3 +418,13 @@ native receipts are recorded:
   `response_loss_echo_observed_reconcilable`), which route to
   `reconcile_observed_exact_review` or `reconcile_observed_review_hold` and
   refuse blind restart whenever an exact App review echo already exists.
+
+### Private-context recovery of caller-accounted runs
+
+Standalone `publish` cannot assume ownership or funding of a retained hosted run.
+When private-context recovery finds original caller accounting, it refuses with
+`original_caller_accounting_transport_required` (typed `absent_context`). Use the
+ordinary hosted `review-run` recovery route with its authenticated original-caller
+transport. Do not supply a fresh allowance or change run IDs to bypass the hold.
+The standalone route's evidence budget is not that transport. Local unbound CLI
+recovery remains supported; standalone metered recovery integration remains open.

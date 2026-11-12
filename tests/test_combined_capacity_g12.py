@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -394,12 +395,32 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 sub_dir = Path(tmpdir) / f"case_{idx:03d}"
                 sub_dir.mkdir(mode=0o700)
                 bundle = _make_recovery_bundle(idx)
-                replay = simulate_interruption_and_fresh_replay(
-                    scenario,
-                    handoff_directory=sub_dir,
-                    handoff_key=handoff_key,
-                    recovery_bundle=bundle,
-                )
+                if (
+                    os.name != "posix"
+                    and scenario.payload_profile != "combined_overflow"
+                ):
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "unsupported on this platform"
+                    ):
+                        simulate_interruption_and_fresh_replay(
+                            scenario,
+                            handoff_directory=sub_dir,
+                            handoff_key=handoff_key,
+                            recovery_bundle=bundle,
+                        )
+                    self.assertEqual(list(sub_dir.iterdir()), [])
+                    # Keep the portable simulation assertions, without claiming
+                    # a private-store handoff or genuine process replay.
+                    replay = simulate_interruption_and_fresh_replay(
+                        scenario, verify_fresh_handoff=False
+                    )
+                else:
+                    replay = simulate_interruption_and_fresh_replay(
+                        scenario,
+                        handoff_directory=sub_dir,
+                        handoff_key=handoff_key,
+                        recovery_bundle=bundle,
+                    )
                 self.assertFalse(replay.authority)
                 self.assertFalse(replay.orphan_parts_trusted)
                 self.assertEqual(replay.duplicate_side_effects, 0)
@@ -418,7 +439,9 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                     self.assertFalse(replay.fresh_process_handoff_verified)
                 else:
                     self.assertTrue(replay.envelope_evaluation.combined_envelope_fits)
-                    self.assertTrue(replay.fresh_process_handoff_verified)
+                    self.assertEqual(
+                        replay.fresh_process_handoff_verified, os.name == "posix"
+                    )
                     if scenario.interruption_mode in {
                         "in_flight_not_stored",
                         "in_flight_stored_response_lost",
@@ -609,6 +632,22 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 key=b"z" * 32,
                 now=lambda: datetime.now(timezone.utc),
             )
+            if os.name != "posix":
+                # The preceding hosted/convergence subjourneys remain portable.
+                # This private-store replay cannot claim Windows ACL qualification.
+                retained = {
+                    name: (root / name).read_bytes()
+                    for name in ("result.json", "configuration.json", "admission.json")
+                }
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    handoff_store.save(admitted.bundle)
+                self.assertFalse((root / "handoff").exists())
+                for name, content in retained.items():
+                    self.assertEqual((root / name).read_bytes(), content)
+                self.assertEqual(ledger.load(PUB_IDENTITY).record, failed_rec)
+                return
             handoff_store.save(admitted.bundle)
             for artifact in ("result.json", "configuration.json", "admission.json"):
                 (root / artifact).unlink()
@@ -745,9 +784,15 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 recovery=rx,
             )
 
-        default_replay = simulate_interruption_and_fresh_replay(valid_scen)
-        self.assertTrue(default_replay.fresh_process_handoff_verified)
-        self.assertTrue(default_replay.converged_after_recovery)
+        if os.name == "posix":
+            default_replay = simulate_interruption_and_fresh_replay(valid_scen)
+            self.assertTrue(default_replay.fresh_process_handoff_verified)
+            self.assertTrue(default_replay.converged_after_recovery)
+        else:
+            with self.assertRaisesRegex(
+                ReviewInputError, "unsupported on this platform"
+            ):
+                simulate_interruption_and_fresh_replay(valid_scen)
 
         opt_out_replay = simulate_interruption_and_fresh_replay(
             valid_scen, verify_fresh_handoff=False

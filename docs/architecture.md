@@ -82,6 +82,11 @@ Writers default to at most 64 findings; readers accept 250. Only trusted `github
 The packaged v5 schema validates structure; explicit rescan uses the trusted reader
 and one original command read allowance.
 
+## G17 private recovery-store platform boundary
+
+Optional original-context handoff requires POSIX ownership/mode enforcement; non-POSIX opt-in refuses before key access/storage, while unconfigured operation remains available. Require bounded reads, exact HMAC encoding and preservation of unauthenticated/malformed cache evidence during expiry pruning. No ACL qualification, writer authority, schema migration, budget expansion or historical settlement follows (ADR 0131; ADR 0135 stabilization addendum).
+References: [ADR 0131](adr/0131-provenance-retention-representability-and-capacity-envelope.md) and [ADR 0135 stabilization addendum](adr/0135-branch-state-lifecycle.md#g17-private-store-stabilization-on-pr-451).
+
 ## Explicit human file review (local, opt-in)
 
 [Human file review](human-file-review.md) binds an owned exact result/root, complete inventory, regular base/head blobs and current authorized source. Hosted composition reads canonical retained state after broker authorization. V1 parts keep 32 files; groups keep 32 KiB and exact union coverage. Media keeps caller accounting and independent Worker check ceilings.

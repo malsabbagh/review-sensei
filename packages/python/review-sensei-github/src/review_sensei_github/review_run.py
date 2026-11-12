@@ -18,7 +18,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -27,13 +27,22 @@ from review_sensei.api_work import (
     ApiRunIdentity,
     FrozenApiConfiguration,
 )
-from review_sensei.baseline import ReviewBaseline, ReviewContextCacheKey
+from review_sensei.baseline import (
+    ReviewBaseline,
+    ReviewContextCacheKey,
+    admission_context_document,
+)
 from review_sensei.cli import _parser as engine_parser
 from review_sensei.cli import main as engine_main
 from review_sensei.configuration import MAX_CONFIG_BYTES, load_configuration
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
 from review_sensei.hosted import HostedPlan, plan_hosted_execution
 from review_sensei.models import ReviewResult, ReviewTransaction
+from review_sensei.outcomes import DEFAULT_RECOVERY_TTL_SECONDS
+from review_sensei.recovery_context import (
+    RecoveryContextStore,
+    resolve_recovery_context_store,
+)
 from review_sensei.session import SessionIdentity
 from review_sensei.workflow import prepare_diff
 
@@ -257,6 +266,9 @@ class ReviewRun:
     title: str = ""
     actions_token: str | None = field(default=None, repr=False)
     restart_id: str | None = None
+    recovery_context_store: RecoveryContextStore | None = field(
+        default=None, repr=False
+    )
 
     def retained_analysis(self, argv: list[str]) -> CompletedAnalysis | None:
         """Recover a stopped same-run owner's exact checkpoint, without inference."""
@@ -295,7 +307,10 @@ class ReviewRun:
         from review_sensei.diff import analyze_diff
         from review_sensei.validation import read_bounded_utf8
 
-        from .publication_context_recovery import reconstruct_publication_contexts
+        from .publication_context_recovery import (
+            reconstruct_publication_contexts,
+            resolve_recovery_placement_mode,
+        )
         from .publication_recovery import recover_retained_review_result
 
         args = engine_parser(include_hosted=True).parse_args(argv)
@@ -305,6 +320,43 @@ class ReviewRun:
         policy = resolve_review_convergence_policy(
             mode=args.review_mode, quality=self.plan.policy.review_quality
         )
+        accounting = self.caller.accounting
+        own_startup = sum(
+            len(slot.requests)
+            for slot in accounting.startup.slots
+            if slot.job == accounting.owner.job
+            and slot.attempt == accounting.owner.run_attempt
+        )
+        other_startup = accounting.startup.liability - own_startup
+        already_consumed = (
+            other_startup + accounting.prior_nonstartup_liability + accounting.confirmed
+        )
+        unknown_usage = accounting.uncertain
+        active_reserved = sum(
+            block.undispatched
+            for block in accounting.blocks
+            if block.issued_by != accounting.owner
+        )
+        current_root_bytes = len(
+            json.dumps(
+                loaded.record.to_dict(), sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        )
+        ancestor_hashes: tuple[str, ...] = ()
+        ancestor_runs: tuple[int, ...] = ()
+        if accounting.previous_record is not None:
+            ancestor_hashes = (str(accounting.previous_record["root_sha256"]),)
+            ancestor_runs = (int(cast(int, accounting.previous_record["run_id"])),)
+        result_part_count = 1
+        if isinstance(loaded.record.publication_staging, Mapping) and isinstance(
+            loaded.record.publication_staging.get("parts"), Sequence
+        ):
+            result_part_count = max(1, len(loaded.record.publication_staging["parts"]))
+        has_cli_overrides = (
+            any(_has_option(argv, opt) for opt in ("--provider", "--model"))
+            or bool(os.environ.get("REVIEWSENSEI_PROVIDER", "").strip())
+            or bool(os.environ.get("REVIEWSENSEI_MODEL", "").strip())
+        )
         contexts = reconstruct_publication_contexts(
             source_root=Path.cwd(),
             diff=diff,
@@ -313,6 +365,25 @@ class ReviewRun:
             base_sha=self.base_sha,
             head_sha=self.head_sha,
             policy=policy,
+            recovery_store=self.recovery_context_store,
+            policy_commit=accounting.configuration.commit,
+            base_ref=self.base_branch,
+            placement_mode=resolve_recovery_placement_mode(
+                publication_inventory="complete", review_mode=policy.mode
+            ),
+            producer="github-actions-review-run",
+            current_run_id=self.caller.run.run_id,
+            attempt=accounting.owner.run_attempt,
+            runtime_only_flags={"cli_overrides": has_cli_overrides},
+            current_root_sha256=loaded.record.record_sha256,
+            ancestor_record_sha256s=ancestor_hashes,
+            ancestor_run_ids=ancestor_runs,
+            current_root_bytes=current_root_bytes,
+            result_part_count=result_part_count,
+            original_api_limit=accounting.configuration.limit,
+            already_consumed_requests=already_consumed,
+            unknown_usage_requests=unknown_usage,
+            active_reserved_requests=active_reserved,
         )
         assert self.identity.repository_id is not None
         result = recover_retained_review_result(
@@ -449,6 +520,44 @@ class ReviewRun:
             lifecycle_diagnostics.phase("outcome_write")
             publication_output.write_text(json.dumps(outcome) + "\n")
             return 1 if terminal_reason else 0
+        if (
+            retained is None
+            and self.recovery_context_store is not None
+            and analysis.result.transaction is not None
+        ):
+            from .publication_context_recovery import (
+                capture_recovery_context_bundle,
+                resolve_recovery_placement_mode,
+            )
+
+            has_cli_overrides = (
+                any(_has_option(argv, opt) for opt in ("--provider", "--model"))
+                or bool(os.environ.get("REVIEWSENSEI_PROVIDER", "").strip())
+                or bool(os.environ.get("REVIEWSENSEI_MODEL", "").strip())
+            )
+            capture_recovery_context_bundle(
+                self.recovery_context_store,
+                transaction=analysis.result.transaction,
+                configuration_context=analysis.configuration_context,
+                admission_context=admission_context_document(
+                    analysis.baseline, analysis.current_key
+                ),
+                evidence_context=analysis.evidence_context,
+                decision_policy_digest=self.plan.decision.digest(),
+                diff=analysis.diff,
+                policy_commit=self.caller.accounting.configuration.commit,
+                base_ref=self.base_branch,
+                repository_id=self.identity.repository_id,
+                placement_mode=resolve_recovery_placement_mode(
+                    publication_inventory="complete",
+                    review_mode=analysis.policy.mode,
+                ),
+                accounting_version=self.caller.accounting.version,
+                producer="github-actions-review-run",
+                run_id=self.caller.run.run_id,
+                attempt=self.caller.accounting.owner.run_attempt,
+                runtime_only_flags={"cli_overrides": has_cli_overrides},
+            )
         application = GitHubApplication(
             broker=self.broker,
             http=self.http,
@@ -661,6 +770,9 @@ def bootstrap(
     source: Mapping[str, object] | None = None,
     quarantine_predecessor_comment_id: int | None = None,
     restart_id: str | None = None,
+    recovery_context_dir: Path | None = None,
+    recovery_context_key_file: Path | None = None,
+    recovery_context_ttl_seconds: int = DEFAULT_RECOVERY_TTL_SECONDS,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
     lifecycle_diagnostics.phase("bootstrap")
@@ -787,6 +899,12 @@ def bootstrap(
         raise ReviewInputError(
             "trusted policy does not enable the current review route"
         )
+    recovery_context_store = resolve_recovery_context_store(
+        recovery_context_dir,
+        recovery_context_key_file,
+        artifacts_policy=plan.policy.artifacts,
+        ttl_seconds=recovery_context_ttl_seconds,
+    )
     job = "command" if purpose == "command" else plan.runner_kind
     if restart_registration is not None and job != restart_registration["job"]:
         raise ReviewInputError("controlled restart runner differs from its designation")
@@ -1254,6 +1372,7 @@ def bootstrap(
         title,
         actions_token,
         restart_id,
+        recovery_context_store,
     )
     lifecycle_diagnostics.admitted(result)
     return result
@@ -1269,6 +1388,13 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
     parser.add_argument("--run-directory", type=Path, required=True)
     parser.add_argument("--publication-outcome", type=Path, required=True)
     parser.add_argument("--quarantine-predecessor-comment-id", type=int)
+    parser.add_argument("--recovery-context-dir", type=Path, default=None)
+    parser.add_argument("--recovery-context-key-file", type=Path, default=None)
+    parser.add_argument(
+        "--recovery-context-ttl-seconds",
+        type=int,
+        default=DEFAULT_RECOVERY_TTL_SECONDS,
+    )
     if controlled_restart:
         parser.add_argument("--restart-id", required=True)
     parser.add_argument("engine_args", nargs=argparse.REMAINDER)
@@ -1297,6 +1423,9 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
         policy_commit=options.policy_commit,
         quarantine_predecessor_comment_id=options.quarantine_predecessor_comment_id,
         restart_id=getattr(options, "restart_id", None),
+        recovery_context_dir=options.recovery_context_dir,
+        recovery_context_key_file=options.recovery_context_key_file,
+        recovery_context_ttl_seconds=options.recovery_context_ttl_seconds,
     )
     core = [*core]
     if not _has_option(core, "--base-sha"):
