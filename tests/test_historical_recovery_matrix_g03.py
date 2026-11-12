@@ -357,6 +357,49 @@ def _make_terminal_action_accounting(
 class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
     """Comprehensive verification of G03 classification, refusals, and recovery."""
 
+    def test_terminal_packet_requires_positive_result_authentication(self):
+        for partitioned in (False, True):
+            accounting, _ = _make_terminal_action_accounting(partitioned=partitioned)
+            record = _make_record(accounting=accounting, transaction=None)
+            for producer in (None, "foreign-producer"):
+                with self.subTest(partitioned=partitioned, producer=producer):
+                    packet = build_attempt_evidence_packet(
+                        record,
+                        current_base=BASE_A,
+                        current_head=HEAD_A,
+                        evidence_producer=producer,
+                    )
+                    self.assertIsNot(packet.terminal_action_authenticated, True)
+                    self.assertFalse(packet.classification.terminal)
+                    self.assertEqual(packet.terminal_settlement_form, "unsettled")
+                    self.assertIn(
+                        "authenticated_api_run_accounting"
+                        if partitioned
+                        else "authenticated_terminal_action_result",
+                        packet.missing_proofs,
+                    )
+                    self.assertFalse(packet.authority)
+        accounting, _ = _make_terminal_action_accounting()
+        record = _make_record(accounting=accounting, transaction=None)
+        valid = build_attempt_evidence_packet(
+            record,
+            current_base=BASE_A,
+            current_head=HEAD_A,
+            evidence_producer=PRODUCER,
+        )
+        self.assertTrue(valid.classification.terminal)
+        self.assertIsNone(valid.terminal_transaction)
+        with self.assertRaises(ReviewInputError):
+            replace(valid, terminal_action_authenticated=False)
+        for invalid in (1, "true", []):
+            with self.subTest(invalid=invalid), self.assertRaises(ReviewInputError):
+                build_attempt_evidence_packet(
+                    record,
+                    current_base=BASE_A,
+                    current_head=HEAD_A,
+                    action_result_authenticated=invalid,
+                )
+
     def setUp(self) -> None:
         for target in ("socket.create_connection", "socket.socket.connect"):
             guard = patch(target, side_effect=AssertionError("unexpected network"))

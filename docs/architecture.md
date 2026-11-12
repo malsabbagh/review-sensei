@@ -66,6 +66,10 @@ upstream requests. Inference and checkout/install/artifact infrastructure have
 separate limits. `run_authority` authenticates current bindings, and
 `prior_rescan_publication` supplies historical evidence without write authority.
 A media receipt alone does not provide typed terminal-result proof.
+Offline historical packets also require positive terminal-result authentication;
+missing producer/result proof never establishes settlement. Positive-cost
+continuation requires known sufficient original allowance, while zero-request
+checks leave unavailable allowance unknown (ADR 0133).
 See [ADR 0111](adr/0111-caller-api-work-allowance.md).
 
 ## Default human inventory references

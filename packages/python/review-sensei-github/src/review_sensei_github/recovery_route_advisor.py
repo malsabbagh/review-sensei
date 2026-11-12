@@ -336,6 +336,11 @@ def classify_recovery_state(
     """Classify a `SessionRecord` into an exact state, witness set, and route."""
     if not isinstance(record, SessionRecord):
         raise ReviewInputError("recovery state requires a SessionRecord")
+    if (
+        action_result_authenticated is not None
+        and type(action_result_authenticated) is not bool
+    ):
+        raise ReviewInputError("action_result_authenticated must be None or a bool")
     _require_sha(current_base, "current_base")
     _require_sha(current_head, "current_head")
     if executor_status not in EXECUTOR_STATUSES:
@@ -480,7 +485,7 @@ def classify_recovery_state(
                         record, old, evidence_producer
                     )
                 else:
-                    verified_action = True
+                    verified_action = False
             if not verified_action:
                 fallbacks: tuple[str, ...] = (
                     ("quarantine_published_tail_isolation",)
@@ -1591,6 +1596,17 @@ class AttemptEvidencePacket:
             raise ReviewInputError(
                 "nonterminal attempt evidence packet cannot claim terminal settlement"
             )
+        if (
+            self.terminal_settlement_form
+            in {
+                "authenticated_terminal_action_null_review_marker",
+                "authenticated_terminal_action_with_prior_review_marker",
+            }
+            and self.terminal_action_authenticated is not True
+        ):
+            raise ReviewInputError(
+                "terminal action settlement requires positive result authentication"
+            )
         if any(
             proof not in ATTEMPT_PACKET_MISSING_PROOFS for proof in self.missing_proofs
         ) or len(set(self.missing_proofs)) != len(self.missing_proofs):
@@ -1790,7 +1806,7 @@ def _assemble_attempt_evidence_packet(
                     record, old, evidence_producer
                 )
             else:
-                verified_action = True
+                verified_action = False
 
     abort_entry_state: str | None = None
     abort_cleanup_root: str | None = None

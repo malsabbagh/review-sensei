@@ -1352,6 +1352,17 @@ class OfflineContinuationQualification:
             raise ReviewInputError(
                 "remaining_caller_allowance must be None or a non-negative integer"
             )
+        if (
+            self.zero_new_funding_verified
+            and self.required_continuation_requests > 0
+            and (
+                self.remaining_caller_allowance is None
+                or self.remaining_caller_allowance < self.required_continuation_requests
+            )
+        ):
+            raise ReviewInputError(
+                "positive-cost continuation requires known sufficient original allowance"
+            )
         if self.qualifies_zero_inference_continuation and (
             not self.zero_new_funding_verified
             or not self.zero_repeated_inference_verified
@@ -1408,14 +1419,18 @@ def qualify_offline_pending_continuation(
     remaining_caller: int | None = None
     if record is not None and record.api_run_accounting is not None:
         old = ApiRunAccounting.from_document(record.api_run_accounting)
+        old.require_writer_version()
         remaining_caller = old.remaining
 
     funding_ok = (
         additional_caller_allowance == 0
         and additional_provider_allowance == 0
         and (
-            remaining_caller is None
-            or remaining_caller >= required_continuation_requests
+            required_continuation_requests == 0
+            or (
+                remaining_caller is not None
+                and remaining_caller >= required_continuation_requests
+            )
         )
     )
     inference_ok = repeated_inference_calls == 0
@@ -1437,6 +1452,8 @@ def qualify_offline_pending_continuation(
         reasons.append("new_provider_funding_forbidden")
     if repeated_inference_calls > 0:
         reasons.append("repeated_model_inference_forbidden")
+    if required_continuation_requests > 0 and remaining_caller is None:
+        reasons.append("original_caller_allowance_unknown")
     if (
         remaining_caller is not None
         and remaining_caller < required_continuation_requests

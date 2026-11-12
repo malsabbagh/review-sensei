@@ -170,6 +170,72 @@ def _app_reply(
 class PendingReassessmentG30Tests(unittest.TestCase):
     """Offline synthetic verification of G30 zero-decision pending reassessment."""
 
+    def test_positive_continuation_requires_known_original_allowance(self):
+        from review_sensei.api_work import ApiRunAccounting
+
+        original = prior(extra_human=True)
+        packet = build_pending_reassessment_attempt_packet(
+            identity=SessionIdentity(
+                repository="owner/repo", pull_request=77, repository_id=987654
+            ),
+            original_eligibility=original,
+            latest_eligibility=original,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=_sha256(HUMAN),
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pending_receipt=PendingReceiptObservation(
+                source_comment_id=40810,
+                source_updated_digest=_sha256("2026-10-15T14:22:00Z"),
+                pull_request=77,
+                head_sha=HEAD,
+                report_digest="c" * 64,
+                expected_pages=2,
+                part_comment_ids=((1, 7709),),
+                complete=False,
+            ),
+            durable_operation_journal_present=True,
+            required_continuation_requests=1,
+        )
+        qualification = packet.offline_continuation
+        self.assertEqual(
+            packet.attribution.state_code, "pending_receipt_delivery_incomplete"
+        )
+        self.assertFalse(qualification.qualifies_zero_inference_continuation)
+        self.assertFalse(qualification.zero_new_funding_verified)
+        self.assertIsNone(qualification.remaining_caller_allowance)
+        self.assertIn(
+            "original_caller_allowance_unknown", qualification.disqualifying_reasons
+        )
+        zero = qualify_offline_pending_continuation(
+            packet.attribution,
+            durable_operation_journal_present=True,
+            required_continuation_requests=0,
+        )
+        self.assertTrue(zero.qualifies_zero_inference_continuation)
+        self.assertIsNone(zero.remaining_caller_allowance)
+        with self.assertRaises(ReviewInputError):
+            replace(zero, required_continuation_requests=1)
+        record = self._make_pending_reply_record(source_body_sha256=_sha256(HUMAN))
+        remaining = ApiRunAccounting.from_document(record.api_run_accounting).remaining
+        for required, qualified in ((remaining, True), (remaining + 1, False)):
+            with self.subTest(required=required):
+                bounded = qualify_offline_pending_continuation(
+                    packet.attribution,
+                    record=record,
+                    durable_operation_journal_present=True,
+                    required_continuation_requests=required,
+                )
+                self.assertEqual(
+                    bounded.qualifies_zero_inference_continuation, qualified
+                )
+                self.assertEqual(bounded.zero_new_funding_verified, qualified)
+                self.assertEqual(bounded.remaining_caller_allowance, remaining)
+
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()

@@ -73,6 +73,11 @@ invariant:
      `"superseded_head_unclosed_publication_succeeded"` across head advance),
      `terminal_settlement_form="unsettled"`, and `inferred_cause="unknown"`
      with explicit missing-proof holds.
+   - Never infer terminal action authentication from absent producer/result
+     inputs. Direct classifiers and packets fail closed without a verified result;
+     explicit authentication inputs are trusted verifier outputs only. Packet
+     construction rejects a claimed authenticated settlement without positive
+     authentication, while valid null-review-marker commands remain recognized.
 
 2. **Pre-entry abort boundary and `NoTransactionAttemptPacket` (`pre_entry_abort_recovery.py` — G29):**
    - Bind original entry, reservation, caller dispatch, owner cessation, executor
@@ -103,6 +108,11 @@ invariant:
      finalizer-close observations; fail closed on duplicate receipt replay,
      head/base drift, or repeated zero-delta attempts reaching
      `NO_PROGRESS_ZERO_DECISION_LIMIT` (`2`).
+   - Positive-cost continuation requires known sufficient original allowance.
+     Missing accounting is an explicit hold, including for direct qualification
+     construction. Zero-request checks require no funding but do not invent a
+     known allowance. Preserve exact original/latest accepted-result digest
+     equality independently of head identity.
 
 4. **Nonterminal publication overflow, `PublicationOverflowAttemptPacket`, and response-loss qualification (`publication_overflow_recovery.py` — G31):**
    - Bind exact candidate/hold selection, publisher context, archive/installed

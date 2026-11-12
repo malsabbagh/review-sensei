@@ -355,7 +355,11 @@ native receipts are recorded:
   or `state_code="terminal_action_settled"`,
   `terminal_settlement_form="authenticated_terminal_action_with_prior_review_marker"`),
   so a null review terminal marker alone is never treated as a universal failure
-  rule. Conversely, ReviewSensei `#443` run `43074015855` generation `11`
+  rule. Terminal action settlement additionally requires positive result
+  authentication from the retained-result verifier; missing producer/result proof
+  is held with `authenticated_terminal_action_result`, not assumed valid. The
+  explicit authentication input is reserved for trusted verification results, not
+  an operator assertion. Conversely, ReviewSensei `#443` run `43074015855` generation `11`
   (`transaction.phase == "publication_succeeded"` with null `terminal_transaction`,
   null `terminal_action`, null `analysis_abort` cleanup, and missing close
   diagnostics) is held as `state_code="same_head_unclosed_publication_succeeded"`
@@ -391,6 +395,10 @@ native receipts are recorded:
   continuation can resume finalization with zero new funding and zero repeated
   inference). Duplicate receipt replay, changed head/base, and repeated
   zero-delta explanations reaching `NO_PROGRESS_ZERO_DECISION_LIMIT` fail closed.
+  Positive-cost offline continuation requires known sufficient original caller
+  allowance; absent accounting yields `original_caller_allowance_unknown`. A
+  zero-request offline check can require no funding while leaving the original
+  allowance unknown. Neither case supplies live recovery authority.
 - **Nonterminal publication overflow and response-loss controls (`publication_overflow_recovery`, G31):**
   `PublicationOverflowAttemptPacket` (`authority=False`,
   `formatter_fit_is_not_settlement=True`) binds exact original candidate/hold
