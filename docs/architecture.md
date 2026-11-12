@@ -89,7 +89,9 @@ Broker failures use the closed diagnostic catalog.
 Native media approval follows the review endpoint's HTTP 200 contract; audit
 comments use HTTP 201. Existing owned readback and current snapshot fences
 stay in place. Protocol failures expose fixed operation/status fields without raw bodies.
-Fresh source, permission, root, request, thread, qualification and full PR facts gate approval. Current finding facts require an exact-result index and positive resolution proof; never infer resolution from false flags. Never complete AI coverage/result/baseline/cache or carry across heads. Unknown writes need exact owned readback; unproven entered actions refuse replay. See [Proposed ADR 0103](adr/0103-bounded-hosted-media-confirmation.md) and [ADR 0077](adr/0077-explicit-human-file-review.md).
+Fresh source, permission, root, request, thread, qualification and full PR facts gate approval. Current finding facts require an exact-result index and positive resolution proof; never infer resolution from false flags. Never complete AI coverage/result/baseline/cache or carry across heads. Unknown writes need exact owned readback; unproven entered actions refuse replay. See Proposed ADR 0103 and ADR 0077.
+
+Reference: [Proposed ADR 0103](adr/0103-bounded-hosted-media-confirmation.md); [ADR 0077](adr/0077-explicit-human-file-review.md).
 
 For the operational flows and separate analysis, persistence, reassessment and
 approval bounds, see [Review pipelines and customization](review-pipelines.md).
@@ -151,7 +153,9 @@ Linux arm64/x64, and Windows x64. Package assembly and independent tarball
 validation are confined to ignored build/dist staging. Release publication is
 version-serialized and platform-first through npm Trusted Publishing, with
 launcher-last after exact registry version/integrity readback; PyPI remains an
-independent lane. A partial or compromised release is handled version-forward, never by moving a tag or replacing a tarball. See [ADR 0031](adr/0031-npm-launcher-and-standalone-platform-packages.md).
+independent lane. A partial or compromised release is handled version-forward, never by moving a tag or replacing a tarball. See ADR 0031.
+
+Reference: [ADR 0031](adr/0031-npm-launcher-and-standalone-platform-packages.md).
 
 ## Boundary map
 
@@ -215,7 +219,9 @@ ReviewBaseline -------------> IncrementalReviewPlan + late classification
                                (C4 verification scope; C2 admits)
 ```
 
-ReviewService.run emits versioned RunOutcome. Hard budgets cap provider calls, transport retries, prompt/output bytes and elapsed time. One structural-correction retry differs from transport retry. Opt-in RecoveryArtifact republishes validated results without models or trusted learnings/configuration changes. See [ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
+ReviewService.run emits versioned RunOutcome. Hard budgets cap provider calls, transport retries, prompt/output bytes and elapsed time. One structural-correction retry differs from transport retry. Opt-in RecoveryArtifact republishes validated results without models or trusted learnings/configuration changes. See ADR 0043.
+
+Reference: [ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
 
 An operator-ledger analysis checkpoint commits the logical review round before
 GitHub publication. An identical retry whose publication is pending or failed
@@ -562,7 +568,9 @@ prepared-source CI still precedes signing and owner publisher approval. See
 
 Supported release combinations are bound by a versioned compatibility
 manifest: workflow commit, Python distribution digest, npm artifact digests,
-public schema version, and Worker identity. Build output is valid only when every named artifact is present with an exact SHA-256 digest and an explicit trusted provenance mechanism. Missing or extra artifacts fail closed. The PyPI-primary and executing-commit install paths prove that identity in review_sensei.release_manifest; live disposable-repository canary and v5 tag movement remain operator-only. See [ADR 0038](adr/0038-release-compatibility-manifest.md).
+public schema version, and Worker identity. Build output is valid only when every named artifact is present with an exact SHA-256 digest and an explicit trusted provenance mechanism. Missing or extra artifacts fail closed. The PyPI-primary and executing-commit install paths prove that identity in review_sensei.release_manifest; live disposable-repository canary and v5 tag movement remain operator-only. See ADR 0038.
+
+Reference: [ADR 0038](adr/0038-release-compatibility-manifest.md).
 
 ## Public landing-page analytics boundary
 
@@ -746,7 +754,9 @@ coverage, waive missing decisions, or authorize stale source. Request and time
 limits remain unchanged, and a later authenticated verification can continue
 from durable decisions and the current native resolution state.
 
-[ADR 0059](adr/0059-dependency-review-and-partial-publication.md) permits validated partial analysis to cross the identity-bound checkpoint/publication boundary only with complete enumeration and evidence of reviewed work. The
+ADR 0059 permits validated partial analysis to cross the identity-bound checkpoint/publication boundary only with complete enumeration and evidence of reviewed work. The
+
+Reference: [ADR 0059](adr/0059-dependency-review-and-partial-publication.md).
 same repository/PR/base/head/policy/configuration/result-digest checks apply to
 first publication and crash recovery. Partial checkpoints charge one failed
 attempt, preserve the last complete baseline, and do not increment completed
@@ -895,7 +905,9 @@ proof for older PR-triggered runs. Recovery preserves session budgets and saved
 publication work; cooperating command/review jobs serialize the comment write.
 
 Complete review evidence now uses the lossless inline contract proposed in
-[ADR 0072](adr/0072-lossless-inline-review-evidence.md). Small baseline and human inventories retain their legacy JSON shape; larger inventories share a bounded canonical JSON/zlib/base64 reader. The existing authenticated ledger atomically
+ADR 0072. Small baseline and human inventories retain their legacy JSON shape; larger inventories share a bounded canonical JSON/zlib/base64 reader. The existing authenticated ledger atomically
+
+Reference: [ADR 0072](adr/0072-lossless-inline-review-evidence.md).
 binds the full baseline and preserves its lifecycle reserve. Human eligibility
 version 3 stores immutable full prose separately from the mutable resolution
 list and reserves room for every possible resolution. Whole inventories are
