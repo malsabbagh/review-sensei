@@ -617,6 +617,45 @@ class GitHubIssueCommentSessionLedger:
                 raise ReviewInputError("GitHub partition storage identity is invalid")
             yield self._part_owner(item, identity)
 
+    def snapshot_preview_parts(
+        self, identity: SessionIdentity, record: SessionRecord
+    ) -> dict[str, AuthenticatedPart] | None:
+        """Return an exact detached cached graph; no GETs/listing/cache mutations."""
+        from review_sensei.session import authenticated_snapshot_preview_parts
+
+        return authenticated_snapshot_preview_parts(
+            identity,
+            record,
+            producer=self.evidence_producer(),
+            cached_part=self._verified_parts.get,
+        )
+
+    def hydrate_snapshot_preview(
+        self, identity: SessionIdentity, record: SessionRecord
+    ) -> None:
+        """Authenticate v1/v2 using the normal charged reader before pure preview."""
+        from review_sensei.session import read_session_dispositions
+
+        if (record.repository, record.pull_request, record.repository_id) != (
+            identity.repository,
+            identity.pull_request,
+            identity.repository_id,
+        ):
+            raise ReviewInputError("snapshot preview identity does not match")
+        read_session_dispositions(self, record)
+
+    def snapshot_preview_read_requests(self, record: SessionRecord) -> int:
+        """Price actual remaining GETs, including all authenticated v2 pages."""
+        identity = SessionIdentity(
+            record.repository, record.pull_request, record.repository_id
+        )
+        parts = self.snapshot_preview_parts(identity, record)
+        if parts is None:
+            raise ReviewInputError("snapshot preview requires explicit hydration")
+        if self._reuse_listed_parts or self._activation_ticket is not None:
+            return 0
+        return len(parts)
+
     def _part_is_listed(self, storage_id: str) -> bool:
         if not storage_id.isdigit():
             return False

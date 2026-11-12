@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import asdict
@@ -1870,6 +1871,35 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
             assert p_rec.disposition_snapshot is not None
             self.assertEqual(p_rec.disposition_snapshot["schema_version"], "2.0")
 
+            # Fresh v2 source must hydrate its complete index/page graph before
+            # handing a detached cached proof to the pure preview.
+            paged_source = _PagedLocalLedger(
+                paged_ledger.root,
+                evidence_budget=EvidenceReadBudget(),
+                enable_disposition_snapshot_writes=True,
+            )
+            self.assertIsNone(paged_source.snapshot_preview_parts(IDENTITY, p_rec))
+            paged_source.hydrate_snapshot_preview(IDENTITY, p_rec)
+            graph_calls = paged_source.evidence_budget.calls
+            self.assertGreater(graph_calls, 0)
+            graph = paged_source.snapshot_preview_parts(IDENTITY, p_rec)
+            assert graph is not None and graph
+            before_graph = canonical_bytes({k: v.document for k, v in graph.items()})
+            next(iter(graph.values())).document["schema_version"] = "tampered"
+            fresh_graph = paged_source.snapshot_preview_parts(IDENTITY, p_rec)
+            assert fresh_graph is not None
+            self.assertEqual(
+                canonical_bytes({k: v.document for k, v in fresh_graph.items()}),
+                before_graph,
+            )
+            self.assertEqual(paged_source.evidence_budget.calls, graph_calls)
+            from dataclasses import replace
+
+            with self.assertRaisesRegex(ReviewInputError, "identity does not match"):
+                paged_source.snapshot_preview_parts(
+                    replace(IDENTITY, pull_request=999), p_rec
+                )
+
             paged_budget = EvidenceReadBudget()
             # Append 10th finding onto v2 paged snapshot in preview:
             app_res, app_rec, app_rep = preview_session_command_representability(
@@ -1890,10 +1920,11 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                 provenance="comment:51",
                 enable_disposition_snapshot_writes=True,
                 evidence_budget=paged_budget,
-                source_ledger=paged_ledger,
+                source_ledger=paged_source,
                 now=fixed_now,
             )
             self.assertEqual(paged_budget.calls, 0)
+            self.assertEqual(paged_source.evidence_budget.calls, graph_calls)
             assert app_res is not None and app_rec is not None
             self.assertEqual(app_res.receipts[0].outcome, "recorded")
             assert app_rec.disposition_snapshot is not None
@@ -1961,6 +1992,75 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                 now=fixed_now,
             )
             self.assertEqual(cold_budget.calls, 0)
+            self.assertEqual(cold_disk_only.evidence_budget.calls, 0)
+            self.assertEqual(
+                cold_rep.refusal_code, "snapshot_parts_unavailable_for_preview"
+            )
+            self.assertIsNone(
+                cold_disk_only.snapshot_preview_parts(IDENTITY, cold_rec_1)
+            )
+            # Physical reads happen only in the explicit, bounded normal read phase.
+            root_manifest = cold_rec_1.disposition_snapshot["state_manifest"]
+            storage_id = root_manifest["parts"][0]["storage_id"]
+            part_path = (
+                cold_dir
+                / ".evidence"
+                / IDENTITY.repository.replace("/", "%2F")
+                / str(IDENTITY.pull_request)
+                / storage_id
+            )
+            original_part = part_path.read_bytes()
+            from review_sensei.bounded_evidence import MAX_PART_BYTES
+
+            for invalid in (b"corrupt", b"x" * (MAX_PART_BYTES + 1), None):
+                try:
+                    if invalid is None:
+                        part_path.unlink()
+                    else:
+                        part_path.write_bytes(invalid)
+                    invalid_ledger = LocalSessionLedger(
+                        cold_dir, evidence_budget=EvidenceReadBudget()
+                    )
+                    with self.assertRaises(ReviewInputError):
+                        invalid_ledger.hydrate_snapshot_preview(IDENTITY, cold_rec_1)
+                    self.assertGreater(invalid_ledger.evidence_budget.calls, 0)
+                finally:
+                    part_path.write_bytes(original_part)
+            if sys.platform != "win32":
+                target = cold_dir / "symlink-target"
+                target.write_bytes(original_part)
+                part_path.unlink()
+                part_path.symlink_to(target)
+                try:
+                    invalid_ledger = LocalSessionLedger(
+                        cold_dir, evidence_budget=EvidenceReadBudget()
+                    )
+                    with self.assertRaises(ReviewInputError):
+                        invalid_ledger.hydrate_snapshot_preview(IDENTITY, cold_rec_1)
+                finally:
+                    part_path.unlink()
+                    part_path.write_bytes(original_part)
+            cold_disk_only.hydrate_snapshot_preview(IDENTITY, cold_rec_1)
+            hydrated_calls = cold_disk_only.evidence_budget.calls
+            self.assertGreater(hydrated_calls, 0)
+            detached = cold_disk_only.snapshot_preview_parts(IDENTITY, cold_rec_1)
+            self.assertIsNotNone(detached)
+            _, _, cold_rep = preview_session_command_representability(
+                identity=IDENTITY,
+                current_record=cold_rec_1,
+                command=MaintainerCommand(
+                    action="verify", actor="alice", head_sha=head_sha
+                ),
+                intent_sha256=intent_sha,
+                binding=binding,
+                actor_role="OWNER",
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=cold_budget,
+                source_ledger=cold_disk_only,
+                now=fixed_now,
+            )
+            self.assertEqual(cold_budget.calls, 0)
+            self.assertEqual(cold_disk_only.evidence_budget.calls, hydrated_calls)
             self.assertTrue(cold_rep.representable)
 
             # Inline v1 snapshot logical disposition_bytes decoding + hosted comment-map preloading:
@@ -2205,19 +2305,21 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                 ),
             }
         )
-        with self.assertRaisesRegex(
-            ReviewInputError, "cached partition JSON is invalid"
-        ):
-            preview_session_command_representability(
-                identity=IDENTITY,
-                current_record=snap_record,
-                command=MaintainerCommand(action="status", actor="alice"),
-                intent_sha256="1" * 64,
-                binding=self._default_binding(),
-                source_ledger=SimpleNamespace(
-                    _part_documents={(IDENTITY, part_ids[0]): (None, b"not-json")}
-                ),
-            )
+        # Private storage shapes are no longer a capability: ignore them rather
+        # than parsing unauthenticated/ad hoc cache bytes during preview.
+        _, _, unavailable = preview_session_command_representability(
+            identity=IDENTITY,
+            current_record=snap_record,
+            command=MaintainerCommand(action="verify", actor="alice"),
+            intent_sha256="1" * 64,
+            binding=self._default_binding(),
+            source_ledger=SimpleNamespace(
+                _part_documents={(IDENTITY, part_ids[0]): (None, b"not-json")}
+            ),
+        )
+        self.assertEqual(
+            unavailable.refusal_code, "snapshot_parts_unavailable_for_preview"
+        )
 
         for unknown_ledger in (
             None,
@@ -2251,10 +2353,7 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                 binding=self._default_binding(),
             )
 
-        hosted_ledger = SimpleNamespace(
-            _comments_by_id={1001: {"id": 1001}},
-            _verified_parts={},
-        )
+        hosted_ledger = SimpleNamespace(snapshot_preview_read_requests=lambda record: 1)
         self.assertEqual(
             _unlisted_snapshot_part_reads(
                 hosted_ledger,
@@ -2281,67 +2380,20 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
         )
         self.assertEqual(priced.snapshot_read_requests, 1)
 
-        # Warm comment-map + startup-snapshot extraction with 0 network/budget calls:
+        # Unsupported adapters cannot turn private comment maps into authority.
         from review_sensei.terminal_representability import (
-            _InMemoryPreviewLedger,
             _preload_snapshot_parts_from_ledger,
         )
 
-        part_body_1 = (
-            "ReviewSensei immutable evidence part v1\n```json\n"
-            + canonical_bytes(snap_parts[0]).decode("utf-8")
-            + "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
+        unsupported = SimpleNamespace(
+            _comments_by_id={1001: {"id": 1001, "body": "bad"}}
         )
-        part_body_2 = (
-            "ReviewSensei immutable evidence part v1\n```json\n"
-            + canonical_bytes(snap_parts[1]).decode("utf-8")
-            + "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
-        )
-        warm_hosted = SimpleNamespace(
-            evidence_producer=lambda: "github-bot:999",
-            _verified_parts={},
-            _comments_by_id={1001: {"id": 1001, "body": part_body_1}},
-            _quarantine_startup_snapshot=SimpleNamespace(
-                comments_by_id={1002: {"id": 1002, "body": part_body_2}}
-            ),
-        )
-        warm_budget = EvidenceReadBudget()
-        preloaded_warm = _preload_snapshot_parts_from_ledger(
-            warm_hosted,
-            IDENTITY,
-            snap_record,
-            producer="github-bot:999",
-        )
-        self.assertEqual(len(preloaded_warm), 2)
-        mem_hosted = _InMemoryPreviewLedger(
-            snap_record,
-            producer="github-bot:999",
-            preloaded_parts=preloaded_warm,
-            evidence_budget=warm_budget,
-        )
-        self.assertEqual(len(mem_hosted._preloaded_parts), 2)
-        self.assertEqual(warm_budget.calls, 0)
-        chained_parts = _preload_snapshot_parts_from_ledger(
-            mem_hosted,
-            IDENTITY,
-            snap_record,
-            producer="github-bot:999",
-        )
-        self.assertEqual(len(chained_parts), 2)
-
-        bad_framing_hosted = SimpleNamespace(
-            evidence_producer=lambda: "github-bot:999",
-            _comments_by_id={1001: {"id": 1001, "body": "bad"}},
-        )
-        with self.assertRaisesRegex(
-            ReviewInputError, "GitHub partition framing is invalid"
-        ):
+        self.assertEqual(
             _preload_snapshot_parts_from_ledger(
-                bad_framing_hosted,
-                IDENTITY,
-                snap_record,
-                producer="github-bot:999",
-            )
+                unsupported, IDENTITY, snap_record, producer="github-bot:999"
+            ),
+            {},
+        )
 
         # Intermediate SessionRecord overflow caught even when terminal state shrinks:
         from review_sensei.disposition import FindingDisposition

@@ -89,3 +89,22 @@ reader. Stdout is drained with a 1,025-byte hard retention bound (excess kills
 the child); stderr goes directly to the OS discard sink. The existing deadline
 remains in force. This is scoped same-installation reader evidence, not a
 claim of whole-environment attestation or broader recovery qualification.
+
+### Explicit snapshot preview capability
+
+The preview no longer discovers private ledger caches, comment maps, or local
+paths. `snapshot_preview_parts(identity, record)` is an optional, pure adapter
+capability: it authenticates the exact v1/v2 graph from already-cached bytes,
+including paged index and page references, and returns detached referenced parts.
+`None` means unavailable, not zero-cost evidence. A missing capability cannot
+supply partitioned preview evidence; inline v1 remains self-contained.
+
+`hydrate_snapshot_preview` is a separate normal read-phase operation using
+`read_session_dispositions` and the production bounded, authenticated readers.
+It charges actual physical work through the existing shared budget. The hosted
+command guard hydrates before pure preview and computes pricing from the updated
+caller accounting; remaining GET pricing is owned by the adapter and includes
+v2 pages. Pure previews neither stat/open files nor issue HTTP nor mutate source
+caches. A cached proof does not authorize live recovery or replace a later
+required fresh read/fence. Unsupported adapters refuse until they implement the
+capability; no writer encoding, limit, durable schema or deployment changes.

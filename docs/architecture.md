@@ -1351,3 +1351,9 @@ physical reads. Missing artifacts remain unqualified; no synthetic original
 context is created. Native-effect and inference replay counters remain unknown.
 Result/archive/context recovery, terminal closure and historical settlement are
 separate gates, not consequences of matching roots or fitting capacity estimates.
+
+Snapshot previews consume the ledger-owned `snapshot_preview_parts` cached-graph
+capability, never concrete cache attributes or filesystem paths. Explicit
+`hydrate_snapshot_preview` runs the charged production v1/v2 reader before the
+pure preview; unavailable cached evidence refuses rather than triggering hidden
+I/O. See ADR 0131 for the detached-proof and post-hydration pricing contracts.

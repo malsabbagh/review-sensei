@@ -47,30 +47,22 @@ def _unlisted_snapshot_part_reads(
         }
     ):
         return 0
-    state_manifest = current_record.disposition_snapshot.get("state_manifest")
-    if not isinstance(state_manifest, Mapping) or (
-        state_manifest.get("encoding") != "partitioned-json-v1"
-    ):
-        return 0
-    parts = state_manifest.get("parts")
-    if not isinstance(parts, list):
-        return 0
-    comments_by_id = getattr(ledger, "_comments_by_id", None)
-    if not isinstance(comments_by_id, Mapping):
+    capability = getattr(ledger, "snapshot_preview_read_requests", None)
+    if not callable(capability):
+        state = current_record.disposition_snapshot.get("state_manifest")
+        if (
+            isinstance(state, Mapping)
+            and state.get("encoding") == "inline-json-v1"
+            and current_record.disposition_snapshot.get("schema_version") == "1.0"
+        ):
+            return 0
         raise ReviewInputError("snapshot read pricing capability is unavailable")
-    verified = getattr(ledger, "_verified_parts", None)
-    verified_map = verified if isinstance(verified, Mapping) else {}
-    cold = 0
-    for ref in parts:
-        if not isinstance(ref, Mapping):
-            continue
-        sid = str(ref.get("storage_id", ""))
-        if sid in verified_map:
-            continue
-        if sid.isdigit() and int(sid) in comments_by_id:
-            continue
-        cold += 1
-    return cold
+    count = capability(current_record)
+    if type(count) is not int or count < 0:
+        raise ReviewInputError(
+            "snapshot read pricing capability returned invalid count"
+        )
+    return count
 
 
 def _command_pricing(
@@ -223,6 +215,25 @@ def guard_current_command_representability(
         ledger=ledger,
         head_sha=head_sha,
     )
+    if (
+        current_record.disposition_snapshot is not None
+        and writes_enabled
+        and command.action
+        in {"accept-risk", "dismiss", "defer", "accept-coverage-uncertainty", "verify"}
+    ):
+        hydrate = getattr(ledger, "hydrate_snapshot_preview", None)
+        if callable(hydrate):
+            hydrate(identity, current_record)
+        else:
+            state = current_record.disposition_snapshot.get("state_manifest")
+            if not (
+                isinstance(state, Mapping)
+                and state.get("encoding") == "inline-json-v1"
+                and current_record.disposition_snapshot.get("schema_version") == "1.0"
+            ):
+                raise ReviewInputError(
+                    "snapshot preview hydration capability is unavailable"
+                )
     consumed_grants = tuple(getattr(ledger, "_consumed_grants", ()) or ())
     pricing = _command_pricing(
         caller,

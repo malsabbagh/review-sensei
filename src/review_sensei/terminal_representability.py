@@ -17,11 +17,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
-from pathlib import Path
 from typing import Any, cast
 
 from .api_work import (
@@ -33,7 +31,6 @@ from .api_work import (
 from .bounded_evidence import (
     INLINE_ENCODING,
     MAX_MANIFEST_BYTES,
-    MAX_PART_BYTES,
     MAX_PART_READS,
     MAX_PARTITION_DECODED_BYTES,
     PARTITION_ENCODING,
@@ -96,8 +93,6 @@ TERMINAL_REFUSAL_CODES = frozenset(
     }
 )
 
-_PART_HEADER = "ReviewSensei immutable evidence part v1\n```json\n"
-_PART_FOOTER = "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
 
 _SESSION_COMMENT_INTRO = "ReviewSensei session ledger (round counters only; no source)."
 _DISPOSITION_ARRAY_OVERFLOW_MESSAGES = frozenset(
@@ -901,114 +896,6 @@ def _verify_partitioned_manifest_without_consume(
     )
 
 
-def _extract_part_from_source_ledger(
-    source_ledger: object,
-    identity: SessionIdentity,
-    storage_id: str,
-    *,
-    producer: str,
-) -> AuthenticatedPart | None:
-    verified = getattr(source_ledger, "_verified_parts", None)
-    if isinstance(verified, Mapping):
-        cached_part = verified.get(storage_id)
-        if isinstance(cached_part, AuthenticatedPart):
-            return AuthenticatedPart(
-                copy.deepcopy(cached_part.document), cached_part.producer
-            )
-
-    if storage_id.isdigit() and 1 <= int(storage_id) < 10**19:
-        comment_sources: list[Mapping[Any, Any]] = []
-        comments_by_id = getattr(source_ledger, "_comments_by_id", None)
-        if isinstance(comments_by_id, Mapping):
-            comment_sources.append(comments_by_id)
-        startup_snap = getattr(source_ledger, "_quarantine_startup_snapshot", None)
-        startup_comments = (
-            getattr(startup_snap, "comments_by_id", None)
-            if startup_snap is not None
-            else None
-        )
-        if isinstance(startup_comments, Mapping):
-            comment_sources.append(startup_comments)
-        comment_id = int(storage_id)
-        for source_map in comment_sources:
-            item = source_map.get(comment_id)
-            if not isinstance(item, dict):
-                continue
-            part_owner = getattr(source_ledger, "_part_owner", None)
-            owned = part_owner(item, identity) if callable(part_owner) else item
-            if (
-                not isinstance(owned, Mapping)
-                or type(owned.get("id")) is not int
-                or owned.get("id") != comment_id
-            ):
-                raise ReviewInputError("GitHub partition identity does not match")
-            body = owned.get("body")
-            if (
-                not isinstance(body, str)
-                or len(body.encode("utf-8")) > MAX_PART_BYTES
-                or not body.startswith(_PART_HEADER)
-                or not body.endswith(_PART_FOOTER)
-            ):
-                raise ReviewInputError("GitHub partition framing is invalid")
-            raw_text = body.split("\n```json\n", 1)[1].rsplit("\n```\n", 1)[0]
-            try:
-                doc = json.loads(raw_text)
-                if canonical_bytes(doc).decode("utf-8") != raw_text:
-                    raise ValueError("noncanonical part")
-            except (ValueError, UnicodeError) as exc:
-                raise ReviewInputError("GitHub partition JSON is invalid") from exc
-            return AuthenticatedPart(doc, producer)
-
-    part_docs = getattr(source_ledger, "_part_documents", None)
-    if isinstance(part_docs, Mapping):
-        local_cached = part_docs.get((identity, storage_id))
-        if isinstance(local_cached, tuple) and len(local_cached) == 2:
-            raw_bytes = local_cached[1]
-            if isinstance(raw_bytes, (bytes, bytearray)):
-                try:
-                    doc = json.loads(bytes(raw_bytes))
-                    if canonical_bytes(doc) == bytes(raw_bytes):
-                        return AuthenticatedPart(doc, producer)
-                except (ValueError, UnicodeError) as exc:
-                    raise ReviewInputError("cached partition JSON is invalid") from exc
-
-    root_dir = getattr(source_ledger, "root", None)
-    if isinstance(root_dir, Path) and re.fullmatch(r"[a-f0-9]{64}", storage_id):
-        safe_repo = identity.repository.replace("/", "%2F")
-        evidence_dir = root_dir / ".evidence"
-        part_dir = evidence_dir / safe_repo / str(identity.pull_request)
-        part_path = part_dir / storage_id
-        if (
-            not any(
-                p.is_symlink()
-                for p in (root_dir, evidence_dir, part_dir.parent, part_dir, part_path)
-            )
-            and part_path.is_file()
-        ):
-            try:
-                raw_file = part_path.read_bytes()
-                if (
-                    len(raw_file) <= MAX_PART_BYTES
-                    and hashlib.sha256(raw_file).hexdigest() == storage_id
-                ):
-                    doc = json.loads(raw_file)
-                    if canonical_bytes(doc) == raw_file:
-                        return AuthenticatedPart(doc, producer)
-            except (OSError, ValueError, UnicodeError) as exc:
-                raise ReviewInputError("local partition is missing or invalid") from exc
-
-    for attr_name in ("_parts", "_preloaded_parts"):
-        mem_parts = getattr(source_ledger, attr_name, None)
-        if isinstance(mem_parts, Mapping) and storage_id in mem_parts:
-            entry = mem_parts[storage_id]
-            if isinstance(entry, AuthenticatedPart):
-                return AuthenticatedPart(copy.deepcopy(entry.document), entry.producer)
-            if isinstance(entry, tuple) and len(entry) == 2:
-                return AuthenticatedPart(copy.deepcopy(entry[0]), str(entry[1]))
-
-    return None
-
-
 def _preload_snapshot_parts_from_ledger(
     source_ledger: object | None,
     identity: SessionIdentity,
@@ -1016,57 +903,23 @@ def _preload_snapshot_parts_from_ledger(
     *,
     producer: str,
 ) -> dict[str, AuthenticatedPart]:
+    """Pure adapter capability only: no private caches, paths or hidden reads."""
     if source_ledger is None or record is None or record.disposition_snapshot is None:
         return {}
-    from .disposition_snapshot import normalize_snapshot
-
-    root = normalize_snapshot(record.disposition_snapshot)
-    if root is None:
+    capability = getattr(source_ledger, "snapshot_preview_parts", None)
+    if not callable(capability):
         return {}
-    manifest = root["state_manifest"]
-    binding = manifest["binding"]
-    preloaded: dict[str, AuthenticatedPart] = {}
-
-    if manifest.get("encoding") == PARTITION_ENCODING:
-        for ref in manifest.get("parts", ()):
-            storage_id = str(ref["storage_id"])
-            extracted = _extract_part_from_source_ledger(
-                source_ledger, identity, storage_id, producer=producer
-            )
-            if extracted is None:
-                return preloaded
-            preloaded[storage_id] = extracted
-
-    if root["schema_version"] == "2.0":
-        try:
-            index_doc = (
-                read_inline_evidence(manifest, expected_binding=binding)
-                if manifest.get("encoding") == INLINE_ENCODING
-                else _verify_partitioned_manifest_without_consume(
-                    manifest,
-                    reader=lambda sid: preloaded[sid],
-                    expected_binding=binding,
-                )
-            )
-        except (KeyError, ReviewInputError):
-            return preloaded
-        if isinstance(index_doc, Mapping):
-            for page_ref in index_doc.get("pages", ()):
-                if (
-                    isinstance(page_ref, Mapping)
-                    and page_ref.get("encoding") == PARTITION_ENCODING
-                ):
-                    for ref in page_ref.get("parts", ()):
-                        storage_id = str(ref["storage_id"])
-                        if storage_id in preloaded:
-                            continue
-                        extracted = _extract_part_from_source_ledger(
-                            source_ledger, identity, storage_id, producer=producer
-                        )
-                        if extracted is not None:
-                            preloaded[storage_id] = extracted
-
-    return preloaded
+    parts = capability(identity, record)
+    if parts is None:
+        return {}
+    if not isinstance(parts, Mapping) or any(
+        not isinstance(key, str)
+        or not isinstance(part, AuthenticatedPart)
+        or part.producer != producer
+        for key, part in parts.items()
+    ):
+        raise ReviewInputError("snapshot preview capability returned invalid parts")
+    return dict(parts)
 
 
 class _InMemoryPreviewLedger:
@@ -1577,11 +1430,6 @@ def preview_session_command_representability(
     )
     if preloaded_parts is not None:
         merged_preloaded_parts.update(preloaded_parts)
-    source_page_cache = (
-        getattr(source_ledger, "_disposition_page_cache", None)
-        if source_ledger is not None
-        else None
-    )
     paged_writes_enabled = (
         supports_paged_disposition_snapshot_writes
         if supports_paged_disposition_snapshot_writes is not None
@@ -1602,9 +1450,7 @@ def preview_session_command_representability(
         evidence_budget=evidence_budget,
         preloaded_parts=merged_preloaded_parts,
         preloaded_dispositions=preloaded_dispositions,
-        disposition_page_cache=(
-            source_page_cache if isinstance(source_page_cache, Mapping) else None
-        ),
+        disposition_page_cache=None,
     )
     try:
         preview_record, preview_result = apply_session_command(
