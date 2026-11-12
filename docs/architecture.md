@@ -1017,10 +1017,5 @@ and proposed [ADR 0124](adr/0124-review-engine-decision-providers.md).
 
 ## G17 private recovery-store platform boundary
 
-The optional original-context handoff described by [ADR 0131](adr/0131-provenance-retention-representability-and-capacity-envelope.md)
-requires POSIX ownership/mode enforcement; non-POSIX opt-in refuses before key
-access or storage, while unconfigured operation remains available. The
-[ADR 0135 stabilization addendum](adr/0135-branch-state-lifecycle.md#g17-private-store-stabilization-on-pr-451)
-requires bounded reads, exact HMAC encoding, and preservation of unauthenticated
-or malformed cache evidence during expiry pruning. No ACL qualification, writer
-authority, schema migration, budget expansion or historical settlement follows.
+Optional original-context handoff requires POSIX ownership/mode enforcement; non-POSIX opt-in refuses before key access/storage, while unconfigured operation remains available. Require bounded reads, exact HMAC encoding and preservation of unauthenticated/malformed cache evidence during expiry pruning. No ACL qualification, writer authority, schema migration, budget expansion or historical settlement follows (ADR 0131; ADR 0135 stabilization addendum).
+References: [ADR 0131](adr/0131-provenance-retention-representability-and-capacity-envelope.md) and [ADR 0135 stabilization addendum](adr/0135-branch-state-lifecycle.md#g17-private-store-stabilization-on-pr-451).
