@@ -684,7 +684,8 @@ def classify_source_comment_lifecycle(
             prior_charges_preserved=True,
             guidance=(
                 f"action has started or uncertain caller work ({mut}/{disp}); G32 "
-                "unstarted cancellation is forbidden; hold fail-closed with prior "
+                "unstarted cancellation is forbidden; pending work requires exact result recovery; "
+                "hold fail-closed with prior "
                 "charges preserved until authentic effect readback or terminal closure"
             ),
         )

@@ -842,6 +842,8 @@ class MediaCLIActivationTests(unittest.TestCase):
         self.broker.cold_invocation()
         self.assertEqual(self.activate(), 1, self.last_output)
         self.assertIn("requires exact result recovery", self.last_output)
+        self.assertIn("G32 unstarted cancellation is forbidden", self.last_output)
+        self.assertIn("prior charges preserved", self.last_output)
         self.assertEqual(len(self.state.reviews), writes)
         self.assertEqual(self.receipt_count(), receipts)
         self.assert_caller_accounting()
