@@ -132,6 +132,43 @@ This correction does not introduce durable webhook processing storage, relax
 original budgets, or replace the G02/G08 writer fence and G13 durable-history
 integration requirements. Legacy installation/setup verification is unchanged.
 
+### Current-root accepted action observation (G13/G32 partial slice)
+
+The existing `ApiRunRequestTransport.admit_action`, execution-entry checkpoint
+and terminal-result writer are the durable producer for ordinary command/reply
+actions. `accepted_action` now provides a typed observation of those exact
+accounting bytes, source revision, operation key, head, phase, uncertainty and
+terminal outcome. Ordinary source lifecycle classification consumes the same
+normalizer rather than independently interpreting the action mapping. Terminal
+normalization uses the existing retained-result decoder and exact operation /
+producer binding before returning a result digest.
+
+`read_current_action` is a separate read-only entry point for a fresh process.
+It requires configured Bot ownership and the existing native read budget, loads
+one current root and refuses missing/invalid authority. An authenticated
+actionless root means only that this root contains no action. It does not mean
+that earlier accepted operations are absent. Selected-root normalization adds no
+HTTP requests to the ordinary lifecycle, while explicit current-root reads
+consume the existing ledger budget. Neither entry point follows ancestors,
+changes census/storage limits, writes state, or issues a replacement allowance.
+
+An observation is not an execution or settlement capability and does not make a
+stale selected root current. Existing live source, caller ownership, uncertainty,
+positive non-dispatch and cessation/fencing checks remain mandatory. In
+particular `execution_started=false` never becomes `NoBusinessDispatchEvidence`.
+The action intent does not retain a review base or full finding-state inventory.
+Consequently these observations deliberately cannot be converted into G13
+`AcceptedOperationRecord.made_progress` receipts: even an explicit no-op may
+have performed native finalization. No no-progress count is inferred from
+request counts, an outcome label or a changed root hash.
+
+This qualifies only cold reconstruction of one existing action observation and
+its ordinary source-lifecycle consumption using synthetic native HTTP. Full
+accepted-operation history production/consumption, durable semantic-progress
+receipts, queue-replacement observation, cross-process non-dispatch/cessation
+and installed/deployed qualification remain open. It closes neither G13 nor
+G32 and settles no historical obligation.
+
 ## Consequences
 
 Every GitHub pull-request lifecycle event has a deterministic, tested outcome
@@ -162,7 +199,8 @@ Actions queue replacement.
 ## Validation
 
 Focused unit and integration-style provider-free suites qualify each slice:
-`tests/test_trigger_coverage_g01.py`, `tests/test_event_convergence_g13.py`,
+`tests/test_accepted_action.py`, `tests/test_trigger_coverage_g01.py`,
+`tests/test_event_convergence_g13.py`,
 `tests/test_merge_queue_boundary_g07.py`,
 `tests/test_thread_resolution_convergence_g26.py`, and
 `tests/test_human_review_independence_g28.py`, alongside existing setup,
