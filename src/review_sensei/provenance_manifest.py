@@ -14,9 +14,13 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import os
 import re
+import stat
+import sys
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
+from pathlib import Path
 from typing import Any
 
 from .errors import ReviewInputError
@@ -27,6 +31,7 @@ ATTEMPT_EVIDENCE_SCHEMA_VERSION = "attempt-evidence-packet-v1"
 UNKNOWN_PROVENANCE = "unknown"
 MISSING_BINDING = "missing"
 MAX_PROVENANCE_PACKET_BYTES = 16_384
+MAX_IMPORTED_MODULE_FILE_BYTES = 1_048_576
 MAX_PUBLIC_SUMMARY_BYTES = 4_096
 MAX_SAFE_TEXT_LENGTH = 200
 MAX_SAFE_STEPS = 8
@@ -704,6 +709,156 @@ class CiRunObservation:
 
 
 @dataclass(frozen=True)
+class InvocationProvenanceEvidence:
+    """Missing evidence joins, not attestations or deployment authorization.
+
+    Artifact digests must come from independently authenticated release evidence;
+    an installed file/RECORD hash is never substituted for a wheel digest.
+    Origin labels reveal no local paths. File hashes describe observed disk bytes,
+    not the historical process's memory. Trust labels are supplied observations,
+    not signature verification performed by this diagnostic module.
+    """
+
+    observation_scope: str = UNKNOWN_PROVENANCE
+    invocation_sha256: str = UNKNOWN_PROVENANCE
+    observed_at: str = UNKNOWN_PROVENANCE
+    core_artifact_version: str = UNKNOWN_PROVENANCE
+    core_artifact_sha256: str = UNKNOWN_PROVENANCE
+    core_artifact_source_commit: str = UNKNOWN_PROVENANCE
+    hosted_artifact_version: str = UNKNOWN_PROVENANCE
+    hosted_artifact_sha256: str = UNKNOWN_PROVENANCE
+    hosted_artifact_source_commit: str = UNKNOWN_PROVENANCE
+    core_module_origin: str = UNKNOWN_PROVENANCE
+    core_module_file_sha256: str = UNKNOWN_PROVENANCE
+    hosted_module_origin: str = UNKNOWN_PROVENANCE
+    hosted_module_file_sha256: str = UNKNOWN_PROVENANCE
+    caller_workflow_tag_object: str = UNKNOWN_PROVENANCE
+    caller_workflow_commit: str = UNKNOWN_PROVENANCE
+    caller_workflow_sha256: str = UNKNOWN_PROVENANCE
+    caller_workflow_trust: str = UNKNOWN_PROVENANCE
+    reusable_workflow_sha256: str = UNKNOWN_PROVENANCE
+    reusable_workflow_signature: str = UNKNOWN_PROVENANCE
+    worker_revision: str = UNKNOWN_PROVENANCE
+    activated_registry_sha256: str = UNKNOWN_PROVENANCE
+
+    def __post_init__(self) -> None:
+        for item in fields(self):
+            name, value = item.name, getattr(self, item.name)
+            if name == "observation_scope":
+                checked = _closed_choice(
+                    value,
+                    frozenset({"current_process", "retained_attempt", "unknown"}),
+                    field=name,
+                )
+            elif name.endswith("_origin"):
+                checked = _closed_choice(
+                    value,
+                    frozenset(
+                        {"distribution-owned", "outside-distribution", "unknown"}
+                    ),
+                    field=name,
+                )
+            elif name in {"caller_workflow_trust", "reusable_workflow_signature"}:
+                checked = _closed_choice(
+                    value,
+                    frozenset({"verified", "invalid", "absent", "unknown"}),
+                    field=name,
+                )
+            elif name.endswith("_version"):
+                checked = _semver_or_unknown(value, field=name)
+            elif name == "observed_at":
+                checked = _utc_timestamp_or_unknown(value, field=name)
+            elif name == "worker_revision":
+                checked = _worker_revision_or_unknown(value, field=name)
+            elif name == "caller_workflow_tag_object" and value == "not_applicable":
+                # Explicit direct-commit caller evidence, never inferred from a ref.
+                checked = value
+            elif name.endswith("_commit") or name.endswith("_tag_object"):
+                checked = _git_sha_or_unknown(value, field=name)
+            else:
+                checked = _sha256_or_unknown(value, field=name)
+            object.__setattr__(self, name, checked)
+
+    def identity_fields(self) -> dict[str, str]:
+        return {item.name: getattr(self, item.name) for item in fields(self)}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "invocation-provenance-v1",
+            **self.identity_fields(),
+            "authority": False,
+            "is_deployment_proof": False,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> InvocationProvenanceEvidence:
+        names = frozenset(item.name for item in fields(cls))
+        mapping = _require_mapping_keys(
+            data,
+            required=names | {"schema_version", "authority", "is_deployment_proof"},
+            optional=frozenset(),
+            label="invocation_evidence",
+        )
+        if mapping["schema_version"] != "invocation-provenance-v1":
+            raise ReviewInputError("unsupported invocation evidence schema")
+        _exact_false_authority(mapping["authority"])
+        _exact_false_authority(
+            mapping["is_deployment_proof"], field="is_deployment_proof"
+        )
+        return cls(**{name: mapping[name] for name in names})
+
+
+@dataclass(frozen=True)
+class InstalledPackageObservation:
+    """One current-process metadata/import observation; no raw origin path."""
+
+    distribution: str
+    version: str = UNKNOWN_PROVENANCE
+    module_origin: str = UNKNOWN_PROVENANCE
+    module_file_sha256: str = UNKNOWN_PROVENANCE
+
+    def __post_init__(self) -> None:
+        if self.distribution not in INSTALLED_DISTRIBUTION_NAMES:
+            raise ReviewInputError("unsupported installed distribution observation")
+        object.__setattr__(
+            self, "version", _semver_or_unknown(self.version, field="version")
+        )
+        object.__setattr__(
+            self,
+            "module_origin",
+            _closed_choice(
+                self.module_origin,
+                frozenset({"distribution-owned", "outside-distribution", "unknown"}),
+                field="module_origin",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "module_file_sha256",
+            _sha256_or_unknown(self.module_file_sha256, field="module_file_sha256"),
+        )
+        if (
+            self.module_origin != "distribution-owned"
+            and self.module_file_sha256 != UNKNOWN_PROVENANCE
+        ):
+            raise ReviewInputError(
+                "unowned module must not supply an installed file digest"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "distribution": self.distribution,
+            "version": self.version,
+            "module_origin": self.module_origin,
+            "module_file_sha256": self.module_file_sha256,
+            "observation_scope": "current_process",
+            "wheel_sha256": UNKNOWN_PROVENANCE,
+            "authority": False,
+            "is_deployment_proof": False,
+        }
+
+
+@dataclass(frozen=True)
 class ProvenanceManifest:
     """Immutable manifest separating repository source, release, and installed runtime."""
 
@@ -731,6 +886,7 @@ class ProvenanceManifest:
     frozen_policy_sha256: str = UNKNOWN_PROVENANCE
     gates: GateObservations = GateObservations()
     ci_observations: tuple[CiRunObservation, ...] = ()
+    invocation_evidence: InvocationProvenanceEvidence | None = None
     authority: bool = False
 
     def __post_init__(self) -> None:
@@ -739,6 +895,13 @@ class ProvenanceManifest:
             raise ReviewInputError("source_event must be a SourceEventIdentity")
         if not isinstance(self.gates, GateObservations):
             raise ReviewInputError("gates must be a GateObservations")
+        if (
+            self.invocation_evidence is not None
+            and type(self.invocation_evidence) is not InvocationProvenanceEvidence
+        ):
+            raise ReviewInputError(
+                "invocation_evidence must be InvocationProvenanceEvidence"
+            )
         if isinstance(self.ci_observations, (str, bytes)) or not isinstance(
             self.ci_observations, Sequence
         ):
@@ -881,7 +1044,7 @@ class ProvenanceManifest:
         return False
 
     def _identity_fields(self) -> dict[str, Any]:
-        return {
+        identity = {
             "repository": self.repository,
             "repository_id": self.repository_id,
             "pull_request": self.pull_request,
@@ -913,6 +1076,14 @@ class ProvenanceManifest:
             ),
             "gates.broker_enforcement": self.gates.broker_enforcement,
         }
+        if self.invocation_evidence is not None:
+            identity.update(
+                {
+                    "invocation_evidence." + key: value
+                    for key, value in self.invocation_evidence.identity_fields().items()
+                }
+            )
+        return identity
 
     @property
     def unknown_fields(self) -> tuple[str, ...]:
@@ -936,7 +1107,11 @@ class ProvenanceManifest:
 
     @property
     def has_complete_runtime_identity(self) -> bool:
-        """Return True when all required runtime identity fields are known.
+        """Return True when the legacy runtime identity labels are known.
+
+        This is metadata completeness, not imported-module, artifact, signature,
+        invocation, qualification or deployment proof. Those joins require the
+        separate invocation evidence and independently authenticated receipts.
 
         Observational repository, release, and CI metadata (``main_sha``,
         ``latest_release_tag``, ``latest_release_tag_object``,
@@ -969,7 +1144,7 @@ class ProvenanceManifest:
         return self.broker_revision != UNKNOWN_PROVENANCE
 
     def _body_dict(self) -> dict[str, Any]:
-        return {
+        body = {
             "schema_version": PROVENANCE_MANIFEST_SCHEMA_VERSION,
             "repository": self.repository,
             "repository_id": self.repository_id,
@@ -1000,6 +1175,10 @@ class ProvenanceManifest:
             "ci_observations": [obs.to_dict() for obs in self.ci_observations],
             "authority": False,
         }
+        # Omit an absent extension to preserve every existing v1 manifest digest.
+        if self.invocation_evidence is not None:
+            body["invocation_evidence"] = self.invocation_evidence.to_dict()
+        return body
 
     @property
     def manifest_sha256(self) -> str:
@@ -1052,6 +1231,7 @@ class ProvenanceManifest:
                     "ci_status_is_deployment_proof",
                     "ci_observations",
                     "manifest_sha256",
+                    "invocation_evidence",
                 }
             ),
             label="provenance_manifest",
@@ -1103,6 +1283,11 @@ class ProvenanceManifest:
             frozen_policy_sha256=mapping["frozen_policy_sha256"],
             gates=GateObservations.from_dict(mapping["gates"]),
             ci_observations=tuple(CiRunObservation.from_dict(item) for item in raw_ci),
+            invocation_evidence=(
+                InvocationProvenanceEvidence.from_dict(mapping["invocation_evidence"])
+                if "invocation_evidence" in mapping
+                else None
+            ),
             authority=False,
         )
         if "manifest_sha256" in mapping:
@@ -1112,6 +1297,239 @@ class ProvenanceManifest:
             if expected != manifest.manifest_sha256:
                 raise ReviewInputError("manifest_sha256 does not match payload")
         return manifest
+
+
+@dataclass(frozen=True)
+class QualificationReceiptBinding:
+    """Scope of an independently retained qualification receipt, not its trust.
+
+    A matching content digest authenticates neither the receipt's producer nor
+    the supplied signature observations. Existing release/runtime verifiers must
+    establish those facts separately; this object grants no authority.
+    """
+
+    manifest_sha256: str
+    invocation_sha256: str
+    route_sha256: str
+    receipt_sha256: str
+    outcome: str = "unknown"
+
+    def __post_init__(self) -> None:
+        for name in (
+            "manifest_sha256",
+            "invocation_sha256",
+            "route_sha256",
+            "receipt_sha256",
+        ):
+            value = _sha256_or_unknown(getattr(self, name), field=name)
+            if value == UNKNOWN_PROVENANCE:
+                raise ReviewInputError("qualification binding requires exact digests")
+        _closed_choice(
+            self.outcome, frozenset({"passed", "failed", "unknown"}), field="outcome"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "provenance-qualification-binding-v1",
+            **{item.name: getattr(self, item.name) for item in fields(self)},
+            "authority": False,
+            "is_deployment_proof": False,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> QualificationReceiptBinding:
+        names = frozenset(item.name for item in fields(cls))
+        mapping = _require_mapping_keys(
+            data,
+            required=names | {"schema_version", "authority", "is_deployment_proof"},
+            optional=frozenset(),
+            label="qualification_binding",
+        )
+        if mapping["schema_version"] != "provenance-qualification-binding-v1":
+            raise ReviewInputError("unsupported qualification binding schema")
+        _exact_false_authority(mapping["authority"])
+        _exact_false_authority(
+            mapping["is_deployment_proof"], field="is_deployment_proof"
+        )
+        return cls(**{name: mapping[name] for name in names})
+
+
+def invocation_route_sha256(manifest: ProvenanceManifest) -> str:
+    """Bind declared source, artifacts, invocation and complete route identities."""
+    if type(manifest) is not ProvenanceManifest or manifest.invocation_evidence is None:
+        raise ReviewInputError("invocation evidence is required for route binding")
+    return hashlib.sha256(
+        _canonical_json_bytes(manifest._identity_fields())
+    ).hexdigest()
+
+
+def bind_qualification_receipt(
+    manifest: ProvenanceManifest, *, receipt_sha256: str, outcome: str
+) -> QualificationReceiptBinding:
+    """Label an existing receipt's exact scope; never run or qualify anything."""
+    route = invocation_route_sha256(manifest)
+    evidence = manifest.invocation_evidence
+    assert evidence is not None
+    return QualificationReceiptBinding(
+        manifest_sha256=manifest.manifest_sha256,
+        invocation_sha256=evidence.invocation_sha256,
+        route_sha256=route,
+        receipt_sha256=receipt_sha256,
+        outcome=outcome,
+    )
+
+
+@dataclass(frozen=True)
+class InvocationProvenanceReport:
+    status: str
+    mismatched_fields: tuple[str, ...]
+    missing_fields: tuple[str, ...]
+    receipt_scope_matches: bool
+
+    def __post_init__(self) -> None:
+        if self.status not in {"scope_matched", "mismatch", "incomplete"}:
+            raise ReviewInputError("invalid invocation provenance status")
+        _exact_bool(self.receipt_scope_matches, field="receipt_scope_matches")
+        if self.status == "scope_matched" and (
+            self.mismatched_fields
+            or self.missing_fields
+            or not self.receipt_scope_matches
+        ):
+            raise ReviewInputError(
+                "scope-matched provenance must have complete bindings"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "mismatched_fields": list(self.mismatched_fields),
+            "missing_fields": list(self.missing_fields),
+            "receipt_scope_matches": self.receipt_scope_matches,
+            "qualification_authenticity_verified": False,
+            "is_runtime_qualification_proof": False,
+            "is_deployment_proof": False,
+            "authority": False,
+        }
+
+
+def classify_invocation_provenance(
+    manifest: ProvenanceManifest,
+    *,
+    expected: ProvenanceManifest,
+    qualification: QualificationReceiptBinding | None = None,
+) -> InvocationProvenanceReport:
+    """Compare complete supplied evidence and receipt scope, without I/O.
+
+    ``expected`` must be chosen from independently authenticated evidence. Even
+    a complete match is not signature/receipt authentication, execution proof,
+    a deployment observation or recovery authority. Legacy v1 compatibility is
+    a separate declared-metadata comparison, never this stronger evidence join.
+    """
+    if (
+        type(manifest) is not ProvenanceManifest
+        or type(expected) is not ProvenanceManifest
+    ):
+        raise ReviewInputError(
+            "observed and expected provenance manifests are required"
+        )
+    if (
+        qualification is not None
+        and type(qualification) is not QualificationReceiptBinding
+    ):
+        raise ReviewInputError("qualification must be a QualificationReceiptBinding")
+    observed_fields = manifest._identity_fields()
+    expected_fields = expected._identity_fields()
+    # Latest-release aliases are observations, not the two particular artifacts
+    # named by this invocation. CI never participates in runtime qualification.
+    omitted = {
+        "latest_release_tag",
+        "latest_release_tag_object",
+        "latest_release_commit",
+    }
+    required = (set(observed_fields) | set(expected_fields)) - omitted
+    missing: set[str] = set()
+    mismatches: set[str] = set()
+    if manifest.invocation_evidence is None:
+        missing.add("invocation_evidence")
+    if expected.invocation_evidence is None:
+        missing.add("expected.invocation_evidence")
+    for name in sorted(required):
+        actual = observed_fields.get(name, UNKNOWN_PROVENANCE)
+        wanted = expected_fields.get(name, UNKNOWN_PROVENANCE)
+        if actual == UNKNOWN_PROVENANCE:
+            missing.add(name)
+        if wanted == UNKNOWN_PROVENANCE:
+            missing.add("expected." + name)
+        if (
+            actual != UNKNOWN_PROVENANCE
+            and wanted != UNKNOWN_PROVENANCE
+            and actual != wanted
+        ):
+            mismatches.add(name)
+    evidence = manifest.invocation_evidence
+    if evidence is not None:
+        for name in ("caller_workflow_trust", "reusable_workflow_signature"):
+            if getattr(evidence, name) not in {"verified", UNKNOWN_PROVENANCE}:
+                mismatches.add("invocation_evidence." + name)
+        for name in ("core_module_origin", "hosted_module_origin"):
+            if getattr(evidence, name) not in {
+                "distribution-owned",
+                UNKNOWN_PROVENANCE,
+            }:
+                mismatches.add("invocation_evidence." + name)
+        for package in ("core", "hosted"):
+            artifact_version = getattr(evidence, package + "_artifact_version")
+            installed_version = getattr(manifest, "installed_" + package + "_version")
+            if (
+                artifact_version != UNKNOWN_PROVENANCE
+                and installed_version != UNKNOWN_PROVENANCE
+                and artifact_version != installed_version
+            ):
+                mismatches.add("installed_" + package + "_version")
+        for name, value in manifest.gates.to_dict().items():
+            if value != "passed":
+                (missing if value == UNKNOWN_PROVENANCE else mismatches).add(
+                    "gates." + name
+                )
+    receipt_matches = False
+    if qualification is None:
+        missing.add("qualification_receipt")
+    elif evidence is None:
+        mismatches.add("qualification_receipt.scope")
+    else:
+        for name, actual, wanted in (
+            (
+                "manifest_sha256",
+                qualification.manifest_sha256,
+                manifest.manifest_sha256,
+            ),
+            (
+                "invocation_sha256",
+                qualification.invocation_sha256,
+                evidence.invocation_sha256,
+            ),
+            (
+                "route_sha256",
+                qualification.route_sha256,
+                invocation_route_sha256(manifest),
+            ),
+            ("outcome", qualification.outcome, "passed"),
+        ):
+            if actual != wanted:
+                mismatches.add("qualification_receipt." + name)
+        receipt_matches = not any(
+            name.startswith("qualification_receipt.") for name in mismatches
+        )
+    return InvocationProvenanceReport(
+        status="mismatch"
+        if mismatches
+        else "incomplete"
+        if missing
+        else "scope_matched",
+        mismatched_fields=tuple(sorted(mismatches)),
+        missing_fields=tuple(sorted(missing)),
+        receipt_scope_matches=receipt_matches,
+    )
 
 
 @dataclass(frozen=True)
@@ -1358,6 +1776,9 @@ class ProvenanceCompatibilityReport:
             "missing_fields": list(self.missing_fields),
             "notes": list(self.notes),
             "recovery": self.recovery.to_dict(),
+            "comparison_scope": "declared_metadata",
+            "is_runtime_qualification_proof": False,
+            "is_deployment_proof": False,
             "authority": False,
         }
 
@@ -2275,6 +2696,91 @@ class AttemptEvidencePacket:
         return packet
 
 
+def _module_file_sha256(path: Path) -> str:
+    # A byte cap does not prevent blocking on a substituted pipe/device. Refuse
+    # special files before open and recheck the descriptor after a nonblocking,
+    # no-follow open where the OS supports those flags. This is bounded local
+    # disk observation, not a filesystem latency or in-memory-code attestation.
+    if not stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode):
+        return UNKNOWN_PROVENANCE
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return UNKNOWN_PROVENANCE
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            body = stream.read(MAX_IMPORTED_MODULE_FILE_BYTES + 1)
+        return (
+            hashlib.sha256(body).hexdigest()
+            if len(body) <= MAX_IMPORTED_MODULE_FILE_BYTES
+            else UNKNOWN_PROVENANCE
+        )
+    finally:
+        os.close(descriptor)
+
+
+def inspect_current_process_packages() -> tuple[InstalledPackageObservation, ...]:
+    """Observe already-imported package origins in this interpreter, without imports.
+
+    Metadata alone is insufficient. A claimed module must resolve to the exact
+    initializer listed by its installed distribution, within this interpreter's
+    prefix. Editable/check-out, symlinked-outside, missing, ambiguous or unloaded
+    modules never receive an installed file digest. No absolute paths, wheel
+    claims, historical identities, network calls or credentials are returned.
+    """
+    observations: list[InstalledPackageObservation] = []
+    prefix = Path(sys.prefix).resolve()
+    for name, module_name in zip(
+        INSTALLED_DISTRIBUTION_NAMES,
+        ("review_sensei", "review_sensei_github"),
+        strict=True,
+    ):
+        version = UNKNOWN_PROVENANCE
+        origin = UNKNOWN_PROVENANCE
+        digest = UNKNOWN_PROVENANCE
+        try:
+            distribution = importlib.metadata.distribution(name)
+            version = _semver_or_unknown(
+                distribution.version, field="installed_version"
+            )
+            module = sys.modules.get(module_name)
+            specification = getattr(module, "__spec__", None)
+            raw_origin = getattr(specification, "origin", None)
+            module_file = getattr(module, "__file__", None)
+            if not isinstance(raw_origin, str) or not isinstance(module_file, str):
+                observations.append(InstalledPackageObservation(name, version))
+                continue
+            resolved = Path(raw_origin).resolve()
+            entries = [
+                item
+                for item in distribution.files or ()
+                if str(item).replace("\\", "/") == module_name + "/__init__.py"
+            ]
+            if len(entries) != 1:
+                observations.append(InstalledPackageObservation(name, version))
+                continue
+            if (
+                not resolved.is_relative_to(prefix)
+                or resolved != Path(module_file).resolve()
+                or resolved != Path(str(distribution.locate_file(entries[0]))).resolve()
+            ):
+                origin = "outside-distribution"
+            else:
+                origin = "distribution-owned"
+                digest = _module_file_sha256(resolved)
+        except (
+            importlib.metadata.PackageNotFoundError,
+            LookupError,
+            ValueError,
+            OSError,
+            RuntimeError,
+        ):
+            # Unknown is not a retry and does not reveal raw path/error text.
+            pass
+        observations.append(InstalledPackageObservation(name, version, origin, digest))
+    return tuple(observations)
+
+
 def inspect_installed_package_versions(
     *,
     version_lookup: Callable[[str], str] | None = None,
@@ -2331,6 +2837,7 @@ def build_provenance_manifest(
     frozen_policy_sha256: str = UNKNOWN_PROVENANCE,
     gates: GateObservations | None = None,
     ci_observations: Sequence[CiRunObservation] = (),
+    invocation_evidence: InvocationProvenanceEvidence | None = None,
     auto_inspect_local_packages: bool = False,
     version_lookup: Callable[[str], str] | None = None,
     require_distinct_annotated_tag: bool = False,
@@ -2341,12 +2848,49 @@ def build_provenance_manifest(
     ``ci_observations`` never populate ``installed_core_version``,
     ``installed_hosted_version``, ``selected_executor``, ``broker_revision``, or
     ``reusable_workflow_peeled_commit``. Absent runtime/deployed telemetry
-    remains ``"unknown"`` unless explicitly supplied (or locally inspected for
-    the current Python process when ``auto_inspect_local_packages=True``).
+    remains ``"unknown"`` unless explicitly supplied. Automatic local version
+    inspection is limited to unbound current-process snapshots; it refuses an
+    identified PR/head/event or retained invocation before lookup. An identified
+    invocation requires its own explicitly supplied original observations, not
+    metadata borrowed from the process constructing this diagnostic document.
     """
 
     _exact_bool(auto_inspect_local_packages, field="auto_inspect_local_packages")
     _exact_bool(require_distinct_annotated_tag, field="require_distinct_annotated_tag")
+    if (
+        invocation_evidence is not None
+        and type(invocation_evidence) is not InvocationProvenanceEvidence
+    ):
+        raise ReviewInputError(
+            "invocation_evidence must be InvocationProvenanceEvidence"
+        )
+    if auto_inspect_local_packages and (
+        (source_event is not None and source_event != SourceEventIdentity())
+        or pull_request not in (None, UNKNOWN_PROVENANCE)
+        or head_sha not in (None, UNKNOWN_PROVENANCE)
+        or (
+            invocation_evidence is not None
+            and (
+                invocation_evidence.observation_scope == "retained_attempt"
+                or invocation_evidence.invocation_sha256 != UNKNOWN_PROVENANCE
+            )
+        )
+    ):
+        raise ReviewInputError(
+            "current-process metadata cannot populate an identified or retained attempt"
+        )
+    if auto_inspect_local_packages and invocation_evidence is None:
+        invocation_evidence = InvocationProvenanceEvidence(
+            observation_scope="current_process"
+        )
+    elif (
+        auto_inspect_local_packages
+        and invocation_evidence is not None
+        and invocation_evidence.observation_scope == UNKNOWN_PROVENANCE
+    ):
+        invocation_evidence = replace(
+            invocation_evidence, observation_scope="current_process"
+        )
     eff_core = installed_core_version
     eff_hosted = installed_hosted_version
     if auto_inspect_local_packages and (
@@ -2387,6 +2931,7 @@ def build_provenance_manifest(
         frozen_policy_sha256=frozen_policy_sha256,
         gates=gates if gates is not None else GateObservations(),
         ci_observations=tuple(ci_observations),
+        invocation_evidence=invocation_evidence,
         authority=False,
     )
     if require_distinct_annotated_tag:

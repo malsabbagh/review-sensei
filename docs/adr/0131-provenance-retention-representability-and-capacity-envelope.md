@@ -110,3 +110,55 @@ No earlier physical charge is refunded or reset. Pure previews neither stat/open
 caches. A cached proof does not authorize live recovery or replace a later
 required fresh read/fence. Unsupported adapters refuse until they implement the
 capability; no writer encoding, limit, durable schema or deployment changes.
+
+### Invocation evidence and qualification scope (G11, prospective correction)
+
+The optional `invocation_evidence` extension reuses the existing main/PR source,
+installed-version, reusable tag-object/peeled-commit, executor, policy and broker
+identities. It adds only missing joins: each release artifact's version, source
+commit and SHA-256; observed imported-module ownership and initializer-file
+SHA-256; caller tag object (or explicit direct-commit `not_applicable`), commit,
+workflow bytes and trust observation; reusable workflow bytes and signature
+observation; separate Worker revision, activated-registry digest, observation
+scope, invocation digest and observation time. An absent extension preserves the
+existing v1 wire body and digest. Missing observations stay `unknown`; there is
+no release-label, current-main, CI or version-metadata fallback.
+
+`inspect_current_process_packages` is opt-in local observation. It examines only
+already-imported modules, their installed distribution's initializer inventory
+and this interpreter's prefix. It imports no candidate package, makes no network
+request, reads at most 1 MiB plus one overflow byte per initializer and returns no local paths or raw
+file bytes. Special files are refused before opening and by descriptor checks;
+nonblocking/no-follow open flags are used where supported. Unloaded, ambiguous,
+missing or editable origins stay unknown or are
+explicitly outside the installed distribution. A file hash observes disk bytes,
+not in-memory code, all package contents or the downloaded wheel. Wheel identity
+must come from separate authenticated release evidence. Automatic legacy version
+inspection now refuses identified PR/head/event or retained-invocation manifests
+rather than filling historical unknowns from today's environment.
+
+`QualificationReceiptBinding` associates an existing receipt digest with the
+exact manifest, invocation and route digests. The route covers source, both
+artifacts, module observations, caller/reusable workflow identities and bytes,
+executor, policy, broker, Worker and activated registry. The stronger comparator
+requires all observed and expected fields, matching artifact/installed versions,
+distribution-owned imports, supplied successful workflow-trust observations and
+a passing receipt scoped to that exact route. Missing evidence refuses a complete
+match; contradictory evidence is reported separately. Legacy `compatible` and
+`has_complete_runtime_identity` remain declared-metadata observations only.
+
+A `scope_matched` report is **not** signature verification, receipt authentication,
+runtime qualification, deployment proof or authority. The diagnostic module
+cannot authenticate the producer of supplied evidence; existing signature,
+release-provenance and runtime verifiers still own that work. Its serialized
+qualification-authenticity, runtime-qualification-proof, deployment-proof and
+authority flags are always false. The fixed 16 KiB attempt-packet limit is
+unchanged. No ordinary workflow telemetry producer, deployed invocation capture,
+Worker deployment, registry activation or historical reconstruction is added.
+G11 therefore remains deployment-evidence incomplete.
+
+Validation includes source-only and mixed-version controls, tag/commit/bytes and
+signature mismatches, wrong import origins, broker/Worker/policy/registry drift,
+missing fields, wrong receipt scope, legacy-digest preservation and an offline
+fixture-wheel installation in a fresh interpreter outside the checkout. The
+fixture is not a published release or live-runtime qualification.
