@@ -140,3 +140,6 @@ Hosted-only reuse requires core-input proof and per-package signed provenance (A
 Only confirmed archives enable narrative excerpts; all finding prose and authority stay intact.
 
 Never execute inactive selection.
+
+seen delivery ID cannot suppress work that was never admitted. Reinspection uses
+verification retains its existing deduplication contract.
