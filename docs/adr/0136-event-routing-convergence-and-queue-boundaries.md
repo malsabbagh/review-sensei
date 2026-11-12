@@ -55,16 +55,21 @@ keeping the existing caller workflow subscriptions unchanged:
    for exact result recovery. This process-local proof is not serialized historical
    cessation authority and creates no replacement allowance.
 2. **Current-state convergence, ownership, and finite stop rule (`G13`):**
-   Reconcile admitted events and manual recovery actions against the
-   authenticated live pull-request `(base_sha, head_sha)` target
-   (`LivePullRequestTarget`) rather than assuming durable FIFO webhook delivery.
-   Assign explicit ownership (`RECONCILIATION_OWNERS`) and enforce a finite
-   no-progress stop (`MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS = 2`,
-   `finite_no_progress_stop`) on repeated unchanged non-progressing attempts
-   without background reconcilers or paid retries, resetting when state
-   advances. When per-PR Actions concurrency displaces a pending run, emit an
-   explicit `ReplacedQueueNotice` naming the superseded run and exact recovery
-   command instead of silently dropping accepted intent.
+   Model reconciliation of admitted events and manual recovery actions against
+   a supplied authenticated live pull-request `(base_sha, head_sha)` target
+   (`LivePullRequestTarget`) and supplied `AcceptedOperationRecord` history,
+   rather than assuming durable FIFO webhook delivery. The classifier assigns
+   explicit ownership (`RECONCILIATION_OWNERS`) and enforces a finite no-progress
+   stop (`MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS = 2`,
+   `finite_no_progress_stop`) when that history proves repeated unchanged
+   non-progressing attempts, resetting when the supplied state advances. It
+   launches no background reconcilers or paid retries. The deterministic
+   `simulate_actions_concurrency_queue` helper returns `ReplacedQueueNotice`
+   values naming displaced pending runs and recovery commands; the convergence
+   classifier holds when supplied `was_queued_replaced=True`. Neither helper
+   detects real Actions queue replacement or publishes a notice from a displaced
+   run. Durable history/progress inputs and live queue-replacement observation
+   remain integration requirements, not guarantees of the installed caller.
 3. **Explicit `merge_group` unsupported boundary and snapshot certification
    (`G07`):** Reject `merge_group` (`checks_requested`, `destroyed`) events
    deterministically with `merge_group_unsupported` across `trigger.py`,
@@ -124,10 +129,13 @@ adapters do not make receipt observation into completed-operation authority.
 
 A duplicate delivery flag alone cannot declare convergence or suppress admission:
 a caller can fail after receiving a route and before accepting the operation.
-Redelivery therefore re-evaluates current source/session state and accepted
-operation history. Completed matching work is reused, pending/uncertain work
-holds, and unadmitted work may reach the existing admission gate. Route selection
-never itself dispatches inference or establishes terminal native completion.
+Redelivery therefore re-evaluates the supplied current source/session state
+rather than trusting the delivery flag. Where matching accepted-operation
+history is supplied to the convergence classifier, completed work is reused,
+pending/uncertain work holds, and unadmitted work may reach the existing
+admission gate. This is not proof that ordinary cold-process routing reconstructs
+all prior accepted operations. Route selection never itself dispatches inference
+or establishes terminal native completion.
 This correction does not introduce durable webhook processing storage, relax
 original budgets, or replace the G02/G08 writer fence and G13 durable-history
 integration requirements. Legacy installation/setup verification is unchanged.
@@ -176,10 +184,16 @@ G32 and settles no historical obligation.
 
 ## Consequences
 
-Every GitHub pull-request lifecycle event has a deterministic, tested outcome
-with zero unapproved inference spend. Duplicate, delayed, or out-of-order
-deliveries cannot trigger redundant paid analysis, and merge-queue commits
-cannot inherit false certification from ordinary PR-head reviews. Operators must
+The event decision table gives each covered GitHub pull-request lifecycle
+event a deterministic, tested classification without dispatching inference.
+With the required live target and accepted-operation history supplied, the
+convergence classifier rejects stale events, reuses matching retained work and
+holds uncertain work without scheduling redundant inference. This modeled
+behavior is not an end-to-end guarantee that duplicate, delayed, or out-of-order
+deliveries cannot cause repeated paid analysis in an installed caller: full
+durable-history production/consumption and queue-replacement observation remain
+open. Merge-queue commits cannot inherit certification from ordinary PR-head
+receipts under the exact-snapshot certification boundary. Operators must
 invoke the documented bounded recovery command (`@reviewsensei verify`,
 `@reviewsensei review status`, `@reviewsensei rescan`,
 `@reviewsensei review remaining`, or `workflow_dispatch`) after unsubscribed
