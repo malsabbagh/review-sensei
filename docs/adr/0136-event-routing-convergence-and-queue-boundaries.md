@@ -117,7 +117,10 @@ The comment and event-routing verifier records a delivery observation only after
 validation and route construction succeed. A failure while classifying or
 executing the lifecycle leaves the delivery eligible for bounded reinspection;
 any native-effect uncertainty remains owned by the authenticated session and
-caller accounting, not by the delivery cache.
+caller accounting, not by the delivery observation cache. The existing default
+`InMemoryDeliveryLedger` is verifier-process-local, bounded to 10,000 entries
+with oldest-entry eviction, and lost on restart. Alternate `DeliveryLedger`
+adapters do not make receipt observation into completed-operation authority.
 
 A duplicate delivery flag alone cannot declare convergence or suppress admission:
 a caller can fail after receiving a route and before accepting the operation.

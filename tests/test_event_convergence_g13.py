@@ -857,7 +857,10 @@ class _StaticSecret:
 
 
 class SubscribedCallerToHandlerJourneyG13Tests(unittest.TestCase):
-    """Exercise .github/workflows/review-sensei-review.yml + trigger.py -> webhooks.py / action_run.py."""
+    """Qualify checked-in subscriptions and actual trigger/webhook/action functions.
+
+    This does not execute the GitHub Actions service or qualify deployed inputs.
+    """
 
     def setUp(self) -> None:
         for target in ("socket.create_connection", "socket.socket.connect"):

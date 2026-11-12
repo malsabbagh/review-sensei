@@ -187,6 +187,15 @@ exclusively by GitHub branch protection:
   `@reviewsensei` override commands apply zero dispositions or approvals
   (`explicit_noop`, `reason="no_change"`) while preserving prior ledger history.
 
+### Source of write authority
+
+The caller workflow's read-only `GITHUB_TOKEN` permissions are unchanged. Native
+command writes use the hosted App installation capability obtained through the
+OIDC-authenticated broker and its session grant, not broader workflow token
+permissions. See [the architecture](architecture.md) and the
+[approval recovery procedure](approval-recovery.md). Routing or convergence
+classification alone cannot issue that capability or bypass live permission checks.
+
 ## Operator recovery quick reference
 
 ```text

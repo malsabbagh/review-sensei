@@ -19,11 +19,12 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from review_sensei.api_work import (
+    ApiExecutionOwner,
     ApiRunAccounting,
     ApiRunIdentity,
     FrozenApiConfiguration,
@@ -35,7 +36,7 @@ from review_sensei.configuration import MAX_CONFIG_BYTES, load_configuration
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
 from review_sensei.hosted import HostedPlan, plan_hosted_execution
 from review_sensei.models import ReviewResult, ReviewTransaction
-from review_sensei.session import SessionIdentity
+from review_sensei.session import SessionIdentity, SessionRecord
 from review_sensei.workflow import prepare_diff
 
 from . import review_lifecycle_diagnostics as lifecycle_diagnostics
@@ -64,6 +65,26 @@ _REPOSITORY = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 
 # Injectable only as the physical external service seam; never selected by JSON.
 physical_opener = urlopen
+
+
+class RolloverService(Protocol):
+    """Internal one-bootstrap dependency; no CLI or document conveys this service.
+
+    Implementations preserve native predecessor authentication, cessation and
+    exact owned activation readback, returning the confirmed caller accounting.
+    """
+
+    def __call__(
+        self,
+        caller: ApiRunRequestTransport,
+        ledger: GitHubIssueCommentSessionLedger,
+        identity: SessionIdentity,
+        configuration: FrozenApiConfiguration,
+        owner: ApiExecutionOwner,
+        previous: SessionRecord,
+        require_cessation: Callable[[], None],
+        /,
+    ) -> ApiRunAccounting: ...
 
 
 class StartupRunLedger(GitHubIssueCommentSessionLedger):
@@ -662,7 +683,7 @@ def bootstrap(
     source: Mapping[str, object] | None = None,
     quarantine_predecessor_comment_id: int | None = None,
     restart_id: str | None = None,
-    rollover_service: Callable[..., Any] | None = None,
+    rollover_service: RolloverService | None = None,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
     lifecycle_diagnostics.phase("bootstrap")

@@ -1349,6 +1349,10 @@ Delivery observations are recorded after successful route construction, but a
 seen delivery ID cannot suppress work that was never admitted. Reinspection uses
 current authenticated lifecycle state and accepted-operation history: terminal
 work is reused and pending/uncertain work holds without new inference or funding.
-The delivery cache is not durable operation authority; downstream admission,
+The existing `InMemoryDeliveryLedger` keeps bounded observations in the verifier
+process (default 10,000 entries, oldest evicted; lost on restart). The
+`DeliveryLedger` protocol allows alternate adapters but grants no completed-work
+authority or new durability requirement. This observation cache is not durable
+operation authority; downstream admission,
 accounting and writer fences remain required. Legacy installation/setup
 verification retains its existing deduplication contract.

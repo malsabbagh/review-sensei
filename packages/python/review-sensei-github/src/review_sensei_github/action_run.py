@@ -10,7 +10,7 @@ import argparse
 import hashlib
 import json
 import os
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -47,7 +47,7 @@ from .event_routing_contract import (
 )
 from .learning_pr import LearningPRPublisher
 from .publication import ReviewPublisher, parse_finding_index
-from .review_run import ActionRunLedger, ReviewRun, bootstrap
+from .review_run import ActionRunLedger, ReviewRun, RolloverService, bootstrap
 from .run_authority import VerifiedRunAction
 from .source_comment_lifecycle import (
     SourceLifecycleClassification,
@@ -102,7 +102,7 @@ class UnstartedCallerRecoveryGate:
 @contextmanager
 def _cross_run_unstarted_rollover_guard(
     gate: UnstartedCallerRecoveryGate | None,
-) -> Iterator[Callable[..., Any] | None]:
+) -> Iterator[RolloverService | None]:
     """Yield one explicit bootstrap dependency; never mutate shared transport methods.
 
     Gate evidence is internal authenticated caller authority, not a CLI document.
@@ -228,7 +228,11 @@ def evaluate_action_convergence_progress(
     current_state_fingerprint: str | None = None,
     max_no_progress_attempts: int = MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS,
 ) -> ConvergenceDecision:
-    """Enforce G13 current-state reconciliation ownership and finite stop rule."""
+    """Evaluate convergence after native bootstrap, never grant caller authority.
+
+    Synthetic routing fields select a policy branch only. Live source/permission
+    fences remain in the executor; this helper cannot replace those checks.
+    """
 
     kind = str(source.get("kind", "issue_comment"))
     event_name = (

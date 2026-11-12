@@ -602,7 +602,6 @@ class HumanReviewIndependenceG28Tests(unittest.TestCase):
             instance_hex = index.entries[0].instance
             finding_ref = "RS-" + instance_hex[:6].upper()
 
-            pull_file = ROOT / ".git"  # dummy check replaced by tempdir file below
             pull_file = Path(directory) / "pull.json"
             out_file = Path(directory) / "out.txt"
             pull_json = {

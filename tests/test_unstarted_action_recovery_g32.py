@@ -2047,7 +2047,6 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
     def test_gate_validation_rollover_guard_and_review_comment_or_pr_review_effect_fences(
         self,
     ) -> None:
-        from review_sensei_github import action_run
         from review_sensei_github.action_run import (
             UnstartedCallerRecoveryGate,
             _cross_run_unstarted_rollover_guard,
@@ -2272,7 +2271,6 @@ class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
                         stranded_rec,
                         lambda: None,
                     )
-            self.assertIsNotNone(action_run)
 
             # 4. PR review disposition marker for command_id blocks verify_no_business_dispatch_evidence!
             stranded_state = ApiRunAccounting.from_document(
