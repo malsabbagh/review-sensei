@@ -759,14 +759,14 @@ limits remain unchanged, and a later authenticated verification can continue
 from durable decisions and the current native resolution state.
 
 ADR 0059 permits validated partial analysis to cross the identity-bound checkpoint/publication boundary only with complete enumeration and evidence of reviewed work. The
-
-Reference: [ADR 0059](adr/0059-dependency-review-and-partial-publication.md).
 same repository/PR/base/head/policy/configuration/result-digest checks apply to
 first publication and crash recovery. Partial checkpoints charge one failed
 attempt, preserve the last complete baseline, and do not increment completed
 review counters or create convergence/no-progress markers. Successful transport
 preserves the `partial` run outcome and approval/check limitations; incomplete
 or wholly failed analysis remains fail-closed.
+
+Reference: [ADR 0059](adr/0059-dependency-review-and-partial-publication.md).
 
 [ADR 0060](adr/0060-stale-baseline-full-review-recovery.md) permits bounded
 fresh full analysis when a valid durable baseline loses incremental reuse
@@ -910,8 +910,6 @@ publication work; cooperating command/review jobs serialize the comment write.
 
 Complete review evidence now uses the lossless inline contract proposed in
 ADR 0072. Small baseline and human inventories retain their legacy JSON shape; larger inventories share a bounded canonical JSON/zlib/base64 reader. The existing authenticated ledger atomically
-
-Reference: [ADR 0072](adr/0072-lossless-inline-review-evidence.md).
 binds the full baseline and preserves its lifecycle reserve. Human eligibility
 version 3 stores immutable full prose separately from the mutable resolution
 list and reserves room for every possible resolution. Whole inventories are
@@ -920,6 +918,8 @@ independent of provider batches. Capacity failure carries an exact-result-bound
 approval while reporting analysis coverage accurately. All shared readers must be upgraded before richer writes; rollback readers fail closed on those records. Representative capacity and retained-state measurements are recorded in the ADR: fifty varied findings fit the baseline and resolution-growth contracts; larger or more verbose inventories can still exceed inline bounds. Full finding
 text is budgeted separately from the input overview, while the framed review
 body remains bounded to 65,536 bytes.
+
+Reference: [ADR 0072](adr/0072-lossless-inline-review-evidence.md).
 
 Only confirmed archives enable narrative excerpts; all finding prose and authority stay intact.
 Complete-profile fitting can use a labelled UTF-8 provider-narrative excerpt
