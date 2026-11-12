@@ -1356,4 +1356,4 @@ Snapshot previews consume the ledger-owned `snapshot_preview_parts` cached-graph
 capability, never concrete cache attributes or filesystem paths. Explicit
 `hydrate_snapshot_preview` runs the charged production v1/v2 reader before the
 pure preview; unavailable cached evidence refuses rather than triggering hidden
-I/O. See ADR 0131 for the detached-proof and post-hydration pricing contracts.
+I/O. See ADR 0131 for the detached-proof and conservative post-hydration read-allowance contracts.

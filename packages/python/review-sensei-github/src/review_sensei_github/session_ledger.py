@@ -645,7 +645,12 @@ class GitHubIssueCommentSessionLedger:
         read_session_dispositions(self, record)
 
     def snapshot_preview_read_requests(self, record: SessionRecord) -> int:
-        """Price actual remaining GETs, including all authenticated v2 pages."""
+        """Conservative remaining-GET allowance, including authenticated v2 pages.
+
+        This is not a measured count. Quarantine startup evidence may satisfy
+        later reads even when ordinary listed-part reuse is disabled; retaining
+        that allowance is conservative and never refunds prior physical work.
+        """
         identity = SessionIdentity(
             record.repository, record.pull_request, record.repository_id
         )

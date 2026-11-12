@@ -103,8 +103,10 @@ supply partitioned preview evidence; inline v1 remains self-contained.
 `read_session_dispositions` and the production bounded, authenticated readers.
 It charges actual physical work through the existing shared budget. The hosted
 command guard hydrates before pure preview and computes pricing from the updated
-caller accounting; remaining GET pricing is owned by the adapter and includes
-v2 pages. Pure previews neither stat/open files nor issue HTTP nor mutate source
+caller accounting; a conservative remaining-GET allowance is owned by the adapter
+and includes v2 pages. This allowance is not a measured count: quarantine startup
+bytes may satisfy subsequent reads even when ordinary listed-part reuse is off.
+No earlier physical charge is refunded or reset. Pure previews neither stat/open files nor issue HTTP nor mutate source
 caches. A cached proof does not authorize live recovery or replace a later
 required fresh read/fence. Unsupported adapters refuse until they implement the
 capability; no writer encoding, limit, durable schema or deployment changes.
