@@ -1,3 +1,4 @@
+Offline historical packets require positive terminal-result authentication; absent producer/result proof never establishes settlement. Positive-cost continuation requires known sufficient original allowance; zero-request checks leave unavailable allowance unknown (ADR 0133).
 installed registration binds the complete original/refused execution census,
 Retain future storage; admit full native tails before effects. Unknown writes never refund. Guarded readers share a cold cursor.
 Quarantine registry: append-only, empty; workflow disabled until reviewed exact one-shot registration. Release grants no activation.
@@ -14,6 +15,8 @@ independent lane. A partial or compromised release is handled version-forward, n
 (fixture adapter: test-only seam, omitted from production map)
 ReviewService.run emits versioned RunOutcome. Hard budgets cap provider calls, transport retries, prompt/output bytes and elapsed time. One structural-correction retry differs from transport retry. Opt-in RecoveryArtifact republishes validated results without models or trusted learnings/configuration changes. See ADR 0043.
 ledger baseline/digests cannot reconstruct them. Reusable runners publish new or independently validated retained results. Opt-in publication-failure diagnostics retain reviewed diff and trusted configuration/admission contexts up to seven days, disabled by `artifacts: none`. Local analysis-only duplicates remain unchanged. PR223 amendment to
+Optional original-context handoff requires POSIX ownership/mode enforcement; non-POSIX opt-in refuses before key access/storage, while unconfigured operation remains available. Require bounded reads, exact HMAC encoding and preservation of unauthenticated/malformed cache evidence during expiry pruning. No ACL qualification, writer authority, schema migration, budget expansion or historical settlement follows (ADR 0131; ADR 0135 stabilization addendum).
+
 Opt-in recovery binds original trusted policy, exact base/head diff and authenticated prior baseline. Configuration/evidence/policy/reservation must match committed transaction. Missing admission/ordinary retries refuse. Both lanes skip provider credentials/inference; retain one read budget, broker/accepted-result/ledger/head guards and writer slot.
 API authentication and comment/review delivery. prepare_publishable_review sits between a validated ReviewResult and any publisher: legacy keeps single-pass comments and identifies them; confirmed publishes only candidates whose evidence exists in the exact reviewed snapshot. Unverified candidates never become findings, and incomplete verification cannot be treated as a clean review. Candidate text and snapshot contents remain untrusted data.
 evaluation loader and FixtureProvider into the unchanged ReviewService. Reports retain only aggregate, non-monetary metrics. Live endpoints are
@@ -139,6 +142,11 @@ Worker bounds are independent; receipts never refund caller POSTs or grant autho
 admit_with_tail joins reservation/admission; owned readback precedes inference (ADR 0090).
 Opt-in partitioned publication binds independent result/snapshot/policy/config/producer, original budget/conditional generation/owned numeric readback. Fresh scans verify all prose; partial roots keep links/capacity/full-ID status. Local replay only; default routes/all-resolved approval unqualified (ADR 0089).
 Continuation must verify full input scope; absent/changed scope refuses reuse.
+## Scoped retained-state qualification
+G12 capacity is not executable recovery evidence. The ADR 0131 qualifier reopens an existing local session in a fresh interpreter and authenticates its disposition snapshot graph via production readers. Its receipt reports only exercised components and physical read counts. Missing artifacts stay unqualified; never synthesize original context. Native-effect/inference replay counts stay unknown. Matching roots/capacity do not qualify result/archive/context recovery, terminal closure or historical settlement.
+
+Snapshot previews use only the ledger-owned snapshot_preview_parts cached-graph capability, not concrete cache attributes/filesystem paths. Explicit hydrate_snapshot_preview charges production v1/v2 reads before pure preview; unavailable cached evidence refuses without hidden I/O. Preserve ADR 0131 detached-proof and conservative post-hydration read-allowance contracts.
+
 Hosted-only reuse requires core-input proof and per-package signed provenance (ADR 0105).
 Only confirmed archives enable narrative excerpts; all finding prose and authority stay intact.
 

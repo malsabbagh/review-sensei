@@ -45,6 +45,7 @@ from review_sensei.recovery_context import (
     RUNTIME_ONLY_FIELD_LABELS,
     OriginalRecoveryContextBundle,
     RecoveryContextDecision,
+    RecoveryContextStore,
     RecoveryRefusalError,
     build_bundle_from_context_documents,
     classify_recovery_input_origins,
@@ -54,10 +55,150 @@ from review_sensei.service import DEFAULT_STAGES, review_work_policy_digest
 from review_sensei.session import (
     SessionIdentity,
     SessionLedger,
+    SessionRecord,
     read_session_baseline,
     session_reservation_id,
 )
 from review_sensei.validation import DEFAULT_REVIEW_LIMITS
+
+
+def resolve_recovery_placement_mode(
+    *, publication_inventory: str, review_mode: str
+) -> str:
+    """Resolve the canonical recovery placement mode from inventory and convergence policy."""
+
+    if review_mode == "advisory":
+        return "advisory"
+    if publication_inventory == "complete":
+        return "complete"
+    return "bounded"
+
+
+def capture_recovery_context_bundle(
+    store: RecoveryContextStore,
+    *,
+    transaction: ReviewTransaction,
+    configuration_context: Mapping[str, Any],
+    admission_context: Mapping[str, Any],
+    decision_policy_digest: str,
+    diff: str,
+    policy_commit: str,
+    evidence_context: Mapping[str, Any] | None = None,
+    base_ref: str = "main",
+    repository_id: int | None = None,
+    placement_mode: str = "complete",
+    accounting_version: str = ACCOUNTING_VERSION,
+    producer: str = "local-cli",
+    run_id: int = 1,
+    attempt: int = 1,
+    runtime_only_flags: Mapping[str, bool] | None = None,
+) -> Path:
+    """Persist a sanitized OriginalRecoveryContextBundle during ordinary entry."""
+
+    reconstructible, runtime_only_fields = classify_recovery_input_origins(
+        **_normalize_runtime_only_flags(runtime_only_flags)
+    )
+    diff_sha256 = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+    bundle = build_bundle_from_context_documents(
+        transaction=transaction,
+        configuration_context=configuration_context,
+        admission_context=admission_context,
+        evidence_context=evidence_context,
+        decision_policy_digest=decision_policy_digest,
+        diff_sha256=diff_sha256,
+        policy_commit=policy_commit,
+        base_ref=base_ref,
+        repository_id=repository_id,
+        placement_mode=placement_mode,
+        accounting_version=accounting_version,
+        producer=producer,
+        run_id=run_id,
+        attempt=attempt,
+        reconstructible_from_defaults=reconstructible,
+        runtime_only_fields=runtime_only_fields,
+    )
+    store.prune_expired()
+    return store.save(bundle)
+
+
+def verify_stored_recovery_context(
+    store: RecoveryContextStore,
+    *,
+    expected_bundle: OriginalRecoveryContextBundle,
+    current_run_id: int = 1,
+    current_root_sha256: str | None = None,
+    ancestor_record_sha256s: Sequence[str] = (),
+    ancestor_run_ids: Sequence[int] = (),
+    current_root_bytes: int = 4_096,
+    intermediate_root_bytes: int = 4_096,
+    result_part_count: int = 1,
+    total_decoded_bytes: int = 16_384,
+    original_api_limit: int = 512,
+    already_consumed_requests: int = 0,
+    unknown_usage_requests: int = 0,
+    active_reserved_requests: int = 0,
+    ledger_expired: bool = False,
+) -> RecoveryContextDecision:
+    """Authenticate, price, and cross-verify stored original recovery context fail-closed."""
+
+    decision = store.load_for_fresh_process(
+        expected_bundle.transaction_id,
+        expected_repository=expected_bundle.repository,
+        expected_pull_request=expected_bundle.pull_request,
+        expected_base_sha=expected_bundle.base_sha,
+        expected_head_sha=expected_bundle.head_sha,
+        expected_policy_commit=expected_bundle.policy_commit,
+        expected_result_sha256=expected_bundle.accepted_result_sha256,
+        expected_baseline_digest=expected_bundle.baseline_digest,
+        verify_baseline_match=True,
+        current_run_id=current_run_id,
+        current_root_sha256=current_root_sha256,
+        ancestor_record_sha256s=ancestor_record_sha256s,
+        ancestor_run_ids=ancestor_run_ids,
+        current_root_bytes=current_root_bytes,
+        intermediate_root_bytes=intermediate_root_bytes,
+        result_part_count=result_part_count,
+        total_decoded_bytes=total_decoded_bytes,
+        original_api_limit=original_api_limit,
+        already_consumed_requests=already_consumed_requests,
+        unknown_usage_requests=unknown_usage_requests,
+        active_reserved_requests=active_reserved_requests,
+        ledger_expired=ledger_expired,
+    )
+    if not decision.admitted or decision.bundle is None:
+        code = decision.refusal_code or "absent_context"
+        details = ", ".join(decision.missing_or_invalid) or "recovery context refused"
+        raise RecoveryRefusalError(f"{code}: {details}", refusal_code=code)
+
+    stored = decision.bundle
+    drifted: list[str] = []
+    if stored.repository_id != expected_bundle.repository_id:
+        drifted.append("repository_id")
+    if expected_bundle.generation < stored.generation:
+        drifted.append("generation")
+    for field_name in (
+        "base_ref",
+        "reservation_id",
+        "configuration_digest",
+        "evidence_digest",
+        "convergence_policy_digest",
+        "work_policy_digest",
+        "decision_policy_digest",
+        "provider_identity",
+        "selected_context_digest",
+        "learnings_digest",
+        "diff_sha256",
+        "placement_mode",
+        "accounting_version",
+    ):
+        if getattr(stored, field_name) != getattr(expected_bundle, field_name):
+            drifted.append(field_name)
+    if drifted:
+        raise RecoveryRefusalError(
+            f"snapshot_or_transaction_mismatch: stored recovery context drifted on {', '.join(drifted)}",
+            refusal_code="snapshot_or_transaction_mismatch",
+        )
+    return decision
 
 
 @dataclass(frozen=True)
@@ -78,6 +219,26 @@ def reconstruct_publication_contexts(
     base_sha: str,
     head_sha: str,
     policy: ReviewConvergencePolicy,
+    recovery_store: RecoveryContextStore | None = None,
+    policy_commit: str | None = None,
+    base_ref: str = "main",
+    placement_mode: str = "complete",
+    producer: str = "local-cli",
+    current_run_id: int = 1,
+    attempt: int = 1,
+    runtime_only_flags: Mapping[str, bool] | None = None,
+    current_root_sha256: str | None = None,
+    ancestor_record_sha256s: Sequence[str] = (),
+    ancestor_run_ids: Sequence[int] = (),
+    current_root_bytes: int = 4_096,
+    intermediate_root_bytes: int = 4_096,
+    result_part_count: int = 1,
+    total_decoded_bytes: int = 16_384,
+    original_api_limit: int = 512,
+    already_consumed_requests: int = 0,
+    unknown_usage_requests: int = 0,
+    active_reserved_requests: int = 0,
+    ledger_expired: bool = False,
 ) -> ReconstructedPublicationContexts:
     """Prove the original default reusable caller's context and reservation.
 
@@ -88,6 +249,60 @@ def reconstruct_publication_contexts(
     rather than guessing. Operators can still supply original context documents
     to the existing publication command for those cases.
     """
+
+    preloaded_record: SessionRecord | None = None
+    if recovery_store is not None:
+        if not policy_commit:
+            raise RecoveryRefusalError(
+                "absent_context: recovery context verification requires policy_commit",
+                refusal_code="absent_context",
+            )
+        loaded_for_store = ledger.load(identity)
+        if (
+            loaded_for_store.status not in {"ok", "migrated"}
+            or loaded_for_store.record is None
+        ):
+            raise RecoveryRefusalError(
+                "original context ledger is unavailable",
+                refusal_code="absent_context",
+            )
+        preloaded_record = loaded_for_store.record
+        if (
+            preloaded_record.transaction is None
+            or preloaded_record.transaction.result_sha256 is None
+        ):
+            raise RecoveryRefusalError(
+                "original context transaction is unavailable",
+                refusal_code="absent_context",
+            )
+        pre_decision = recovery_store.load_for_fresh_process(
+            preloaded_record.transaction.transaction_id,
+            expected_repository=identity.repository,
+            expected_pull_request=identity.pull_request,
+            expected_base_sha=base_sha,
+            expected_head_sha=head_sha,
+            expected_policy_commit=policy_commit,
+            expected_result_sha256=preloaded_record.transaction.result_sha256,
+            current_run_id=current_run_id,
+            current_root_sha256=current_root_sha256,
+            ancestor_record_sha256s=ancestor_record_sha256s,
+            ancestor_run_ids=ancestor_run_ids,
+            current_root_bytes=current_root_bytes,
+            intermediate_root_bytes=intermediate_root_bytes,
+            result_part_count=result_part_count,
+            total_decoded_bytes=total_decoded_bytes,
+            original_api_limit=original_api_limit,
+            already_consumed_requests=already_consumed_requests,
+            unknown_usage_requests=unknown_usage_requests,
+            active_reserved_requests=active_reserved_requests,
+            ledger_expired=ledger_expired,
+        )
+        if not pre_decision.admitted or pre_decision.bundle is None:
+            code = pre_decision.refusal_code or "absent_context"
+            details = (
+                ", ".join(pre_decision.missing_or_invalid) or "recovery context refused"
+            )
+            raise RecoveryRefusalError(f"{code}: {details}", refusal_code=code)
 
     if not source_root.is_dir() or not (source_root / ".reviewsensei.yml").is_file():
         raise RecoveryRefusalError(
@@ -179,13 +394,16 @@ def reconstruct_publication_contexts(
             "original admission context is unavailable",
             refusal_code="absent_context",
         )
-    loaded = ledger.load(identity)
-    if loaded.status not in {"ok", "migrated"} or loaded.record is None:
-        raise RecoveryRefusalError(
-            "original context ledger is unavailable",
-            refusal_code="absent_context",
-        )
-    record = loaded.record
+    if preloaded_record is not None:
+        record = preloaded_record
+    else:
+        loaded = ledger.load(identity)
+        if loaded.status not in {"ok", "migrated"} or loaded.record is None:
+            raise RecoveryRefusalError(
+                "original context ledger is unavailable",
+                refusal_code="absent_context",
+            )
+        record = loaded.record
     transaction = record.transaction
     configuration_digest = ReviewTransaction.compute_configuration_digest(
         reconstructed_configuration
@@ -282,7 +500,7 @@ def reconstruct_publication_contexts(
             "original prior baseline is unavailable; supply the original admission context",
             refusal_code="overwritten_baseline_or_context",
         )
-    return ReconstructedPublicationContexts(
+    reconstructed_contexts = ReconstructedPublicationContexts(
         reconstructed_configuration,
         evidence,
         baseline,
@@ -302,6 +520,41 @@ def reconstruct_publication_contexts(
             "current_key": dict(key.__dict__),
         },
     )
+    if recovery_store is not None:
+        assert policy_commit is not None
+        expected_bundle = bundle_from_reconstructed_contexts(
+            reconstructed_contexts,
+            source_root=source_root,
+            diff=diff,
+            ledger=ledger,
+            identity=identity,
+            base_ref=base_ref,
+            policy_commit=policy_commit,
+            placement_mode=placement_mode,
+            producer=producer,
+            run_id=current_run_id,
+            attempt=attempt,
+            runtime_only_flags=runtime_only_flags,
+            _preloaded_record=record,
+        )
+        verify_stored_recovery_context(
+            recovery_store,
+            expected_bundle=expected_bundle,
+            current_run_id=current_run_id,
+            current_root_sha256=current_root_sha256,
+            ancestor_record_sha256s=ancestor_record_sha256s,
+            ancestor_run_ids=ancestor_run_ids,
+            current_root_bytes=current_root_bytes,
+            intermediate_root_bytes=intermediate_root_bytes,
+            result_part_count=result_part_count,
+            total_decoded_bytes=total_decoded_bytes,
+            original_api_limit=original_api_limit,
+            already_consumed_requests=already_consumed_requests,
+            unknown_usage_requests=unknown_usage_requests,
+            active_reserved_requests=active_reserved_requests,
+            ledger_expired=ledger_expired,
+        )
+    return reconstructed_contexts
 
 
 def _normalize_runtime_only_flags(
@@ -339,6 +592,7 @@ def bundle_from_reconstructed_contexts(
     run_id: int = 1,
     attempt: int = 1,
     runtime_only_flags: Mapping[str, bool] | None = None,
+    _preloaded_record: SessionRecord | None = None,
 ) -> OriginalRecoveryContextBundle:
     """Convert reconstructed publication contexts into a sanitized G17 recovery bundle."""
 
@@ -348,13 +602,16 @@ def bundle_from_reconstructed_contexts(
             refusal_code="absent_context",
         )
     configuration = load_configuration(source_root / ".reviewsensei.yml")
-    loaded = ledger.load(identity)
-    if loaded.status not in {"ok", "migrated"} or loaded.record is None:
-        raise RecoveryRefusalError(
-            "original context ledger is unavailable",
-            refusal_code="absent_context",
-        )
-    record = loaded.record
+    if _preloaded_record is not None:
+        record = _preloaded_record
+    else:
+        loaded = ledger.load(identity)
+        if loaded.status not in {"ok", "migrated"} or loaded.record is None:
+            raise RecoveryRefusalError(
+                "original context ledger is unavailable",
+                refusal_code="absent_context",
+            )
+        record = loaded.record
     if record.transaction is None:
         raise RecoveryRefusalError(
             "original context transaction is unavailable",
@@ -417,6 +674,7 @@ def reconstruct_or_prescribe_publication_contexts(
     head_sha: str,
     policy_commit: str,
     policy: ReviewConvergencePolicy,
+    recovery_store: RecoveryContextStore | None = None,
     placement_mode: str = "complete",
     producer: str = "local-cli",
     current_run_id: int = 1,
@@ -445,6 +703,25 @@ def reconstruct_or_prescribe_publication_contexts(
             base_sha=base_sha,
             head_sha=head_sha,
             policy=policy,
+            recovery_store=recovery_store,
+            policy_commit=policy_commit,
+            base_ref=base_ref,
+            placement_mode=placement_mode,
+            producer=producer,
+            current_run_id=current_run_id,
+            attempt=attempt,
+            runtime_only_flags=runtime_only_flags,
+            ancestor_record_sha256s=ancestor_record_sha256s,
+            ancestor_run_ids=ancestor_run_ids,
+            current_root_bytes=current_root_bytes,
+            intermediate_root_bytes=intermediate_root_bytes,
+            result_part_count=result_part_count,
+            total_decoded_bytes=total_decoded_bytes,
+            original_api_limit=original_api_limit,
+            already_consumed_requests=already_consumed_requests,
+            unknown_usage_requests=unknown_usage_requests,
+            active_reserved_requests=active_reserved_requests,
+            ledger_expired=ledger_expired,
         )
         bundle = bundle_from_reconstructed_contexts(
             reconstructed,

@@ -34,6 +34,8 @@ import review_sensei_github.cli as cli
 import review_sensei_github.controlled_restart as restart
 import review_sensei_github.review_run as review_run
 from fake_github_http import json_response
+from review_sensei_github.api_run_host import review_startup_plan
+from review_sensei_github.api_run_plan import owner_allocations
 from review_sensei_github.conversation import ReplyResult, reply_marker
 from review_sensei_github.errors import GitHubPublicationTransientError
 from review_sensei_github.http import GitHubHttp
@@ -44,15 +46,25 @@ from review_sensei_github.operation_comments import (
 from review_sensei_github.operation_host import GitHubCommentOperationStore
 from review_sensei_github.pending_reassessment_recovery import (
     NO_PROGRESS_ZERO_DECISION_LIMIT,
+    OFFLINE_CONTINUATION_KINDS,
     PENDING_REASSESSMENT_CLASSIFIER_ID,
+    PENDING_REASSESSMENT_PACKET_SCHEMA,
+    PENDING_WORK_REASONS,
+    REVIEWSENSEI_408_CASE_ID,
+    REVIEWSENSEI_408_PULL_REQUEST,
+    REVIEWSENSEI_408_REPOSITORY,
+    OfflineContinuationQualification,
+    PendingReassessmentAttemptPacket,
     PendingReassessmentAttribution,
     PendingReassessmentRecoveryDescriptor,
     PendingReassessmentWindow,
     PendingReceiptObservation,
     ReassessmentProgressSummary,
+    build_pending_reassessment_attempt_packet,
     build_pending_reassessment_recovery_descriptor,
     evaluate_reassessment_progress,
     inspect_durable_pending_receipts,
+    qualify_offline_pending_continuation,
     qualify_pending_reassessment,
 )
 from review_sensei_github.publication import ReviewApprovalFinalizer
@@ -157,6 +169,72 @@ def _app_reply(
 
 class PendingReassessmentG30Tests(unittest.TestCase):
     """Offline synthetic verification of G30 zero-decision pending reassessment."""
+
+    def test_positive_continuation_requires_known_original_allowance(self):
+        from review_sensei.api_work import ApiRunAccounting
+
+        original = prior(extra_human=True)
+        packet = build_pending_reassessment_attempt_packet(
+            identity=SessionIdentity(
+                repository="owner/repo", pull_request=77, repository_id=987654
+            ),
+            original_eligibility=original,
+            latest_eligibility=original,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=_sha256(HUMAN),
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pending_receipt=PendingReceiptObservation(
+                source_comment_id=40810,
+                source_updated_digest=_sha256("2026-10-15T14:22:00Z"),
+                pull_request=77,
+                head_sha=HEAD,
+                report_digest="c" * 64,
+                expected_pages=2,
+                part_comment_ids=((1, 7709),),
+                complete=False,
+            ),
+            durable_operation_journal_present=True,
+            required_continuation_requests=1,
+        )
+        qualification = packet.offline_continuation
+        self.assertEqual(
+            packet.attribution.state_code, "pending_receipt_delivery_incomplete"
+        )
+        self.assertFalse(qualification.qualifies_zero_inference_continuation)
+        self.assertFalse(qualification.zero_new_funding_verified)
+        self.assertIsNone(qualification.remaining_caller_allowance)
+        self.assertIn(
+            "original_caller_allowance_unknown", qualification.disqualifying_reasons
+        )
+        zero = qualify_offline_pending_continuation(
+            packet.attribution,
+            durable_operation_journal_present=True,
+            required_continuation_requests=0,
+        )
+        self.assertTrue(zero.qualifies_zero_inference_continuation)
+        self.assertIsNone(zero.remaining_caller_allowance)
+        with self.assertRaises(ReviewInputError):
+            replace(zero, required_continuation_requests=1)
+        record = self._make_pending_reply_record(source_body_sha256=_sha256(HUMAN))
+        remaining = ApiRunAccounting.from_document(record.api_run_accounting).remaining
+        for required, qualified in ((remaining, True), (remaining + 1, False)):
+            with self.subTest(required=required):
+                bounded = qualify_offline_pending_continuation(
+                    packet.attribution,
+                    record=record,
+                    durable_operation_journal_present=True,
+                    required_continuation_requests=required,
+                )
+                self.assertEqual(
+                    bounded.qualifies_zero_inference_continuation, qualified
+                )
+                self.assertEqual(bounded.zero_new_funding_verified, qualified)
+                self.assertEqual(bounded.remaining_caller_allowance, remaining)
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -1632,6 +1710,717 @@ class PendingReassessmentG30Tests(unittest.TestCase):
                 current_base_sha=BASE,
                 current_head_sha=HEAD,
             )
+
+    def _make_pending_reply_record(
+        self,
+        *,
+        repository: str = REVIEWSENSEI_408_REPOSITORY,
+        pull_request: int = REVIEWSENSEI_408_PULL_REQUEST,
+        repository_id: int = 987654,
+        run_id: int = 408001,
+        limit: int = 512,
+        source_id: int = 40810,
+        source_updated_at: str = "2026-10-15T14:22:00Z",
+        source_body_sha256: str = "1" * 64,
+        head_sha: str = HEAD,
+        generation: int = 3,
+    ) -> SessionRecord:
+        from review_sensei.api_work import (
+            ApiExecutionOwner,
+            ApiRunAccounting,
+            ApiRunIdentity,
+            FrozenApiConfiguration,
+            initial_accounting,
+        )
+
+        config = FrozenApiConfiguration(commit=BASE, digest="2" * 64, limit=limit)
+        owner = ApiExecutionOwner(1, "hosted", 0)
+        plan = review_startup_plan("hosted")
+        allocation = owner_allocations(limit, plan.liability)
+        accounting = (
+            initial_accounting(
+                ApiRunIdentity(repository_id, run_id),
+                config,
+                owner,
+                plan,
+                prior_nonstartup_liability_upper_bound=0,
+            )
+            .reserve("hosted-review", allocation.first_work)
+            .reserve("hosted-terminal", allocation.first_terminal)
+        )
+        doc = accounting.to_document()
+        doc["action"] = {
+            "intent": {
+                "purpose": "reply",
+                "source": {
+                    "kind": "issue_comment",
+                    "id": source_id,
+                    "updated_at": source_updated_at,
+                    "body_sha256": source_body_sha256,
+                },
+                "run_id": run_id,
+                "owner": {
+                    "run_attempt": 1,
+                    "job": "hosted",
+                    "generation": 0,
+                },
+                "head_sha": head_sha,
+                "configuration_digest": config.digest,
+                "operation_key": "a" * 64,
+                "source_root": "b" * 64,
+            },
+            "phase": "pending",
+            "execution_started": True,
+            "result": None,
+            "outcome": None,
+        }
+        validated = ApiRunAccounting.from_document(doc)
+        return SessionRecord._construct(
+            repository=repository,
+            pull_request=pull_request,
+            repository_id=repository_id,
+            completed_initial_reviews=1,
+            completed_verification_rounds=0,
+            failed_attempts=0,
+            generation=generation,
+            reservation_id=None,
+            reserved_slot=None,
+            last_committed_reservation_id="5" * 64,
+            created_at="2026-10-15T14:00:00Z",
+            updated_at="2026-10-15T14:22:30Z",
+            expires_at="2026-11-15T14:00:00Z",
+            api_run_accounting=validated.to_document(),
+        )
+
+    def test_reviewsensei_408_offline_zero_decision_attempt_packet_and_finalizer_contrast(
+        self,
+    ) -> None:
+        id_408 = SessionIdentity(
+            repository=REVIEWSENSEI_408_REPOSITORY,
+            pull_request=REVIEWSENSEI_408_PULL_REQUEST,
+            repository_id=987654,
+        )
+        orig_elig = prior(extra_human=True)
+        assert orig_elig.human_review is not None
+        source_sha = _sha256(HUMAN)
+        rec_408 = self._make_pending_reply_record(source_body_sha256=source_sha)
+        receipt_408 = PendingReceiptObservation(
+            source_comment_id=40810,
+            source_updated_digest=_sha256("2026-10-15T14:22:00Z"),
+            pull_request=REVIEWSENSEI_408_PULL_REQUEST,
+            head_sha=HEAD,
+            report_digest="c" * 64,
+            expected_pages=1,
+            part_comment_ids=((1, 40899),),
+            complete=True,
+        )
+
+        pkt_408 = build_pending_reassessment_attempt_packet(
+            identity=id_408,
+            original_eligibility=orig_elig,
+            latest_eligibility=orig_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pr_merged=True,
+            record=rec_408,
+            source_actor="maintainer-user",
+            pending_receipt=receipt_408,
+        )
+        self.assertIsInstance(pkt_408, PendingReassessmentAttemptPacket)
+        self.assertEqual(pkt_408.case_id, REVIEWSENSEI_408_CASE_ID)
+        self.assertFalse(pkt_408.authority)
+        self.assertTrue(pkt_408.offline_only)
+        self.assertFalse(pkt_408.zero_decision_is_completion_witness)
+        self.assertTrue(pkt_408.pr_merged)
+        self.assertEqual(
+            pkt_408.pending_reason, "zero_decision_human_explanation_incomplete"
+        )
+        self.assertIn(pkt_408.pending_reason, PENDING_WORK_REASONS)
+        self.assertTrue(pkt_408.assessment_unfinished)
+        self.assertTrue(pkt_408.zero_decisions_recorded)
+        self.assertFalse(pkt_408.finalizer_entered)
+        self.assertFalse(pkt_408.finalizer_failed)
+        self.assertTrue(pkt_408.retained_result_immutable)
+        self.assertEqual(pkt_408.original_result_digest, orig_elig.result_digest)
+        self.assertEqual(pkt_408.latest_result_digest, orig_elig.result_digest)
+        self.assertEqual(pkt_408.accepted_result_sha256, orig_elig.result_digest)
+        self.assertEqual(pkt_408.predecessor_run_id, 408001)
+        self.assertEqual(pkt_408.operation_key, "a" * 64)
+        self.assertFalse(
+            pkt_408.offline_continuation.qualifies_zero_inference_continuation
+        )
+        self.assertFalse(pkt_408.offline_continuation.completion_witness_established)
+        self.assertIn(
+            "merged_pr_live_rerun_forbidden",
+            pkt_408.offline_continuation.disqualifying_reasons,
+        )
+        self.assertIn(
+            "zero_decisions_already_delivered_pending_receipt",
+            pkt_408.offline_continuation.disqualifying_reasons,
+        )
+        self.assertEqual(
+            set(pkt_408.missing_proofs),
+            {
+                "completed_reassessment_decisions",
+                "terminal_action_outcome",
+                "missing_close_diagnostics",
+                "installed_executor_provenance",
+                "historical_live_settlement_receipt",
+            },
+        )
+        serialized_408 = pkt_408.to_dict()
+        self.assertEqual(
+            serialized_408["schema_version"], PENDING_REASSESSMENT_PACKET_SCHEMA
+        )
+        self.assertFalse(serialized_408["authority"])
+        self.assertTrue(serialized_408["offline_only"])
+        self.assertFalse(serialized_408["zero_decision_is_completion_witness"])
+        self.assertEqual(
+            serialized_408["pending_work_identity"]["pull_request"],
+            REVIEWSENSEI_408_PULL_REQUEST,
+        )
+
+        # Contrast 1: Unmerged incomplete pending receipt delivery with durable journal
+        # qualifies zero-funding / zero-inference replay without completion witness.
+        id_unmerged = SessionIdentity(
+            repository="owner/repo", pull_request=77, repository_id=123
+        )
+        rec_unmerged = self._make_pending_reply_record(
+            repository="owner/repo",
+            pull_request=77,
+            repository_id=123,
+            run_id=7701,
+            source_body_sha256=source_sha,
+        )
+        incomplete_obs = PendingReceiptObservation(
+            source_comment_id=40810,
+            source_updated_digest=_sha256("2026-10-15T14:22:00Z"),
+            pull_request=77,
+            head_sha=HEAD,
+            report_digest="c" * 64,
+            expected_pages=2,
+            part_comment_ids=((1, 7709),),
+            complete=False,
+        )
+        pkt_replay = build_pending_reassessment_attempt_packet(
+            identity=id_unmerged,
+            original_eligibility=orig_elig,
+            latest_eligibility=orig_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pr_merged=False,
+            record=rec_unmerged,
+            pending_receipt=incomplete_obs,
+            durable_operation_journal_present=True,
+            required_continuation_requests=2,
+            executor_sha="e" * 40,
+            installed_core_version="0.8.12",
+            installed_hosted_version="0.3.13",
+            diagnostics_available=True,
+        )
+        self.assertEqual(pkt_replay.case_id, "owner/repo#77:gen-3:run-7701")
+        self.assertEqual(
+            pkt_replay.pending_reason, "pending_receipt_delivery_incomplete"
+        )
+        self.assertTrue(
+            pkt_replay.offline_continuation.qualifies_zero_inference_continuation
+        )
+        self.assertEqual(
+            pkt_replay.offline_continuation.continuation_kind,
+            "replay_stored_pending_receipt",
+        )
+        self.assertIn(
+            pkt_replay.offline_continuation.continuation_kind,
+            OFFLINE_CONTINUATION_KINDS,
+        )
+        self.assertFalse(pkt_replay.offline_continuation.completion_witness_established)
+        self.assertIn("complete_durable_pending_receipt", pkt_replay.missing_proofs)
+        self.assertNotIn("installed_executor_provenance", pkt_replay.missing_proofs)
+        self.assertNotIn("missing_close_diagnostics", pkt_replay.missing_proofs)
+
+        # Without durable journal, replay is disqualified cleanly:
+        pkt_no_journal = build_pending_reassessment_attempt_packet(
+            identity=id_unmerged,
+            original_eligibility=orig_elig,
+            latest_eligibility=orig_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pr_merged=False,
+            pending_receipt=incomplete_obs,
+            durable_operation_journal_present=False,
+        )
+        self.assertFalse(
+            pkt_no_journal.offline_continuation.qualifies_zero_inference_continuation
+        )
+        self.assertIn(
+            "durable_operation_journal_missing",
+            pkt_no_journal.offline_continuation.disqualifying_reasons,
+        )
+        self.assertEqual(pkt_no_journal.case_id, "owner/repo#77:gen-none:run-none")
+
+        # Contrast 2: Failed finalizer after durable decisions qualifies exact-head
+        # zero-inference finalizer resumption on an unmerged PR, but NOT on a merged PR!
+        resolved_inv = replace(
+            orig_elig.human_review,
+            resolved=tuple(f.fingerprint for f in orig_elig.human_review.findings),
+        )
+        resolved_elig = replace(orig_elig, human_review=resolved_inv)
+        pkt_fin = build_pending_reassessment_attempt_packet(
+            identity=id_unmerged,
+            original_eligibility=orig_elig,
+            latest_eligibility=resolved_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pr_merged=False,
+            record=rec_unmerged,
+            required_continuation_requests=3,
+        )
+        self.assertEqual(
+            pkt_fin.pending_reason, "finalizer_interrupted_after_durable_decisions"
+        )
+        self.assertTrue(pkt_fin.retained_result_immutable)
+        self.assertFalse(pkt_fin.admissible_to_approve)
+        self.assertTrue(pkt_fin.finalizer_entered)
+        self.assertTrue(pkt_fin.finalizer_failed)
+        self.assertFalse(pkt_fin.zero_decisions_recorded)
+        self.assertTrue(
+            pkt_fin.offline_continuation.qualifies_zero_inference_continuation
+        )
+        self.assertEqual(
+            pkt_fin.offline_continuation.continuation_kind,
+            "resume_recorded_decision_finalizer",
+        )
+        self.assertIn(
+            "confirmed_finalizer_check_thread_approval_settlement",
+            pkt_fin.missing_proofs,
+        )
+
+        pkt_fin_merged = build_pending_reassessment_attempt_packet(
+            identity=id_408,
+            original_eligibility=orig_elig,
+            latest_eligibility=resolved_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pr_merged=True,
+        )
+        self.assertFalse(pkt_fin_merged.admissible_to_approve)
+        self.assertFalse(
+            pkt_fin_merged.offline_continuation.qualifies_zero_inference_continuation
+        )
+        self.assertIn(
+            "merged_pr_live_rerun_forbidden",
+            pkt_fin_merged.offline_continuation.disqualifying_reasons,
+        )
+
+        # Contrast 3: Settled full vs partial reassessment & remaining state mappings:
+        settled_reply = ReplyResult(
+            status="replied",
+            comment_id=501,
+            finalization_completion=object(),  # type: ignore[arg-type]
+            resolution_status="resolved",
+            approval_status="approved",
+        )
+        pkt_settled = build_pending_reassessment_attempt_packet(
+            identity=id_unmerged,
+            original_eligibility=orig_elig,
+            latest_eligibility=resolved_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            reply_result=settled_reply,
+        )
+        self.assertEqual(pkt_settled.pending_reason, "settled_all_human_holds_resolved")
+        self.assertTrue(pkt_settled.retained_result_immutable)
+        self.assertTrue(pkt_settled.admissible_to_approve)
+        self.assertTrue(pkt_settled.to_dict()["admissible_to_approve"])
+        self.assertEqual(
+            pkt_settled.offline_continuation.continuation_kind, "not_needed_settled"
+        )
+        self.assertTrue(pkt_settled.offline_continuation.completion_witness_established)
+        self.assertEqual(pkt_settled.missing_proofs, ())
+
+        partial_inv = replace(
+            orig_elig.human_review,
+            resolved=(orig_elig.human_review.findings[1].fingerprint,),
+        )
+        partial_elig = replace(orig_elig, human_review=partial_inv)
+        pkt_partial = build_pending_reassessment_attempt_packet(
+            identity=id_unmerged,
+            original_eligibility=orig_elig,
+            latest_eligibility=partial_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            reply_result=settled_reply,
+        )
+        self.assertEqual(
+            pkt_partial.pending_reason, "partial_reassessment_remaining_human_holds"
+        )
+        self.assertTrue(pkt_partial.retained_result_immutable)
+        self.assertFalse(pkt_partial.admissible_to_approve)
+        self.assertFalse(
+            pkt_partial.offline_continuation.completion_witness_established
+        )
+        self.assertEqual(
+            pkt_partial.missing_proofs, ("remaining_human_adjudication_decisions",)
+        )
+
+        # Contrast 4: Mutated result_digest on the SAME head_sha MUST fail closed
+        # (`retained_result_immutable=False`, `admissible_to_approve=False`).
+        mutated_same_head_elig = replace(resolved_elig, result_digest="9" * 64)
+        pkt_mutated = build_pending_reassessment_attempt_packet(
+            identity=id_unmerged,
+            original_eligibility=orig_elig,
+            latest_eligibility=mutated_same_head_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pr_merged=False,
+            reply_result=settled_reply,
+        )
+        self.assertFalse(pkt_mutated.retained_result_immutable)
+        self.assertFalse(pkt_mutated.admissible_to_approve)
+        self.assertFalse(pkt_mutated.to_dict()["admissible_to_approve"])
+        self.assertFalse(
+            pkt_mutated.to_dict()["accepted_result"]["retained_result_immutable"]
+        )
+        self.assertFalse(
+            pkt_mutated.to_dict()["accepted_result"]["admissible_to_approve"]
+        )
+        self.assertFalse(
+            pkt_mutated.offline_continuation.qualifies_zero_inference_continuation
+        )
+        self.assertFalse(
+            pkt_mutated.offline_continuation.completion_witness_established
+        )
+        self.assertEqual(
+            pkt_mutated.offline_continuation.continuation_kind,
+            "not_eligible_requires_new_human_evidence_or_restart",
+        )
+        self.assertIn(
+            "retained_result_digest_mutated",
+            pkt_mutated.offline_continuation.disqualifying_reasons,
+        )
+        self.assertNotIn(
+            "action_already_settled",
+            pkt_mutated.offline_continuation.disqualifying_reasons,
+        )
+        self.assertIn("immutable_accepted_result_digest", pkt_mutated.missing_proofs)
+        self.assertIn("historical_live_settlement_receipt", pkt_mutated.missing_proofs)
+        with self.assertRaisesRegex(ReviewInputError, "fail closed"):
+            replace(pkt_mutated, admissible_to_approve=True)
+
+    def test_offline_continuation_and_attempt_packet_validation_guardrails(
+        self,
+    ) -> None:
+        id_77 = SessionIdentity(
+            repository="owner/repo", pull_request=77, repository_id=123
+        )
+        orig_elig = prior()
+        source_sha = _sha256(HUMAN)
+        rec_low = self._make_pending_reply_record(
+            repository="owner/repo",
+            pull_request=77,
+            repository_id=123,
+            run_id=7702,
+            source_body_sha256=source_sha,
+        )
+
+        # Disqualifiers for new caller/provider funding, repeated inference, and insufficient allowance:
+        pkt_disq = build_pending_reassessment_attempt_packet(
+            identity=id_77,
+            original_eligibility=orig_elig,
+            latest_eligibility=orig_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            record=rec_low,
+            durable_operation_journal_present=True,
+            required_continuation_requests=999,
+            additional_caller_allowance=1,
+            additional_provider_allowance=1,
+            repeated_inference_calls=1,
+        )
+        self.assertFalse(pkt_disq.offline_continuation.zero_new_funding_verified)
+        self.assertFalse(pkt_disq.offline_continuation.zero_repeated_inference_verified)
+        self.assertEqual(
+            set(pkt_disq.offline_continuation.disqualifying_reasons),
+            {
+                "new_caller_funding_forbidden",
+                "new_provider_funding_forbidden",
+                "repeated_model_inference_forbidden",
+                "insufficient_remaining_caller_allowance",
+            },
+        )
+
+        # Cover source-changed, head-drifted, no-progress-exhausted, and duplicate-conflict reasons:
+        pkt_src = build_pending_reassessment_attempt_packet(
+            identity=id_77,
+            original_eligibility=orig_elig,
+            latest_eligibility=orig_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            live_source_updated_at="2026-10-15T15:00:00Z",
+        )
+        self.assertEqual(
+            pkt_src.pending_reason, "source_revision_mutated_after_admission"
+        )
+        self.assertIn(
+            "source_comment_revision_changed",
+            pkt_src.offline_continuation.disqualifying_reasons,
+        )
+
+        pkt_drift = build_pending_reassessment_attempt_packet(
+            identity=id_77,
+            original_eligibility=orig_elig,
+            latest_eligibility=orig_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha="f" * 40,
+        )
+        self.assertEqual(
+            pkt_drift.pending_reason, "head_or_base_drifted_from_bound_scope"
+        )
+        self.assertIn(
+            "head_or_base_drifted",
+            pkt_drift.offline_continuation.disqualifying_reasons,
+        )
+
+        dup_obs = PendingReceiptObservation(
+            source_comment_id=40810,
+            source_updated_digest=_sha256("2026-10-15T14:22:00Z"),
+            pull_request=77,
+            head_sha=HEAD,
+            report_digest="c" * 64,
+            expected_pages=1,
+            part_comment_ids=((1, 7709),),
+            complete=False,
+            duplicate_conflict=True,
+        )
+        pkt_dup = build_pending_reassessment_attempt_packet(
+            identity=id_77,
+            original_eligibility=orig_elig,
+            latest_eligibility=orig_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pending_receipt=dup_obs,
+        )
+        self.assertEqual(pkt_dup.pending_reason, "duplicate_or_corrupt_pending_receipt")
+        self.assertIn(
+            "duplicate_or_corrupt_pending_receipt_conflict",
+            pkt_dup.offline_continuation.disqualifying_reasons,
+        )
+
+        ok_obs = replace(dup_obs, duplicate_conflict=False, complete=True)
+        pkt_exh = build_pending_reassessment_attempt_packet(
+            identity=id_77,
+            original_eligibility=orig_elig,
+            latest_eligibility=orig_elig,
+            bound_source_comment_id=40810,
+            bound_source_updated_at="2026-10-15T14:22:00Z",
+            bound_source_body_sha256=source_sha,
+            bound_source_kind="issue",
+            bound_base_sha=BASE,
+            bound_head_sha=HEAD,
+            current_base_sha=BASE,
+            current_head_sha=HEAD,
+            pending_receipt=ok_obs,
+            consecutive_zero_decision_attempts=2,
+        )
+        self.assertEqual(
+            pkt_exh.pending_reason, "reassessment_no_progress_window_exhausted"
+        )
+        self.assertIn(
+            "no_progress_zero_decision_window_exhausted",
+            pkt_exh.offline_continuation.disqualifying_reasons,
+        )
+
+        # Validation error branches:
+        with self.assertRaises(ReviewInputError):
+            qualify_offline_pending_continuation("bad")  # type: ignore[arg-type]
+        with self.assertRaises(ReviewInputError):
+            qualify_offline_pending_continuation(
+                pkt_exh.attribution, repeated_inference_calls=-1
+            )
+        for bad_cont in (
+            {"authority": True},
+            {"offline_only": False},
+            {"continuation_kind": "bogus"},
+            {"required_continuation_requests": -1},
+            {"remaining_caller_allowance": -1},
+            {
+                "qualifies_zero_inference_continuation": True,
+                "disqualifying_reasons": ("conflict",),
+            },
+        ):
+            base_cont: dict[str, Any] = {
+                "qualifies_zero_inference_continuation": False,
+                "continuation_kind": "not_eligible_requires_new_human_evidence_or_restart",
+                "zero_new_funding_verified": True,
+                "zero_repeated_inference_verified": True,
+                "completion_witness_established": False,
+                "remaining_caller_allowance": 10,
+                "required_continuation_requests": 0,
+                "disqualifying_reasons": ("reason",),
+            }
+            base_cont.update(bad_cont)
+            with self.assertRaises(ReviewInputError):
+                OfflineContinuationQualification(**base_cont)
+
+        with self.assertRaises(ReviewInputError):
+            build_pending_reassessment_attempt_packet(
+                identity=SessionIdentity(repository="owner/repo", pull_request=77),
+                original_eligibility=orig_elig,
+                latest_eligibility=orig_elig,
+                bound_source_comment_id=10,
+                bound_source_updated_at="t1",
+                bound_source_body_sha256=source_sha,
+                bound_source_kind="issue",
+                bound_base_sha=BASE,
+                bound_head_sha=HEAD,
+                current_base_sha=BASE,
+                current_head_sha=HEAD,
+            )
+        with self.assertRaises(ReviewInputError):
+            build_pending_reassessment_attempt_packet(
+                identity=id_77,
+                original_eligibility=orig_elig,
+                latest_eligibility=orig_elig,
+                bound_source_comment_id=10,
+                bound_source_updated_at="t1",
+                bound_source_body_sha256=source_sha,
+                bound_source_kind="issue",
+                bound_base_sha=BASE,
+                bound_head_sha=HEAD,
+                current_base_sha=BASE,
+                current_head_sha=HEAD,
+                record="not-a-record",  # type: ignore[arg-type]
+            )
+        mismatched_rec = self._make_pending_reply_record()
+        with self.assertRaisesRegex(ReviewInputError, "record identity conflicts"):
+            build_pending_reassessment_attempt_packet(
+                identity=id_77,
+                original_eligibility=orig_elig,
+                latest_eligibility=orig_elig,
+                bound_source_comment_id=10,
+                bound_source_updated_at="t1",
+                bound_source_body_sha256=source_sha,
+                bound_source_kind="issue",
+                bound_base_sha=BASE,
+                bound_head_sha=HEAD,
+                current_base_sha=BASE,
+                current_head_sha=HEAD,
+                record=mismatched_rec,
+            )
+
+        qual_cont = OfflineContinuationQualification(
+            qualifies_zero_inference_continuation=True,
+            continuation_kind="replay_stored_pending_receipt",
+            zero_new_funding_verified=True,
+            zero_repeated_inference_verified=True,
+            completion_witness_established=False,
+            remaining_caller_allowance=10,
+            required_continuation_requests=1,
+            disqualifying_reasons=(),
+        )
+        for bad_pkt in (
+            {"authority": True},
+            {"offline_only": False},
+            {"zero_decision_is_completion_witness": True},
+            {"attribution": "bad"},
+            {"case_id": "  "},
+            {"repository_id": None},
+            {"repository_id": 0},
+            {"repository_id": -1},
+            {"repository_id": True},
+            {"pending_reason": "bogus"},
+            {"retained_result_immutable": "bad"},
+            {"admissible_to_approve": "bad"},
+            {"retained_result_immutable": False},
+            {
+                "latest_result_digest": "9" * 64,
+                "retained_result_immutable": False,
+                "admissible_to_approve": True,
+                "missing_proofs": (
+                    "immutable_accepted_result_digest",
+                    "historical_live_settlement_receipt",
+                ),
+            },
+            {"admissible_to_approve": True},
+            {"executor_sha": "not-sha"},
+            {"installed_core_version": "bad version!"},
+            {"pr_merged": True, "offline_continuation": qual_cont},
+            {"missing_proofs": ()},
+        ):
+            with self.assertRaises(ReviewInputError):
+                replace(pkt_exh, **bad_pkt)
 
 
 if __name__ == "__main__":

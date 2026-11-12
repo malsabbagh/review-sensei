@@ -35,10 +35,18 @@ import review_sensei_github.review_run as review_run
 from fake_github_http import json_response
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.pre_entry_abort_recovery import (
+    NO_TRANSACTION_ATTEMPT_PACKET_SCHEMA,
     RECOVERY_CLASSIFIER_ID,
+    SITEVAULT_142_CASE_ID,
+    SITEVAULT_142_PULL_REQUEST,
+    SITEVAULT_153_CASE_ID,
+    SITEVAULT_153_PULL_REQUEST,
     NoTransactionAbortQualification,
+    NoTransactionAttemptPacket,
     NoTransactionRecoveryDescriptor,
+    build_no_transaction_attempt_packet,
     build_no_transaction_recovery_descriptor,
+    inspect_live_no_transaction_attempt_packet,
     inspect_live_no_transaction_predecessor,
     qualify_no_transaction_abort,
     verify_reenroll_forbidden,
@@ -1596,6 +1604,310 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
         self.assertTrue(
             _detect_late_native_effects(paged_ledger, IDENTITY, abort_rec, abort_acc)
         )
+
+        # 7. Clean live `inspect_live_no_transaction_attempt_packet` readback:
+        state["threads_p2"] = {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [],
+        }
+        live_pkt = inspect_live_no_transaction_attempt_packet(
+            ledger=paged_ledger,
+            identity=IDENTITY,
+            actions_token="tok",
+            executor_sha=WORKFLOW_SHA,
+            installed_core_version="0.8.20",
+            installed_hosted_version="0.3.26",
+        )
+        self.assertIsInstance(live_pkt, NoTransactionAttemptPacket)
+        self.assertFalse(live_pkt.authority)
+        self.assertFalse(live_pkt.reenroll_permitted)
+        self.assertEqual(live_pkt.schema_version, NO_TRANSACTION_ATTEMPT_PACKET_SCHEMA)
+        self.assertTrue(live_pkt.qualification.qualifies_rollover)
+        self.assertEqual(live_pkt.entry_classification, "proven_pre_entry_not_started")
+        self.assertTrue(live_pkt.missing_transaction_means_no_operation)
+        self.assertEqual(live_pkt.missing_proof_holds, ())
+        self.assertEqual(live_pkt.session_comment_ref["id"], 203)  # type: ignore[index]
+
+    def test_sitevault_142_and_153_attempt_packets_and_guardrails(self) -> None:
+        """G29: Bind distinct offline attempt-evidence packets for SiteVault #142 and #153."""
+        plan = StartupPlan(
+            (
+                StartupSlot("hosted", 1, ("s1", "s2")),
+                StartupSlot("hosted", 2, ("s3", "s4")),
+            )
+        )
+        cfg = FrozenApiConfiguration(commit=POLICY_SHA, digest="1" * 64, limit=512)
+        owner = ApiExecutionOwner(run_attempt=1, job="hosted", generation=0)
+
+        # 1. SiteVault #142 (`phase=no-transaction`, `record.transaction=None`,
+        #    `analysis_abort=None`, released reservation, no live settlement receipt):
+        sv_142_id = SessionIdentity(
+            repository="org/sitevault",
+            pull_request=SITEVAULT_142_PULL_REQUEST,
+            repository_id=900142,
+        )
+        sv_142_acc = initial_accounting(
+            ApiRunIdentity(900142, 4100142),
+            cfg,
+            owner,
+            plan,
+            prior_nonstartup_liability_upper_bound=6,
+        ).reserve("hosted-review", 24)
+        sv_142_rec = SessionRecord._construct(
+            repository=sv_142_id.repository,
+            pull_request=sv_142_id.pull_request,
+            repository_id=sv_142_id.repository_id,
+            completed_initial_reviews=1,
+            completed_verification_rounds=0,
+            failed_attempts=0,
+            generation=3,
+            reservation_id=None,
+            reserved_slot=None,
+            last_committed_reservation_id="8" * 64,
+            created_at="2026-11-10T12:00:00Z",
+            updated_at="2026-11-10T12:05:00Z",
+            expires_at="2026-12-10T12:00:00Z",
+            operator_paused=False,
+            transaction=None,
+            convergence_history={
+                "state": "recovery-required",
+                "progress": [
+                    {
+                        "event": "completed",
+                        "generation": 1,
+                        "blocker_set_sha256": "f" * 64,
+                        "blocker_count": 2,
+                    }
+                ],
+                "provenance": {"ledger_digest": "e" * 64},
+            },
+            api_run_accounting=sv_142_acc.to_document(),
+        )
+        sv_142_orig_sha = sv_142_rec.record_sha256
+
+        # Unconfirmed cold exit on SiteVault #142:
+        pkt_142_cold = build_no_transaction_attempt_packet(
+            sv_142_rec,
+            owner_ceased=True,
+            diagnostics_available=False,
+            session_comment_ref={"id": 14201, "bytes": 1024, "sha256": "9" * 64},
+        )
+        self.assertEqual(sv_142_rec.record_sha256, sv_142_orig_sha)
+        self.assertFalse(pkt_142_cold.authority)
+        self.assertFalse(pkt_142_cold.reenroll_permitted)
+        self.assertEqual(pkt_142_cold.case_id, SITEVAULT_142_CASE_ID)
+        self.assertEqual(pkt_142_cold.pull_request, SITEVAULT_142_PULL_REQUEST)
+        self.assertEqual(pkt_142_cold.entry_classification, "unproven_or_unknown")
+        self.assertFalse(pkt_142_cold.missing_transaction_means_no_operation)
+        self.assertFalse(pkt_142_cold.provider_entry_proven_absent)
+        self.assertTrue(pkt_142_cold.reservation_release_confirmed)
+        self.assertEqual(pkt_142_cold.conservative_provider_call_hold, 1)
+        self.assertEqual(pkt_142_cold.prior_finding_obligations_count, 2)
+        self.assertFalse(pkt_142_cold.historical_settlement_receipt_supplied)
+        for hold in (
+            "authenticated_analysis_abort_receipt",
+            "proven_provider_non_entry",
+            "missing_close_diagnostics",
+            "installed_executor_provenance",
+            "historical_live_settlement_receipt",
+        ):
+            self.assertIn(hold, pkt_142_cold.missing_proof_holds)
+        with self.assertRaisesRegex(
+            ReviewInputError, "fresh reenroll/reset is forbidden"
+        ):
+            verify_reenroll_forbidden(sv_142_rec)
+
+        # Provider-entered variant on SiteVault #142 (missing transaction != no work happened):
+        pkt_142_provider = build_no_transaction_attempt_packet(
+            sv_142_rec,
+            owner_ceased=True,
+            provider_entry_started=True,
+            diagnostics_available=True,
+            executor_sha=WORKFLOW_SHA,
+        )
+        self.assertEqual(pkt_142_provider.entry_classification, "provider_entered")
+        self.assertEqual(
+            pkt_142_provider.qualification.state_code, "no_transaction_provider_entered"
+        )
+        self.assertFalse(pkt_142_provider.missing_transaction_means_no_operation)
+        self.assertIn("zero_provider_entry", pkt_142_provider.missing_proof_holds)
+        self.assertIn(
+            "historical_live_settlement_receipt", pkt_142_provider.missing_proof_holds
+        )
+
+        # 2. SiteVault #153 (distinct PR & case_id; unconfirmed abort / unknown dispatch
+        #    and active reservation shapes without resetting or reenrolling):
+        sv_153_id = SessionIdentity(
+            repository="org/sitevault",
+            pull_request=SITEVAULT_153_PULL_REQUEST,
+            repository_id=900142,
+        )
+        sv_153_acc_uncertain = (
+            initial_accounting(
+                ApiRunIdentity(900142, 4100153),
+                cfg,
+                owner,
+                plan,
+                prior_nonstartup_liability_upper_bound=4,
+            )
+            .reserve("hosted-review", 20)
+            .dispatch("hosted-review", PendingApiRequest("req-abort-close", 9_999_999))
+        )
+        sv_153_rec_uncertain = SessionRecord._construct(
+            repository=sv_153_id.repository,
+            pull_request=sv_153_id.pull_request,
+            repository_id=sv_153_id.repository_id,
+            completed_initial_reviews=1,
+            completed_verification_rounds=1,
+            failed_attempts=0,
+            generation=5,
+            reservation_id=None,
+            reserved_slot=None,
+            last_committed_reservation_id="7" * 64,
+            created_at="2026-11-10T13:00:00Z",
+            updated_at="2026-11-10T13:08:00Z",
+            expires_at="2026-12-10T13:00:00Z",
+            operator_paused=False,
+            transaction=None,
+            api_run_accounting=sv_153_acc_uncertain.to_document(),
+        )
+        pkt_153_unknown = build_no_transaction_attempt_packet(
+            sv_153_rec_uncertain,
+            identity=sv_153_id,
+            owner_ceased=True,
+            diagnostics_available=False,
+        )
+        self.assertNotEqual(pkt_153_unknown.case_id, pkt_142_cold.case_id)
+        self.assertEqual(pkt_153_unknown.case_id, SITEVAULT_153_CASE_ID)
+        self.assertEqual(pkt_153_unknown.pull_request, SITEVAULT_153_PULL_REQUEST)
+        self.assertFalse(pkt_153_unknown.authority)
+        self.assertFalse(pkt_153_unknown.reenroll_permitted)
+        self.assertFalse(pkt_153_unknown.dispatch_clean)
+        self.assertEqual(pkt_153_unknown.uncertain_requests, 1)
+        self.assertEqual(
+            pkt_153_unknown.qualification.state_code, "no_transaction_unknown_dispatch"
+        )
+        for hold in (
+            "zero_uncertain_caller_mutations",
+            "authenticated_analysis_abort_receipt",
+            "missing_close_diagnostics",
+            "historical_live_settlement_receipt",
+        ):
+            self.assertIn(hold, pkt_153_unknown.missing_proof_holds)
+        with self.assertRaisesRegex(
+            ReviewInputError, "fresh reenroll/reset is forbidden"
+        ):
+            verify_reenroll_forbidden(sv_153_rec_uncertain)
+
+        # SiteVault #153 unreleased active reservation (`cleanup-absent`) shape:
+        sv_153_active_res = SessionRecord._construct(
+            repository=sv_153_id.repository,
+            pull_request=sv_153_id.pull_request,
+            repository_id=sv_153_id.repository_id,
+            completed_initial_reviews=0,
+            completed_verification_rounds=0,
+            failed_attempts=0,
+            generation=2,
+            reservation_id="6" * 64,
+            reserved_slot="initial",
+            last_committed_reservation_id=None,
+            created_at="2026-11-10T13:00:00Z",
+            updated_at="2026-11-10T13:02:00Z",
+            expires_at="2026-12-10T13:00:00Z",
+            operator_paused=False,
+            transaction=None,
+            api_run_accounting=sv_153_acc_uncertain.to_document(),
+        )
+        pkt_153_active = build_no_transaction_attempt_packet(
+            sv_153_active_res,
+            owner_ceased=True,
+            diagnostics_available=False,
+        )
+        self.assertFalse(pkt_153_active.reservation_release_confirmed)
+        self.assertEqual(pkt_153_active.active_reservation_id, "6" * 64)
+        self.assertIn(
+            "confirmed_reservation_release", pkt_153_active.missing_proof_holds
+        )
+        self.assertIn(
+            "historical_live_settlement_receipt", pkt_153_active.missing_proof_holds
+        )
+        pkt_dict = pkt_153_active.to_dict()
+        self.assertIs(pkt_dict["authority"], False)
+        self.assertIs(pkt_dict["reenroll_permitted"], False)
+        self.assertEqual(pkt_dict["case_id"], SITEVAULT_153_CASE_ID)
+
+        # 3. Outside-boundary delegation & validation guardrails:
+        outside_tx = replace(
+            ReviewTransaction.create(
+                repository="owner/repo",
+                pull_request=7,
+                base_sha=BASE_SHA,
+                head_sha=HEAD_SHA,
+                reservation_id="5" * 64,
+                policy_digest="2" * 64,
+                configuration_digest="1" * 64,
+                evidence_digest="3" * 64,
+                generation=2,
+            ),
+            phase="publication_succeeded",
+            result_sha256="4" * 64,
+        )
+        outside_rec = _make_record(
+            accounting=_base_accounting(), transaction=outside_tx
+        )
+        outside_pkt = build_no_transaction_attempt_packet(outside_rec)
+        self.assertEqual(
+            outside_pkt.entry_classification, "outside_no_transaction_boundary"
+        )
+        self.assertIn("owner/repo#7:gen-2:run-1001", outside_pkt.case_id)
+
+        with self.assertRaisesRegex(ReviewInputError, "strictly diagnostic"):
+            replace(pkt_142_cold, authority=True)
+        with self.assertRaisesRegex(ReviewInputError, "strictly diagnostic"):
+            replace(pkt_142_cold, reenroll_permitted=True)
+        with self.assertRaisesRegex(
+            ReviewInputError, "NoTransactionAbortQualification"
+        ):
+            replace(pkt_142_cold, qualification="bad")  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ReviewInputError, "case_id"):
+            replace(pkt_142_cold, case_id=" ")
+        with self.assertRaisesRegex(ReviewInputError, "record_sha256"):
+            replace(pkt_142_cold, record_sha256="bad")
+        with self.assertRaisesRegex(ReviewInputError, "entry_classification"):
+            replace(pkt_142_cold, entry_classification="bad")
+        with self.assertRaisesRegex(ReviewInputError, "executor_sha"):
+            replace(pkt_142_cold, executor_sha="bad")
+        with self.assertRaisesRegex(ReviewInputError, "installed_core_version"):
+            replace(pkt_142_cold, installed_core_version="bad version!")
+        with self.assertRaisesRegex(ReviewInputError, "abort_source_root"):
+            replace(pkt_142_cold, abort_source_root="bad")
+        with self.assertRaisesRegex(ReviewInputError, "abort_base_sha"):
+            replace(pkt_142_cold, abort_base_sha="bad")
+        with self.assertRaisesRegex(
+            ReviewInputError, "historical_live_settlement_receipt"
+        ):
+            replace(pkt_142_cold, missing_proof_holds=("proven_provider_non_entry",))
+        with self.assertRaisesRegex(ReviewInputError, "session_comment_ref"):
+            build_no_transaction_attempt_packet(
+                sv_142_rec, session_comment_ref={"id": 0, "bytes": 1, "sha256": "a"}
+            )
+        with self.assertRaisesRegex(ReviewInputError, "identity must be"):
+            build_no_transaction_attempt_packet(
+                sv_142_rec,
+                identity="bad",  # type: ignore[arg-type]
+            )
+        with self.assertRaisesRegex(ReviewInputError, "conflicts with SessionRecord"):
+            build_no_transaction_attempt_packet(sv_142_rec, identity=IDENTITY)
+        no_repo_rec = _make_record(accounting=_base_accounting())
+        object.__setattr__(no_repo_rec, "repository_id", None)
+        with self.assertRaisesRegex(ReviewInputError, "positive integer repository_id"):
+            build_no_transaction_attempt_packet(
+                no_repo_rec,
+                identity=SessionIdentity("owner/repo", 7, repository_id=None),
+            )
+        for bad_repo_id in (None, 0, -1, True):
+            with self.assertRaisesRegex(ReviewInputError, "positive integer"):
+                replace(pkt_142_cold, repository_id=bad_repo_id)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

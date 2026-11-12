@@ -26,11 +26,52 @@ from review_sensei.terminal_representability import (
 )
 
 
+def _unlisted_snapshot_part_reads(
+    ledger: Any,
+    current_record: SessionRecord | None,
+    *,
+    action: str,
+    writes_enabled: bool,
+) -> int:
+    if (
+        not writes_enabled
+        or current_record is None
+        or current_record.disposition_snapshot is None
+        or action
+        not in {
+            "accept-risk",
+            "dismiss",
+            "defer",
+            "accept-coverage-uncertainty",
+            "verify",
+        }
+    ):
+        return 0
+    capability = getattr(ledger, "snapshot_preview_read_requests", None)
+    if not callable(capability):
+        state = current_record.disposition_snapshot.get("state_manifest")
+        if (
+            isinstance(state, Mapping)
+            and state.get("encoding") == "inline-json-v1"
+            and current_record.disposition_snapshot.get("schema_version") == "1.0"
+        ):
+            return 0
+        raise ReviewInputError("snapshot read pricing capability is unavailable")
+    count = capability(current_record)
+    if type(count) is not int or count < 0:
+        raise ReviewInputError(
+            "snapshot read pricing capability returned invalid count"
+        )
+    return count
+
+
 def _command_pricing(
     caller: Any,
     *,
     action: str,
     writes_enabled: bool,
+    ledger: Any = None,
+    current_record: SessionRecord | None = None,
 ) -> ActionSettlementPricing:
     accounting = caller.accounting
     limit = int(accounting.configuration.limit)
@@ -65,6 +106,13 @@ def _command_pricing(
         refinalize_reqs = 0
         receipt_reqs = 2
 
+    cold_snapshot_reads = _unlisted_snapshot_part_reads(
+        ledger,
+        current_record,
+        action=action,
+        writes_enabled=writes_enabled,
+    )
+
     return ActionSettlementPricing(
         cold_census_requests=0,
         business_mutation_requests=business_reqs,
@@ -74,6 +122,7 @@ def _command_pricing(
         terminal_close_requests=1,
         committed_requests=committed_effective,
         original_api_limit=max(1, limit),
+        snapshot_read_requests=cold_snapshot_reads,
     )
 
 
@@ -166,11 +215,32 @@ def guard_current_command_representability(
         ledger=ledger,
         head_sha=head_sha,
     )
+    if (
+        current_record.disposition_snapshot is not None
+        and writes_enabled
+        and command.action
+        in {"accept-risk", "dismiss", "defer", "accept-coverage-uncertainty", "verify"}
+    ):
+        hydrate = getattr(ledger, "hydrate_snapshot_preview", None)
+        if callable(hydrate):
+            hydrate(identity, current_record)
+        else:
+            state = current_record.disposition_snapshot.get("state_manifest")
+            if not (
+                isinstance(state, Mapping)
+                and state.get("encoding") == "inline-json-v1"
+                and current_record.disposition_snapshot.get("schema_version") == "1.0"
+            ):
+                raise ReviewInputError(
+                    "snapshot preview hydration capability is unavailable"
+                )
     consumed_grants = tuple(getattr(ledger, "_consumed_grants", ()) or ())
     pricing = _command_pricing(
         caller,
         action=command.action,
         writes_enabled=writes_enabled,
+        ledger=ledger,
+        current_record=current_record,
     )
     _preview_res, _preview_rec, report = preview_session_command_representability(
         identity=identity,
@@ -188,10 +258,14 @@ def guard_current_command_representability(
         enable_disposition_snapshot_writes=bool(
             getattr(ledger, "enable_disposition_snapshot_writes", False)
         ),
+        supports_paged_disposition_snapshot_writes=bool(
+            getattr(ledger, "supports_paged_disposition_snapshot_writes", False)
+        ),
         evidence_budget=(
             getattr(ledger, "evidence_budget", None)
             or getattr(caller, "budget_view", None)
         ),
+        source_ledger=ledger,
         accounting_version=str(caller.accounting.version),
         pricing=pricing,
         consumed_grants=consumed_grants,

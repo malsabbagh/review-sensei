@@ -66,6 +66,7 @@ upstream requests. Inference and checkout/install/artifact infrastructure have
 separate limits. `run_authority` authenticates current bindings, and
 `prior_rescan_publication` supplies historical evidence without write authority.
 A media receipt alone does not provide typed terminal-result proof.
+Offline historical packets require positive terminal-result authentication; absent producer/result proof never establishes settlement. Positive-cost continuation requires known sufficient original allowance; zero-request checks leave unavailable allowance unknown (ADR 0133).
 See [ADR 0111](adr/0111-caller-api-work-allowance.md).
 
 ## Default human inventory references
@@ -80,6 +81,11 @@ Writers default to at most 64 findings; readers accept 250. Only trusted `github
 
 The packaged v5 schema validates structure; explicit rescan uses the trusted reader
 and one original command read allowance.
+
+## G17 private recovery-store platform boundary
+
+Optional original-context handoff requires POSIX ownership/mode enforcement; non-POSIX opt-in refuses before key access/storage, while unconfigured operation remains available. Require bounded reads, exact HMAC encoding and preservation of unauthenticated/malformed cache evidence during expiry pruning. No ACL qualification, writer authority, schema migration, budget expansion or historical settlement follows (ADR 0131; ADR 0135 stabilization addendum).
+References: [ADR 0131](adr/0131-provenance-retention-representability-and-capacity-envelope.md) and [ADR 0135 stabilization addendum](adr/0135-branch-state-lifecycle.md#g17-private-store-stabilization-on-pr-451).
 
 ## Explicit human file review (local, opt-in)
 
@@ -240,6 +246,12 @@ API authentication and comment/review delivery. prepare_publishable_review sits 
 The versioned synthetic corpus flows through a bounded, provider-neutral
 evaluation loader and FixtureProvider into the unchanged ReviewService. Reports retain only aggregate, non-monetary metrics. Live endpoints are
 authority-gated by the CLI; CI uses fixture mode.
+
+## Scoped retained-state qualification
+
+G12 capacity is not executable recovery evidence. The ADR 0131 qualifier reopens an existing local session in a fresh interpreter and authenticates its disposition snapshot graph via production readers. Its receipt reports only exercised components and physical read counts. Missing artifacts stay unqualified; never synthesize original context. Native-effect/inference replay counts stay unknown. Matching roots/capacity do not qualify result/archive/context recovery, terminal closure or historical settlement.
+
+Snapshot previews use only the ledger-owned snapshot_preview_parts cached-graph capability, not concrete cache attributes/filesystem paths. Explicit hydrate_snapshot_preview charges production v1/v2 reads before pure preview; unavailable cached evidence refuses without hidden I/O. Preserve ADR 0131 detached-proof and conservative post-hydration read-allowance contracts.
 
 ## Quality and supply-chain boundary
 

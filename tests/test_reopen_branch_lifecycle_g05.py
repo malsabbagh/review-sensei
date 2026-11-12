@@ -7,13 +7,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 try:
     from fake_github_http import json_response
+    from test_reply_freshness_g33 import FreshnessReplyFixture
     from test_review_run import IDENTITY, EntryFixture
 except ModuleNotFoundError:
     from tests.fake_github_http import json_response
+    from tests.test_reply_freshness_g33 import FreshnessReplyFixture
     from tests.test_review_run import IDENTITY, EntryFixture
 
 from review_sensei_github import branch_lifecycle
@@ -24,6 +27,7 @@ from review_sensei_github.branch_lifecycle import (
     evaluate_live_pr_write_gate,
     session_has_unresolved_obligations,
 )
+from review_sensei_github.conversation import ConversationPublisher
 from review_sensei_github.errors import GitHubPublicationError
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.publication import ReviewApprovalFinalizer, ReviewPublisher
@@ -1208,6 +1212,313 @@ class ReopenBranchLifecycleG05Tests(unittest.TestCase):
         )
         assert pf_skipped.result is not None
         self.assertEqual(pf_skipped.result.status, "skipped_pr_state")
+
+    def test_late_effects_after_close_and_after_changed_sha_reopen_preserve_obligations(
+        self,
+    ) -> None:
+        """G05 exact-scope: delayed review, finalizer, and mention-reply effects after close/reopen."""
+
+        class _CloseReopenReplyFixture(FreshnessReplyFixture):
+            live_state = "open"
+
+            def external(self, request, timeout):
+                response = super().external(request, timeout)
+                target = urlsplit(request.full_url)
+                if request.get_method() == "GET" and target.path.endswith("/pulls/7"):
+                    pull = json.loads(response.read(524288))
+                    pull["state"] = self.live_state
+                    return json_response(pull)
+                return response
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "review").mkdir()
+            (root / "reply_closed").mkdir()
+            (root / "reply_stale").mkdir()
+
+            fixture = LifecycleEntryFixture(root / "review")
+            h1 = fixture.live_head
+            h2 = HEAD_SHA_2
+
+            # 1. Initial open review on H1 records an unresolved human obligation and emits COMMENT.
+            code_init, out_init = fixture.run_and_read(human=True)
+            self.assertEqual(code_init, 0)
+            assert out_init is not None
+            self.assertEqual(out_init["status"], "published")
+            self.assertEqual([r["event"] for r in fixture.review_posts], ["COMMENT"])
+            record_h1 = parse_session_comment(
+                fixture.comment["body"], identity=IDENTITY
+            )
+            self.assertTrue(session_has_unresolved_obligations(record_h1))
+
+            # 2. Close PR #7: late review, late approval finalization, and late mention reply
+            # all skip cleanly (`skipped_pr_state`) without revoking the confirmed H1 COMMENT
+            # review or mutating session obligations.
+            fixture.pr_state = "closed"
+            publisher = ReviewPublisher(http=fixture.http)
+            finalizer = ReviewApprovalFinalizer(http=fixture.http)
+
+            late_closed_pub = publisher.publish(
+                token="installation-token",
+                repository="owner/repo",
+                repository_id=123,
+                pull_request=7,
+                head_sha=h1,
+                base_branch="main",
+                base_sha=fixture.live_base,
+                diff=SAMPLE_DIFF,
+                result=ReviewResult(
+                    summary="Delayed clean review arriving after close.",
+                    comments=(),
+                    provider="ollama",
+                    review_status="complete",
+                ),
+                auto_approve=True,
+                app_slug="reviewsensei[bot]",
+            )
+            self.assertEqual(late_closed_pub.status, "skipped_pr_state")
+            late_closed_fin = finalizer._preflight(
+                token="installation-token",
+                repository="owner/repo",
+                pull_request=7,
+                head_sha=h1,
+                app_slug="reviewsensei[bot]",
+            )
+            assert late_closed_fin.result is not None
+            self.assertEqual(late_closed_fin.result.status, "skipped_pr_state")
+            self.assertEqual([r["event"] for r in fixture.review_posts], ["COMMENT"])
+
+            reply_closed = _CloseReopenReplyFixture(root / "reply_closed")
+            reply_closed.initialize_freshness()
+            orig_reply_publish = ConversationPublisher._publish
+
+            def close_before_reply_post(conv_pub, **kwargs):
+                reply_closed.live_state = "closed"
+                return orig_reply_publish(conv_pub, **kwargs)
+
+            with patch.object(
+                ConversationPublisher, "_publish", close_before_reply_post
+            ):
+                code_reply_closed = reply_closed.invoke_reply()
+            self.assertEqual(code_reply_closed, 1)
+            self.assertEqual(reply_closed.reply_posts, 0)
+            self.assertEqual(
+                getattr(reply_closed.last_result, "status", None), "skipped_pr_state"
+            )
+            self.assertEqual(reply_closed.action()["phase"], "pending")
+
+            # 3. Reopen PR #7 at changed SHA H2: delayed old-head (H1) review, finalizer,
+            # mention reply, and stale-event ReviewRun all fence as `skipped_stale_head` / refused.
+            fixture.pr_state = "open"
+            fixture.live_head = h2
+
+            late_stale_pub = publisher.publish(
+                token="installation-token",
+                repository="owner/repo",
+                repository_id=123,
+                pull_request=7,
+                head_sha=h1,
+                base_branch="main",
+                base_sha=fixture.live_base,
+                diff=SAMPLE_DIFF,
+                result=ReviewResult(
+                    summary="Delayed H1 review arriving after changed-SHA reopen.",
+                    comments=(),
+                    provider="ollama",
+                    review_status="complete",
+                ),
+                auto_approve=True,
+                app_slug="reviewsensei[bot]",
+            )
+            self.assertEqual(late_stale_pub.status, "skipped_stale_head")
+            late_stale_fin = finalizer._preflight(
+                token="installation-token",
+                repository="owner/repo",
+                pull_request=7,
+                head_sha=h1,
+                app_slug="reviewsensei[bot]",
+            )
+            assert late_stale_fin.result is not None
+            self.assertEqual(late_stale_fin.result.status, "skipped_stale_head")
+            self.assertEqual([r["event"] for r in fixture.review_posts], ["COMMENT"])
+
+            reply_stale = _CloseReopenReplyFixture(root / "reply_stale")
+            reply_stale.initialize_freshness()
+
+            def reopen_at_h2_before_reply_post(conv_pub, **kwargs):
+                reply_stale.live_state = "open"
+                reply_stale.live_head = h2
+                return orig_reply_publish(conv_pub, **kwargs)
+
+            with patch.object(
+                ConversationPublisher, "_publish", reopen_at_h2_before_reply_post
+            ):
+                code_reply_stale = reply_stale.invoke_reply()
+            self.assertEqual(code_reply_stale, 1)
+            self.assertEqual(reply_stale.reply_posts, 0)
+            self.assertEqual(
+                getattr(reply_stale.last_result, "status", None), "skipped_stale_head"
+            )
+            self.assertEqual(reply_stale.action()["phase"], "pending")
+
+            # Delayed ReviewRun still targeting H1 fails closed at bootstrap with 0 provider calls.
+            fixture.run_id += 1
+            fixture.requested_head = h1
+            fixture.trace.clear()
+            fixture.transports.clear()
+            fixture.worker_observations.clear()
+            code_stale_run, out_stale_run = fixture.run_and_read(human=False)
+            self.assertEqual(code_stale_run, 1)
+            self.assertIsNone(out_stale_run)
+            self.assertEqual(fixture.provider_calls, 1)
+            self.assertEqual([r["event"] for r in fixture.review_posts], ["COMMENT"])
+
+            # Current H2 run converges cleanly while preserving H1's unresolved obligation
+            # and withholding spurious APPROVE.
+            fixture.advance_run_to_head(h2)
+            code_h2, out_h2 = fixture.run_and_read(human=False)
+            self.assertEqual(code_h2, 0, fixture.error)
+            assert out_h2 is not None
+            self.assertEqual(out_h2["status"], "published")
+            self.assertTrue(out_h2["accounting_terminal"])
+            self.assertEqual(fixture.provider_calls, 2)
+            self.assertEqual(
+                [r["event"] for r in fixture.review_posts], ["COMMENT", "COMMENT"]
+            )
+            self.assertEqual(fixture.review_posts[-1]["commit_id"], h2)
+            record_h2 = parse_session_comment(
+                fixture.comment["body"], identity=IDENTITY
+            )
+            self.assertTrue(session_has_unresolved_obligations(record_h2))
+
+    def test_reordered_close_reopen_synchronize_and_deleted_branch_ref_combinations(
+        self,
+    ) -> None:
+        """G05 exact-scope: out-of-order reopen/close/synchronize deliveries and branch_ref_exists."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = LifecycleEntryFixture(Path(tmp))
+            h1 = fixture.live_head
+            h2 = HEAD_SHA_2
+
+            code_1, out_1 = fixture.run_and_read(human=True)
+            self.assertEqual(code_1, 0)
+            assert out_1 is not None
+            self.assertEqual(out_1["status"], "published")
+            record_1 = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            self.assertTrue(session_has_unresolved_obligations(record_1))
+
+            # 1. Out-of-order `reopened(H1)` event processed AFTER `synchronize(H2)` already
+            # advanced live GitHub PR #7 to H2: stale event fails closed pre-inference.
+            fixture.live_head = h2
+            fixture.requested_head = h1
+            fixture.run_id += 1
+            fixture.trace.clear()
+            fixture.transports.clear()
+            fixture.worker_observations.clear()
+            code_reordered_sync, out_reordered_sync = fixture.run_and_read(human=False)
+            self.assertEqual(code_reordered_sync, 1)
+            self.assertIsNone(out_reordered_sync)
+            self.assertEqual(fixture.provider_calls, 1)
+            self.assertEqual(len(fixture.review_posts), 1)
+
+            # 2. Out-of-order `reopened(H2)` event processed AFTER rapid re-`closed` took effect
+            # on live GitHub PR #7: live PR truth (`state="closed"`) blocks execution pre-inference.
+            fixture.pr_state = "closed"
+            fixture.advance_run_to_head(h2)
+            code_reordered_close, out_reordered_close = fixture.run_and_read(
+                human=False
+            )
+            self.assertEqual(code_reordered_close, 1)
+            self.assertIsNone(out_reordered_close)
+            self.assertEqual(fixture.provider_calls, 1)
+            self.assertEqual(len(fixture.review_posts), 1)
+
+            # 3. Branch ref deleted while `head.repo` object remains populated (`branch_ref_exists=False`
+            # with `head_repo_present=True`), closed -> open while branch ref still absent,
+            # and branch ref recreation at same vs changed SHA.
+            s_open_h1 = PullRequestLifecycleSnapshot.from_pull_request_payload(
+                _sample_pr_payload(state="open", head_sha=h1),
+                branch_ref_exists=True,
+            )
+            s_ref_deleted_repo_present = (
+                PullRequestLifecycleSnapshot.from_pull_request_payload(
+                    _sample_pr_payload(
+                        state="open", head_sha=h1, head_repo_missing=False
+                    ),
+                    branch_ref_exists=False,
+                )
+            )
+            self.assertTrue(s_ref_deleted_repo_present.head_repo_present)
+            self.assertFalse(s_ref_deleted_repo_present.has_live_same_repo_head)
+            self.assertFalse(s_ref_deleted_repo_present.admits_live_writes)
+
+            ref_del_dec = classify_reopen_branch_transition(
+                s_open_h1,
+                s_ref_deleted_repo_present,
+                prior_record=record_1,
+            )
+            self.assertEqual(
+                ref_del_dec.transition_kind, "head_branch_deleted_blocking_writes"
+            )
+            self.assertFalse(ref_del_dec.admits_live_writes)
+            self.assertTrue(ref_del_dec.preserves_prior_obligations)
+            self.assertTrue(ref_del_dec.unresolved_obligations_present)
+            self.assertFalse(ref_del_dec.mints_fresh_failed_attempt_allowance)
+
+            # Closed with deleted ref -> reopened while ref still deleted -> restored ref.
+            s_closed_ref_deleted = (
+                PullRequestLifecycleSnapshot.from_pull_request_payload(
+                    _sample_pr_payload(state="closed", head_sha=h1),
+                    branch_ref_exists=False,
+                )
+            )
+            closed_del_dec = classify_reopen_branch_transition(
+                s_ref_deleted_repo_present,
+                s_closed_ref_deleted,
+                prior_record=record_1,
+            )
+            self.assertEqual(closed_del_dec.transition_kind, "closed_blocking_writes")
+            self.assertFalse(closed_del_dec.admits_live_writes)
+
+            reopen_still_deleted = classify_reopen_branch_transition(
+                s_closed_ref_deleted,
+                s_ref_deleted_repo_present,
+                prior_record=record_1,
+            )
+            self.assertEqual(
+                reopen_still_deleted.transition_kind,
+                "head_branch_deleted_blocking_writes",
+            )
+            self.assertFalse(reopen_still_deleted.admits_live_writes)
+
+            restored_same_dec = classify_reopen_branch_transition(
+                s_ref_deleted_repo_present,
+                s_open_h1,
+                prior_record=record_1,
+            )
+            self.assertEqual(
+                restored_same_dec.transition_kind, "branch_recreated_same_sha"
+            )
+            self.assertTrue(restored_same_dec.admits_live_writes)
+            self.assertTrue(restored_same_dec.unresolved_obligations_present)
+            self.assertFalse(restored_same_dec.prior_approval_valid)
+
+            s_open_h2 = PullRequestLifecycleSnapshot.from_pull_request_payload(
+                _sample_pr_payload(state="open", head_sha=h2),
+                branch_ref_exists=True,
+            )
+            restored_changed_dec = classify_reopen_branch_transition(
+                s_ref_deleted_repo_present,
+                s_open_h2,
+                prior_record=record_1,
+                prior_approved_binding=(BASE_SHA, h1),
+            )
+            self.assertEqual(
+                restored_changed_dec.transition_kind, "branch_recreated_changed_sha"
+            )
+            self.assertTrue(restored_changed_dec.admits_live_writes)
+            self.assertFalse(restored_changed_dec.prior_approval_valid)
 
 
 if __name__ == "__main__":

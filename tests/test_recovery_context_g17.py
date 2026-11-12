@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,7 @@ from review_sensei_github.publication_context_recovery import (
     bundle_from_reconstructed_contexts,
     reconstruct_or_prescribe_publication_contexts,
     reconstruct_publication_contexts,
+    verify_stored_recovery_context,
 )
 from test_publication_recovery import BASE, HEAD, IDENTITY
 
@@ -41,6 +43,7 @@ from review_sensei.recovery_context import (
     classify_recovery_input_origins,
     ensure_not_observation_only_evidence,
     price_recovery_context_admission,
+    resolve_recovery_context_store,
 )
 from review_sensei.session import LocalSessionLedger
 
@@ -277,6 +280,7 @@ class PreEffectBudgetAndHandoffStoreTests(unittest.TestCase):
             exhausted.recovery.action, "reconcile_owned_readback_then_hold_or_dispose"
         )
 
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_handoff_store_authenticates_and_refuses_tampering_truncation_expiry(
         self,
     ) -> None:
@@ -396,11 +400,15 @@ class PreEffectBudgetAndHandoffStoreTests(unittest.TestCase):
             self.assertFalse(truncated.admitted)
             self.assertEqual(truncated.refusal_code, "truncated_or_corrupt_context")
 
-    def test_handoff_store_enforces_file_cap_and_rejects_bad_keys(self) -> None:
+    def test_handoff_store_rejects_bad_keys_without_storage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ReviewInputError, "key"):
                 RecoveryContextStore(Path(directory) / "bad", key=b"short")
+            self.assertEqual(list(Path(directory).iterdir()), [])
 
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_handoff_store_enforces_file_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
             store = RecoveryContextStore(Path(directory) / "capped", key=HANDOFF_KEY)
             for idx in range(MAX_RECOVERY_HANDOFF_FILES):
                 tx_id = f"{idx:064x}"
@@ -430,6 +438,8 @@ class PreEffectBudgetAndHandoffStoreTests(unittest.TestCase):
 
         ensure_not_observation_only_evidence(None)
 
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_signed_corrupt_handoff_envelopes(self) -> None:
         now = datetime(2026, 11, 11, 4, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
             handoff_dir = Path(directory) / "handoff"
@@ -548,65 +558,68 @@ _FailedPublication = trusted_recovery._FailedPublication
 class EndToEndFreshProcessRecoveryG17Tests(
     trusted_recovery.TrustedPublicationRecoveryTests
 ):
+    @staticmethod
+    def _enable_diagnostics_and_handoff_args(root: Path) -> tuple[str, ...]:
+        config_path = root / ".reviewsensei.yml"
+        text = config_path.read_text(encoding="utf-8")
+        if "artifacts: diagnostics" not in text:
+            text = text.replace(
+                "github:\n",
+                "github:\n  artifacts: diagnostics\n",
+                1,
+            )
+            config_path.write_text(text, encoding="utf-8")
+        key_file = root / "handoff.key"
+        key_file.write_bytes(HANDOFF_KEY)
+        key_file.chmod(0o600)
+        return (
+            "--recovery-context-dir",
+            str(root / "handoff"),
+            "--recovery-context-key-file",
+            str(key_file),
+            "--policy-commit",
+            POLICY_COMMIT,
+        )
+
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_fresh_process_zero_inference_handoff_and_decision_drift_recovery(
         self,
     ) -> None:
-        # 1. Default context: delete all local files (result, config, admission)
-        #    and recover from remote retained parts + fresh-process handoff.
+        # 1. Default context: ordinary CLI publish captures handoff automatically
+        #    before publication fails; delete all local files (result, config, admission)
+        #    and recover from remote retained parts + authenticated fresh-process handoff
+        #    with zero test-side store.save(...) shortcuts.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.original_analysis(root)
-            diff_text = (root / "review.patch").read_text(encoding="utf-8")
+            handoff_args = self._enable_diagnostics_and_handoff_args(root)
             result = ReviewResult.from_dict(
                 json.loads((root / "result.json").read_text(encoding="utf-8"))
             )
             assert result.transaction is not None
             state = _FailedPublication()
-            self.assertEqual(self.invoke(root, state)[0], 1)
-            ledger = LocalSessionLedger(root / "ledger")
-            _, admitted_default = reconstruct_or_prescribe_publication_contexts(
-                source_root=root,
-                diff=diff_text,
-                ledger=ledger,
-                identity=IDENTITY,
-                base_ref="main",
-                base_sha=BASE,
-                head_sha=HEAD,
-                policy_commit=POLICY_COMMIT,
-                policy=ReviewConvergencePolicy(),
+            self.assertEqual(self.invoke(root, state, extra=handoff_args)[0], 1)
+            handoff_file = (
+                root / "handoff" / f"{result.transaction.transaction_id}.json"
             )
-            self.assertTrue(admitted_default.admitted)
-            assert admitted_default.bundle is not None
-            handoff_store = RecoveryContextStore(
-                root / "handoff",
-                key=HANDOFF_KEY,
-                now=lambda: datetime.now(timezone.utc),
-            )
-            handoff_store.save(admitted_default.bundle)
+            self.assertTrue(handoff_file.is_file())
             for artifact in ("result.json", "configuration.json", "admission.json"):
                 (root / artifact).unlink()
-            loaded_default = handoff_store.load_for_fresh_process(
-                result.transaction.transaction_id,
-                expected_repository=IDENTITY.repository,
-                expected_pull_request=IDENTITY.pull_request,
-                expected_base_sha=BASE,
-                expected_head_sha=HEAD,
-                expected_policy_commit=POLICY_COMMIT,
-                expected_result_sha256=result.content_digest(),
-                current_run_id=2,
-            )
-            self.assertTrue(loaded_default.admitted)
             state.fail_review = False
-            code, output, error = self.invoke(root, state, reconstruct=True)
+            code, output, error = self.invoke(
+                root, state, reconstruct=True, extra=handoff_args
+            )
             self.assertEqual(code, 0, error)
             self.assertIn("published", output)
 
-        # 2. #427 Decision-enabled context: drift refuses without ledger mutation;
-        #    restoring pinned .reviewsensei.yml recovers to published with zero inference.
+        # 2. #427 Decision-enabled context: ordinary entry captures handoff;
+        #    drift refuses closed without ledger mutation; restoring pinned
+        #    .reviewsensei.yml recovers to published with zero inference.
         decision = {"enabled": True, "provider": "ollama", "model": "fixture-decision"}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.original_analysis(root, decision=decision, work_mode="unified")
+            handoff_args = self._enable_diagnostics_and_handoff_args(root)
             original_config_text = (root / ".reviewsensei.yml").read_text(
                 encoding="utf-8"
             )
@@ -617,41 +630,32 @@ class EndToEndFreshProcessRecoveryG17Tests(
             assert result.transaction is not None
 
             state = _FailedPublication()
-            self.assertEqual(self.invoke(root, state)[0], 1)
+            self.assertEqual(self.invoke(root, state, extra=handoff_args)[0], 1)
             ledger = LocalSessionLedger(root / "ledger")
 
-            reconstructed, admitted = reconstruct_or_prescribe_publication_contexts(
-                source_root=root,
-                diff=diff_text,
-                ledger=ledger,
-                identity=IDENTITY,
-                base_ref="main",
-                base_sha=BASE,
-                head_sha=HEAD,
-                policy_commit=POLICY_COMMIT,
-                policy=ReviewConvergencePolicy(),
+            handoff_file = (
+                root / "handoff" / f"{result.transaction.transaction_id}.json"
             )
-            self.assertTrue(admitted.admitted)
-            assert reconstructed is not None
-            assert admitted.bundle is not None
-            self.assertNotIn("diff --git", json.dumps(admitted.bundle.to_dict()))
-
-            handoff_store = RecoveryContextStore(
-                root / "handoff",
-                key=HANDOFF_KEY,
-                now=lambda: datetime.now(timezone.utc),
-            )
-            handoff_store.save(admitted.bundle)
+            self.assertTrue(handoff_file.is_file())
+            self.assertNotIn("diff --git", handoff_file.read_text(encoding="utf-8"))
 
             for artifact in ("result.json", "configuration.json", "admission.json"):
                 (root / artifact).unlink()
 
-            # Drift #427 decision policy -> must refuse without mutating ledger
+            # Drift #427 decision policy -> CLI recovery must refuse closed without mutating ledger
             (root / ".reviewsensei.yml").write_text(
                 original_config_text.replace("fixture-decision", "drifted-decision"),
                 encoding="utf-8",
             )
             before_ledger = self.ledger_bytes(root)
+            state.fail_review = False
+            drift_code, _, drift_err = self.invoke(
+                root, state, reconstruct=True, extra=handoff_args
+            )
+            self.assertEqual(drift_code, 1)
+            self.assertIn("original committed transaction", drift_err)
+            self.assertEqual(self.ledger_bytes(root), before_ledger)
+
             drifted_ctx, drifted_decision = (
                 reconstruct_or_prescribe_publication_contexts(
                     source_root=root,
@@ -676,25 +680,13 @@ class EndToEndFreshProcessRecoveryG17Tests(
             self.assertEqual(drifted_decision.recovery.command, "@reviewsensei rescan")
             self.assertEqual(self.ledger_bytes(root), before_ledger)
 
-            # Restore pinned config & verify fresh-process handoff + zero-inference publish
+            # Restore pinned config & verify fresh-process CLI recovery with zero inference
             (root / ".reviewsensei.yml").write_text(
                 original_config_text, encoding="utf-8"
             )
-            loaded_handoff = handoff_store.load_for_fresh_process(
-                result.transaction.transaction_id,
-                expected_repository=IDENTITY.repository,
-                expected_pull_request=IDENTITY.pull_request,
-                expected_base_sha=BASE,
-                expected_head_sha=HEAD,
-                expected_policy_commit=POLICY_COMMIT,
-                expected_result_sha256=result.content_digest(),
-                current_run_id=2,
+            code, output, error = self.invoke(
+                root, state, reconstruct=True, extra=handoff_args
             )
-            self.assertTrue(loaded_handoff.admitted)
-            self.assertEqual(loaded_handoff.bundle, admitted.bundle)
-
-            state.fail_review = False
-            code, output, error = self.invoke(root, state, reconstruct=True)
             self.assertEqual(code, 0, error)
             self.assertIn("published", output)
             final_record = ledger.load(IDENTITY).record
@@ -1219,6 +1211,1362 @@ class EndToEndFreshProcessRecoveryG17Tests(
             self.assertEqual(
                 unfunded_dec.refusal_code, "budget_exhausted_before_effect"
             )
+
+
+class OrdinaryEntryHostedAndCliRecoveryG17Tests(
+    trusted_recovery.TrustedPublicationRecoveryTests
+):
+    """End-to-end G17 proofs: ordinary entry capture to fresh-process recovery with zero manual save."""
+
+    @staticmethod
+    def _make_hosted_fixture(
+        directory: str,
+        *,
+        artifacts: str = "diagnostics",
+        limit: int = 512,
+    ):
+        import subprocess
+
+        from test_review_run import EntryFixture
+
+        class _RecoveryRunEntryFixture(EntryFixture):
+            recovery_context_dir: Path | None = None
+            recovery_context_key_file: Path | None = None
+            recovery_context_ttl_seconds: int | None = None
+            override_run_directory: Path | None = None
+
+            def invoke(self, *, human: bool = False) -> int:
+                from review_sensei_github import cli as package_cli
+
+                original_main = package_cli.main
+
+                def _inject(argv: list[str] | None = None) -> int:
+                    assert argv is not None
+                    mutated = list(argv)
+                    if (
+                        self.override_run_directory is not None
+                        and "--run-directory" in mutated
+                    ):
+                        run_idx = mutated.index("--run-directory")
+                        mutated[run_idx + 1] = str(self.override_run_directory)
+                    extra: list[str] = []
+                    if self.recovery_context_dir is not None:
+                        extra.extend(
+                            ["--recovery-context-dir", str(self.recovery_context_dir)]
+                        )
+                    if self.recovery_context_key_file is not None:
+                        extra.extend(
+                            [
+                                "--recovery-context-key-file",
+                                str(self.recovery_context_key_file),
+                            ]
+                        )
+                    if self.recovery_context_ttl_seconds is not None:
+                        extra.extend(
+                            [
+                                "--recovery-context-ttl-seconds",
+                                str(self.recovery_context_ttl_seconds),
+                            ]
+                        )
+                    if mutated and mutated[0] == "review-run" and extra:
+                        mutated = ["review-run", *extra, *mutated[1:]]
+                    return original_main(mutated)
+
+                with patch.object(package_cli, "main", side_effect=_inject):
+                    return int(super().invoke(human=human))
+
+        fx = _RecoveryRunEntryFixture(directory, limit=limit)
+        if artifacts != "none":
+            updated = fx.config_bytes.decode("utf-8").replace(
+                "github:\n",
+                f"github:\n  artifacts: {artifacts}\n",
+                1,
+            )
+            fx.config_bytes = updated.encode("utf-8")
+            (fx.root / ".reviewsensei.yml").write_bytes(fx.config_bytes)
+            subprocess.run(
+                ["git", "-C", str(fx.root), "add", ".reviewsensei.yml"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(fx.root),
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "--amend",
+                    "-m",
+                    "fixture",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            fx.policy = subprocess.check_output(
+                ["git", "-C", str(fx.root), "rev-parse", "HEAD"],
+                text=True,
+                stderr=subprocess.PIPE,
+            ).strip()
+            fx.policy_ref = fx.policy
+        return fx
+
+    def test_default_unconfigured_and_opt_in_policy_gates_write_nothing(self) -> None:
+        # 1. Default unconfigured hosted run (even under artifacts: diagnostics) writes nothing.
+        with tempfile.TemporaryDirectory() as directory:
+            fx = self._make_hosted_fixture(directory, artifacts="diagnostics")
+            self.assertEqual(fx.invoke(), 0, fx.error)
+            self.assertFalse((fx.root / "handoff").exists())
+            self.assertEqual(
+                list(fx.root.glob("*recovery*")),
+                [],
+            )
+
+        # 2. Opting in without artifacts: diagnostics refuses before provider execution.
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            tempfile.TemporaryDirectory() as secret_dir,
+        ):
+            fx = self._make_hosted_fixture(directory, artifacts="none")
+            handoff_dir = Path(secret_dir) / "handoff"
+            key_file = Path(secret_dir) / "handoff.key"
+            key_file.write_bytes(HANDOFF_KEY)
+            key_file.chmod(0o600)
+            fx.recovery_context_dir = handoff_dir
+            fx.recovery_context_key_file = key_file
+            self.assertEqual(fx.invoke(), 1)
+            self.assertIn("diagnostics artifact policy", fx.error)
+            self.assertEqual(fx.provider_calls, 0)
+            self.assertFalse(handoff_dir.exists())
+
+        # 3. Unpaired option, non-private key file, short key file, and symlink key file refuse.
+        with tempfile.TemporaryDirectory() as secret_dir:
+            sroot = Path(secret_dir)
+            self.assertIsNone(
+                resolve_recovery_context_store(
+                    None, None, artifacts_policy="diagnostics"
+                )
+            )
+            key_file = sroot / "valid.key"
+            key_file.write_bytes(HANDOFF_KEY)
+            key_file.chmod(0o600)
+            with self.assertRaisesRegex(ReviewInputError, "paired directory"):
+                resolve_recovery_context_store(
+                    sroot / "handoff", None, artifacts_policy="diagnostics"
+                )
+            if os.name != "posix":
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    resolve_recovery_context_store(
+                        sroot / "handoff", key_file, artifacts_policy="diagnostics"
+                    )
+                self.assertFalse((sroot / "handoff").exists())
+                return
+            open_key = sroot / "open.key"
+            open_key.write_bytes(HANDOFF_KEY)
+            open_key.chmod(0o644)
+            with self.assertRaisesRegex(ReviewInputError, "must be private"):
+                resolve_recovery_context_store(
+                    sroot / "handoff", open_key, artifacts_policy="diagnostics"
+                )
+            short_key = sroot / "short.key"
+            short_key.write_bytes(b"short")
+            short_key.chmod(0o600)
+            with self.assertRaisesRegex(ReviewInputError, "unavailable or invalid"):
+                resolve_recovery_context_store(
+                    sroot / "handoff", short_key, artifacts_policy="diagnostics"
+                )
+            symlink_key = sroot / "link.key"
+            symlink_key.symlink_to(key_file)
+            with self.assertRaisesRegex(ReviewInputError, "must be private"):
+                resolve_recovery_context_store(
+                    sroot / "handoff", symlink_key, artifacts_policy="diagnostics"
+                )
+
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_hosted_review_run_ordinary_capture_fresh_successor_and_fail_closed_controls(
+        self,
+    ) -> None:
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_api_work_persistence import IDENTITY as RUN_IDENTITY
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            tempfile.TemporaryDirectory() as secret_dir,
+        ):
+            fx = self._make_hosted_fixture(directory, artifacts="diagnostics")
+            sroot = Path(secret_dir)
+            handoff_dir = sroot / "handoff"
+            key_file = sroot / "handoff.key"
+            key_file.write_bytes(HANDOFF_KEY)
+            key_file.chmod(0o600)
+            fx.recovery_context_dir = handoff_dir
+            fx.recovery_context_key_file = key_file
+            fx.recovery_context_ttl_seconds = 600
+            fx.provider_summary = "Sensitive model summary must never enter handoff."
+
+            def crash_before_publish() -> None:
+                raise OSError("simulated process crash before publication")
+
+            fx.before_publication = crash_before_publish
+            self.assertEqual(fx.invoke(), 1)
+            self.assertEqual(fx.provider_calls, 1)
+            self.assertEqual(len(fx.reviews), 0)
+
+            # Ordinary review-run entry automatically captured the handoff file (no store.save in test!)
+            self.assertTrue(handoff_dir.is_dir())
+            self.assertEqual(handoff_dir.stat().st_mode & 0o077, 0)
+            handoff_files = list(handoff_dir.glob("*.json"))
+            self.assertEqual(len(handoff_files), 1)
+            handoff_path = handoff_files[0]
+            raw_handoff_bytes = handoff_path.read_bytes()
+            raw_handoff_text = raw_handoff_bytes.decode("utf-8")
+
+            # Privacy redaction proof: zero raw diffs, prompts, model prose, keys, or tokens stored.
+            for forbidden_secret in (
+                "diff --git",
+                "Sensitive model summary",
+                "synthetic-only",
+                "synthetic-workflow-read",
+                HANDOFF_KEY.decode("ascii"),
+            ):
+                self.assertNotIn(forbidden_secret, raw_handoff_text)
+            parsed_envelope = json.loads(raw_handoff_text)
+            self.assertIs(
+                parsed_envelope["document"]["bundle"]["contains_raw_diff_or_prompt"],
+                False,
+            )
+            self.assertIs(parsed_envelope["document"]["bundle"]["authority"], False)
+
+            # Remove all local analysis diagnostic files before fresh-process attempt=2 recovery.
+            for local_diag in ("configuration.json", "admission.json", "review.json"):
+                (fx.root / local_diag).unlink(missing_ok=True)
+
+            assert fx.comment is not None
+            saved_ledger_comment = fx.comment["body"]
+            fx.before_publication = None
+            fx.attempt = 2
+            run_counter = [0]
+
+            def reset_for_attempt_2() -> None:
+                assert fx.comment is not None
+                fx.comment["body"] = saved_ledger_comment
+                fx.trace = [entry for entry in fx.trace if entry[0] != 2]
+                run_counter[0] += 1
+                fresh_run_dir = sroot / f"fresh-runner-{run_counter[0]}"
+                fresh_run_dir.mkdir(parents=True, exist_ok=True)
+                fx.override_run_directory = fresh_run_dir
+
+            # Control 1: Missing handoff context -> fails closed (absent_context), zero inference/publish.
+            reset_for_attempt_2()
+            handoff_path.unlink()
+            self.assertEqual(fx.invoke(), 1)
+            self.assertIn("absent_context", fx.error)
+            self.assertEqual(fx.provider_calls, 1)
+            self.assertEqual(len(fx.reviews), 0)
+
+            # Control 2: Tampered handoff HMAC -> fails closed (tampered_authentication_or_digest).
+            reset_for_attempt_2()
+            tampered_env = json.loads(raw_handoff_text)
+            tampered_env["authentication"] = "0" * 64
+            handoff_path.write_text(json.dumps(tampered_env), encoding="utf-8")
+            self.assertEqual(fx.invoke(), 1)
+            self.assertIn("tampered_authentication_or_digest", fx.error)
+            self.assertEqual(fx.provider_calls, 1)
+            self.assertEqual(len(fx.reviews), 0)
+
+            # Control 3: Truncated handoff JSON -> fails closed (truncated_or_corrupt_context).
+            reset_for_attempt_2()
+            handoff_path.write_bytes(raw_handoff_bytes[:32])
+            self.assertEqual(fx.invoke(), 1)
+            self.assertIn("truncated_or_corrupt_context", fx.error)
+            self.assertEqual(fx.provider_calls, 1)
+            self.assertEqual(len(fx.reviews), 0)
+
+            # Control 4: Expired handoff TTL -> fails closed (expired_context) without auto-deleting file.
+            reset_for_attempt_2()
+            handoff_path.write_bytes(raw_handoff_bytes)
+            future_now = datetime.now(timezone.utc) + timedelta(seconds=601)
+            original_resolve = resolve_recovery_context_store
+
+            def expired_resolve(*r_args, **r_kwargs):  # type: ignore[no-untyped-def]
+                r_kwargs["now"] = lambda: future_now
+                return original_resolve(*r_args, **r_kwargs)
+
+            with patch(
+                "review_sensei_github.review_run.resolve_recovery_context_store",
+                side_effect=expired_resolve,
+            ):
+                self.assertEqual(fx.invoke(), 1)
+            self.assertIn("expired_context", fx.error)
+            self.assertTrue(handoff_path.is_file())
+            self.assertEqual(fx.provider_calls, 1)
+            self.assertEqual(len(fx.reviews), 0)
+
+            # Control 5: Original caller budget exhausted before effect -> fails closed.
+            reset_for_attempt_2()
+            original_reconstruct = reconstruct_publication_contexts
+
+            def budget_starved_reconstruct(**kwargs):  # type: ignore[no-untyped-def]
+                kwargs["already_consumed_requests"] = kwargs["original_api_limit"]
+                return original_reconstruct(**kwargs)
+
+            with patch(
+                "review_sensei_github.publication_context_recovery.reconstruct_publication_contexts",
+                side_effect=budget_starved_reconstruct,
+            ):
+                self.assertEqual(fx.invoke(), 1)
+            self.assertIn("budget_exhausted_before_effect", fx.error)
+            self.assertEqual(fx.provider_calls, 1)
+            self.assertEqual(len(fx.reviews), 0)
+
+            # Valid fresh-process attempt=2 recovery: authenticates stored bundle and publishes with 0 new inference.
+            reset_for_attempt_2()
+            self.assertEqual(fx.invoke(), 0, fx.error)
+            self.assertEqual(fx.provider_calls, 1)
+            self.assertEqual(
+                [r["state"] for r in fx.reviews],
+                ["COMMENTED", "APPROVED"],
+            )
+            pub_outcome = json.loads(
+                (fx.root / "publication.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(pub_outcome["status"], "published")
+            final_record = parse_session_comment(
+                fx.comment["body"], identity=RUN_IDENTITY
+            )
+            assert final_record.transaction is not None
+            self.assertEqual(final_record.transaction.phase, "publication_succeeded")
+
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_standalone_cli_holds_caller_accounted_context_before_business_effects(
+        self,
+    ):
+        from review_sensei.api_work import (
+            ApiExecutionOwner,
+            ApiRunIdentity,
+            FrozenApiConfiguration,
+            StartupPlan,
+            StartupSlot,
+            initial_accounting,
+        )
+
+        # A finite metered fixture uses the production accounting constructor and
+        # serializer. This negative control cannot authorize any real caller.
+        accounting = initial_accounting(
+            ApiRunIdentity(1, 456),
+            FrozenApiConfiguration(POLICY_COMMIT, "a" * 64, 384),
+            ApiExecutionOwner(1, "hosted", 0),
+            StartupPlan(
+                (
+                    StartupSlot("hosted", 1, ("configuration",)),
+                    StartupSlot("hosted", 2, ("configuration",)),
+                )
+            ),
+            prior_nonstartup_liability_upper_bound=37,
+        ).reserve("retained", 40)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for reconstruct in (False, True):
+                with self.subTest(reconstruct=reconstruct):
+                    local = root / str(reconstruct)
+                    local.mkdir()
+                    self.original_analysis(local)
+                    handoff_args = EndToEndFreshProcessRecoveryG17Tests._enable_diagnostics_and_handoff_args(
+                        local
+                    )
+                    state = _FailedPublication()
+                    self.assertEqual(
+                        self.invoke(local, state, extra=handoff_args)[0], 1
+                    )
+                    # Persist the original finite allowance and liabilities;
+                    # CLI must not reinterpret them as owner 2 or fresh 512 funds.
+                    ledger = LocalSessionLedger(local / "ledger")
+                    ledger.replace(
+                        IDENTITY,
+                        lambda record: record.evolve(
+                            api_run_accounting=accounting.to_document()
+                        ),
+                    )
+                    before = self.ledger_bytes(local)
+                    handoff = next((local / "handoff").glob("*.json"))
+                    before_handoff = handoff.read_bytes()
+                    state.fail_review = False
+                    code, _, error = self.invoke(
+                        local, state, reconstruct=reconstruct, extra=handoff_args
+                    )
+                    self.assertEqual(code, 1, error)
+                    self.assertIn(
+                        "original_caller_accounting_transport_required", error
+                    )
+                    self.assertIn("review-run", error)
+                    self.assertEqual(state.reviews, [])
+                    self.assertEqual(self.ledger_bytes(local), before)
+                    self.assertEqual(handoff.read_bytes(), before_handoff)
+
+                    # Omitting the selected original ledger must not bypass the
+                    # accounting hold. The existing transaction-binding gate
+                    # rejects this before any native business effect.
+                    real_main = trusted_recovery.github_main
+
+                    def omit_selected_ledger(argv):
+                        argv = list(argv)
+                        index = argv.index("--session-ledger")
+                        del argv[index : index + 2]
+                        return real_main(argv)
+
+                    with patch.object(
+                        trusted_recovery, "github_main", omit_selected_ledger
+                    ):
+                        omitted_code, _, omitted_error = self.invoke(
+                            local, state, reconstruct=reconstruct, extra=handoff_args
+                        )
+                    self.assertEqual(omitted_code, 1, omitted_error)
+                    self.assertIn("requires a session ledger", omitted_error)
+                    self.assertEqual(state.reviews, [])
+                    self.assertEqual(self.ledger_bytes(local), before)
+                    self.assertEqual(handoff.read_bytes(), before_handoff)
+
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_cli_publish_refusal_controls_explicit_context_mode_and_retention_cleanup(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.original_analysis(root)
+            config_path = root / ".reviewsensei.yml"
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8").replace(
+                    "github:\n",
+                    "github:\n  artifacts: diagnostics\n",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            key_file = root / "handoff.key"
+            key_file.write_bytes(HANDOFF_KEY)
+            key_file.chmod(0o600)
+            handoff_dir = root / "handoff"
+            handoff_args = (
+                "--recovery-context-dir",
+                str(handoff_dir),
+                "--recovery-context-key-file",
+                str(key_file),
+                "--policy-commit",
+                POLICY_COMMIT,
+            )
+
+            # Ordinary CLI publish fails on HTTP 403, but automatically captures handoff first.
+            state = _FailedPublication()
+            self.assertEqual(self.invoke(root, state, extra=handoff_args)[0], 1)
+            handoff_files = list(handoff_dir.glob("*.json"))
+            self.assertEqual(len(handoff_files), 1)
+            handoff_path = handoff_files[0]
+            saved_bytes = handoff_path.read_bytes()
+
+            saved_config_doc = (root / "configuration.json").read_bytes()
+            saved_admission_doc = (root / "admission.json").read_bytes()
+            for artifact in ("result.json", "configuration.json", "admission.json"):
+                (root / artifact).unlink()
+            state.fail_review = False
+
+            # CLI missing / tampered / budget-exhausted / placement-drift refusal controls:
+            handoff_path.unlink()
+            code, _, err = self.invoke(
+                root, state, reconstruct=True, extra=handoff_args
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("absent_context", err)
+
+            tampered = json.loads(saved_bytes.decode("utf-8"))
+            tampered["authentication"] = "f" * 64
+            handoff_path.write_text(json.dumps(tampered), encoding="utf-8")
+            code, _, err = self.invoke(
+                root, state, reconstruct=True, extra=handoff_args
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("tampered_authentication_or_digest", err)
+
+            handoff_path.write_bytes(saved_bytes)
+            code, _, err = self.invoke(
+                root,
+                state,
+                reconstruct=True,
+                extra=(
+                    *handoff_args,
+                    "--original-api-limit",
+                    "20",
+                    "--prior-consumed-requests",
+                    "10",
+                ),
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("budget_exhausted_before_effect", err)
+
+            code, _, err = self.invoke(
+                root,
+                state,
+                reconstruct=True,
+                extra=(*handoff_args, "--publication-inventory", "legacy"),
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("snapshot_or_transaction_mismatch", err)
+
+            # Explicit-document --recover-retained mode also enforces stored recovery context:
+            (root / "configuration.json").write_bytes(saved_config_doc)
+            (root / "admission.json").write_bytes(saved_admission_doc)
+            explicit_recover_args = [
+                "publish",
+                "--allow-write",
+                "--enable-review",
+                "--no-auto-approve",
+                "--oidc-token",
+                "synthetic",
+                "--repository",
+                IDENTITY.repository,
+                "--repository-id",
+                "1",
+                "--pull-request",
+                "1",
+                "--head-sha",
+                HEAD,
+                "--base-sha",
+                BASE,
+                "--base-branch",
+                "main",
+                "--app-slug",
+                trusted_recovery.APP,
+                "--diff",
+                str(root / "review.patch"),
+                "--config",
+                str(root / ".reviewsensei.yml"),
+                "--outcome",
+                str(root / "publication-outcome.json"),
+                "--session-ledger",
+                str(root / "ledger"),
+                "--recover-retained",
+                "--configuration-context",
+                str(root / "configuration.json"),
+                "--admission-context",
+                str(root / "admission.json"),
+                *handoff_args,
+                "--original-api-limit",
+                "20",
+                "--prior-consumed-requests",
+                "10",
+            ]
+            import io
+            import os
+            from contextlib import redirect_stderr, redirect_stdout
+
+            import review_sensei_github as github
+            from review_sensei_github.cli import main as github_main
+
+            err_buf = io.StringIO()
+            with (
+                patch.dict(os.environ, {"GITHUB_TOKEN": "synthetic-read"}, clear=True),
+                patch.multiple(
+                    github,
+                    GitHubHttp=lambda: state.http,
+                    BrokerClient=trusted_recovery._Broker,
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(err_buf),
+            ):
+                self.assertEqual(github_main(explicit_recover_args), 1)
+            self.assertIn("budget_exhausted_before_effect", err_buf.getvalue())
+            (root / "configuration.json").unlink()
+            (root / "admission.json").unlink()
+
+            # Valid fresh-process CLI recovery succeeds with zero inference:
+            code, out, err = self.invoke(
+                root, state, reconstruct=True, extra=handoff_args
+            )
+            self.assertEqual(code, 0, err)
+            self.assertIn("published", out)
+
+        # Bounded retention cleanup proof: prune_expired removes expired envelopes while keeping active ones.
+        base_now = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+        clock = [base_now]
+        with tempfile.TemporaryDirectory() as cleanup_dir:
+            cpath = Path(cleanup_dir) / "handoff"
+            store = RecoveryContextStore(
+                cpath, key=HANDOFF_KEY, ttl_seconds=300, now=lambda: clock[0]
+            )
+            self.assertEqual(store.prune_expired(), ())
+            for idx in range(MAX_RECOVERY_HANDOFF_FILES - 1):
+                store.save(_sample_bundle(transaction_id=f"{idx:064x}"))
+            clock[0] = base_now + timedelta(seconds=200)
+            active_path = store.save(_sample_bundle(transaction_id="e" * 64))
+            clock[0] = base_now + timedelta(seconds=301)
+            removed = store.prune_expired()
+            self.assertEqual(len(removed), MAX_RECOVERY_HANDOFF_FILES - 1)
+            self.assertTrue(active_path.is_file())
+            # Slot capacity is reclaimed for subsequent captures without enlarging the 8-file cap.
+            new_path = store.save(_sample_bundle(transaction_id="f" * 64))
+            self.assertTrue(new_path.is_file())
+
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_cli_result_retry_does_not_overwrite_handoff_recover_from_rejection_repo_id_none_and_corrupt_accounting(
+        self,
+    ) -> None:
+        import io
+        import os
+        from contextlib import redirect_stderr, redirect_stdout
+        from dataclasses import replace
+
+        import review_sensei_github as github
+        from review_sensei_github.cli import main as github_main
+
+        from review_sensei.recovery_context import RecoveryRefusalError
+
+        # 1. `verify_stored_recovery_context` rejects `repository_id=None` mismatch in BOTH directions.
+        with tempfile.TemporaryDirectory() as rdir:
+            rstore = RecoveryContextStore(Path(rdir) / "handoff", key=HANDOFF_KEY)
+            bundle_with_id = _sample_bundle(transaction_id="1" * 64, repository_id=123)
+            rstore.save(bundle_with_id)
+            with self.assertRaises(RecoveryRefusalError) as err_to_none:
+                verify_stored_recovery_context(
+                    rstore,
+                    expected_bundle=replace(bundle_with_id, repository_id=None),
+                    current_run_id=2,
+                )
+            self.assertEqual(
+                err_to_none.exception.refusal_code, "snapshot_or_transaction_mismatch"
+            )
+            self.assertIn("repository_id", str(err_to_none.exception))
+
+            bundle_without_id = _sample_bundle(
+                transaction_id="2" * 64, repository_id=None
+            )
+            rstore.save(bundle_without_id)
+            with self.assertRaises(RecoveryRefusalError) as err_from_none:
+                verify_stored_recovery_context(
+                    rstore,
+                    expected_bundle=replace(bundle_without_id, repository_id=123),
+                    current_run_id=2,
+                )
+            self.assertEqual(
+                err_from_none.exception.refusal_code,
+                "snapshot_or_transaction_mismatch",
+            )
+            self.assertIn("repository_id", str(err_from_none.exception))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.original_analysis(root)
+            config_path = root / ".reviewsensei.yml"
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8").replace(
+                    "github:\n",
+                    "github:\n  artifacts: diagnostics\n",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            key_file = root / "handoff.key"
+            key_file.write_bytes(HANDOFF_KEY)
+            key_file.chmod(0o600)
+            handoff_dir = root / "handoff"
+            handoff_args = (
+                "--recovery-context-dir",
+                str(handoff_dir),
+                "--recovery-context-key-file",
+                str(key_file),
+                "--policy-commit",
+                POLICY_COMMIT,
+            )
+
+            # 2. `--recover-from` rejects `--recovery-context-dir` / `--recovery-context-key-file`
+            # BEFORE reading legacy artifact or executing `recover_review` (even with world-readable key).
+            insecure_key = root / "insecure.key"
+            insecure_key.write_bytes(HANDOFF_KEY)
+            insecure_key.chmod(0o644)
+            state = _FailedPublication()
+            state.fail_review = False
+            legacy_args = [
+                "publish",
+                "--allow-write",
+                "--enable-review",
+                "--no-auto-approve",
+                "--oidc-token",
+                "synthetic",
+                "--repository",
+                IDENTITY.repository,
+                "--repository-id",
+                "1",
+                "--pull-request",
+                "1",
+                "--head-sha",
+                HEAD,
+                "--base-sha",
+                BASE,
+                "--base-branch",
+                "main",
+                "--app-slug",
+                trusted_recovery.APP,
+                "--diff",
+                str(root / "review.patch"),
+                "--outcome",
+                str(root / "publication-outcome.json"),
+                "--recover-from",
+                str(root / "nonexistent-legacy-artifact.json"),
+                "--recovery-context-dir",
+                str(handoff_dir),
+                "--recovery-context-key-file",
+                str(insecure_key),
+            ]
+            legacy_err = io.StringIO()
+            with (
+                patch.dict(os.environ, {"GITHUB_TOKEN": "synthetic-read"}, clear=True),
+                patch.multiple(
+                    github,
+                    GitHubHttp=lambda: state.http,
+                    BrokerClient=trusted_recovery._Broker,
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(legacy_err),
+            ):
+                self.assertEqual(github_main(legacy_args), 1)
+            self.assertIn(
+                "legacy --recover-from does not accept recovery-context handoff settings",
+                legacy_err.getvalue(),
+            )
+            self.assertEqual(len(state.reviews), 0)
+
+            # 3. Retried `--result` verifies existing handoff envelope rather than overwriting it!
+            state.fail_review = True
+            self.assertEqual(self.invoke(root, state, extra=handoff_args)[0], 1)
+            handoff_files = list(handoff_dir.glob("*.json"))
+            self.assertEqual(len(handoff_files), 1)
+            handoff_path = handoff_files[0]
+            original_handoff_bytes = handoff_path.read_bytes()
+            state.fail_review = False
+
+            # 3a. Tampered handoff on `--result` retry fails closed and is NOT overwritten.
+            tampered_doc = json.loads(original_handoff_bytes.decode("utf-8"))
+            tampered_doc["authentication"] = "0" * 64
+            tampered_bytes = json.dumps(tampered_doc).encode("utf-8")
+            handoff_path.write_bytes(tampered_bytes)
+            code, _, err = self.invoke(root, state, extra=handoff_args)
+            self.assertEqual(code, 1)
+            self.assertIn("tampered_authentication_or_digest", err)
+            self.assertEqual(handoff_path.read_bytes(), tampered_bytes)
+            self.assertEqual(len(state.reviews), 0)
+
+            # 3b. Symlink at handoff target on `--result` retry fails closed and is NOT overwritten.
+            decoy_target = root / "decoy.json"
+            decoy_target.write_bytes(original_handoff_bytes)
+            handoff_path.unlink()
+            handoff_path.symlink_to(decoy_target)
+            code, _, err = self.invoke(root, state, extra=handoff_args)
+            self.assertEqual(code, 1)
+            self.assertIn("tampered_authentication_or_digest", err)
+            self.assertIn("symlink_handoff_rejected", err)
+            self.assertTrue(handoff_path.is_symlink())
+            self.assertEqual(len(state.reviews), 0)
+            handoff_path.unlink()
+
+            # 3c. Expired handoff on `--result` retry fails closed (never mints fresh TTL).
+            handoff_path.write_bytes(original_handoff_bytes)
+            future_now = datetime.now(timezone.utc) + timedelta(days=365)
+            orig_resolve = resolve_recovery_context_store
+
+            def expired_cli_resolve(*r_args, **r_kwargs):  # type: ignore[no-untyped-def]
+                r_kwargs["now"] = lambda: future_now
+                return orig_resolve(*r_args, **r_kwargs)
+
+            with patch(
+                "review_sensei_github.command_bodies.resolve_recovery_context_store",
+                side_effect=expired_cli_resolve,
+            ):
+                code, _, err = self.invoke(root, state, extra=handoff_args)
+            self.assertEqual(code, 1)
+            self.assertIn("expired_context", err)
+            self.assertEqual(handoff_path.read_bytes(), original_handoff_bytes)
+            self.assertEqual(len(state.reviews), 0)
+
+            # 3d. Budget-exhausted `--result` retry fails closed (honors --original-api-limit).
+            code, _, err = self.invoke(
+                root,
+                state,
+                extra=(
+                    *handoff_args,
+                    "--original-api-limit",
+                    "20",
+                    "--prior-consumed-requests",
+                    "15",
+                ),
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("budget_exhausted_before_effect", err)
+            self.assertEqual(len(state.reviews), 0)
+
+            # 4. Malformed `record.api_run_accounting` fails closed (`truncated_or_corrupt_context`)
+            # on BOTH `--result` and explicit `--recover-retained` (no silent ACCOUNTING_VERSION fallback).
+            orig_load = LocalSessionLedger.load
+            for corrupt_accounting in (["not-a-mapping"], {"version": "   "}):
+
+                def corrupt_load(ledger_self, ident, *, _bad=corrupt_accounting):  # type: ignore[no-untyped-def]
+                    loaded = orig_load(ledger_self, ident)
+                    if loaded.record is not None:
+                        object.__setattr__(loaded.record, "api_run_accounting", _bad)
+                    return loaded
+
+                with patch.object(LocalSessionLedger, "load", corrupt_load):
+                    code_res, _, err_res = self.invoke(root, state, extra=handoff_args)
+                self.assertEqual(code_res, 1)
+                self.assertIn("truncated_or_corrupt_context", err_res)
+
+                explicit_args = [
+                    "publish",
+                    "--allow-write",
+                    "--enable-review",
+                    "--no-auto-approve",
+                    "--oidc-token",
+                    "synthetic",
+                    "--repository",
+                    IDENTITY.repository,
+                    "--repository-id",
+                    "1",
+                    "--pull-request",
+                    "1",
+                    "--head-sha",
+                    HEAD,
+                    "--base-sha",
+                    BASE,
+                    "--base-branch",
+                    "main",
+                    "--app-slug",
+                    trusted_recovery.APP,
+                    "--diff",
+                    str(root / "review.patch"),
+                    "--config",
+                    str(root / ".reviewsensei.yml"),
+                    "--outcome",
+                    str(root / "publication-outcome.json"),
+                    "--session-ledger",
+                    str(root / "ledger"),
+                    "--recover-retained",
+                    "--configuration-context",
+                    str(root / "configuration.json"),
+                    "--admission-context",
+                    str(root / "admission.json"),
+                    *handoff_args,
+                ]
+                exp_err = io.StringIO()
+                with (
+                    patch.dict(
+                        os.environ, {"GITHUB_TOKEN": "synthetic-read"}, clear=True
+                    ),
+                    patch.multiple(
+                        github,
+                        GitHubHttp=lambda: state.http,
+                        BrokerClient=trusted_recovery._Broker,
+                    ),
+                    patch.object(LocalSessionLedger, "load", corrupt_load),
+                    redirect_stdout(io.StringIO()),
+                    redirect_stderr(exp_err),
+                ):
+                    self.assertEqual(github_main(explicit_args), 1)
+                self.assertIn("truncated_or_corrupt_context", exp_err.getvalue())
+
+            # 5. Valid `--result` retry verifies existing envelope WITHOUT overwriting it and publishes!
+            code_ok, out_ok, err_ok = self.invoke(root, state, extra=handoff_args)
+            self.assertEqual(code_ok, 0, err_ok)
+            self.assertIn("published", out_ok)
+            self.assertEqual(handoff_path.read_bytes(), original_handoff_bytes)
+
+
+@unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+class RecoveryContextMalformedEnvelopeTests(unittest.TestCase):
+    def load(self, store, bundle):
+        return store.load_for_fresh_process(
+            bundle.transaction_id,
+            expected_repository=bundle.repository,
+            expected_pull_request=bundle.pull_request,
+            expected_base_sha=bundle.base_sha,
+            expected_head_sha=bundle.head_sha,
+            expected_policy_commit=bundle.policy_commit,
+            expected_result_sha256=bundle.accepted_result_sha256,
+        )
+
+    def test_malformed_authentication_refuses_selected_and_preserves_unrelated(self):
+        now = datetime(2026, 11, 11, 12, tzinfo=timezone.utc)
+        for authentication in ("é" * 64, "0" * 63, "G" * 64, "0" * 65, None, 1):
+            with (
+                self.subTest(authentication=authentication),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                clock = [now]
+                store = RecoveryContextStore(
+                    Path(directory) / "handoff",
+                    key=HANDOFF_KEY,
+                    ttl_seconds=1,
+                    now=lambda: clock[0],
+                )
+                bundle = _sample_bundle()
+                target = store.save(bundle)
+                envelope = json.loads(target.read_bytes())
+                envelope["authentication"] = authentication
+                target.write_text(json.dumps(envelope), encoding="utf-8")
+                retained = target.read_bytes()
+                decision = self.load(store, bundle)
+                self.assertFalse(decision.admitted)
+                self.assertEqual(decision.refusal_code, "truncated_or_corrupt_context")
+                clock[0] = now + timedelta(seconds=2)
+                self.assertEqual(store.prune_expired(), ())
+                self.assertEqual(target.read_bytes(), retained)
+
+    def test_selected_and_pruning_reads_are_bounded_before_parsing(self):
+        import io
+
+        from review_sensei.recovery_context import MAX_RECOVERY_CONTEXT_BUNDLE_BYTES
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecoveryContextStore(Path(directory) / "handoff", key=HANDOFF_KEY)
+            bundle = _sample_bundle()
+            target = store.save(bundle)
+            target.write_bytes(b"x" * (MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 20))
+            original_open = Path.open
+            reads = []
+
+            class BoundedStream(io.BytesIO):
+                def read(self, size=-1):
+                    reads.append(size)
+                    self_test.assertEqual(size, MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 1)
+                    return super().read(size)
+
+            self_test = self
+
+            def opened(path, *args, **kwargs):
+                if path == target:
+                    return BoundedStream(
+                        b"x" * (MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 20)
+                    )
+                return original_open(path, *args, **kwargs)
+
+            with patch.object(Path, "open", opened):
+                self.assertEqual(
+                    self.load(store, bundle).refusal_code,
+                    "truncated_or_corrupt_context",
+                )
+                self.assertEqual(store.prune_expired(), ())
+            self.assertEqual(reads, [MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 1] * 2)
+            self.assertTrue(target.exists())
+
+    def test_pruning_retains_untrusted_expiry_and_invalid_signed_ttl(self):
+        now = datetime(2026, 11, 11, 12, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecoveryContextStore(
+                Path(directory) / "handoff", key=HANDOFF_KEY, now=lambda: now
+            )
+            bundle = _sample_bundle()
+            target = store.save(bundle)
+            envelope = json.loads(target.read_bytes())
+            envelope["document"]["expires_at"] = (
+                now - timedelta(seconds=1)
+            ).isoformat()
+            # Old timestamp without a matching HMAC is not deletion authority.
+            target.write_text(json.dumps(envelope), encoding="utf-8")
+            self.assertEqual(store.prune_expired(), ())
+            self.assertEqual(
+                self.load(store, bundle).refusal_code,
+                "tampered_authentication_or_digest",
+            )
+            # Even an authenticated envelope with a negative TTL is malformed.
+            envelope["authentication"] = store._signature(envelope["document"])
+            target.write_text(json.dumps(envelope), encoding="utf-8")
+            retained = target.read_bytes()
+            self.assertEqual(store.prune_expired(), ())
+            self.assertEqual(target.read_bytes(), retained)
+
+    def test_unserializable_document_fails_closed_without_pruning(self):
+        for invalid in ("\ud800", float("nan")):
+            with (
+                self.subTest(invalid=repr(invalid)),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                store = RecoveryContextStore(
+                    Path(directory) / "handoff", key=HANDOFF_KEY
+                )
+                bundle = _sample_bundle()
+                target = store.save(bundle)
+                envelope = json.loads(target.read_bytes())
+                envelope["document"]["invalid"] = invalid
+                target.write_text(json.dumps(envelope), encoding="utf-8")
+                retained = target.read_bytes()
+                self.assertEqual(
+                    self.load(store, bundle).refusal_code,
+                    "truncated_or_corrupt_context",
+                )
+                self.assertEqual(store.prune_expired(), ())
+                self.assertEqual(target.read_bytes(), retained)
+
+    def test_pruning_directory_scan_is_bounded_and_preserves_all_entries_on_overflow(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecoveryContextStore(Path(directory) / "handoff", key=HANDOFF_KEY)
+            target = store.save(_sample_bundle())
+            visited = []
+
+            def entries():
+                for index in range(100):
+                    visited.append(index)
+                    yield SimpleNamespace(name=f"{index}.json")
+
+            with patch("review_sensei.recovery_context.os.scandir") as scan:
+                scan.return_value.__enter__.return_value = entries()
+                with self.assertRaisesRegex(ReviewInputError, "entry cap exceeded"):
+                    store.prune_expired()
+            self.assertEqual(len(visited), 33)
+            self.assertTrue(target.exists())
+
+    def test_unreadable_unrelated_entry_is_preserved_and_selected_load_refuses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecoveryContextStore(Path(directory) / "handoff", key=HANDOFF_KEY)
+            bundle = _sample_bundle()
+            target = store.save(bundle)
+            with patch.object(Path, "open", side_effect=PermissionError("synthetic")):
+                self.assertEqual(store.prune_expired(), ())
+                self.assertEqual(
+                    self.load(store, bundle).refusal_code,
+                    "truncated_or_corrupt_context",
+                )
+            self.assertTrue(target.exists())
+            with patch.object(Path, "is_file", side_effect=OSError("synthetic")):
+                self.assertEqual(store.prune_expired(), ())
+            self.assertTrue(target.exists())
+
+    def test_deep_or_overlong_numeric_json_refuses_without_pruning(self):
+        for raw in (
+            b"[" * 1100 + b"]" * 1100,
+            b'{"document":{"n":'
+            + b"1" * 5000
+            + b'},"authentication":"'
+            + b"0" * 64
+            + b'"}',
+        ):
+            with (
+                self.subTest(size=len(raw)),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                store = RecoveryContextStore(
+                    Path(directory) / "handoff", key=HANDOFF_KEY
+                )
+                bundle = _sample_bundle()
+                target = store.save(bundle)
+                target.write_bytes(raw)
+                self.assertEqual(
+                    self.load(store, bundle).refusal_code,
+                    "truncated_or_corrupt_context",
+                )
+                self.assertEqual(store.prune_expired(), ())
+                self.assertEqual(target.read_bytes(), raw)
+
+
+class RecoveryContextPlatformPrivacyTests(unittest.TestCase):
+    def test_non_posix_store_refuses_before_filesystem_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "handoff"
+            key_file = Path(directory) / "not-read.key"
+            store = RecoveryContextStore(root, key=HANDOFF_KEY)
+            bundle = _sample_bundle()
+            with (
+                patch("review_sensei.recovery_context.os", SimpleNamespace(name="nt")),
+                patch.object(
+                    Path,
+                    "open",
+                    side_effect=AssertionError("must not open private files"),
+                ),
+            ):
+                self.assertIsNone(
+                    resolve_recovery_context_store(
+                        None, None, artifacts_policy="diagnostics"
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    resolve_recovery_context_store(
+                        root, key_file, artifacts_policy="diagnostics"
+                    )
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    store.save(bundle)
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    store.prune_expired()
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    store.load_for_fresh_process(
+                        bundle.transaction_id,
+                        expected_repository=bundle.repository,
+                        expected_pull_request=bundle.pull_request,
+                        expected_base_sha=bundle.base_sha,
+                        expected_head_sha=bundle.head_sha,
+                        expected_policy_commit=bundle.policy_commit,
+                        expected_result_sha256=bundle.accepted_result_sha256,
+                    )
+            self.assertFalse(root.exists())
+            self.assertFalse(key_file.exists())
+
+    def test_hosted_non_posix_opt_in_refuses_before_inference_or_storage(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            tempfile.TemporaryDirectory() as secret_dir,
+        ):
+            fixture = OrdinaryEntryHostedAndCliRecoveryG17Tests._make_hosted_fixture(
+                directory, artifacts="diagnostics"
+            )
+            handoff = Path(secret_dir) / "handoff"
+            fixture.recovery_context_dir = handoff
+            fixture.recovery_context_key_file = Path(secret_dir) / "absent.key"
+            with patch("review_sensei.recovery_context.os", SimpleNamespace(name="nt")):
+                self.assertEqual(fixture.invoke(), 1)
+            self.assertIn("unsupported on this platform", fixture.error)
+            self.assertEqual(fixture.provider_calls, 0)
+            self.assertFalse(handoff.exists())
+            self.assertEqual(list(Path(secret_dir).iterdir()), [])
+
+
+@unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+class OrdinaryRecoverySubprocessG17Tests(unittest.TestCase):
+    """Real interpreter restart using ordinary entry writers and fake native HTTP."""
+
+    CHILD = r"""
+import json, os, sys
+from pathlib import Path
+from test_recovery_context_g17 import OrdinaryEntryHostedAndCliRecoveryG17Tests
+from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_persistence import IDENTITY
+
+packet = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+# A new fixture supplies only synthetic service behavior. All retained artifacts
+# and accepted-result bytes below came from production writers in the parent.
+f = OrdinaryEntryHostedAndCliRecoveryG17Tests._make_hosted_fixture(sys.argv[2], limit=packet["limit"])
+f.root = Path(packet["root"])
+f.policy = f.policy_ref = packet["policy"]
+f.config_bytes = bytes.fromhex(packet["config_hex"])
+f.comment = packet["comment"]
+f.extra_comments = {int(k): v for k, v in packet["extra_comments"].items()}
+f.run_id = packet["run_id"]
+f.attempt = 2
+f.recovery_context_dir = Path(packet["handoff"])
+f.recovery_context_key_file = Path(packet["key_file"])
+f.override_run_directory = Path(sys.argv[3])
+def no_inference():
+    raise AssertionError("cold retained recovery invoked the provider")
+f.before_provider = no_inference
+assert f.provider_calls == 0 and f.accounted is None and f.selected is None
+code = f.invoke()
+record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+Path(sys.argv[4]).write_text(json.dumps({
+    "pid": os.getpid(), "code": code, "error": f.error,
+    "provider_calls": f.provider_calls, "record": record.to_dict(),
+    "reviews": [r["state"] for r in f.reviews], "trace": f.trace,
+    "checks": f.check_runs,
+}), encoding="utf-8")
+"""
+
+    def test_ordinary_retention_reopens_in_cold_process_without_new_inference(self):
+        import subprocess
+        import sys
+
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_api_work_persistence import IDENTITY as RUN_IDENTITY
+
+        from review_sensei.api_work import ApiRunAccounting
+        from review_sensei.session import SessionRecord
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            producer = OrdinaryEntryHostedAndCliRecoveryG17Tests._make_hosted_fixture(
+                str(source), artifacts="diagnostics", limit=384
+            )
+            handoff = root / "private-handoff"
+            key_file = root / "private.key"
+            key_file.write_bytes(HANDOFF_KEY)
+            key_file.chmod(0o600)
+            producer.recovery_context_dir = handoff
+            producer.recovery_context_key_file = key_file
+            producer.before_publication = lambda: (_ for _ in ()).throw(
+                OSError("synthetic interruption after ordinary retention")
+            )
+            self.assertEqual(producer.invoke(), 1)
+            self.assertEqual(producer.provider_calls, 1)
+            self.assertEqual(producer.reviews, [])
+            original = parse_session_comment(
+                producer.comment["body"], identity=RUN_IDENTITY
+            )
+            self.assertEqual(original.transaction.phase, "publication_pending")
+            original_accounting = ApiRunAccounting.from_document(
+                original.api_run_accounting
+            )
+            self.assertEqual(original_accounting.configuration.limit, 384)
+            self.assertGreater(original_accounting.confirmed, 0)
+            handoff_files = list(handoff.glob("*.json"))
+            self.assertEqual(len(handoff_files), 1)
+            retained_handoff = handoff_files[0].read_bytes()
+            retained_bundle = json.loads(retained_handoff)["document"]["bundle"]
+            self.assertEqual(retained_bundle["run_id"], producer.run_id)
+            self.assertEqual(
+                retained_bundle["accepted_result_sha256"],
+                original.transaction.result_sha256,
+            )
+            for name in ("configuration.json", "admission.json", "review.json"):
+                (source / name).unlink(missing_ok=True)
+            packet = root / "transport.json"
+            packet.write_text(
+                json.dumps(
+                    {
+                        "root": str(source),
+                        "policy": producer.policy,
+                        "config_hex": producer.config_bytes.hex(),
+                        "limit": 384,
+                        "comment": producer.comment,
+                        "extra_comments": producer.extra_comments,
+                        "run_id": producer.run_id,
+                        "handoff": str(handoff),
+                        "key_file": str(key_file),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            checkout = Path(__file__).resolve().parents[1]
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if key
+                in {"PATH", "HOME", "TMP", "TMPDIR", "TEMP", "SYSTEMROOT", "LANG"}
+            }
+            env["PYTHONPATH"] = os.pathsep.join(
+                str(path)
+                for path in (
+                    checkout / "tests",
+                    checkout / "src",
+                    checkout / "packages/python/review-sensei-github/src",
+                )
+            )
+            original_diff = (source / "review.patch").read_bytes()
+            original_config = (source / ".reviewsensei.yml").read_bytes()
+            cases = (
+                ("missing_handoff", "absent_context"),
+                ("tampered_handoff", "tampered_authentication_or_digest"),
+                ("malformed_handoff", "truncated_or_corrupt_context"),
+                (
+                    "changed_diff",
+                    "snapshot_or_transaction_mismatch: stored recovery context drifted on diff_sha256",
+                ),
+                ("valid", None),
+            )
+            for label, refusal in cases:
+                with self.subTest(case=label):
+                    handoff_files[0].write_bytes(retained_handoff)
+                    (source / "review.patch").write_bytes(original_diff)
+                    (source / ".reviewsensei.yml").write_bytes(original_config)
+                    for name in ("configuration.json", "admission.json", "review.json"):
+                        (source / name).unlink(missing_ok=True)
+                    if label == "missing_handoff":
+                        handoff_files[0].unlink()
+                    elif label in {"tampered_handoff", "malformed_handoff"}:
+                        envelope = json.loads(retained_handoff)
+                        envelope["authentication"] = (
+                            "0" * 64 if label == "tampered_handoff" else "é" * 64
+                        )
+                        handoff_files[0].write_text(
+                            json.dumps(envelope), encoding="utf-8"
+                        )
+                    elif label == "changed_diff":
+                        changed = original_diff.replace(b"+change", b"+different")
+                        self.assertNotEqual(changed, original_diff)
+                        (source / "review.patch").write_bytes(changed)
+                    cold_fixture = root / (label + "-fixture")
+                    cold_fixture.mkdir()
+                    cold_run = root / (label + "-run")
+                    cold_run.mkdir()
+                    output = root / (label + ".json")
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-c",
+                            self.CHILD,
+                            str(packet),
+                            str(cold_fixture),
+                            str(cold_run),
+                            str(output),
+                        ],
+                        cwd=root,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    child = json.loads(output.read_text(encoding="utf-8"))
+                    self.assertNotEqual(child["pid"], os.getpid())
+                    self.assertEqual(child["provider_calls"], 0)
+                    recovered = SessionRecord.from_dict(child["record"])
+                    self.assertEqual(
+                        recovered.transaction.result_sha256,
+                        original.transaction.result_sha256,
+                    )
+                    current = ApiRunAccounting.from_document(
+                        recovered.api_run_accounting
+                    )
+                    self.assertEqual(
+                        current.configuration, original_accounting.configuration
+                    )
+                    self.assertEqual(
+                        current.blocks[: len(original_accounting.blocks)],
+                        original_accounting.blocks,
+                    )
+                    self.assertGreaterEqual(
+                        current.confirmed, original_accounting.confirmed
+                    )
+                    self.assertLessEqual(
+                        current.remaining, original_accounting.remaining
+                    )
+                    self.assertGreaterEqual(current.remaining, 0)
+                    self.assertEqual(
+                        current.startup.liability
+                        + current.prior_nonstartup_liability
+                        + current.confirmed
+                        + current.uncertain
+                        + current.reserved_undispatched
+                        + current.remaining,
+                        384,
+                    )
+                    if refusal:
+                        self.assertEqual(child["code"], 1, child["error"])
+                        self.assertIn(refusal, child["error"])
+                        self.assertNotIn("api key", child["error"].lower())
+                        self.assertEqual(child["reviews"], [])
+                        self.assertEqual(child["checks"], [])
+                        self.assertEqual(
+                            recovered.transaction.phase, "publication_pending"
+                        )
+                        self.assertIsNone(current.terminal_transaction)
+                    else:
+                        self.assertEqual(child["code"], 0, child["error"])
+                        self.assertEqual(child["reviews"], ["COMMENTED", "APPROVED"])
+                        self.assertEqual(
+                            recovered.transaction.phase, "publication_succeeded"
+                        )
+                        self.assertIsNotNone(current.terminal_transaction)
+                        self.assertEqual(
+                            handoff_files[0].read_bytes(), retained_handoff
+                        )
 
 
 if __name__ == "__main__":

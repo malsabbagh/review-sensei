@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -43,6 +45,7 @@ from review_sensei.combined_capacity import (
     ORDINARY_EVIDENCE_READ_LIMIT,
     REPRESENTATION_LIMIT_INVENTORY,
     RESERVED_FENCE_READS,
+    BoundaryInterruptionResult,
     CombinedCapacityError,
     CombinedCapacityEvaluation,
     CombinedComponentFootprint,
@@ -50,10 +53,13 @@ from review_sensei.combined_capacity import (
     InterruptionScenario,
     RepresentationLimit,
     build_supported_scenario_matrix,
+    decompose_session_and_result_footprint,
+    estimate_lifecycle_future_growth_bytes,
     evaluate_combined_capacity,
     evaluate_live_session_envelope,
     lookup_representation_limit,
     measure_utf8_text,
+    qualify_retained_interruption_replay,
     require_combined_capacity,
     simulate_interruption_and_fresh_replay,
     verify_inventory_against_runtime_constants,
@@ -394,12 +400,32 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 sub_dir = Path(tmpdir) / f"case_{idx:03d}"
                 sub_dir.mkdir(mode=0o700)
                 bundle = _make_recovery_bundle(idx)
-                replay = simulate_interruption_and_fresh_replay(
-                    scenario,
-                    handoff_directory=sub_dir,
-                    handoff_key=handoff_key,
-                    recovery_bundle=bundle,
-                )
+                if (
+                    os.name != "posix"
+                    and scenario.payload_profile != "combined_overflow"
+                ):
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "unsupported on this platform"
+                    ):
+                        simulate_interruption_and_fresh_replay(
+                            scenario,
+                            handoff_directory=sub_dir,
+                            handoff_key=handoff_key,
+                            recovery_bundle=bundle,
+                        )
+                    self.assertEqual(list(sub_dir.iterdir()), [])
+                    # Keep the portable simulation assertions, without claiming
+                    # a private-store handoff or genuine process replay.
+                    replay = simulate_interruption_and_fresh_replay(
+                        scenario, verify_fresh_handoff=False
+                    )
+                else:
+                    replay = simulate_interruption_and_fresh_replay(
+                        scenario,
+                        handoff_directory=sub_dir,
+                        handoff_key=handoff_key,
+                        recovery_bundle=bundle,
+                    )
                 self.assertFalse(replay.authority)
                 self.assertFalse(replay.orphan_parts_trusted)
                 self.assertEqual(replay.duplicate_side_effects, 0)
@@ -418,7 +444,9 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                     self.assertFalse(replay.fresh_process_handoff_verified)
                 else:
                     self.assertTrue(replay.envelope_evaluation.combined_envelope_fits)
-                    self.assertTrue(replay.fresh_process_handoff_verified)
+                    self.assertEqual(
+                        replay.fresh_process_handoff_verified, os.name == "posix"
+                    )
                     if scenario.interruption_mode in {
                         "in_flight_not_stored",
                         "in_flight_stored_response_lost",
@@ -609,6 +637,22 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 key=b"z" * 32,
                 now=lambda: datetime.now(timezone.utc),
             )
+            if os.name != "posix":
+                # The preceding hosted/convergence subjourneys remain portable.
+                # This private-store replay cannot claim Windows ACL qualification.
+                retained = {
+                    name: (root / name).read_bytes()
+                    for name in ("result.json", "configuration.json", "admission.json")
+                }
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    handoff_store.save(admitted.bundle)
+                self.assertFalse((root / "handoff").exists())
+                for name, content in retained.items():
+                    self.assertEqual((root / name).read_bytes(), content)
+                self.assertEqual(ledger.load(PUB_IDENTITY).record, failed_rec)
+                return
             handoff_store.save(admitted.bundle)
             for artifact in ("result.json", "configuration.json", "admission.json"):
                 (root / artifact).unlink()
@@ -745,9 +789,15 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 recovery=rx,
             )
 
-        default_replay = simulate_interruption_and_fresh_replay(valid_scen)
-        self.assertTrue(default_replay.fresh_process_handoff_verified)
-        self.assertTrue(default_replay.converged_after_recovery)
+        if os.name == "posix":
+            default_replay = simulate_interruption_and_fresh_replay(valid_scen)
+            self.assertTrue(default_replay.fresh_process_handoff_verified)
+            self.assertTrue(default_replay.converged_after_recovery)
+        else:
+            with self.assertRaisesRegex(
+                ReviewInputError, "unsupported on this platform"
+            ):
+                simulate_interruption_and_fresh_replay(valid_scen)
 
         opt_out_replay = simulate_interruption_and_fresh_replay(
             valid_scen, verify_fresh_handoff=False
@@ -789,6 +839,27 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 repository_id=101,
                 pull_request=448,
             )
+        corrupt_v2_record = SessionRecord.create(
+            SessionIdentity("malsabbagh/review-sensei", 448, 101)
+        )
+        object.__setattr__(
+            corrupt_v2_record,
+            "api_run_accounting",
+            {"version": ACCOUNTING_VERSION, "confirmed": "corrupt"},
+        )
+        with self.assertRaises(ReviewInputError):
+            evaluate_live_session_envelope(
+                corrupt_v2_record,
+                repository_id=101,
+                pull_request=448,
+            )
+        with self.assertRaises(ReviewInputError):
+            qualify_retained_interruption_replay(
+                corrupt_v2_record,
+                identity=SessionIdentity("malsabbagh/review-sensei", 448, 101),
+                interruption_stage="review_publication",
+                interruption_mode="in_flight_not_stored",
+            )
 
         # RS-1378BC: exact ORDINARY_EVIDENCE_READ_LIMIT (60) vs +1 (61) boundary:
         exact_60 = evaluate_combined_capacity(
@@ -810,6 +881,818 @@ class CombinedCapacityG12Tests(unittest.TestCase):
         )
         self.assertFalse(over_61.combined_envelope_fits)
         self.assertEqual(over_61.refusal_code, "combined_evidence_read_budget_exceeded")
+
+        # Protected 4-call terminal fence tail cannot be under-priced:
+        under_tail = evaluate_combined_capacity(
+            CombinedComponentFootprint(protected_tail_requests=3)
+        )
+        self.assertFalse(under_tail.individual_components_fit)
+        self.assertEqual(under_tail.refusal_code, "individual_component_limit_exceeded")
+        self.assertIn("protected_tail_requests=3", under_tail.reason)
+
+    def test_complete_session_record_retained_result_future_growth_and_intermediate_peaks(
+        self,
+    ) -> None:
+        """Decompose actual ReviewResult, complete SessionRecord (with snapshot & archive), future growth, and intermediate peaks."""
+        from test_terminal_representability_g34 import _deterministic_valid_path
+
+        from review_sensei.api_work import (
+            ApiExecutionOwner,
+            ApiRunIdentity,
+            FrozenApiConfiguration,
+            PendingApiRequest,
+            StartupPlan,
+            StartupSlot,
+        )
+        from review_sensei.bounded_evidence import (
+            EvidenceReadBudget,
+            evidence_manifest,
+            partition_evidence,
+        )
+        from review_sensei.coverage import CoverageManifest, FileCoverage
+        from review_sensei.disposition import (
+            FindingIdentity,
+            MaintainerCommand,
+            apply_session_command,
+        )
+        from review_sensei.models import ReviewComment
+        from review_sensei.session import ReviewTransaction
+        from review_sensei.terminal_representability import (
+            build_action_result_binding,
+            preview_session_command_representability,
+        )
+
+        fixed_now = datetime(2026, 11, 11, 0, 0, tzinfo=timezone.utc)
+        head_sha = "b" * 40
+        tx_id = ReviewTransaction.derive_id(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+            policy_digest="c" * 64,
+            configuration_digest="d" * 64,
+            evidence_digest="e" * 64,
+            reservation_id="2" * 64,
+        )
+        tx = ReviewTransaction(
+            transaction_id=tx_id,
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="a" * 40,
+            head_sha=head_sha,
+            policy_digest="c" * 64,
+            configuration_digest="d" * 64,
+            evidence_digest="e" * 64,
+            generation=1,
+            reservation_id="2" * 64,
+            phase="publication_succeeded",
+            result_sha256="f" * 64,
+        )
+        files_12 = tuple(
+            FileCoverage(
+                path=_deterministic_valid_path(i, total_len=227),
+                outcome="budget-exhausted",
+            )
+            for i in range(12)
+        )
+        retained = ReviewResult(
+            summary="審査完了 🧪 Partial convergence summary with multibyte UTF-8",
+            comments=(
+                ReviewComment(
+                    path="src/app.py",
+                    line=12,
+                    severity="high",
+                    body="Guard missing on snapshot state",
+                ),
+            ),
+            provider="openai:gpt-5",
+            review_status="partial",
+            coverage=CoverageManifest(
+                files=files_12,
+                enumerated_paths=tuple(f.path for f in files_12),
+            ),
+        )
+
+        # Build authentic ApiRunAccounting with startup liability, archived predecessor, and pending unknown request:
+        startup = StartupPlan(
+            (
+                StartupSlot("review", 1, ("pr_get", "comments_list", "terminal_patch")),
+                StartupSlot("review", 2, ("pr_get", "comments_list", "terminal_patch")),
+            )
+        )
+        prev_binding = {
+            "repository": IDENTITY.repository,
+            "repository_id": IDENTITY.repository_id,
+            "pull_request": IDENTITY.pull_request,
+            "base_sha": "a" * 40,
+            "head_sha": head_sha,
+            "policy_digest": "c" * 64,
+            "configuration_digest": "d" * 64,
+            "generation": 0,
+            "producer": "local-ledger",
+            "purpose": "evidence",
+            "schema_version": "1.0",
+        }
+        prev_doc = {"archived_run_id": 100}
+        prev_parts = partition_evidence(prev_doc, binding=prev_binding, item_count=1)
+        prev_manifest = evidence_manifest(
+            prev_doc,
+            binding=prev_binding,
+            item_count=1,
+            parts=prev_parts,
+            storage_ids=("9001",),
+        )
+        acc = ApiRunAccounting(
+            version=ACCOUNTING_VERSION,
+            identity=ApiRunIdentity(IDENTITY.repository_id or 123, 101),
+            owner=ApiExecutionOwner(1, "review", 1),
+            configuration=FrozenApiConfiguration("e" * 40, "d" * 64, 512),
+            startup=startup,
+            startup_used=(("review", 1),),
+            previous_record={
+                "run_id": 100,
+                "root_sha256": "9" * 64,
+                "manifest": prev_manifest,
+            },
+        )
+        acc = acc.reserve("b0", 3)
+        req1 = PendingApiRequest("r1", 1_700_000_000_001)
+        req2 = PendingApiRequest("r2", 1_700_000_000_002)
+        acc = acc.dispatch("b0", req1)
+        acc = acc.confirm(req1)
+        acc = acc.dispatch("b0", req2)  # left pending/uncertain!
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = LocalSessionLedger(
+                Path(tmp),
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=EvidenceReadBudget(),
+            )
+            rec = ledger.initialize(IDENTITY, now=fixed_now)
+            rec = ledger.replace(
+                IDENTITY,
+                lambda r: r.evolve(
+                    completed_initial_reviews=1,
+                    last_committed_reservation_id="2" * 64,
+                    transaction=tx,
+                    api_run_accounting=acc.to_document(),
+                ),
+                now=fixed_now,
+            )
+            finding = FindingIdentity(instance="abcdef" + "0" * 58, needs_human=True)
+            rec, _ = apply_session_command(
+                ledger,
+                IDENTITY,
+                MaintainerCommand(
+                    action="accept-risk",
+                    actor="alice",
+                    reason="ok",
+                    head_sha=head_sha,
+                    finding_references=("RS-ABCDEF",),
+                ),
+                finding_inventory=(finding,),
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:1",
+                now=fixed_now,
+            )
+            # Stage large 2nd decision so disposition_snapshot is created on rec:
+            files_37 = tuple(
+                FileCoverage(
+                    path=_deterministic_valid_path(i, total_len=227),
+                    outcome="budget-exhausted",
+                )
+                for i in range(37)
+            )
+            res_37 = ReviewResult(
+                summary="Partial",
+                comments=(),
+                provider="openai:gpt-5",
+                review_status="partial",
+                coverage=CoverageManifest(
+                    files=files_37,
+                    enumerated_paths=tuple(f.path for f in files_37),
+                ),
+            )
+            from review_sensei.disposition import incomplete_coverage_from_result
+
+            rec, _ = apply_session_command(
+                ledger,
+                IDENTITY,
+                MaintainerCommand(
+                    action="accept-coverage-uncertainty",
+                    actor="alice",
+                    reason="ok",
+                    head_sha=head_sha,
+                ),
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:2",
+                incomplete_coverage=incomplete_coverage_from_result(res_37),
+                now=fixed_now,
+            )
+            assert rec.disposition_snapshot is not None
+
+            fp = decompose_session_and_result_footprint(
+                rec,
+                repository_id=123,
+                pull_request=7,
+                retained_result=retained,
+                include_future_growth=True,
+                include_intermediate_staging_peak=True,
+                retry_reconcile_requests=2,
+            )
+            self.assertGreater(fp.disposition_snapshot_root_bytes, 400)
+            self.assertEqual(fp.disposition_snapshot_part_reads, 1)
+            self.assertGreaterEqual(fp.ancestry_part_reads, 1)
+            self.assertEqual(fp.startup_requests, 6)
+            self.assertEqual(fp.committed_requests, 1)
+            self.assertEqual(fp.unknown_usage_requests, 1)
+            self.assertEqual(fp.active_reserved_requests, 1)
+            self.assertEqual(fp.coverage_entry_count, 13)
+            self.assertEqual(fp.max_coverage_token_bytes, 249)
+            self.assertGreater(fp.future_growth_bytes, 100)
+            self.assertGreater(
+                fp.max_intermediate_record_bytes, fp.projected_record_bytes
+            )
+
+            ev_live = evaluate_live_session_envelope(
+                rec,
+                repository_id=123,
+                pull_request=7,
+                retained_result=retained,
+                include_future_growth=True,
+                include_intermediate_staging_peak=True,
+                retry_reconcile_requests=2,
+            )
+            self.assertTrue(ev_live.combined_envelope_fits)
+
+            # Future growth alone pushes a near-ceiling record > 32,768B:
+            growth_only = estimate_lifecycle_future_growth_bytes(rec)
+            self.assertGreater(growth_only, 0)
+            near_ceiling_reserve = (
+                MAX_SESSION_RECORD_BYTES
+                - len(canonical_bytes(rec.to_dict()))
+                - growth_only
+                + 16
+            )
+            ev_without_growth = evaluate_live_session_envelope(
+                rec,
+                repository_id=123,
+                pull_request=7,
+                future_root_reserve_bytes=near_ceiling_reserve,
+                include_future_growth=False,
+            )
+            self.assertTrue(ev_without_growth.combined_envelope_fits)
+            ev_with_growth = evaluate_live_session_envelope(
+                rec,
+                repository_id=123,
+                pull_request=7,
+                future_root_reserve_bytes=near_ceiling_reserve,
+                include_future_growth=True,
+            )
+            self.assertFalse(ev_with_growth.combined_envelope_fits)
+            self.assertEqual(
+                ev_with_growth.refusal_code, "combined_session_record_bytes_exceeded"
+            )
+
+            # G34 2-decision snapshot replay counterexample caught inside G12 combined envelope:
+            shared_budget = EvidenceReadBudget()
+            _, _, g34_rep = preview_session_command_representability(
+                identity=IDENTITY,
+                current_record=rec,
+                command=MaintainerCommand(
+                    action="accept-risk",
+                    actor="alice",
+                    reason="ok",
+                    head_sha=head_sha,
+                    finding_references=("RS-ABCDEF",),
+                ),
+                intent_sha256="1" * 64,
+                binding=build_action_result_binding(
+                    identity=IDENTITY,
+                    policy_commit="e" * 40,
+                    head_sha=head_sha,
+                    intent_sha256="1" * 64,
+                    configuration_digest="d" * 64,
+                    owner_generation=1,
+                    producer="local-ledger",
+                ),
+                finding_inventory=(finding,),
+                actor_role="OWNER",
+                policy_digest="c" * 64,
+                provenance="comment:3",
+                enable_disposition_snapshot_writes=True,
+                evidence_budget=shared_budget,
+                source_ledger=ledger,
+                now=fixed_now,
+            )
+            self.assertEqual(shared_budget.calls, 0)
+            self.assertFalse(g34_rep.representable)
+            g34_replay = qualify_retained_interruption_replay(
+                rec,
+                identity=IDENTITY,
+                interruption_stage="terminal_accounting_close",
+                interruption_mode="before_dispatch",
+                retained_result=res_37,
+                terminal_report=g34_rep,
+                ledger_directory=Path(tmp),
+            )
+            self.assertFalse(g34_replay.envelope_evaluation.combined_envelope_fits)
+            self.assertEqual(
+                g34_replay.envelope_evaluation.refusal_code,
+                "individual_component_limit_exceeded",
+            )
+            self.assertEqual(g34_rep.carrier_bytes, 9_294)
+            self.assertIn(
+                f"terminal_action_manifest_bytes={g34_rep.carrier_bytes} exceeds 8192",
+                g34_replay.envelope_evaluation.reason,
+            )
+            self.assertFalse(g34_replay.fresh_ledger_reloaded)
+            self.assertFalse(g34_replay.retained_snapshot_preserved)
+            self.assertEqual(g34_replay.qualification_status, "capacity_refused")
+
+            # Valid retained 2-decision snapshot state crossed with all 4 interruption modes + fresh-process replay:
+            for mode in INTERRUPTION_MODES:
+                ok_replay = qualify_retained_interruption_replay(
+                    rec,
+                    identity=IDENTITY,
+                    interruption_stage="review_publication",
+                    interruption_mode=mode,
+                    retained_result=retained,
+                    ledger_directory=Path(tmp),
+                )
+                self.assertTrue(ok_replay.envelope_evaluation.combined_envelope_fits)
+                self.assertTrue(ok_replay.fresh_ledger_reloaded)
+                self.assertFalse(ok_replay.fresh_handoff_verified)
+                self.assertTrue(ok_replay.retained_snapshot_preserved)
+                self.assertTrue(ok_replay.protected_fence_tail_preserved)
+                self.assertIsNone(ok_replay.duplicate_side_effects)
+                self.assertIsNone(ok_replay.fresh_inference_calls)
+                self.assertFalse(ok_replay.to_dict()["authority"])
+                self.assertEqual(
+                    ok_replay.qualification_status, "snapshot_graph_verified"
+                )
+                self.assertEqual(
+                    ok_replay.qualified_components,
+                    ("session_root", "disposition_snapshot"),
+                )
+                self.assertGreater(ok_replay.physical_reads, 0)
+                self.assertIn("archive", ok_replay.to_dict()["unqualified_components"])
+                if mode in {"in_flight_not_stored", "in_flight_stored_response_lost"}:
+                    self.assertGreaterEqual(ok_replay.retained_unknown_charges, 2)
+
+            # A matching root is insufficient: its referenced bytes must exist
+            # and authenticate in the child, independently of this warm ledger.
+            assert rec.disposition_snapshot is not None
+            manifest = rec.disposition_snapshot["state_manifest"]
+            part_id = manifest["parts"][0]["storage_id"]
+            part_path = next(Path(tmp).rglob(part_id))
+            original = part_path.read_bytes()
+            for mutation in ("missing", "corrupt"):
+                with self.subTest(mutation=mutation):
+                    if mutation == "missing":
+                        part_path.unlink()
+                    else:
+                        part_path.write_bytes(b"{}")
+                    try:
+                        with self.assertRaisesRegex(
+                            ReviewInputError, "subprocess authentication failed"
+                        ):
+                            qualify_retained_interruption_replay(
+                                rec,
+                                identity=IDENTITY,
+                                interruption_stage="review_publication",
+                                interruption_mode="before_dispatch",
+                                ledger_directory=Path(tmp),
+                            )
+                    finally:
+                        part_path.write_bytes(original)
+
+    def test_paged_snapshot_subprocess_authenticates_each_retained_part(self) -> None:
+        from test_paged_disposition_snapshots import (
+            HEAD as SNAPSHOT_HEAD,
+        )
+        from test_paged_disposition_snapshots import (
+            IDENTITY as SNAPSHOT_IDENTITY,
+        )
+        from test_paged_disposition_snapshots import (
+            BatchCandidateLedger,
+            LocalDispositionBatchTests,
+            decision,
+        )
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from review_sensei.session import stage_session_dispositions
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            record = LocalDispositionBatchTests.record()
+            seed = LocalSessionLedger(path)
+            seed.initialize(SNAPSHOT_IDENTITY)
+            seed.replace(
+                SNAPSHOT_IDENTITY,
+                lambda current: current.evolve(
+                    generation=1,
+                    transaction=record.transaction,
+                    last_committed_reservation_id=record.last_committed_reservation_id,
+                ),
+            )
+            writer = BatchCandidateLedger(
+                path,
+                evidence_budget=EvidenceReadBudget(),
+                enable_disposition_snapshot_writes=True,
+            )
+            values = tuple(decision(i) for i in range(33))
+            written = writer.replace(
+                SNAPSHOT_IDENTITY,
+                lambda current: stage_session_dispositions(
+                    writer,
+                    current,
+                    values,
+                    head_sha=SNAPSHOT_HEAD,
+                    now=None,
+                ),
+            )
+            args = dict(
+                identity=SNAPSHOT_IDENTITY,
+                interruption_stage="review_publication",
+                interruption_mode="before_dispatch",
+                ledger_directory=path,
+            )
+            receipt = qualify_retained_interruption_replay(written, **args)
+            self.assertEqual(receipt.qualification_status, "snapshot_graph_verified")
+            self.assertEqual(written.disposition_snapshot["schema_version"], "2.0")
+            parts = LocalDispositionBatchTests.parts(path)
+            self.assertGreater(len(parts), 1)
+            for relative, original in parts.items():
+                with self.subTest(part=relative):
+                    target = path / relative
+                    target.write_bytes(b"{}")
+                    try:
+                        with self.assertRaisesRegex(
+                            ReviewInputError, "subprocess authentication failed"
+                        ):
+                            qualify_retained_interruption_replay(written, **args)
+                    finally:
+                        target.write_bytes(original)
+
+    def test_snapshot_qualification_requires_actual_artifacts_and_reports_root_only(
+        self,
+    ) -> None:
+        record = SessionRecord.create(IDENTITY)
+        args = dict(
+            identity=IDENTITY,
+            interruption_stage="review_publication",
+            interruption_mode="before_dispatch",
+        )
+        missing = qualify_retained_interruption_replay(record, **args)
+        self.assertEqual(missing.qualification_status, "retained_artifacts_required")
+        self.assertFalse(missing.fresh_ledger_reloaded)
+        self.assertFalse(missing.fresh_handoff_verified)
+        self.assertEqual(missing.qualified_components, ())
+        self.assertIsNone(missing.physical_reads)
+        self.assertIsNone(missing.duplicate_side_effects)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ReviewInputError, "directory is required"):
+                qualify_retained_interruption_replay(
+                    record, ledger_directory=root / "absent", **args
+                )
+            self.assertFalse((root / "absent").exists())
+            ledger = LocalSessionLedger(root)
+            stored = ledger.initialize(IDENTITY)
+            receipt = qualify_retained_interruption_replay(
+                stored, ledger_directory=root, **args
+            )
+            self.assertEqual(receipt.qualification_status, "root_verified")
+            self.assertEqual(receipt.qualified_components, ("session_root",))
+            self.assertFalse(receipt.retained_snapshot_preserved)
+            self.assertFalse(receipt.fresh_handoff_verified)
+            self.assertGreater(receipt.physical_reads, 0)
+            with patch(
+                "review_sensei.combined_capacity._run_snapshot_probe",
+                side_effect=subprocess.TimeoutExpired("snapshot-probe", 1),
+            ):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "subprocess unavailable or timed out"
+                ):
+                    qualify_retained_interruption_replay(
+                        stored, ledger_directory=root, **args
+                    )
+            for output in (
+                b"not-json",
+                b'{"components": ["session_root"], "physical_reads": true}',
+                b"x" * 1025,
+            ):
+                with (
+                    self.subTest(output_size=len(output)),
+                    patch(
+                        "review_sensei.combined_capacity._run_snapshot_probe",
+                        return_value=subprocess.CompletedProcess(
+                            [], 0, stdout=output, stderr=b""
+                        ),
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        ReviewInputError,
+                        "subprocess (receipt invalid|authentication failed)",
+                    ):
+                        qualify_retained_interruption_replay(
+                            stored, ledger_directory=root, **args
+                        )
+            with self.assertRaisesRegex(
+                ReviewInputError, "subprocess authentication failed"
+            ):
+                qualify_retained_interruption_replay(
+                    stored.evolve(completed_initial_reviews=1),
+                    ledger_directory=root,
+                    **args,
+                )
+
+    def test_retained_qualification_rejects_missing_repository_scope(self) -> None:
+        from dataclasses import replace
+
+        args = dict(
+            interruption_stage="review_publication", interruption_mode="before_dispatch"
+        )
+        missing_id = replace(IDENTITY, repository_id=None)
+        with self.assertRaisesRegex(ReviewInputError, "repository_id is required"):
+            qualify_retained_interruption_replay(
+                SessionRecord.create(missing_id), identity=missing_id, **args
+            )
+
+    def test_snapshot_probe_pins_reader_and_bounds_live_output(self) -> None:
+        import review_sensei.combined_capacity as capacity
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ledger = LocalSessionLedger(root / "ledger")
+            stored = ledger.initialize(IDENTITY)
+            args = dict(
+                identity=IDENTITY,
+                interruption_stage="review_publication",
+                interruption_mode="before_dispatch",
+                ledger_directory=root / "ledger",
+            )
+            # A cwd/PYTHONPATH shadow must never execute, even if it can forge
+            # the otherwise plausible root-only receipt.
+            shadow = root / "review_sensei"
+            shadow.mkdir()
+            marker = root / "shadow-executed"
+            (shadow / "__init__.py").write_text(
+                f"from pathlib import Path; Path({str(marker)!r}).touch(); raise RuntimeError()"
+            )
+            real_popen = subprocess.Popen
+
+            def shadow_cwd(*a, **kw):
+                return real_popen(*a, **kw, cwd=root)
+
+            with (
+                patch.dict(os.environ, {"PYTHONPATH": str(root)}),
+                patch(
+                    "review_sensei.combined_capacity.subprocess.Popen",
+                    side_effect=shadow_cwd,
+                ),
+            ):
+                result = qualify_retained_interruption_replay(stored, **args)
+            self.assertEqual(result.qualification_status, "root_verified")
+            self.assertFalse(marker.exists())
+
+            identity = capacity._snapshot_reader_identity()
+            mismatched = {path: "0" * 64 for path in identity}
+            with patch.object(
+                capacity, "_snapshot_reader_identity", return_value=mismatched
+            ):
+                with self.assertRaisesRegex(ReviewInputError, "authentication failed"):
+                    qualify_retained_interruption_replay(stored, **args)
+
+            # Exercise the real bounded pipe, not a mocked CompletedProcess.
+            flood = "import os; " + "\nwhile True: os.write(1, b'x' * 4096)"
+            with patch.object(
+                capacity,
+                "_snapshot_probe_command",
+                return_value=[sys.executable, "-I", "-c", flood],
+            ):
+                with self.assertRaisesRegex(ReviewInputError, "authentication failed"):
+                    qualify_retained_interruption_replay(stored, **args)
+
+            receipt = json.dumps(
+                {
+                    "components": ["session_root"],
+                    "physical_reads": 1,
+                    "reader_identity": identity,
+                }
+            )
+            stderr = f"import os; os.write(2, b'x' * 1048576); print({receipt!r})"
+            with patch.object(
+                capacity,
+                "_snapshot_probe_command",
+                return_value=[sys.executable, "-I", "-c", stderr],
+            ):
+                result = qualify_retained_interruption_replay(stored, **args)
+                self.assertEqual(result.qualification_status, "root_verified")
+            with (
+                patch.object(capacity, "PART_READ_SECONDS", 0.1),
+                patch.object(
+                    capacity,
+                    "_snapshot_probe_command",
+                    return_value=[
+                        sys.executable,
+                        "-I",
+                        "-c",
+                        "import time; time.sleep(10)",
+                    ],
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unavailable or timed out"
+                ):
+                    qualify_retained_interruption_replay(stored, **args)
+
+    def test_exact_boundary_sizes_crossed_with_interruption_and_fresh_replay(
+        self,
+    ) -> None:
+        """Verify exact N-1 / N / N+1 boundaries across 8192, 10240, 32768, 65536, 60/64, and 512 with interruption & replay."""
+        record = SessionRecord.create(IDENTITY)
+        raw_rec_bytes = len(canonical_bytes(record.to_dict()))
+        raw_com_bytes = len(
+            render_session_comment(
+                repository_id=123, pull_request=7, record=record
+            ).encode("utf-8")
+        )
+
+        # 1. 8,191 / 8,192 / 8,193 terminal action manifest bytes:
+        for carrier_b, expected_ok in ((8_191, True), (8_192, True), (8_193, False)):
+            res = qualify_retained_interruption_replay(
+                record,
+                identity=IDENTITY,
+                interruption_stage="terminal_accounting_close",
+                interruption_mode="in_flight_stored_response_lost",
+                terminal_carrier_bytes=carrier_b,
+            )
+            self.assertEqual(
+                res.envelope_evaluation.combined_envelope_fits, expected_ok
+            )
+            self.assertFalse(res.fresh_ledger_reloaded)
+            self.assertEqual(
+                res.qualification_status,
+                "retained_artifacts_required" if expected_ok else "capacity_refused",
+            )
+
+        # 2. 10,239 / 10,240 / 10,241 inline disposition bytes:
+        for disp_b, expected_ok in ((10_239, True), (10_240, True), (10_241, False)):
+            ev = evaluate_combined_capacity(
+                CombinedComponentFootprint(dispositions_bytes=disp_b)
+            )
+            self.assertEqual(ev.combined_envelope_fits, expected_ok)
+
+        # 3. 32,767 / 32,768 / 32,769 SessionRecord canonical bytes:
+        for target_rec_b, expected_ok in (
+            (32_767, True),
+            (32_768, True),
+            (32_769, False),
+        ):
+            res = qualify_retained_interruption_replay(
+                record,
+                identity=IDENTITY,
+                interruption_stage="retained_result_staging",
+                interruption_mode="before_dispatch",
+                future_root_reserve_bytes=(target_rec_b - raw_rec_bytes),
+            )
+            self.assertEqual(
+                res.envelope_evaluation.projected_record_bytes, target_rec_b
+            )
+            self.assertEqual(
+                res.envelope_evaluation.combined_envelope_fits, expected_ok
+            )
+
+        # Intermediate peak > 32,768B refused even when terminal projected_record_bytes <= 32,768B:
+        ev_inter_peak = evaluate_combined_capacity(
+            CombinedComponentFootprint(
+                base_shell_bytes=4_000,
+                intermediate_peak_record_bytes=32_769,
+            )
+        )
+        self.assertFalse(ev_inter_peak.combined_envelope_fits)
+        self.assertEqual(
+            ev_inter_peak.refusal_code, "combined_session_record_bytes_exceeded"
+        )
+
+        # 4. 65,535 / 65,536 / 65,537 session comment bytes (via grants + reserve) and review body bytes:
+        grants_350 = tuple(f"{i:064x}" for i in range(350))
+        com_350 = len(
+            render_session_comment(
+                repository_id=123,
+                pull_request=7,
+                record=record,
+                consumed_grants=grants_350,
+            ).encode("utf-8")
+        )
+        for target_com_b, expected_ok in (
+            (65_535, True),
+            (65_536, True),
+            (65_537, False),
+        ):
+            reserve_needed = target_com_b - com_350
+            self.assertLessEqual(
+                raw_rec_bytes + reserve_needed, MAX_SESSION_RECORD_BYTES
+            )
+            ev_c = evaluate_live_session_envelope(
+                record,
+                repository_id=123,
+                pull_request=7,
+                consumed_grants=grants_350,
+                future_root_reserve_bytes=reserve_needed,
+            )
+            self.assertEqual(ev_c.projected_comment_bytes, target_com_b)
+            self.assertEqual(ev_c.combined_envelope_fits, expected_ok)
+
+        for target_rev_b, expected_ok in (
+            (65_535, True),
+            (65_536, True),
+            (65_537, False),
+        ):
+            ev_r = evaluate_combined_capacity(
+                CombinedComponentFootprint(
+                    published_review_summary_utf8_bytes=(target_rev_b - 1_024),
+                    published_marker_overhead_bytes=1_024,
+                )
+            )
+            self.assertEqual(ev_r.projected_review_body_bytes, target_rev_b)
+            self.assertEqual(ev_r.combined_envelope_fits, expected_ok)
+
+        # 5. 511 / 512 / 513 physical API requests crossed with in_flight interruption charge (+1 unknown):
+        #    Note: in_flight_not_stored adds +1 unknown request, terminal_close=1, protected_tail=4 -> 6 fixed!
+        for committed, expected_total, expected_ok in (
+            (505, 511, True),
+            (506, 512, True),
+            (507, 513, False),
+        ):
+            res_api = qualify_retained_interruption_replay(
+                record,
+                identity=IDENTITY,
+                interruption_stage="check_publication",
+                interruption_mode="in_flight_not_stored",
+                committed_requests=committed,
+            )
+            self.assertEqual(
+                res_api.envelope_evaluation.total_projected_requests, expected_total
+            )
+            self.assertEqual(
+                res_api.envelope_evaluation.combined_envelope_fits, expected_ok
+            )
+
+        # Definite rejection on check_publication vs other stages + BoundaryInterruptionResult invariants:
+        def_rej_check = qualify_retained_interruption_replay(
+            record,
+            identity=IDENTITY,
+            interruption_stage="check_publication",
+            interruption_mode="definite_rejection",
+        )
+        self.assertFalse(def_rej_check.fresh_handoff_verified)
+        def_rej_other = qualify_retained_interruption_replay(
+            record,
+            identity=IDENTITY,
+            interruption_stage="native_approval",
+            interruption_mode="definite_rejection",
+        )
+        self.assertEqual(
+            def_rej_other.recovery.action, "rescan_under_pinned_provenance"
+        )
+
+        with self.assertRaises(ReviewInputError):
+            qualify_retained_interruption_replay(
+                record,
+                identity=IDENTITY,
+                interruption_stage="bad_stage",
+                interruption_mode="before_dispatch",
+            )
+        with self.assertRaises(ReviewInputError):
+            qualify_retained_interruption_replay(
+                record,
+                identity=IDENTITY,
+                interruption_stage="review_publication",
+                interruption_mode="bad_mode",
+            )
+        with self.assertRaises(ReviewInputError):
+            BoundaryInterruptionResult(
+                interruption_stage="review_publication",
+                interruption_mode="before_dispatch",
+                footprint=CombinedComponentFootprint(),
+                envelope_evaluation=evaluate_combined_capacity(
+                    CombinedComponentFootprint()
+                ),
+                fresh_ledger_reloaded=True,
+                fresh_handoff_verified=True,
+                retained_snapshot_preserved=False,
+                retained_unknown_charges=0,
+                protected_fence_tail_preserved=False,
+                duplicate_side_effects=0,
+                fresh_inference_calls=0,
+                recovery=prescribe_recovery("supported_read_only_observation"),
+            )
+        self.assertGreater(raw_com_bytes, raw_rec_bytes)
 
 
 if __name__ == "__main__":

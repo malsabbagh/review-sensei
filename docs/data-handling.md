@@ -40,6 +40,23 @@ six-hour default/24-hour maximum reuse expiry. Expiry does not delete files;
 the host owns cleanup and any separate upload/retention policy. It writes
 nothing by default and never adds evidence to the public session ledger.
 
+The separate G17 `RecoveryContextStore` retains only authenticated original-context
+identity/digest bundles, not raw diffs, prompts, provider prose or credentials.
+It is opt-in under paired directory/key paths and `artifacts: diagnostics`.
+Private storage currently requires POSIX ownership/mode enforcement: Windows and
+other non-POSIX hosts refuse this opt-in before reading the key or creating a
+handoff directory. Unconfigured review/recovery remains unchanged. `chmod` on
+Windows is not treated as proof of a private ACL; a qualified ACL mechanism is
+still required before enabling this private-store feature there.
+
+Selected malformed or unauthenticated bundles fail closed. Pruning skips and
+preserves unrelated malformed/unreadable files, including forged expiry metadata;
+only an authenticated current-version envelope with a valid bounded, elapsed TTL
+can be removed. Directory scans admit at most 32 entries, and each envelope read
+is bounded to the existing 8,192-byte ceiling plus one overflow sentinel before
+JSON parsing. Invalid evidence still occupies its existing storage allowance;
+pruning does not reset accounting, enlarge capacity or authorize recovery.
+
 Lens documents are read only for the current review and are not persisted by
 the core. The optional in-memory `ReviewContextCache` stores only bounded
 metadata such as coverage mode and generation; it is repository/PR-scoped,

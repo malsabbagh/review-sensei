@@ -147,7 +147,16 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
             self.assertEqual(
                 self.f.override(start, event), 0, (self.f.error, self.f.exception)
             )
-            self.assertEqual(len(self.f.decisions()[1]), min(start + 10, 25))
+            record, decisions = self.f.decisions()
+            self.assertEqual(len(decisions), min(start + 10, 25))
+            ledger = self.f.selected.ledger
+            before = len(self.f.trace)
+            parts = ledger.snapshot_preview_parts(IDENTITY, record)
+            self.assertIsNotNone(parts)
+            remaining = ledger.snapshot_preview_read_requests(record)
+            self.assertGreaterEqual(remaining, 0)
+            self.assertEqual(ledger.snapshot_preview_parts(IDENTITY, record), parts)
+            self.assertEqual(len(self.f.trace), before)
             self.assert_accounting()
 
     def assert_accounting(self):

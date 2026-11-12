@@ -435,17 +435,25 @@ def authenticate_historical_publication(
 # Backward-compatible advisory re-exports (`authority=False`); core historical
 # publication authentication above never depends on `recovery_route_advisor`.
 from .recovery_route_advisor import (  # noqa: E402
+    ATTEMPT_EVIDENCE_PACKET_SCHEMA,
+    AttemptEvidencePacket,
     RecoveryClassification,
+    build_attempt_evidence_packet,
+    build_live_ledger_attempt_evidence_packet,
     classify_live_ledger_recovery,
     classify_recovery_state,
 )
 
 __all__ = [
+    "ATTEMPT_EVIDENCE_PACKET_SCHEMA",
+    "AttemptEvidencePacket",
     "HistoricalPublicationCompletion",
     "HistoricalReadSelection",
     "HistoricalSnapshotLedger",
     "RecoveryClassification",
     "authenticate_historical_publication",
+    "build_attempt_evidence_packet",
+    "build_live_ledger_attempt_evidence_packet",
     "classify_live_ledger_recovery",
     "classify_recovery_state",
 ]

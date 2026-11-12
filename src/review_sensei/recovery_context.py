@@ -17,6 +17,7 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +51,15 @@ SUPPORTED_WRITER_ACCOUNTING_VERSIONS = frozenset(
     {LEGACY_ACCOUNTING_VERSION, ACCOUNTING_VERSION}
 )
 PLACEMENT_MODES = frozenset(
-    {"complete", "bounded", "advisory", "merge_focused", "merge-focused"}
+    {
+        "complete",
+        "bounded",
+        "advisory",
+        "merge_focused",
+        "merge-focused",
+        "strict",
+        "legacy",
+    }
 )
 RUNTIME_ONLY_FIELD_LABELS = frozenset(
     {
@@ -543,6 +552,12 @@ def build_bundle_from_context_documents(
 
     current_key = admission_context.get("current_key")
     if (
+        isinstance(current_key, Mapping)
+        and isinstance(current_key.get("context_digest"), str)
+        and _HEX64_RE.fullmatch(current_key["context_digest"])
+    ):
+        selected_context_digest = canonical_recovery_digest(current_key)
+    elif (
         "active_category_ids" in admission_context
         or "lens_contexts" in admission_context
     ):
@@ -555,16 +570,22 @@ def build_bundle_from_context_documents(
     else:
         selected_context_digest = canonical_recovery_digest(current_key)
 
-    if "learnings" in admission_context:
-        learnings_digest = canonical_recovery_digest(
-            admission_context.get("learnings", [])
-        )
+    if (
+        isinstance(current_key, Mapping)
+        and isinstance(current_key.get("learning_digest"), str)
+        and _HEX64_RE.fullmatch(current_key["learning_digest"])
+    ):
+        learnings_digest = current_key["learning_digest"]
     elif (
         isinstance(current_key, Mapping)
         and isinstance(current_key.get("learnings_digest"), str)
         and _HEX64_RE.fullmatch(current_key["learnings_digest"])
     ):
         learnings_digest = current_key["learnings_digest"]
+    elif "learnings" in admission_context:
+        learnings_digest = canonical_recovery_digest(
+            admission_context.get("learnings", [])
+        )
     else:
         learnings_digest = canonical_recovery_digest([])
 
@@ -835,6 +856,14 @@ def price_recovery_context_admission(
     )
 
 
+def _require_private_store_platform() -> None:
+    if os.name != "posix":
+        raise ReviewInputError(
+            "private recovery context storage is unsupported on this platform; "
+            "POSIX ownership and mode enforcement are required"
+        )
+
+
 class RecoveryContextStore:
     """Private, HMAC-authenticated handoff store for original recovery bundles."""
 
@@ -869,6 +898,7 @@ class RecoveryContextStore:
         ).hexdigest()
 
     def _validate_directory(self) -> None:
+        _require_private_store_platform()
         if self.directory.is_symlink():
             raise ReviewInputError("recovery context directory must not be a symlink")
         if self.directory.exists() and os.name == "posix":
@@ -979,13 +1009,14 @@ class RecoveryContextStore:
                 "tampered_authentication_or_digest", ("symlink_handoff_rejected",)
             )
         try:
-            raw = path.read_bytes()
+            with path.open("rb") as stream:
+                raw = stream.read(MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 1)
             if not raw or len(raw) > MAX_RECOVERY_CONTEXT_BUNDLE_BYTES:
                 return _refusal_decision(
                     "truncated_or_corrupt_context", ("invalid_envelope_size",)
                 )
             envelope = json.loads(raw.decode("utf-8", errors="strict"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
             return _refusal_decision(
                 "truncated_or_corrupt_context", ("truncated_or_invalid_json",)
             )
@@ -994,6 +1025,7 @@ class RecoveryContextStore:
             not isinstance(envelope, Mapping)
             or set(envelope.keys()) != {"document", "authentication"}
             or not isinstance(envelope.get("authentication"), str)
+            or _HEX64_RE.fullmatch(envelope["authentication"]) is None
             or not isinstance(envelope.get("document"), Mapping)
         ):
             return _refusal_decision(
@@ -1001,7 +1033,12 @@ class RecoveryContextStore:
             )
 
         document = envelope["document"]
-        expected_sig = self._signature(document)
+        try:
+            expected_sig = self._signature(document)
+        except (ValueError, UnicodeError, RecursionError):
+            return _refusal_decision(
+                "truncated_or_corrupt_context", ("malformed_handoff_document",)
+            )
         if not hmac.compare_digest(envelope["authentication"], expected_sig):
             return _refusal_decision(
                 "tampered_authentication_or_digest", ("hmac_signature_mismatch",)
@@ -1102,3 +1139,131 @@ class RecoveryContextStore:
             unknown_usage_requests=unknown_usage_requests,
             active_reserved_requests=active_reserved_requests,
         )
+
+    def prune_expired(self) -> tuple[Path, ...]:
+        """Unlink only authenticated, bounded-TTL expired handoff envelopes.
+
+        Unrelated malformed/unreadable files are preserved and skipped. Their
+        untrusted timestamps never authorize deletion; selected loads refuse.
+        """
+
+        self._validate_directory()
+        if not self.directory.exists():
+            return ()
+        now = self.now()
+        if now.tzinfo is None:
+            raise ReviewInputError("recovery context clock must be timezone-aware")
+        removed: list[Path] = []
+        try:
+            with os.scandir(self.directory) as scan:
+                entries = [self.directory / entry.name for entry in islice(scan, 33)]
+        except OSError:
+            raise ReviewInputError(
+                "recovery context directory is unavailable"
+            ) from None
+        if len(entries) > 32:
+            raise ReviewInputError("recovery context directory entry cap exceeded")
+        for entry in sorted(entries):
+            if entry.suffix != ".json":
+                continue
+            try:
+                if entry.is_symlink() or not entry.is_file():
+                    raise ReviewInputError(
+                        "recovery context directory entry is invalid"
+                    )
+                with entry.open("rb") as stream:
+                    raw = stream.read(MAX_RECOVERY_CONTEXT_BUNDLE_BYTES + 1)
+                if not raw or len(raw) > MAX_RECOVERY_CONTEXT_BUNDLE_BYTES:
+                    continue
+                envelope = json.loads(raw.decode("utf-8", errors="strict"))
+            except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+                continue
+            if (
+                not isinstance(envelope, Mapping)
+                or set(envelope.keys()) != {"document", "authentication"}
+                or not isinstance(envelope.get("authentication"), str)
+                or _HEX64_RE.fullmatch(envelope["authentication"]) is None
+                or not isinstance(envelope.get("document"), Mapping)
+            ):
+                continue
+            document = envelope["document"]
+            try:
+                if not hmac.compare_digest(
+                    envelope["authentication"], self._signature(document)
+                ):
+                    continue
+                if (
+                    set(document)
+                    != {"envelope_version", "saved_at", "expires_at", "bundle"}
+                    or document["envelope_version"] != RECOVERY_HANDOFF_ENVELOPE_VERSION
+                ):
+                    continue
+                saved_at = datetime.fromisoformat(str(document["saved_at"]))
+                expires_at = datetime.fromisoformat(str(document["expires_at"]))
+            except (ValueError, UnicodeError, RecursionError):
+                continue
+            if (
+                saved_at.tzinfo is not None
+                and expires_at.tzinfo is not None
+                and 0
+                < (expires_at - saved_at).total_seconds()
+                <= MAX_RECOVERY_TTL_SECONDS
+                and now >= expires_at
+            ):
+                try:
+                    entry.unlink(missing_ok=True)
+                except OSError:
+                    raise ReviewInputError(
+                        "expired recovery context could not be removed"
+                    ) from None
+                removed.append(entry)
+        return tuple(removed)
+
+
+def resolve_recovery_context_store(
+    directory: Path | None,
+    key_file: Path | None,
+    *,
+    artifacts_policy: str,
+    ttl_seconds: int = DEFAULT_RECOVERY_TTL_SECONDS,
+    now: Callable[[], datetime] | None = None,
+) -> RecoveryContextStore | None:
+    """Resolve an opt-in RecoveryContextStore under private key and diagnostics policy.
+
+    Returns ``None`` when unconfigured (both ``directory`` and ``key_file`` are
+    ``None``), writing nothing by default per ``docs/data-handling.md``.
+    """
+
+    if directory is None and key_file is None:
+        return None
+    if directory is None or key_file is None or artifacts_policy != "diagnostics":
+        raise ReviewInputError(
+            "recovery context store requires paired directory and key file paths "
+            "and explicit diagnostics artifact policy"
+        )
+    _require_private_store_platform()
+    key_path = Path(key_file)
+    try:
+        if key_path.is_symlink() or (
+            os.name == "posix"
+            and (
+                key_path.stat().st_mode & 0o077 or key_path.stat().st_uid != os.getuid()
+            )
+        ):
+            raise ReviewInputError("recovery context key file must be private")
+        with key_path.open("rb") as stream:
+            key = stream.read(4097)
+        if not 32 <= len(key) <= 4096:
+            raise ValueError("key size")
+    except ReviewInputError:
+        raise
+    except (OSError, ValueError):
+        raise ReviewInputError(
+            "recovery context key file is unavailable or invalid"
+        ) from None
+    return RecoveryContextStore(
+        Path(directory),
+        key=key,
+        ttl_seconds=ttl_seconds,
+        now=now,
+    )

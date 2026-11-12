@@ -31,6 +31,7 @@ MAX_PUBLIC_SUMMARY_BYTES = 4_096
 MAX_SAFE_TEXT_LENGTH = 200
 MAX_SAFE_STEPS = 8
 MAX_UNCERTAIN_DISPATCHES = 64
+MAX_CI_OBSERVATIONS = 16
 MAX_COUNTER_VALUE = 9_007_199_254_740_991
 MAX_VALIDATED_STRING_LENGTH = 1_024
 INSTALLED_DISTRIBUTION_NAMES = ("review-sensei", "review-sensei-github")
@@ -42,6 +43,12 @@ _SEMVER_RE = re.compile(
     r"(?:-[0-9A-Za-z-]{1,32}(?:\.[0-9A-Za-z-]{1,32}){0,15})?"
     r"(?:\+[0-9A-Za-z-]{1,32}(?:\.[0-9A-Za-z-]{1,32}){0,15})?$"
 )
+_RELEASE_TAG_RE = re.compile(
+    r"^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z-]{1,32}(?:\.[0-9A-Za-z-]{1,32}){0,15})?"
+    r"(?:\+[0-9A-Za-z-]{1,32}(?:\.[0-9A-Za-z-]{1,32}){0,15})?$"
+)
+_UTC_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 _SAFE_REPO_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
 )
@@ -72,6 +79,28 @@ _SECRET_LIKE_RE = re.compile(
 )
 
 GATE_OUTCOMES = frozenset({"passed", "failed", "skipped", "not_run", "unknown"})
+CI_CONCLUSIONS = frozenset(
+    {
+        "success",
+        "failure",
+        "cancelled",
+        "action_required",
+        "timed_out",
+        "neutral",
+        "skipped",
+        "in_progress",
+        "unknown",
+    }
+)
+CI_FAILURE_CLASSIFICATIONS = frozenset(
+    {
+        "none",
+        "transient_artifact_upload_5xx",
+        "code_or_gate_failure",
+        "action_required",
+        "unknown",
+    }
+)
 BROKER_ROUTES = frozenset({"/github/token", "/github/session-grant", "none", "unknown"})
 SOURCE_EVENT_KINDS = frozenset(
     {
@@ -168,6 +197,12 @@ def _non_negative_int(value: object, *, field: str) -> int:
     return value
 
 
+def _positive_int(value: object, *, field: str) -> int:
+    if type(value) is not int or not 1 <= value <= MAX_COUNTER_VALUE:
+        raise ReviewInputError(f"{field} must be a bounded positive integer")
+    return value
+
+
 def _positive_int_or_unknown(value: object, *, field: str) -> int | str:
     if value is None or value == UNKNOWN_PROVENANCE:
         return UNKNOWN_PROVENANCE
@@ -241,6 +276,44 @@ def _semver_or_unknown(value: object, *, field: str) -> str:
     _reject_secret_or_control(value, field=field)
     if _SEMVER_RE.fullmatch(value) is None:
         raise ReviewInputError(f"{field} must be a semantic version or 'unknown'")
+    return value
+
+
+def _release_tag_or_unknown(value: object, *, field: str) -> str:
+    if value is None or value == UNKNOWN_PROVENANCE:
+        return UNKNOWN_PROVENANCE
+    if not isinstance(value, str) or len(value) > 128:
+        raise ReviewInputError(
+            f"{field} must be a semantic release tag (e.g. 'v0.8.20') or 'unknown'"
+        )
+    _reject_secret_or_control(value, field=field)
+    if _RELEASE_TAG_RE.fullmatch(value) is None:
+        raise ReviewInputError(
+            f"{field} must be a semantic release tag (e.g. 'v0.8.20') or 'unknown'"
+        )
+    return value
+
+
+def _utc_timestamp_or_unknown(value: object, *, field: str) -> str:
+    if value is None or value == UNKNOWN_PROVENANCE:
+        return UNKNOWN_PROVENANCE
+    if not isinstance(value, str) or len(value) > 64:
+        raise ReviewInputError(f"{field} must be a UTC ISO-8601 timestamp or 'unknown'")
+    _reject_secret_or_control(value, field=field)
+    if _UTC_TIMESTAMP_RE.fullmatch(value) is None:
+        raise ReviewInputError(f"{field} must be a UTC ISO-8601 timestamp or 'unknown'")
+    return value
+
+
+def _bounded_safe_label(value: object, *, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or value != value.strip()
+        or len(value) > MAX_SAFE_TEXT_LENGTH
+    ):
+        raise ReviewInputError(f"{field} must be trimmed bounded safe text")
+    _reject_secret_or_control(value, field=field)
     return value
 
 
@@ -496,8 +569,143 @@ class GateObservations:
 
 
 @dataclass(frozen=True)
+class CiRunObservation:
+    """Timestamped, non-authoritative CI run observation on an exact commit SHA.
+
+    Green builds and transient artifact-upload failures are recorded as dated
+    observations only; neither proves runtime deployment or historical settlement.
+    """
+
+    run_id: int
+    workflow_name: str
+    head_sha: str
+    conclusion: str = UNKNOWN_PROVENANCE
+    failure_classification: str = "none"
+    failed_step_names: tuple[str, ...] = ()
+    observed_at: str = UNKNOWN_PROVENANCE
+    is_deployment_proof: bool = False
+    authority: bool = False
+
+    def __post_init__(self) -> None:
+        _exact_false_authority(self.authority, field="authority")
+        _exact_false_authority(self.is_deployment_proof, field="is_deployment_proof")
+        object.__setattr__(
+            self, "run_id", _positive_int(self.run_id, field="ci_observation.run_id")
+        )
+        object.__setattr__(
+            self,
+            "workflow_name",
+            _bounded_safe_label(
+                self.workflow_name, field="ci_observation.workflow_name"
+            ),
+        )
+        normalized_sha = _git_sha_or_unknown(
+            self.head_sha, field="ci_observation.head_sha"
+        )
+        if normalized_sha == UNKNOWN_PROVENANCE:
+            raise ReviewInputError(
+                "ci_observation.head_sha must be a 40-char lowercase hex SHA"
+            )
+        object.__setattr__(self, "head_sha", normalized_sha)
+        object.__setattr__(
+            self,
+            "conclusion",
+            _closed_choice(
+                self.conclusion, CI_CONCLUSIONS, field="ci_observation.conclusion"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "failure_classification",
+            _closed_choice(
+                self.failure_classification,
+                CI_FAILURE_CLASSIFICATIONS,
+                field="ci_observation.failure_classification",
+            ),
+        )
+        if isinstance(self.failed_step_names, (str, bytes)) or not isinstance(
+            self.failed_step_names, Sequence
+        ):
+            raise ReviewInputError(
+                "ci_observation.failed_step_names must be a sequence of step names"
+            )
+        steps = tuple(
+            _bounded_safe_label(step, field=f"ci_observation.failed_step_names[{idx}]")
+            for idx, step in enumerate(self.failed_step_names)
+        )
+        if len(steps) > MAX_SAFE_STEPS:
+            raise ReviewInputError(
+                "ci_observation.failed_step_names exceeds maximum bounded count"
+            )
+        if self.conclusion == "success" and (
+            self.failure_classification != "none" or steps
+        ):
+            raise ReviewInputError(
+                "successful CI observation cannot carry failure_classification or failed_step_names"
+            )
+        object.__setattr__(self, "failed_step_names", steps)
+        object.__setattr__(
+            self,
+            "observed_at",
+            _utc_timestamp_or_unknown(
+                self.observed_at, field="ci_observation.observed_at"
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "workflow_name": self.workflow_name,
+            "head_sha": self.head_sha,
+            "conclusion": self.conclusion,
+            "failure_classification": self.failure_classification,
+            "failed_step_names": list(self.failed_step_names),
+            "observed_at": self.observed_at,
+            "is_deployment_proof": False,
+            "authority": False,
+        }
+
+    @classmethod
+    def from_dict(cls, data: object) -> CiRunObservation:
+        mapping = _require_mapping_keys(
+            data,
+            required=frozenset(
+                {
+                    "run_id",
+                    "workflow_name",
+                    "head_sha",
+                    "conclusion",
+                    "failure_classification",
+                    "failed_step_names",
+                    "observed_at",
+                    "is_deployment_proof",
+                    "authority",
+                }
+            ),
+            optional=frozenset(),
+            label="ci_observation",
+        )
+        raw_steps = mapping["failed_step_names"]
+        if not isinstance(raw_steps, list):
+            raise ReviewInputError(
+                "ci_observation.failed_step_names must be a JSON array"
+            )
+        return cls(
+            run_id=mapping["run_id"],
+            workflow_name=mapping["workflow_name"],
+            head_sha=mapping["head_sha"],
+            conclusion=mapping["conclusion"],
+            failure_classification=mapping["failure_classification"],
+            failed_step_names=tuple(raw_steps),
+            observed_at=mapping["observed_at"],
+            is_deployment_proof=mapping["is_deployment_proof"],
+            authority=mapping["authority"],
+        )
+
+
+@dataclass(frozen=True)
 class ProvenanceManifest:
-    """Immutable manifest separating repository source from installed runtime."""
+    """Immutable manifest separating repository source, release, and installed runtime."""
 
     repository: str = UNKNOWN_PROVENANCE
     repository_id: int | str = UNKNOWN_PROVENANCE
@@ -511,6 +719,9 @@ class ProvenanceManifest:
     reusable_workflow_ref: str = UNKNOWN_PROVENANCE
     reusable_workflow_tag_object: str = UNKNOWN_PROVENANCE
     reusable_workflow_peeled_commit: str = UNKNOWN_PROVENANCE
+    latest_release_tag: str = UNKNOWN_PROVENANCE
+    latest_release_tag_object: str = UNKNOWN_PROVENANCE
+    latest_release_commit: str = UNKNOWN_PROVENANCE
     installed_core_version: str = UNKNOWN_PROVENANCE
     installed_hosted_version: str = UNKNOWN_PROVENANCE
     selected_executor: str = UNKNOWN_PROVENANCE
@@ -519,6 +730,7 @@ class ProvenanceManifest:
     frozen_policy_commit: str = UNKNOWN_PROVENANCE
     frozen_policy_sha256: str = UNKNOWN_PROVENANCE
     gates: GateObservations = GateObservations()
+    ci_observations: tuple[CiRunObservation, ...] = ()
     authority: bool = False
 
     def __post_init__(self) -> None:
@@ -527,6 +739,21 @@ class ProvenanceManifest:
             raise ReviewInputError("source_event must be a SourceEventIdentity")
         if not isinstance(self.gates, GateObservations):
             raise ReviewInputError("gates must be a GateObservations")
+        if isinstance(self.ci_observations, (str, bytes)) or not isinstance(
+            self.ci_observations, Sequence
+        ):
+            raise ReviewInputError(
+                "ci_observations must be a sequence of CiRunObservation"
+            )
+        normalized_ci = tuple(self.ci_observations)
+        if len(normalized_ci) > MAX_CI_OBSERVATIONS:
+            raise ReviewInputError("ci_observations exceeds maximum bounded count")
+        for obs in normalized_ci:
+            if not isinstance(obs, CiRunObservation):
+                raise ReviewInputError(
+                    "every ci_observations item must be a CiRunObservation"
+                )
+        object.__setattr__(self, "ci_observations", normalized_ci)
         object.__setattr__(
             self, "repository", _repo_or_unknown(self.repository, field="repository")
         )
@@ -580,6 +807,27 @@ class ProvenanceManifest:
         )
         object.__setattr__(
             self,
+            "latest_release_tag",
+            _release_tag_or_unknown(
+                self.latest_release_tag, field="latest_release_tag"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "latest_release_tag_object",
+            _git_sha_or_unknown(
+                self.latest_release_tag_object, field="latest_release_tag_object"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "latest_release_commit",
+            _git_sha_or_unknown(
+                self.latest_release_commit, field="latest_release_commit"
+            ),
+        )
+        object.__setattr__(
+            self,
             "installed_core_version",
             _semver_or_unknown(
                 self.installed_core_version, field="installed_core_version"
@@ -628,6 +876,10 @@ class ProvenanceManifest:
     def grants_recovery_authority(self) -> bool:
         return False
 
+    @property
+    def grants_deployment_proof(self) -> bool:
+        return False
+
     def _identity_fields(self) -> dict[str, Any]:
         return {
             "repository": self.repository,
@@ -645,6 +897,9 @@ class ProvenanceManifest:
             "reusable_workflow_ref": self.reusable_workflow_ref,
             "reusable_workflow_tag_object": self.reusable_workflow_tag_object,
             "reusable_workflow_peeled_commit": self.reusable_workflow_peeled_commit,
+            "latest_release_tag": self.latest_release_tag,
+            "latest_release_tag_object": self.latest_release_tag_object,
+            "latest_release_commit": self.latest_release_commit,
             "installed_core_version": self.installed_core_version,
             "installed_hosted_version": self.installed_hosted_version,
             "selected_executor": self.selected_executor,
@@ -683,9 +938,12 @@ class ProvenanceManifest:
     def has_complete_runtime_identity(self) -> bool:
         """Return True when all required runtime identity fields are known.
 
-        Observational repository/policy checksums (``main_sha``, ``source_event``,
-        ``reusable_workflow_tag_object``, ``frozen_policy_sha256``, ``gates``) may
-        remain ``"unknown"`` when uncollected without invalidating runtime identity.
+        Observational repository, release, and CI metadata (``main_sha``,
+        ``latest_release_tag``, ``latest_release_tag_object``,
+        ``latest_release_commit``, ``ci_observations``, ``source_event``,
+        ``reusable_workflow_tag_object``, ``frozen_policy_sha256``, ``gates``)
+        never substitute for missing runtime fields and may remain ``"unknown"``
+        when uncollected without invalidating an otherwise complete runtime identity.
         """
 
         required_runtime = (
@@ -726,6 +984,11 @@ class ProvenanceManifest:
             "reusable_workflow_ref": self.reusable_workflow_ref,
             "reusable_workflow_tag_object": self.reusable_workflow_tag_object,
             "reusable_workflow_peeled_commit": self.reusable_workflow_peeled_commit,
+            "latest_release_tag": self.latest_release_tag,
+            "latest_release_tag_object": self.latest_release_tag_object,
+            "latest_release_commit": self.latest_release_commit,
+            "release_is_deployment_proof": False,
+            "ci_status_is_deployment_proof": False,
             "installed_core_version": self.installed_core_version,
             "installed_hosted_version": self.installed_hosted_version,
             "selected_executor": self.selected_executor,
@@ -734,6 +997,7 @@ class ProvenanceManifest:
             "frozen_policy_commit": self.frozen_policy_commit,
             "frozen_policy_sha256": self.frozen_policy_sha256,
             "gates": self.gates.to_dict(),
+            "ci_observations": [obs.to_dict() for obs in self.ci_observations],
             "authority": False,
         }
 
@@ -779,7 +1043,17 @@ class ProvenanceManifest:
                     "authority",
                 }
             ),
-            optional=frozenset({"manifest_sha256"}),
+            optional=frozenset(
+                {
+                    "latest_release_tag",
+                    "latest_release_tag_object",
+                    "latest_release_commit",
+                    "release_is_deployment_proof",
+                    "ci_status_is_deployment_proof",
+                    "ci_observations",
+                    "manifest_sha256",
+                }
+            ),
             label="provenance_manifest",
         )
         if require_digest and "manifest_sha256" not in mapping:
@@ -790,7 +1064,16 @@ class ProvenanceManifest:
             raise ReviewInputError("unsupported provenance manifest schema_version")
         if mapping["main_sha_is_runtime_proof"] is not False:
             raise ReviewInputError("main_sha_is_runtime_proof must be exactly False")
+        if mapping.get("release_is_deployment_proof", False) is not False:
+            raise ReviewInputError("release_is_deployment_proof must be exactly False")
+        if mapping.get("ci_status_is_deployment_proof", False) is not False:
+            raise ReviewInputError(
+                "ci_status_is_deployment_proof must be exactly False"
+            )
         _exact_false_authority(mapping["authority"], field="authority")
+        raw_ci = mapping.get("ci_observations", [])
+        if not isinstance(raw_ci, list):
+            raise ReviewInputError("ci_observations must be a JSON array")
         manifest = cls(
             repository=mapping["repository"],
             repository_id=mapping["repository_id"],
@@ -804,6 +1087,13 @@ class ProvenanceManifest:
             reusable_workflow_ref=mapping["reusable_workflow_ref"],
             reusable_workflow_tag_object=mapping["reusable_workflow_tag_object"],
             reusable_workflow_peeled_commit=mapping["reusable_workflow_peeled_commit"],
+            latest_release_tag=mapping.get("latest_release_tag", UNKNOWN_PROVENANCE),
+            latest_release_tag_object=mapping.get(
+                "latest_release_tag_object", UNKNOWN_PROVENANCE
+            ),
+            latest_release_commit=mapping.get(
+                "latest_release_commit", UNKNOWN_PROVENANCE
+            ),
             installed_core_version=mapping["installed_core_version"],
             installed_hosted_version=mapping["installed_hosted_version"],
             selected_executor=mapping["selected_executor"],
@@ -812,6 +1102,7 @@ class ProvenanceManifest:
             frozen_policy_commit=mapping["frozen_policy_commit"],
             frozen_policy_sha256=mapping["frozen_policy_sha256"],
             gates=GateObservations.from_dict(mapping["gates"]),
+            ci_observations=tuple(CiRunObservation.from_dict(item) for item in raw_ci),
             authority=False,
         )
         if "manifest_sha256" in mapping:
@@ -1074,18 +1365,65 @@ class ProvenanceCompatibilityReport:
 def classify_provenance_compatibility(
     manifest: ProvenanceManifest,
     *,
+    expected_main_sha: str | None = None,
     expected_peeled_commit: str | None = None,
     expected_tag_object: str | None = None,
+    expected_release_tag: str | None = None,
+    expected_release_tag_object: str | None = None,
+    expected_release_commit: str | None = None,
     expected_core_version: str | None = None,
     expected_hosted_version: str | None = None,
     expected_policy_commit: str | None = None,
     expected_broker_revision: str | None = None,
     compatibility_manifest: CompatibilityManifest | None = None,
+    require_annotated_tag_peel: bool = False,
 ) -> ProvenanceCompatibilityReport:
     """Compare runtime/source provenance without probing or elevating authority."""
 
     if not isinstance(manifest, ProvenanceManifest):
         raise ReviewInputError("manifest must be a ProvenanceManifest")
+    _exact_bool(require_annotated_tag_peel, field="require_annotated_tag_peel")
+
+    for sha_field, sha_val in (
+        ("expected_main_sha", expected_main_sha),
+        ("expected_peeled_commit", expected_peeled_commit),
+        ("expected_tag_object", expected_tag_object),
+        ("expected_release_tag_object", expected_release_tag_object),
+        ("expected_release_commit", expected_release_commit),
+        ("expected_policy_commit", expected_policy_commit),
+    ):
+        if sha_val is not None:
+            checked = _git_sha_or_unknown(sha_val, field=sha_field)
+            if checked == UNKNOWN_PROVENANCE:
+                raise ReviewInputError(
+                    f"{sha_field} must be a 40-char lowercase hex SHA when provided"
+                )
+    if expected_release_tag is not None:
+        checked_tag = _release_tag_or_unknown(
+            expected_release_tag, field="expected_release_tag"
+        )
+        if checked_tag == UNKNOWN_PROVENANCE:
+            raise ReviewInputError(
+                "expected_release_tag must be a semantic release tag when provided"
+            )
+    for ver_field, ver_val in (
+        ("expected_core_version", expected_core_version),
+        ("expected_hosted_version", expected_hosted_version),
+    ):
+        if ver_val is not None:
+            checked_ver = _semver_or_unknown(ver_val, field=ver_field)
+            if checked_ver == UNKNOWN_PROVENANCE:
+                raise ReviewInputError(
+                    f"{ver_field} must be a semantic version when provided"
+                )
+    if expected_broker_revision is not None:
+        checked_broker = _worker_revision_or_unknown(
+            expected_broker_revision, field="expected_broker_revision"
+        )
+        if checked_broker == UNKNOWN_PROVENANCE:
+            raise ReviewInputError(
+                "expected_broker_revision must be a Worker revision when provided"
+            )
 
     mismatches: list[str] = []
     missing: list[str] = []
@@ -1099,17 +1437,69 @@ def classify_provenance_compatibility(
         notes.append("main_sha_differs_from_executing_workflow_commit")
 
     if (
+        manifest.main_sha != UNKNOWN_PROVENANCE
+        and manifest.latest_release_commit != UNKNOWN_PROVENANCE
+        and manifest.main_sha != manifest.latest_release_commit
+    ):
+        notes.append("main_sha_differs_from_latest_release_commit")
+
+    if (
+        manifest.latest_release_commit != UNKNOWN_PROVENANCE
+        and manifest.reusable_workflow_peeled_commit != UNKNOWN_PROVENANCE
+        and manifest.latest_release_commit != manifest.reusable_workflow_peeled_commit
+    ):
+        notes.append("latest_release_differs_from_executing_workflow_commit")
+
+    if (
         manifest.reusable_workflow_tag_object != UNKNOWN_PROVENANCE
         and manifest.reusable_workflow_peeled_commit != UNKNOWN_PROVENANCE
         and manifest.reusable_workflow_tag_object
         == manifest.reusable_workflow_peeled_commit
     ):
         notes.append("tag_object_equals_peeled_commit_lightweight_or_direct_sha")
+        if require_annotated_tag_peel:
+            mismatches.append("reusable_workflow_tag_object")
+    elif require_annotated_tag_peel and (
+        manifest.reusable_workflow_tag_object == UNKNOWN_PROVENANCE
+    ):
+        missing.append("reusable_workflow_tag_object")
+
+    if (
+        expected_tag_object is not None
+        and expected_peeled_commit is not None
+        and expected_tag_object != expected_peeled_commit
+        and (
+            manifest.reusable_workflow_peeled_commit == expected_tag_object
+            or manifest.reusable_workflow_tag_object == expected_peeled_commit
+        )
+    ):
+        notes.append("annotated_tag_object_and_peeled_commit_conflated")
+
+    if manifest.latest_release_tag != UNKNOWN_PROVENANCE and (
+        not manifest.has_complete_runtime_identity
+    ):
+        notes.append("release_tag_present_without_installed_runtime_proof")
+
+    if any(obs.conclusion == "success" for obs in manifest.ci_observations) and (
+        not manifest.has_complete_runtime_identity
+    ):
+        notes.append("green_ci_observation_does_not_prove_deployment")
+
+    if any(
+        obs.failure_classification == "transient_artifact_upload_5xx"
+        for obs in manifest.ci_observations
+    ):
+        notes.append("exact_head_ci_transient_artifact_upload_5xx_observed")
 
     if manifest.gates.has_routing_pass_with_live_refusal_or_unknown():
         notes.append("routing_preflight_passed_without_live_validation_pass")
 
     checks: list[tuple[str, str, str | None]] = [
+        (
+            "main_sha",
+            manifest.main_sha,
+            expected_main_sha,
+        ),
         (
             "reusable_workflow_peeled_commit",
             manifest.reusable_workflow_peeled_commit,
@@ -1119,6 +1509,21 @@ def classify_provenance_compatibility(
             "reusable_workflow_tag_object",
             manifest.reusable_workflow_tag_object,
             expected_tag_object,
+        ),
+        (
+            "latest_release_tag",
+            manifest.latest_release_tag,
+            expected_release_tag,
+        ),
+        (
+            "latest_release_tag_object",
+            manifest.latest_release_tag_object,
+            expected_release_tag_object,
+        ),
+        (
+            "latest_release_commit",
+            manifest.latest_release_commit,
+            expected_release_commit,
         ),
         (
             "installed_core_version",
@@ -1769,11 +2174,19 @@ class AttemptEvidencePacket:
             "schema_version": ATTEMPT_EVIDENCE_SCHEMA_VERSION,
             "manifest_sha256": self.provenance.manifest_sha256,
             "packet_sha256": self.packet_sha256,
-            "installed_core_version": self.provenance.installed_core_version,
-            "installed_hosted_version": self.provenance.installed_hosted_version,
+            "main_sha": self.provenance.main_sha,
+            "reusable_workflow_tag_object": (
+                self.provenance.reusable_workflow_tag_object
+            ),
             "reusable_workflow_peeled_commit": (
                 self.provenance.reusable_workflow_peeled_commit
             ),
+            "latest_release_tag": self.provenance.latest_release_tag,
+            "latest_release_commit": self.provenance.latest_release_commit,
+            "release_is_deployment_proof": False,
+            "ci_status_is_deployment_proof": False,
+            "installed_core_version": self.provenance.installed_core_version,
+            "installed_hosted_version": self.provenance.installed_hosted_version,
             "broker_route": self.provenance.broker_route,
             "gates": self.provenance.gates.to_dict(),
             "unknown_provenance_count": len(self.provenance.unknown_fields),
@@ -1890,6 +2303,108 @@ def inspect_installed_package_versions(
         else:
             resolved.append(UNKNOWN_PROVENANCE)
     return resolved[0], resolved[1]
+
+
+def build_provenance_manifest(
+    *,
+    repository: str = UNKNOWN_PROVENANCE,
+    repository_id: int | str = UNKNOWN_PROVENANCE,
+    pull_request: int | str = UNKNOWN_PROVENANCE,
+    main_sha: str = UNKNOWN_PROVENANCE,
+    base_ref: str = UNKNOWN_PROVENANCE,
+    base_sha: str = UNKNOWN_PROVENANCE,
+    head_sha: str = UNKNOWN_PROVENANCE,
+    source_event: SourceEventIdentity | None = None,
+    caller_workflow: str = UNKNOWN_PROVENANCE,
+    reusable_workflow_ref: str = UNKNOWN_PROVENANCE,
+    reusable_workflow_tag_object: str = UNKNOWN_PROVENANCE,
+    reusable_workflow_peeled_commit: str = UNKNOWN_PROVENANCE,
+    latest_release_tag: str = UNKNOWN_PROVENANCE,
+    latest_release_tag_object: str = UNKNOWN_PROVENANCE,
+    latest_release_commit: str = UNKNOWN_PROVENANCE,
+    installed_core_version: str = UNKNOWN_PROVENANCE,
+    installed_hosted_version: str = UNKNOWN_PROVENANCE,
+    selected_executor: str = UNKNOWN_PROVENANCE,
+    broker_route: str = UNKNOWN_PROVENANCE,
+    broker_revision: str = UNKNOWN_PROVENANCE,
+    frozen_policy_commit: str = UNKNOWN_PROVENANCE,
+    frozen_policy_sha256: str = UNKNOWN_PROVENANCE,
+    gates: GateObservations | None = None,
+    ci_observations: Sequence[CiRunObservation] = (),
+    auto_inspect_local_packages: bool = False,
+    version_lookup: Callable[[str], str] | None = None,
+    require_distinct_annotated_tag: bool = False,
+) -> ProvenanceManifest:
+    """Build a sanitized ``ProvenanceManifest`` without probing or inferring deployment.
+
+    ``main_sha``, ``latest_release_tag``, ``latest_release_commit``, and
+    ``ci_observations`` never populate ``installed_core_version``,
+    ``installed_hosted_version``, ``selected_executor``, ``broker_revision``, or
+    ``reusable_workflow_peeled_commit``. Absent runtime/deployed telemetry
+    remains ``"unknown"`` unless explicitly supplied (or locally inspected for
+    the current Python process when ``auto_inspect_local_packages=True``).
+    """
+
+    _exact_bool(auto_inspect_local_packages, field="auto_inspect_local_packages")
+    _exact_bool(require_distinct_annotated_tag, field="require_distinct_annotated_tag")
+    eff_core = installed_core_version
+    eff_hosted = installed_hosted_version
+    if auto_inspect_local_packages and (
+        eff_core == UNKNOWN_PROVENANCE or eff_hosted == UNKNOWN_PROVENANCE
+    ):
+        local_core, local_hosted = inspect_installed_package_versions(
+            version_lookup=version_lookup
+        )
+        if eff_core == UNKNOWN_PROVENANCE:
+            eff_core = local_core
+        if eff_hosted == UNKNOWN_PROVENANCE:
+            eff_hosted = local_hosted
+
+    manifest = ProvenanceManifest(
+        repository=repository,
+        repository_id=repository_id,
+        pull_request=pull_request,
+        main_sha=main_sha,
+        base_ref=base_ref,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        source_event=source_event
+        if source_event is not None
+        else SourceEventIdentity(),
+        caller_workflow=caller_workflow,
+        reusable_workflow_ref=reusable_workflow_ref,
+        reusable_workflow_tag_object=reusable_workflow_tag_object,
+        reusable_workflow_peeled_commit=reusable_workflow_peeled_commit,
+        latest_release_tag=latest_release_tag,
+        latest_release_tag_object=latest_release_tag_object,
+        latest_release_commit=latest_release_commit,
+        installed_core_version=eff_core,
+        installed_hosted_version=eff_hosted,
+        selected_executor=selected_executor,
+        broker_route=broker_route,
+        broker_revision=broker_revision,
+        frozen_policy_commit=frozen_policy_commit,
+        frozen_policy_sha256=frozen_policy_sha256,
+        gates=gates if gates is not None else GateObservations(),
+        ci_observations=tuple(ci_observations),
+        authority=False,
+    )
+    if require_distinct_annotated_tag:
+        if (
+            manifest.reusable_workflow_tag_object == UNKNOWN_PROVENANCE
+            or manifest.reusable_workflow_peeled_commit == UNKNOWN_PROVENANCE
+        ):
+            raise ReviewInputError(
+                "require_distinct_annotated_tag requires both reusable_workflow_tag_object and reusable_workflow_peeled_commit"
+            )
+        if (
+            manifest.reusable_workflow_tag_object
+            == manifest.reusable_workflow_peeled_commit
+        ):
+            raise ReviewInputError(
+                "annotated reusable_workflow_tag_object must differ from reusable_workflow_peeled_commit"
+            )
+    return manifest
 
 
 def build_attempt_evidence_packet(

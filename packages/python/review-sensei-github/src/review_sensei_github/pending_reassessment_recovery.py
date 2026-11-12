@@ -39,10 +39,38 @@ _HEX64 = re.compile(r"[a-f0-9]{64}")
 _PART_TAIL_RE = re.compile(r"(\d+)/(\d+) content=([a-f0-9]{64}) -->")
 
 PENDING_REASSESSMENT_CLASSIFIER_ID = "pending-reassessment-attribution-v1"
+PENDING_REASSESSMENT_PACKET_SCHEMA = "pending-reassessment-attempt-evidence-v1"
+REVIEWSENSEI_408_CASE_ID = "reviewsensei-408-zero-decision-pending-reassessment"
+REVIEWSENSEI_408_REPOSITORY = "malsabbagh/review-sensei"
+REVIEWSENSEI_408_PULL_REQUEST = 408
 DEFAULT_MAX_ZERO_DECISION_ATTEMPTS = 2
 NO_PROGRESS_ZERO_DECISION_LIMIT = DEFAULT_MAX_ZERO_DECISION_ATTEMPTS
+_VERSION_TOKEN_RE = re.compile(r"[A-Za-z0-9_.+-]{1,64}")
 _VALID_SOURCE_KINDS: frozenset[str] = frozenset(
     {"inline", "issue", "review_comment", "issue_comment"}
+)
+
+PENDING_WORK_REASONS: frozenset[str] = frozenset(
+    {
+        "zero_decision_human_explanation_incomplete",
+        "pending_receipt_delivery_incomplete",
+        "finalizer_interrupted_after_durable_decisions",
+        "partial_reassessment_remaining_human_holds",
+        "reassessment_no_progress_window_exhausted",
+        "source_revision_mutated_after_admission",
+        "head_or_base_drifted_from_bound_scope",
+        "duplicate_or_corrupt_pending_receipt",
+        "settled_all_human_holds_resolved",
+    }
+)
+
+OFFLINE_CONTINUATION_KINDS: frozenset[str] = frozenset(
+    {
+        "replay_stored_pending_receipt",
+        "resume_recorded_decision_finalizer",
+        "not_eligible_requires_new_human_evidence_or_restart",
+        "not_needed_settled",
+    }
 )
 
 PENDING_REASSESSMENT_STATES: frozenset[str] = frozenset(
@@ -1288,19 +1316,738 @@ def build_pending_reassessment_recovery_descriptor(
     )
 
 
+@dataclass(frozen=True)
+class OfflineContinuationQualification:
+    """Offline zero-funding, zero-inference continuation check for G30 (`authority=False`)."""
+
+    qualifies_zero_inference_continuation: bool
+    continuation_kind: str
+    zero_new_funding_verified: bool
+    zero_repeated_inference_verified: bool
+    completion_witness_established: bool
+    remaining_caller_allowance: int | None
+    required_continuation_requests: int
+    disqualifying_reasons: tuple[str, ...]
+    offline_only: bool = True
+    authority: bool = False
+
+    def __post_init__(self) -> None:
+        if self.authority is not False or self.offline_only is not True:
+            raise ReviewInputError(
+                "offline continuation qualification is strictly offline (authority=False)"
+            )
+        if self.continuation_kind not in OFFLINE_CONTINUATION_KINDS:
+            raise ReviewInputError("unsupported offline continuation_kind")
+        if (
+            type(self.required_continuation_requests) is not int
+            or self.required_continuation_requests < 0
+        ):
+            raise ReviewInputError(
+                "required_continuation_requests must be a non-negative integer"
+            )
+        if self.remaining_caller_allowance is not None and (
+            type(self.remaining_caller_allowance) is not int
+            or self.remaining_caller_allowance < 0
+        ):
+            raise ReviewInputError(
+                "remaining_caller_allowance must be None or a non-negative integer"
+            )
+        if (
+            self.zero_new_funding_verified
+            and self.required_continuation_requests > 0
+            and (
+                self.remaining_caller_allowance is None
+                or self.remaining_caller_allowance < self.required_continuation_requests
+            )
+        ):
+            raise ReviewInputError(
+                "positive-cost continuation requires known sufficient original allowance"
+            )
+        if self.qualifies_zero_inference_continuation and (
+            not self.zero_new_funding_verified
+            or not self.zero_repeated_inference_verified
+            or self.disqualifying_reasons
+        ):
+            raise ReviewInputError(
+                "qualified offline continuation requires zero new funding, "
+                "zero repeated inference, and empty disqualifying_reasons"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "authority": False,
+            "offline_only": True,
+            "qualifies_zero_inference_continuation": (
+                self.qualifies_zero_inference_continuation
+            ),
+            "continuation_kind": self.continuation_kind,
+            "zero_new_funding_verified": self.zero_new_funding_verified,
+            "zero_repeated_inference_verified": self.zero_repeated_inference_verified,
+            "completion_witness_established": self.completion_witness_established,
+            "remaining_caller_allowance": self.remaining_caller_allowance,
+            "required_continuation_requests": self.required_continuation_requests,
+            "disqualifying_reasons": list(self.disqualifying_reasons),
+        }
+
+
+def qualify_offline_pending_continuation(
+    attribution: PendingReassessmentAttribution,
+    *,
+    record: SessionRecord | None = None,
+    pr_merged: bool = False,
+    durable_operation_journal_present: bool = False,
+    required_continuation_requests: int = 0,
+    additional_caller_allowance: int = 0,
+    additional_provider_allowance: int = 0,
+    repeated_inference_calls: int = 0,
+    retained_result_immutable: bool = True,
+) -> OfflineContinuationQualification:
+    """Qualify bounded offline continuation checks with zero new funding and zero repeated inference."""
+    if not isinstance(attribution, PendingReassessmentAttribution):
+        raise ReviewInputError("attribution must be a PendingReassessmentAttribution")
+    if type(retained_result_immutable) is not bool:
+        raise ReviewInputError("retained_result_immutable must be a bool")
+    for label, amount in (
+        ("required_continuation_requests", required_continuation_requests),
+        ("additional_caller_allowance", additional_caller_allowance),
+        ("additional_provider_allowance", additional_provider_allowance),
+        ("repeated_inference_calls", repeated_inference_calls),
+    ):
+        if type(amount) is not int or amount < 0:
+            raise ReviewInputError(f"{label} must be a non-negative integer")
+
+    remaining_caller: int | None = None
+    if record is not None and record.api_run_accounting is not None:
+        old = ApiRunAccounting.from_document(record.api_run_accounting)
+        old.require_writer_version()
+        remaining_caller = old.remaining
+
+    funding_ok = (
+        additional_caller_allowance == 0
+        and additional_provider_allowance == 0
+        and (
+            required_continuation_requests == 0
+            or (
+                remaining_caller is not None
+                and remaining_caller >= required_continuation_requests
+            )
+        )
+    )
+    inference_ok = repeated_inference_calls == 0
+    completion_witness = bool(
+        retained_result_immutable
+        and attribution.state_code == "reassessment_completed_settled"
+        and attribution.terminal
+        and not attribution.zero_decisions_recorded
+    )
+
+    reasons: list[str] = []
+    if not retained_result_immutable:
+        reasons.append("retained_result_digest_mutated")
+    if pr_merged:
+        reasons.append("merged_pr_live_rerun_forbidden")
+    if additional_caller_allowance > 0:
+        reasons.append("new_caller_funding_forbidden")
+    if additional_provider_allowance > 0:
+        reasons.append("new_provider_funding_forbidden")
+    if repeated_inference_calls > 0:
+        reasons.append("repeated_model_inference_forbidden")
+    if required_continuation_requests > 0 and remaining_caller is None:
+        reasons.append("original_caller_allowance_unknown")
+    if (
+        remaining_caller is not None
+        and remaining_caller < required_continuation_requests
+    ):
+        reasons.append("insufficient_remaining_caller_allowance")
+
+    if retained_result_immutable and attribution.state_code in {
+        "reassessment_completed_settled",
+        "unfinished_partial_decision_assessment",
+    }:
+        return OfflineContinuationQualification(
+            qualifies_zero_inference_continuation=False,
+            continuation_kind="not_needed_settled",
+            zero_new_funding_verified=funding_ok,
+            zero_repeated_inference_verified=inference_ok,
+            completion_witness_established=completion_witness,
+            remaining_caller_allowance=remaining_caller,
+            required_continuation_requests=required_continuation_requests,
+            disqualifying_reasons=tuple(
+                dict.fromkeys([*reasons, "action_already_settled"])
+            ),
+        )
+
+    if attribution.state_code == "pending_receipt_delivery_incomplete":
+        if not durable_operation_journal_present:
+            reasons.append("durable_operation_journal_missing")
+        deduped = tuple(dict.fromkeys(reasons))
+        can_replay = len(deduped) == 0 and funding_ok and inference_ok
+        return OfflineContinuationQualification(
+            qualifies_zero_inference_continuation=can_replay,
+            continuation_kind=(
+                "replay_stored_pending_receipt"
+                if can_replay
+                else "not_eligible_requires_new_human_evidence_or_restart"
+            ),
+            zero_new_funding_verified=funding_ok,
+            zero_repeated_inference_verified=inference_ok,
+            completion_witness_established=False,
+            remaining_caller_allowance=remaining_caller,
+            required_continuation_requests=required_continuation_requests,
+            disqualifying_reasons=deduped,
+        )
+
+    if attribution.state_code == "failed_finalizer_after_reassessment":
+        deduped_fin = tuple(dict.fromkeys(reasons))
+        can_resume = len(deduped_fin) == 0 and funding_ok and inference_ok
+        return OfflineContinuationQualification(
+            qualifies_zero_inference_continuation=can_resume,
+            continuation_kind=(
+                "resume_recorded_decision_finalizer"
+                if can_resume
+                else "not_eligible_requires_new_human_evidence_or_restart"
+            ),
+            zero_new_funding_verified=funding_ok,
+            zero_repeated_inference_verified=inference_ok,
+            completion_witness_established=False,
+            remaining_caller_allowance=remaining_caller,
+            required_continuation_requests=required_continuation_requests,
+            disqualifying_reasons=deduped_fin,
+        )
+
+    state_reason_map = {
+        "unfinished_zero_decision_assessment": (
+            "zero_decisions_already_delivered_pending_receipt"
+        ),
+        "pending_reassessment_no_progress_exhausted": (
+            "no_progress_zero_decision_window_exhausted"
+        ),
+        "pending_reassessment_source_changed": "source_comment_revision_changed",
+        "pending_reassessment_head_or_base_changed": "head_or_base_drifted",
+        "pending_reassessment_duplicate_receipt_conflict": (
+            "duplicate_or_corrupt_pending_receipt_conflict"
+        ),
+    }
+    if attribution.state_code in state_reason_map:
+        reasons.append(state_reason_map[attribution.state_code])
+    elif retained_result_immutable:
+        reasons.append("unsupported_pending_state")
+    return OfflineContinuationQualification(
+        qualifies_zero_inference_continuation=False,
+        continuation_kind="not_eligible_requires_new_human_evidence_or_restart",
+        zero_new_funding_verified=funding_ok,
+        zero_repeated_inference_verified=inference_ok,
+        completion_witness_established=False,
+        remaining_caller_allowance=remaining_caller,
+        required_continuation_requests=required_continuation_requests,
+        disqualifying_reasons=tuple(dict.fromkeys(reasons)),
+    )
+
+
+def _derive_pending_reason(attribution: PendingReassessmentAttribution) -> str:
+    mapping = {
+        "unfinished_zero_decision_assessment": (
+            "zero_decision_human_explanation_incomplete"
+        ),
+        "pending_receipt_delivery_incomplete": "pending_receipt_delivery_incomplete",
+        "failed_finalizer_after_reassessment": (
+            "finalizer_interrupted_after_durable_decisions"
+        ),
+        "unfinished_partial_decision_assessment": (
+            "partial_reassessment_remaining_human_holds"
+        ),
+        "pending_reassessment_no_progress_exhausted": (
+            "reassessment_no_progress_window_exhausted"
+        ),
+        "pending_reassessment_source_changed": (
+            "source_revision_mutated_after_admission"
+        ),
+        "pending_reassessment_head_or_base_changed": (
+            "head_or_base_drifted_from_bound_scope"
+        ),
+        "pending_reassessment_duplicate_receipt_conflict": (
+            "duplicate_or_corrupt_pending_receipt"
+        ),
+        "reassessment_completed_settled": "settled_all_human_holds_resolved",
+    }
+    return mapping[attribution.state_code]
+
+
+@dataclass(frozen=True)
+class PendingReassessmentAttemptPacket:
+    """Offline read-only attempt-evidence packet for G30 (`ReviewSensei #408`).
+
+    Binds original pending-work identity, pending reason, accepted result
+    digests, exact source revision, unfinished-assessment vs finalizer-failure
+    separation, and bounded offline continuation qualification (`authority=False`,
+    `offline_only=True`, `zero_decision_is_completion_witness=False`).
+    """
+
+    case_id: str
+    repository: str
+    repository_id: int
+    pull_request: int
+    pr_merged: bool
+    session_generation: int | None
+    record_sha256: str | None
+    predecessor_run_id: int | None
+    operation_key: str | None
+    pending_reason: str
+    pending_finding_ids: tuple[str, ...]
+    resolved_finding_ids: tuple[str, ...]
+    newly_resolved_finding_ids: tuple[str, ...]
+    original_result_digest: str
+    latest_result_digest: str
+    accepted_result_sha256: str
+    eligibility_head_sha: str
+    retained_result_immutable: bool
+    source_comment_id: int
+    source_kind: str
+    source_actor: str | None
+    source_updated_at: str
+    source_body_sha256: str
+    bound_base_sha: str
+    bound_head_sha: str
+    current_base_sha: str
+    current_head_sha: str
+    assessment_unfinished: bool
+    zero_decisions_recorded: bool
+    finalizer_entered: bool
+    finalizer_failed: bool
+    executor_sha: str
+    installed_core_version: str
+    installed_hosted_version: str
+    caller_allowance_limit: int | None
+    remaining_caller_allowance: int | None
+    offline_continuation: OfflineContinuationQualification
+    historical_settlement_receipt_supplied: bool
+    diagnostics_available: bool
+    missing_proofs: tuple[str, ...]
+    attribution: PendingReassessmentAttribution
+    admissible_to_approve: bool = False
+    zero_decision_is_completion_witness: bool = False
+    offline_only: bool = True
+    authority: bool = False
+    schema_version: str = PENDING_REASSESSMENT_PACKET_SCHEMA
+
+    def __post_init__(self) -> None:
+        if (
+            self.authority is not False
+            or self.offline_only is not True
+            or self.zero_decision_is_completion_witness is not False
+            or self.schema_version != PENDING_REASSESSMENT_PACKET_SCHEMA
+        ):
+            raise ReviewInputError(
+                "pending reassessment attempt packet is strictly offline "
+                "(authority=False) and never treats zero decisions as a completion witness"
+            )
+        if not isinstance(
+            self.attribution, PendingReassessmentAttribution
+        ) or not isinstance(
+            self.offline_continuation, OfflineContinuationQualification
+        ):
+            raise ReviewInputError(
+                "pending reassessment packet requires attribution and offline_continuation"
+            )
+        if not isinstance(self.case_id, str) or not self.case_id.strip():
+            raise ReviewInputError("pending reassessment case_id must be non-empty")
+        if type(self.repository_id) is not int or self.repository_id <= 0:
+            raise ReviewInputError(
+                "pending reassessment repository_id must be a positive integer"
+            )
+        SessionIdentity(
+            repository=self.repository,
+            pull_request=self.pull_request,
+            repository_id=self.repository_id,
+        )
+        if self.pending_reason not in PENDING_WORK_REASONS:
+            raise ReviewInputError("unsupported pending_reason")
+        if (
+            type(self.retained_result_immutable) is not bool
+            or type(self.admissible_to_approve) is not bool
+        ):
+            raise ReviewInputError(
+                "retained_result_immutable and admissible_to_approve must be booleans"
+            )
+        for label, digest in (
+            ("original_result_digest", self.original_result_digest),
+            ("latest_result_digest", self.latest_result_digest),
+            ("accepted_result_sha256", self.accepted_result_sha256),
+            ("source_body_sha256", self.source_body_sha256),
+        ):
+            _require_hex(digest, _HEX64, label)
+        if self.retained_result_immutable != (
+            self.original_result_digest == self.latest_result_digest
+        ):
+            raise ReviewInputError(
+                "retained_result_immutable must match original_result_digest == latest_result_digest"
+            )
+        if not self.retained_result_immutable and (
+            self.admissible_to_approve
+            or self.offline_continuation.qualifies_zero_inference_continuation
+            or self.offline_continuation.completion_witness_established
+            or "immutable_accepted_result_digest" not in self.missing_proofs
+        ):
+            raise ReviewInputError(
+                "mutated retained result must fail closed (admissible_to_approve=False)"
+            )
+        if self.admissible_to_approve and (
+            not self.attribution.terminal
+            or self.attribution.state_code != "reassessment_completed_settled"
+            or self.pr_merged
+        ):
+            raise ReviewInputError(
+                "admissible_to_approve requires settled unmerged reassessment with immutable result"
+            )
+        for label, opt_digest in (
+            ("record_sha256", self.record_sha256),
+            ("operation_key", self.operation_key),
+        ):
+            if opt_digest is not None:
+                _require_hex(opt_digest, _HEX64, label)
+        for label, sha in (
+            ("eligibility_head_sha", self.eligibility_head_sha),
+            ("bound_base_sha", self.bound_base_sha),
+            ("bound_head_sha", self.bound_head_sha),
+            ("current_base_sha", self.current_base_sha),
+            ("current_head_sha", self.current_head_sha),
+        ):
+            _require_hex(sha, _HEX40, label)
+        if self.executor_sha != "unknown":
+            _require_hex(self.executor_sha, _HEX40, "executor_sha")
+        for label, ver in (
+            ("installed_core_version", self.installed_core_version),
+            ("installed_hosted_version", self.installed_hosted_version),
+        ):
+            if ver != "unknown" and _VERSION_TOKEN_RE.fullmatch(ver) is None:
+                raise ReviewInputError(f"invalid {label}")
+        if self.pr_merged and (
+            self.admissible_to_approve
+            or self.offline_continuation.qualifies_zero_inference_continuation
+        ):
+            raise ReviewInputError(
+                "merged historical pull request cannot authorize live continuation or approval"
+            )
+        if (
+            (not self.attribution.terminal or not self.retained_result_immutable)
+            and not self.historical_settlement_receipt_supplied
+            and "historical_live_settlement_receipt" not in self.missing_proofs
+        ):
+            raise ReviewInputError(
+                "unsettled pending reassessment packet must record historical_live_settlement_receipt"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "authority": False,
+            "offline_only": True,
+            "zero_decision_is_completion_witness": False,
+            "admissible_to_approve": self.admissible_to_approve,
+            "case_id": self.case_id,
+            "pending_work_identity": {
+                "repository": self.repository,
+                "repository_id": self.repository_id,
+                "pull_request": self.pull_request,
+                "pr_merged": self.pr_merged,
+                "session_generation": self.session_generation,
+                "record_sha256": self.record_sha256,
+                "predecessor_run_id": self.predecessor_run_id,
+                "operation_key": self.operation_key,
+                "pending_reason": self.pending_reason,
+                "pending_finding_ids": list(self.pending_finding_ids),
+                "resolved_finding_ids": list(self.resolved_finding_ids),
+                "newly_resolved_finding_ids": list(self.newly_resolved_finding_ids),
+            },
+            "accepted_result": {
+                "original_result_digest": self.original_result_digest,
+                "latest_result_digest": self.latest_result_digest,
+                "accepted_result_sha256": self.accepted_result_sha256,
+                "eligibility_head_sha": self.eligibility_head_sha,
+                "retained_result_immutable": self.retained_result_immutable,
+                "admissible_to_approve": self.admissible_to_approve,
+            },
+            "source_revision": {
+                "source_comment_id": self.source_comment_id,
+                "source_kind": self.source_kind,
+                "source_actor": self.source_actor,
+                "source_updated_at": self.source_updated_at,
+                "source_body_sha256": self.source_body_sha256,
+                "bound_base_sha": self.bound_base_sha,
+                "bound_head_sha": self.bound_head_sha,
+                "current_base_sha": self.current_base_sha,
+                "current_head_sha": self.current_head_sha,
+            },
+            "finalizer_separation": {
+                "assessment_unfinished": self.assessment_unfinished,
+                "zero_decisions_recorded": self.zero_decisions_recorded,
+                "finalizer_entered": self.finalizer_entered,
+                "finalizer_failed": self.finalizer_failed,
+            },
+            "installed_executor_and_funding": {
+                "executor_sha": self.executor_sha,
+                "installed_core_version": self.installed_core_version,
+                "installed_hosted_version": self.installed_hosted_version,
+                "caller_allowance_limit": self.caller_allowance_limit,
+                "remaining_caller_allowance": self.remaining_caller_allowance,
+            },
+            "offline_continuation": self.offline_continuation.to_dict(),
+            "settlement": {
+                "historical_settlement_receipt_supplied": (
+                    self.historical_settlement_receipt_supplied
+                ),
+                "diagnostics_available": self.diagnostics_available,
+            },
+            "missing_proofs": list(self.missing_proofs),
+            "attribution": self.attribution.to_dict(),
+        }
+
+
+def build_pending_reassessment_attempt_packet(
+    *,
+    identity: SessionIdentity,
+    original_eligibility: ReviewApprovalEligibility,
+    latest_eligibility: ReviewApprovalEligibility | None,
+    bound_source_comment_id: int,
+    bound_source_updated_at: str,
+    bound_source_body_sha256: str,
+    bound_source_kind: str,
+    bound_base_sha: str,
+    bound_head_sha: str,
+    current_base_sha: str,
+    current_head_sha: str,
+    case_id: str | None = None,
+    pr_merged: bool = False,
+    record: SessionRecord | None = None,
+    accepted_result_sha256: str | None = None,
+    live_source_updated_at: str | None = None,
+    live_source_body_sha256: str | None = None,
+    source_actor: str | None = None,
+    reply_result: ReplyResult | None = None,
+    pending_receipt: PendingReceiptObservation | None = None,
+    prior_receipt_digests: Sequence[str] = (),
+    consecutive_zero_decision_attempts: int | None = None,
+    max_zero_decision_attempts: int = DEFAULT_MAX_ZERO_DECISION_ATTEMPTS,
+    durable_operation_journal_present: bool = False,
+    required_continuation_requests: int = 0,
+    additional_caller_allowance: int = 0,
+    additional_provider_allowance: int = 0,
+    repeated_inference_calls: int = 0,
+    executor_sha: str = "unknown",
+    installed_core_version: str = "unknown",
+    installed_hosted_version: str = "unknown",
+    historical_settlement_receipt_supplied: bool = False,
+    diagnostics_available: bool = False,
+) -> PendingReassessmentAttemptPacket:
+    """Build a strictly offline `PendingReassessmentAttemptPacket` (`authority=False`).
+
+    Models `ReviewSensei #408` and all pending reassessment states without network
+    or model inference calls, separating unfinished zero-decision assessment from
+    failed finalization and qualifying zero-funding / zero-inference continuation.
+    """
+    if (
+        not isinstance(identity, SessionIdentity)
+        or type(identity.repository_id) is not int
+        or identity.repository_id <= 0
+    ):
+        raise ReviewInputError(
+            "pending reassessment packet requires a repository_id-bound SessionIdentity"
+        )
+    repo_id = identity.repository_id
+    if record is not None:
+        if not isinstance(record, SessionRecord):
+            raise ReviewInputError("record must be None or a SessionRecord")
+        if (
+            record.repository != identity.repository
+            or record.pull_request != identity.pull_request
+            or (record.repository_id is not None and record.repository_id != repo_id)
+        ):
+            raise ReviewInputError("record identity conflicts with SessionIdentity")
+
+    latest_digest = (
+        latest_eligibility.result_digest
+        if latest_eligibility is not None
+        else original_eligibility.result_digest
+    )
+    is_result_immutable = original_eligibility.result_digest == latest_digest
+
+    attribution = qualify_pending_reassessment(
+        original_eligibility=original_eligibility,
+        latest_eligibility=latest_eligibility,
+        bound_source_comment_id=bound_source_comment_id,
+        bound_source_updated_at=bound_source_updated_at,
+        bound_source_body_sha256=bound_source_body_sha256,
+        bound_source_kind=bound_source_kind,
+        bound_base_sha=bound_base_sha,
+        bound_head_sha=bound_head_sha,
+        current_base_sha=current_base_sha,
+        current_head_sha=current_head_sha,
+        live_source_updated_at=live_source_updated_at,
+        live_source_body_sha256=live_source_body_sha256,
+        source_actor=source_actor,
+        reply_result=reply_result,
+        pending_receipt=pending_receipt,
+        record=record,
+        prior_receipt_digests=prior_receipt_digests,
+        consecutive_zero_decision_attempts=consecutive_zero_decision_attempts,
+        max_zero_decision_attempts=max_zero_decision_attempts,
+    )
+    continuation = qualify_offline_pending_continuation(
+        attribution,
+        record=record,
+        pr_merged=pr_merged,
+        durable_operation_journal_present=durable_operation_journal_present,
+        required_continuation_requests=required_continuation_requests,
+        additional_caller_allowance=additional_caller_allowance,
+        additional_provider_allowance=additional_provider_allowance,
+        repeated_inference_calls=repeated_inference_calls,
+        retained_result_immutable=is_result_immutable,
+    )
+
+    caller_limit: int | None = None
+    remaining_caller: int | None = None
+    if record is not None and record.api_run_accounting is not None:
+        old = ApiRunAccounting.from_document(record.api_run_accounting)
+        caller_limit = old.configuration.limit
+        remaining_caller = old.remaining
+
+    tx_result_sha = (
+        record.transaction.result_sha256
+        if record is not None
+        and record.transaction is not None
+        and record.transaction.result_sha256 is not None
+        else None
+    )
+    resolved_accepted_sha = (
+        accepted_result_sha256
+        if accepted_result_sha256 is not None
+        else (tx_result_sha or original_eligibility.result_digest)
+    )
+
+    resolved_case_id = case_id
+    if resolved_case_id is None:
+        if (
+            identity.pull_request == REVIEWSENSEI_408_PULL_REQUEST
+            and "review-sensei" in identity.repository.casefold()
+        ):
+            resolved_case_id = REVIEWSENSEI_408_CASE_ID
+        else:
+            gen_tok = str(record.generation) if record is not None else "none"
+            run_tok = (
+                str(attribution.predecessor_run_id)
+                if attribution.predecessor_run_id is not None
+                else "none"
+            )
+            resolved_case_id = (
+                f"{identity.repository}#{identity.pull_request}"
+                f":gen-{gen_tok}:run-{run_tok}"
+            )
+
+    missing: list[str] = []
+    if not is_result_immutable:
+        missing.append("immutable_accepted_result_digest")
+        if not historical_settlement_receipt_supplied:
+            missing.append("historical_live_settlement_receipt")
+    if not attribution.terminal:
+        if attribution.assessment_unfinished:
+            missing.append("completed_reassessment_decisions")
+        if attribution.finalizer_entered and attribution.finalizer_failed:
+            missing.append("confirmed_finalizer_check_thread_approval_settlement")
+        if record is not None and record.api_run_accounting is not None:
+            old_chk = ApiRunAccounting.from_document(record.api_run_accounting)
+            if isinstance(old_chk.action, Mapping) and (
+                old_chk.action.get("phase") == "pending"
+            ):
+                missing.append("terminal_action_outcome")
+        if attribution.state_code == "pending_receipt_delivery_incomplete":
+            missing.append("complete_durable_pending_receipt")
+        if not diagnostics_available:
+            missing.append("missing_close_diagnostics")
+        if executor_sha == "unknown":
+            missing.append("installed_executor_provenance")
+        if not historical_settlement_receipt_supplied:
+            missing.append("historical_live_settlement_receipt")
+    elif len(attribution.pending_finding_ids) > 0:
+        missing.append("remaining_human_adjudication_decisions")
+
+    admissible_to_approve = bool(
+        is_result_immutable
+        and attribution.state_code == "reassessment_completed_settled"
+        and attribution.terminal
+        and not pr_merged
+    )
+
+    return PendingReassessmentAttemptPacket(
+        case_id=resolved_case_id,
+        repository=identity.repository,
+        repository_id=repo_id,
+        pull_request=identity.pull_request,
+        pr_merged=bool(pr_merged),
+        session_generation=record.generation if record is not None else None,
+        record_sha256=record.record_sha256 if record is not None else None,
+        predecessor_run_id=attribution.predecessor_run_id,
+        operation_key=attribution.operation_key,
+        pending_reason=_derive_pending_reason(attribution),
+        pending_finding_ids=attribution.pending_finding_ids,
+        resolved_finding_ids=attribution.resolved_finding_ids,
+        newly_resolved_finding_ids=attribution.newly_resolved_finding_ids,
+        original_result_digest=original_eligibility.result_digest,
+        latest_result_digest=latest_digest,
+        accepted_result_sha256=resolved_accepted_sha,
+        eligibility_head_sha=original_eligibility.head_sha,
+        retained_result_immutable=is_result_immutable,
+        source_comment_id=attribution.source_comment_id,
+        source_kind=attribution.source_kind,
+        source_actor=attribution.source_actor,
+        source_updated_at=attribution.source_updated_at,
+        source_body_sha256=attribution.source_body_sha256,
+        bound_base_sha=attribution.bound_base_sha,
+        bound_head_sha=attribution.bound_head_sha,
+        current_base_sha=attribution.current_base_sha,
+        current_head_sha=attribution.current_head_sha,
+        assessment_unfinished=attribution.assessment_unfinished,
+        zero_decisions_recorded=attribution.zero_decisions_recorded,
+        finalizer_entered=attribution.finalizer_entered,
+        finalizer_failed=attribution.finalizer_failed,
+        executor_sha=executor_sha,
+        installed_core_version=installed_core_version,
+        installed_hosted_version=installed_hosted_version,
+        caller_allowance_limit=caller_limit,
+        remaining_caller_allowance=remaining_caller,
+        offline_continuation=continuation,
+        historical_settlement_receipt_supplied=bool(
+            historical_settlement_receipt_supplied
+        ),
+        diagnostics_available=bool(diagnostics_available),
+        missing_proofs=tuple(dict.fromkeys(missing)),
+        attribution=attribution,
+        admissible_to_approve=admissible_to_approve,
+    )
+
+
 __all__ = [
     "DEFAULT_MAX_ZERO_DECISION_ATTEMPTS",
     "NO_PROGRESS_ZERO_DECISION_LIMIT",
+    "OFFLINE_CONTINUATION_KINDS",
     "PENDING_REASSESSMENT_CLASSIFIER_ID",
+    "PENDING_REASSESSMENT_PACKET_SCHEMA",
     "PENDING_REASSESSMENT_ROUTES",
     "PENDING_REASSESSMENT_STATES",
+    "PENDING_WORK_REASONS",
+    "REVIEWSENSEI_408_CASE_ID",
+    "REVIEWSENSEI_408_PULL_REQUEST",
+    "REVIEWSENSEI_408_REPOSITORY",
+    "OfflineContinuationQualification",
     "PendingReceiptObservation",
+    "PendingReassessmentAttemptPacket",
     "PendingReassessmentAttribution",
     "PendingReassessmentRecoveryDescriptor",
     "PendingReassessmentWindow",
     "ReassessmentProgressSummary",
+    "build_pending_reassessment_attempt_packet",
     "build_pending_reassessment_recovery_descriptor",
     "evaluate_reassessment_progress",
     "inspect_durable_pending_receipts",
+    "qualify_offline_pending_continuation",
     "qualify_pending_reassessment",
 ]
