@@ -141,5 +141,4 @@ Only confirmed archives enable narrative excerpts; all finding prose and authori
 
 Never execute inactive selection.
 
-seen delivery ID cannot suppress work that was never admitted. Reinspection uses
-verification retains its existing deduplication contract.
+Prospective ADR 0136 routing separates verified receipt, accepted operations and native completion. Record delivery observations only after successful route construction; seen IDs never suppress unadmitted work. Reinspect current authenticated lifecycle state and accepted-operation history: reuse terminal work; hold pending/uncertain work without new inference/funding. InMemoryDeliveryLedger observations are verifier-process-local (default 10,000 entries; oldest evicted; lost on restart). DeliveryLedger permits alternate adapters, not completed-work authority or new durability requirements. This cache is not durable operation authority: downstream admission, accounting and writer fences remain required. Legacy installation/setup verification retains its deduplication contract.

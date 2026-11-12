@@ -1017,16 +1017,7 @@ and proposed [ADR 0124](adr/0124-review-engine-decision-providers.md).
 
 ## Webhook receipt and lifecycle completion
 
-The prospective comment/event routing contract in [ADR 0136](adr/0136-event-routing-convergence-and-queue-boundaries.md)
-keeps verified receipt separate from accepted operations and native completion.
-Delivery observations are recorded after successful route construction, but a
-seen delivery ID cannot suppress work that was never admitted. Reinspection uses
-current authenticated lifecycle state and accepted-operation history: terminal
-work is reused and pending/uncertain work holds without new inference or funding.
-The existing `InMemoryDeliveryLedger` keeps bounded observations in the verifier
-process (default 10,000 entries, oldest evicted; lost on restart). The
-`DeliveryLedger` protocol allows alternate adapters but grants no completed-work
-authority or new durability requirement. This observation cache is not durable
-operation authority; downstream admission,
-accounting and writer fences remain required. Legacy installation/setup
-verification retains its existing deduplication contract.
+Prospective ADR 0136 routing separates verified receipt, accepted operations and native completion. Record delivery observations only after successful route construction; seen IDs never suppress unadmitted work. Reinspect current authenticated lifecycle state and accepted-operation history: reuse terminal work; hold pending/uncertain work without new inference/funding. InMemoryDeliveryLedger observations are verifier-process-local (default 10,000 entries; oldest evicted; lost on restart). DeliveryLedger permits alternate adapters, not completed-work authority or new durability requirements. This cache is not durable operation authority: downstream admission, accounting and writer fences remain required. Legacy installation/setup verification retains its deduplication contract.
+
+
+Reference: [ADR 0136](adr/0136-event-routing-convergence-and-queue-boundaries.md).
