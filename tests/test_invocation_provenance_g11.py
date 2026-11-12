@@ -526,12 +526,28 @@ class CurrentProcessPackageObservationTests(unittest.TestCase):
             self.assertEqual([row["version"] for row in observed], ["0.8.21", "0.3.27"])
             self.assertTrue(all(row["wheel_sha256"] == "unknown" for row in observed))
             self.assertNotIn(str(root), result.stdout.decode())
-            # Correct installed metadata cannot bless an imported checkout.
-            shadow = command.replace(
-                "; import review_sensei,review_sensei_github;",
-                "; sys.path.insert(0, "
+            # Select actual installed-wheel metadata *before* inserting the
+            # checkout. An editable checkout can itself expose .egg-info;
+            # otherwise the negative case changes both import and metadata
+            # selection, rather than testing the intended independent join.
+            bootstrap = (
+                "import sys,json; sys.path.extend("
+                + repr(site.getsitepackages())
+                + "); "
+            )
+            imports = "import review_sensei,review_sensei_github; from review_sensei.provenance_manifest import inspect_current_process_packages; "
+            observe = "print(json.dumps([x.to_dict() for x in inspect_current_process_packages()]))"
+            shadow = (
+                bootstrap
+                + "import importlib.metadata as metadata; from pathlib import Path; "
+                + "lookup=metadata.distribution; pinned={name:lookup(name) for name in ('review-sensei','review-sensei-github')}; "
+                + "assert all(Path(item.locate_file('')).resolve().is_relative_to(Path(sys.prefix).resolve()) for item in pinned.values()); "
+                + "sys.path.insert(0, "
                 + repr(str(ROOT / "src"))
-                + "); import review_sensei,review_sensei_github;",
+                + "); "
+                + imports
+                + "metadata.distribution=lambda name:pinned[name] if name in pinned else lookup(name); "
+                + observe
             )
             wrong_origin = subprocess.run(
                 [str(python), "-I", "-c", shadow],
@@ -549,6 +565,49 @@ class CurrentProcessPackageObservationTests(unittest.TestCase):
             self.assertEqual(wrong[0]["version"], "0.8.21")
             self.assertEqual(wrong[0]["module_origin"], "outside-distribution")
             self.assertEqual(wrong[0]["module_file_sha256"], "unknown")
+            # Reproduce CI's editable-source metadata overlay independently of
+            # the developer checkout's installation state. Its inventory is
+            # not installed-wheel ownership proof, so unknown is conservative.
+            editable = root / "editable" / "src"
+            with zipfile.ZipFile(wheels[0]) as archive:
+                for member in archive.namelist():
+                    if member.startswith("review_sensei/"):
+                        destination = editable / member
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.write_bytes(archive.read(member))
+            egg = editable / "review_sensei.egg-info"
+            egg.mkdir()
+            (egg / "PKG-INFO").write_text(
+                "Metadata-Version: 2.1\nName: review-sensei\nVersion: 0.8.21\n",
+                encoding="utf-8",
+            )
+            (egg / "SOURCES.txt").write_text(
+                "src/review_sensei/__init__.py\n", encoding="utf-8"
+            )
+            editable_command = (
+                bootstrap
+                + "sys.path.insert(0, "
+                + repr(str(editable))
+                + "); "
+                + imports
+                + observe
+            )
+            overlaid = subprocess.run(
+                [str(python), "-I", "-c", editable_command],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                timeout=30,
+            )
+            self.assertEqual(
+                overlaid.returncode,
+                0,
+                overlaid.stderr.decode("utf-8", "replace")[-2000:],
+            )
+            overlaid_rows = json.loads(overlaid.stdout)
+            self.assertEqual(overlaid_rows[0]["version"], "0.8.21")
+            self.assertEqual(overlaid_rows[0]["module_origin"], "unknown")
+            self.assertEqual(overlaid_rows[0]["module_file_sha256"], "unknown")
             # Disk mutation is observable, not silently treated as the wheel.
             initializer = target / "review_sensei/__init__.py"
             initializer.write_bytes(
