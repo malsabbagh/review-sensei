@@ -136,6 +136,33 @@ class ActionTransportState:
         )
 
 
+@dataclass(frozen=True)
+class CallerTransportContainmentSnapshot:
+    """Read-only containment and physical-budget snapshot for ApiRunRequestTransport."""
+
+    run: ApiRunIdentity
+    job: str
+    attempt: int
+    logical_phase: str
+    live_cutover_enabled: bool
+    is_activated: bool
+    accounting_version: str | None
+    legacy_accounting_overlap_refused: bool
+    startup_dispatches: int
+    startup_liability: int
+    configured_limit: int | None
+    confirmed_requests: int
+    uncertain_requests: int
+    reserved_undispatched: int
+    remaining_unallocated: int | None
+    usable_requests: int
+    unresolved_mutation_count: int
+    terminal_claimed: bool
+    has_action_effect_boundary: bool
+    has_action_result_proof: bool
+    conservation_holds: bool
+
+
 @dataclass
 class _ThreadResolutionCapture:
     """Private, one-invocation correlation; never imported from a ledger."""
@@ -242,6 +269,83 @@ class ApiRunRequestTransport:
         }:
             raise ReviewInputError("caller lifecycle phase is invalid")
         self._logical_phase = phase
+
+    def containment_and_budget_snapshot(self) -> CallerTransportContainmentSnapshot:
+        """Inspect live containment posture, legacy refusal, and physical budget conservation."""
+        from review_sensei.writer_containment import (
+            LIVE_CANONICAL_CUTOVER_ENABLED,
+            evaluate_physical_budget_guarantees,
+        )
+
+        unresolved_mutations = sum(
+            1
+            for item in self.observations
+            if item.get("mutation")
+            and (
+                item["outcome"] in {"unknown", "expired"}
+                or item.get("uncertain_effect")
+            )
+            and item["request_id"] not in self._reconciled_mutations
+        )
+        state = self._state
+        if state is None:
+            return CallerTransportContainmentSnapshot(
+                run=self.run,
+                job=self.job,
+                attempt=self.attempt,
+                logical_phase=self._logical_phase,
+                live_cutover_enabled=LIVE_CANONICAL_CUTOVER_ENABLED,
+                is_activated=False,
+                accounting_version=None,
+                legacy_accounting_overlap_refused=False,
+                startup_dispatches=self.startup_dispatches,
+                startup_liability=self.plan.liability,
+                configured_limit=None,
+                confirmed_requests=0,
+                uncertain_requests=0,
+                reserved_undispatched=0,
+                remaining_unallocated=None,
+                usable_requests=0,
+                unresolved_mutation_count=unresolved_mutations,
+                terminal_claimed=self._terminal_reason is not None,
+                has_action_effect_boundary=self._action_effect_boundary is not None,
+                has_action_result_proof=self._action_result_proof is not None,
+                # No active accounting exists to establish full conservation.
+                conservation_holds=False,
+            )
+        guarantee = evaluate_physical_budget_guarantees(
+            configured_limit=state.configuration.limit,
+            startup_liability=state.startup.liability,
+            prior_nonstartup_liability=state.prior_nonstartup_liability,
+            confirmed_requests=state.confirmed,
+            uncertain_requests=state.uncertain,
+            reserved_undispatched=state.reserved_undispatched,
+            remaining_unallocated=state.remaining,
+        )
+        return CallerTransportContainmentSnapshot(
+            run=self.run,
+            job=self.job,
+            attempt=self.attempt,
+            logical_phase=self._logical_phase,
+            live_cutover_enabled=LIVE_CANONICAL_CUTOVER_ENABLED,
+            is_activated=True,
+            accounting_version=state.version,
+            legacy_accounting_overlap_refused=state.version
+            != LEGACY_ACCOUNTING_VERSION,
+            startup_dispatches=self.startup_dispatches,
+            startup_liability=state.startup.liability,
+            configured_limit=state.configuration.limit,
+            confirmed_requests=state.confirmed,
+            uncertain_requests=state.uncertain,
+            reserved_undispatched=state.reserved_undispatched,
+            remaining_unallocated=state.remaining,
+            usable_requests=self.usable,
+            unresolved_mutation_count=unresolved_mutations,
+            terminal_claimed=self._terminal_reason is not None,
+            has_action_effect_boundary=self._action_effect_boundary is not None,
+            has_action_result_proof=self._action_result_proof is not None,
+            conservation_holds=guarantee.conservation_holds,
+        )
 
     @property
     def budget_view(self) -> Any:

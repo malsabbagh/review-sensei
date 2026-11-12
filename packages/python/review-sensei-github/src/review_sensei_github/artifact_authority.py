@@ -35,6 +35,7 @@ from review_sensei.active_finding_window import AuthoritativeDecisionInventory
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.disposition import _require_reason, authorized_override
 from review_sensei.errors import ReviewInputError
+from review_sensei.finding_drift import DriftInventory
 from review_sensei.session import SessionIdentity, SessionLoadError, SessionRecord
 
 from .session_ledger import (
@@ -240,7 +241,7 @@ def evaluate_observed_artifact(
     observed: ObservedGitHubArtifact,
     *,
     identity: SessionIdentity | None = None,
-    inventory: AuthoritativeDecisionInventory | None = None,
+    inventory: AuthoritativeDecisionInventory | DriftInventory | None = None,
     enrollment_witness_present: bool = False,
     has_active_reservation: bool = False,
 ) -> ArtifactEvaluationDecision:

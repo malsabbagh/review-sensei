@@ -1384,5 +1384,1105 @@ class FindingLocationDriftG16Tests(unittest.TestCase):
         self.assertFalse(publisher.threads["gh-drift-thread-1"].resolved)
 
 
+class _DriftFakeBroker:
+    def request_oidc_token(self) -> str:
+        return "oidc-drift-test"
+
+    def exchange(self, _oidc: str, *, capability: str) -> str:
+        return f"tok-{capability}"
+
+
+class _DriftGitHubHost:
+    """Stateful fake GitHub host exercising real ReviewPublisher & GitHubApplication."""
+
+    def __init__(
+        self,
+        *,
+        head_sha: str = HEAD_1,
+        base_sha: str = BASE_SHA,
+        app_slug: str = "reviewsensei[bot]",
+    ) -> None:
+        from review_sensei_github import GitHubHttp
+
+        self.head_sha = head_sha
+        self.base_sha = base_sha
+        self.app_slug = app_slug
+        self.reviews: list[dict[str, object]] = []
+        self.threads: list[dict[str, object]] = []
+        self.check_runs: list[dict[str, object]] = []
+        self.issue_comments: list[dict[str, object]] = []
+        self.fail_next_review_post_transient = False
+        self.calls: list[tuple[str, str, object]] = []
+        self.http = GitHubHttp(api_url="https://api.github.test", opener=self._open)
+
+    def _resp(self, payload: object, status: int = 200):
+        from tests.fake_github_http import json_response
+
+        return json_response(payload, status)
+
+    def _open(self, request, timeout=None):
+        import json
+        from urllib.parse import urlparse
+
+        from review_sensei_github.errors import GitHubHTTPTransientError
+
+        parsed = urlparse(request.full_url)
+        path = parsed.path
+        body = json.loads(request.data.decode("utf-8")) if request.data else None
+        self.calls.append((request.method, path, body))
+
+        if request.method == "GET":
+            if path.endswith("/pulls/1"):
+                return self._resp(
+                    {
+                        "state": "open",
+                        "draft": False,
+                        "changed_files": 2,
+                        "user": {"login": "dev-author", "type": "User"},
+                        "head": {
+                            "sha": self.head_sha,
+                            "ref": "feature",
+                            "repo": {"full_name": "owner/repo", "fork": False},
+                        },
+                        "base": {
+                            "sha": self.base_sha,
+                            "ref": "main",
+                            "repo": {"id": 1, "full_name": "owner/repo", "fork": False},
+                        },
+                    }
+                )
+            if path.endswith("/pulls/1/reviews"):
+                return self._resp(list(self.reviews))
+            if "/reviews/" in path and path.endswith("/comments"):
+                rid = int(path.split("/reviews/")[1].split("/")[0])
+                matched = [
+                    c
+                    for t in self.threads
+                    for c in t["comments"]["nodes"]  # type: ignore[index]
+                    if c.get("pull_request_review_id") == rid
+                ]
+                return self._resp(matched)
+            if path.endswith("/pulls/1/comments"):
+                return self._resp([])
+            if "/pulls/comments/" in path:
+                cid = int(path.rsplit("/", 1)[-1])
+                for t in self.threads:
+                    for c in t["comments"]["nodes"]:  # type: ignore[index]
+                        if c.get("databaseId") == cid:
+                            return self._resp(
+                                {
+                                    "id": cid,
+                                    "body": c["body"],
+                                    "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/1",
+                                    "user": {
+                                        "id": 9001,
+                                        "login": self.app_slug,
+                                        "type": "Bot",
+                                    },
+                                }
+                            )
+                return self._resp({"message": "Not Found"}, 404)
+            if path.endswith("/issues/1/comments"):
+                return self._resp(list(self.issue_comments))
+            if path.endswith("/check-runs"):
+                matching = [
+                    r for r in self.check_runs if r.get("head_sha") == self.head_sha
+                ]
+                return self._resp({"check_runs": matching})
+            if "/rules/branches/" in path:
+                return self._resp([])
+            if path.endswith("/protection"):
+                return self._resp({"message": "Not Found"}, 404)
+            if path == "/user" or path.startswith("/users/"):
+                return self._resp({"id": 9001, "login": self.app_slug, "type": "Bot"})
+            if "/collaborators/" in path and path.endswith("/permission"):
+                return self._resp({"permission": "maintain"})
+
+        if request.method == "POST":
+            if path.endswith("/pulls/1/reviews"):
+                if self.fail_next_review_post_transient:
+                    self.fail_next_review_post_transient = False
+                    raise GitHubHTTPTransientError("simulated review POST timeout")
+                assert isinstance(body, dict)
+                review_id = 100 + len(self.reviews)
+                state_map = {
+                    "APPROVE": "APPROVED",
+                    "REQUEST_CHANGES": "CHANGES_REQUESTED",
+                    "COMMENT": "COMMENTED",
+                }
+                ev = str(body.get("event", "COMMENT"))
+                record: dict[str, object] = {
+                    "id": review_id,
+                    "commit_id": body["commit_id"],
+                    "state": state_map.get(ev, "COMMENTED"),
+                    "body": body.get("body", ""),
+                    "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/1",
+                    "user": {"id": 9001, "login": self.app_slug, "type": "Bot"},
+                }
+                self.reviews.append(record)
+                for idx, comment in enumerate(body.get("comments") or ()):
+                    thread_id = f"PRRT_{review_id}_{idx}"
+                    self.threads.append(
+                        {
+                            "id": thread_id,
+                            "isResolved": False,
+                            "path": comment["path"],
+                            "line": comment["line"],
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "id": f"PRRC_{review_id}_{idx}",
+                                        "databaseId": review_id * 100 + idx,
+                                        "pull_request_review_id": review_id,
+                                        "body": comment["body"],
+                                        "author": {
+                                            "login": self.app_slug,
+                                            "__typename": "Bot",
+                                        },
+                                    }
+                                ]
+                            },
+                        }
+                    )
+                return self._resp(record, 200)
+            if path.endswith("/check-runs"):
+                assert isinstance(body, dict)
+                run_id = 500 + len(self.check_runs)
+                run: dict[str, object] = {
+                    "id": run_id,
+                    "name": body["name"],
+                    "head_sha": body["head_sha"],
+                    "status": body.get("status"),
+                    "conclusion": body.get("conclusion"),
+                    "output": body.get("output", {}),
+                    "app": {"slug": "reviewsensei"},
+                }
+                self.check_runs.append(run)
+                return self._resp(run, 201)
+            if path == "/graphql":
+                assert isinstance(body, dict)
+                query = str(body.get("query", ""))
+                variables = body.get("variables") or {}
+                if "resolveReviewThread" in query:
+                    tid = (variables.get("input") or {}).get(
+                        "threadId"
+                    ) or variables.get("threadId")
+                    for thread in self.threads:
+                        if thread["id"] == tid:
+                            thread["isResolved"] = True
+                            return self._resp(
+                                {
+                                    "data": {
+                                        "resolveReviewThread": {
+                                            "thread": {"id": tid, "isResolved": True}
+                                        }
+                                    }
+                                }
+                            )
+                    return self._resp(
+                        {"errors": [{"message": "thread not found"}]}, 200
+                    )
+                if body.get("operationName") == "ResolutionReadback":
+                    tid = variables.get("id")
+                    for thread in self.threads:
+                        if thread["id"] == tid:
+                            return self._resp(
+                                {
+                                    "data": {
+                                        "node": {
+                                            "id": tid,
+                                            "isResolved": thread["isResolved"],
+                                        }
+                                    }
+                                }
+                            )
+                    return self._resp({"data": {"node": None}}, 200)
+                return self._resp(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {
+                                        "nodes": list(self.threads),
+                                        "pageInfo": {
+                                            "hasNextPage": False,
+                                            "endCursor": None,
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+            if path.endswith("/issues/1/comments"):
+                assert isinstance(body, dict)
+                cid = 800 + len(self.issue_comments)
+                item: dict[str, object] = {
+                    "id": cid,
+                    "body": body["body"],
+                    "user": {"id": 9001, "login": self.app_slug, "type": "Bot"},
+                }
+                self.issue_comments.append(item)
+                return self._resp(item, 201)
+
+        if request.method == "PUT" and "/reviews/" in path:
+            assert isinstance(body, dict)
+            rid = int(path.rsplit("/", 1)[-1])
+            for rev in self.reviews:
+                if rev["id"] == rid:
+                    rev["body"] = body["body"]
+                    return self._resp(rev, 200)
+
+        if request.method == "PATCH" and "/check-runs/" in path:
+            assert isinstance(body, dict)
+            cid = int(path.rsplit("/", 1)[-1])
+            for run in self.check_runs:
+                if run["id"] == cid:
+                    run.update(body)
+                    return self._resp(run, 200)
+
+        raise AssertionError(f"Unhandled request: {request.method} {path}")
+
+
+class OrdinaryPublisherFindingDriftTests(unittest.TestCase):
+    """End-to-end ordinary ReviewPublisher & GitHubApplication G16 tests."""
+
+    def _make_app(self, host: _DriftGitHubHost, ledger_dir: str, *, cap: int = 4):
+        from pathlib import Path
+
+        from review_sensei_github import (
+            ConversationPublisher,
+            GitHubApplication,
+            GitHubWriteOptions,
+            LearningPRPublisher,
+            ReviewPublisher,
+        )
+
+        from review_sensei.session import LocalSessionLedger, SessionIdentity
+
+        publisher = ReviewPublisher(http=host.http)
+        ledger = LocalSessionLedger(Path(ledger_dir))
+        ledger.initialize(
+            SessionIdentity(repository="owner/repo", pull_request=1, repository_id=1)
+        )
+        app = GitHubApplication(
+            http=host.http,
+            broker=_DriftFakeBroker(),  # type: ignore[arg-type]
+            reviewer=publisher,
+            learner=LearningPRPublisher(http=host.http),
+            replier=ConversationPublisher(http=host.http),
+            session_ledger=None,
+        )
+        cmd_app = GitHubApplication(
+            http=host.http,
+            broker=_DriftFakeBroker(),  # type: ignore[arg-type]
+            reviewer=publisher,
+            learner=LearningPRPublisher(http=host.http),
+            replier=ConversationPublisher(http=host.http),
+            session_ledger=ledger,
+        )
+        options = GitHubWriteOptions(
+            auto_review=True,
+            auto_approve=True,
+            github_writes=True,
+            operation_entry="disabled",
+            max_active_findings=cap,
+            enable_drift_tracking=True,
+        )
+        return app, cmd_app, publisher, options
+
+    @staticmethod
+    def _blockers(res: ReviewResult):
+        from review_sensei.convergence import derive_blocker_candidate
+
+        return tuple(
+            derive_blocker_candidate(
+                c,
+                on_changed_path=True,
+                evidence_locations_validated=True,
+                has_failure_condition=True,
+                has_actionable_remedy=True,
+                has_specific_violation=True,
+                named_mandatory_rule="SEC-DRIFT-01",
+                has_required_contract=True,
+            )
+            for c in res.comments
+        )
+
+    @staticmethod
+    def _baseline_template(head_sha: str):
+        from review_sensei.baseline import ReviewBaseline
+        from review_sensei.context import ReviewContextCacheKey
+
+        return ReviewBaseline(
+            cache_key=ReviewContextCacheKey(
+                repository="owner/repo",
+                pull_request=1,
+                base_sha=BASE_SHA,
+                head_sha=head_sha,
+                engine="fixture",
+                model="fixture-v1",
+                profile="default",
+                stage_digest=_sha("stage"),
+                context_digest=_sha("ctx"),
+                learning_digest=_sha("learn"),
+            ),
+            policy_digest=_sha("policy"),
+            complete=True,
+            reviewed_paths=("src/legacy_auth.py",),
+        )
+
+    def test_ordinary_publisher_rename_and_cross_file_move_preserve_identity_baseline_and_supersede_threads(
+        self,
+    ) -> None:
+        import tempfile
+
+        diff_r1 = (
+            "diff --git a/src/legacy_auth.py b/src/legacy_auth.py\n"
+            "--- a/src/legacy_auth.py\n"
+            "+++ b/src/legacy_auth.py\n"
+            "@@ -1,1 +1,6 @@\n"
+            "-def verify_token(tok): return True\n"
+            "+def verify_token(tok, key_id=''):\n"
+            "+    if not key_id:\n"
+            "+        return True\n"
+            "+    return bool(tok)\n"
+            "+# line 5\n"
+            "+# line 6\n"
+        )
+        diff_rename = (
+            "diff --git a/src/legacy_auth.py b/src/token_auth.py\n"
+            "similarity index 92%\n"
+            "rename from src/legacy_auth.py\n"
+            "rename to src/token_auth.py\n"
+            "--- a/src/legacy_auth.py\n"
+            "+++ b/src/token_auth.py\n"
+            "@@ -1,6 +1,6 @@\n"
+            " def verify_token(tok, key_id=''):\n"
+            "     if not key_id:\n"
+            "         return True\n"
+            "-    return bool(tok)\n"
+            "+    return bool(tok and key_id)\n"
+            " # line 5\n"
+            " # line 6\n"
+        )
+        diff_move = (
+            "diff --git a/src/security/verifier.py b/src/security/verifier.py\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/src/security/verifier.py\n"
+            "@@ -0,0 +1,6 @@\n"
+            "+def verify_token(tok, key_id=''):\n"
+            "+    if not key_id:\n"
+            "+        return True\n"
+            "+    return bool(tok and key_id)\n"
+            "+# line 5\n"
+            "+# line 6\n"
+        )
+        diff_fix = (
+            "diff --git a/src/security/verifier.py b/src/security/verifier.py\n"
+            "--- a/src/security/verifier.py\n"
+            "+++ b/src/security/verifier.py\n"
+            "@@ -1,6 +1,6 @@\n"
+            " def verify_token(tok, key_id=''):\n"
+            "     if not key_id:\n"
+            "-        return True\n"
+            "+        raise ValueError('missing key_id')\n"
+            "     return bool(tok and key_id)\n"
+            " # line 5\n"
+            " # line 6\n"
+        )
+        policy = ReviewConvergencePolicy(mode="strict")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = _DriftGitHubHost(head_sha=HEAD_1)
+            app, _cmd_app, _pub, options = self._make_app(host, tmpdir, cap=3)
+
+            # Round 1 (HEAD_1): initial blocking finding on src/legacy_auth.py
+            c1 = _comment("src/legacy_auth.py", line=3, symbol="verify_token")
+            res1 = _result(c1, paths=("src/legacy_auth.py",))
+            pub1 = app.publish_review(
+                options=options,
+                oidc_token="oidc-1",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_1,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res1,
+                diff=diff_r1,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=self._blockers(res1),
+            )
+            self.assertEqual(pub1.status, "published")
+            self.assertEqual(pub1.diagnostic, "required_fixes_open")
+            self.assertEqual(len(host.threads), 1)
+            self.assertEqual(host.threads[0]["path"], "src/legacy_auth.py")
+            self.assertFalse(host.threads[0]["isResolved"])
+
+            dstate1 = app.drift_state(repository_id=1, pull_request=1)
+            assert dstate1 is not None
+            ob1 = dstate1.inventory.obligations[0]
+            orig_oid = ob1.obligation_id
+            orig_fp = ob1.criterion.original_fingerprint
+            orig_rc = ob1.criterion.resolution_criterion
+
+            base1 = app.drift_baseline(
+                repository_id=1,
+                pull_request=1,
+                baseline_template=self._baseline_template(HEAD_1),
+            )
+            assert base1 is not None
+            self.assertEqual(len(base1.findings), 1)
+            self.assertEqual(base1.findings[0].fingerprint, orig_fp)
+            self.assertEqual(base1.findings[0].resolution_criterion, orig_rc)
+
+            # Round 2 (HEAD_2): file_rename src/legacy_auth.py -> src/token_auth.py
+            host.head_sha = HEAD_2
+            c2 = _comment("src/token_auth.py", line=4, symbol="verify_token")
+            res2 = _result(c2, paths=("src/token_auth.py",))
+            pub2 = app.publish_review(
+                options=options,
+                oidc_token="oidc-2",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res2,
+                diff=diff_rename,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=self._blockers(res2),
+            )
+            self.assertEqual(pub2.status, "published")
+            self.assertEqual(pub2.diagnostic, "required_fixes_open")
+            dstate2 = app.drift_state(repository_id=1, pull_request=1)
+            assert dstate2 is not None
+            self.assertEqual(len(dstate2.inventory.obligations), 1)
+            ob2 = dstate2.inventory.obligations[0]
+            # Original concern identity preserved independently from current location!
+            self.assertEqual(ob2.obligation_id, orig_oid)
+            self.assertEqual(ob2.criterion.original_fingerprint, orig_fp)
+            self.assertEqual(ob2.criterion.origin_path, "src/legacy_auth.py")
+            self.assertEqual(ob2.present_anchor.path, "src/token_auth.py")
+            self.assertEqual(ob2.present_anchor.drift_kind, "file_rename")
+            # Old thread superseded via GraphQL ResolveReviewThread; new thread anchored on new path!
+            self.assertEqual(len(host.threads), 2)
+            self.assertTrue(host.threads[0]["isResolved"])
+            self.assertEqual(host.threads[1]["path"], "src/token_auth.py")
+            self.assertFalse(host.threads[1]["isResolved"])
+
+            base2 = app.drift_baseline(
+                repository_id=1,
+                pull_request=1,
+                baseline_template=self._baseline_template(HEAD_2),
+            )
+            assert base2 is not None
+            self.assertEqual(base2.findings[0].fingerprint, orig_fp)
+            self.assertEqual(base2.findings[0].resolution_criterion, orig_rc)
+            self.assertEqual(base2.findings[0].path, "src/token_auth.py")
+
+            # Round 3 (HEAD_3): unique cross_file_move -> src/security/verifier.py
+            host.head_sha = HEAD_3
+            c3 = _comment("src/security/verifier.py", line=3, symbol="verify_token")
+            res3 = _result(c3, paths=("src/security/verifier.py",))
+            pub3 = app.publish_review(
+                options=options,
+                oidc_token="oidc-3",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_3,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res3,
+                diff=diff_move,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=self._blockers(res3),
+                drift_descriptors=(
+                    FileDriftDescriptor(
+                        drift_kind="cross_file_move",
+                        source_path="src/token_auth.py",
+                        target_paths=("src/security/verifier.py",),
+                        moved_symbols=("verify_token",),
+                    ),
+                ),
+            )
+            self.assertEqual(pub3.status, "published")
+            dstate3 = app.drift_state(repository_id=1, pull_request=1)
+            assert dstate3 is not None
+            self.assertEqual(len(dstate3.inventory.obligations), 1)
+            ob3 = dstate3.inventory.obligations[0]
+            self.assertEqual(ob3.obligation_id, orig_oid)
+            self.assertEqual(ob3.criterion.original_fingerprint, orig_fp)
+            self.assertEqual(ob3.present_anchor.path, "src/security/verifier.py")
+            self.assertEqual(ob3.present_anchor.drift_kind, "cross_file_move")
+            self.assertEqual(len(host.threads), 3)
+            self.assertTrue(host.threads[1]["isResolved"])
+            self.assertEqual(host.threads[2]["path"], "src/security/verifier.py")
+            self.assertFalse(host.threads[2]["isResolved"])
+
+            # Round 4 (HEAD_4): verified fix bound to original resolution_criterion ->
+            # supersedes PRRT_102_0 automatically and approves!
+            host.head_sha = HEAD_4
+            fix4 = ConfirmedFixEvidence(
+                obligation_id=orig_oid,
+                resolution_criterion=orig_rc,
+                head_sha=HEAD_4,
+                evidence_sha256=_sha("fix-verifier-r4"),
+                verified_paths=("src/security/verifier.py",),
+            )
+            pub4 = app.publish_review(
+                options=options,
+                oidc_token="oidc-4",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_4,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=_result(paths=("src/security/verifier.py",)),
+                diff=diff_fix,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                confirmed_fixes=(fix4,),
+            )
+            self.assertEqual(pub4.status, "published")
+            self.assertIsNone(pub4.diagnostic)
+            self.assertTrue(host.threads[2]["isResolved"])
+            self.assertEqual(host.check_runs[-1]["conclusion"], "success")
+            self.assertTrue(
+                any(
+                    r["commit_id"] == HEAD_4 and r["state"] == "APPROVED"
+                    for r in host.reviews
+                )
+            )
+            pub_doc = app.drift_public_status(repository_id=1, pull_request=1)
+            assert pub_doc is not None
+            self.assertTrue(pub_doc["approval_eligible"])
+            base4 = app.drift_baseline(
+                repository_id=1,
+                pull_request=1,
+                baseline_template=self._baseline_template(HEAD_4),
+            )
+            assert base4 is not None
+            self.assertTrue(base4.complete)
+            self.assertEqual(base4.findings, ())
+
+    def test_ordinary_publisher_deletion_rewrite_and_ui_resolved_outdated_thread_never_clear_obligation(
+        self,
+    ) -> None:
+        import tempfile
+
+        diff_r1 = (
+            "diff --git a/src/worker.py b/src/worker.py\n"
+            "--- a/src/worker.py\n"
+            "+++ b/src/worker.py\n"
+            "@@ -1,1 +1,5 @@\n"
+            "-def run_job(): pass\n"
+            "+def run_job(queue):\n"
+            "+    item = queue.pop()\n"
+            "+    return item\n"
+            "+# line 4\n"
+            "+# line 5\n"
+        )
+        diff_delete = (
+            "diff --git a/src/worker.py b/src/worker.py\n"
+            "deleted file mode 100644\n"
+            "--- a/src/worker.py\n"
+            "+++ /dev/null\n"
+            "@@ -1,5 +0,0 @@\n"
+            "-def run_job(queue):\n"
+            "-    item = queue.pop()\n"
+            "-    return item\n"
+            "-# line 4\n"
+            "-# line 5\n"
+        )
+        diff_rewrite = (
+            "diff --git a/src/worker.py b/src/worker.py\n"
+            "--- a/src/worker.py\n"
+            "+++ b/src/worker.py\n"
+            "@@ -0,0 +1,6 @@\n"
+            "+def run_job_v2(queue):\n"
+            "+    item = queue.pop()\n"
+            "+    return item\n"
+            "+def step_a(): pass\n"
+            "+def step_b(): pass\n"
+            "+def step_c(): pass\n"
+        )
+        policy = ReviewConvergencePolicy(mode="strict")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = _DriftGitHubHost(head_sha=HEAD_1)
+            app, _cmd_app, _pub, options = self._make_app(host, tmpdir, cap=3)
+
+            c1 = _comment(
+                "src/worker.py",
+                line=2,
+                body="Unsynchronized pop races across worker threads.",
+                symbol="run_job",
+                defect_kind="race_condition",
+            )
+            res1 = _result(c1, paths=("src/worker.py",))
+            app.publish_review(
+                options=options,
+                oidc_token="oidc-1",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_1,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res1,
+                diff=diff_r1,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=self._blockers(res1),
+            )
+            tid_r1 = str(host.threads[0]["id"])
+            # Collaborator clicks "Resolve conversation" in GitHub UI AND anchor goes outdated!
+            host.threads[0]["isResolved"] = True
+
+            # Round 2 (HEAD_2): line_deletion + host_outdated_threads + host_resolved_threads,
+            # 0 comments emitted -> MUST fall back to body placement & withhold APPROVE!
+            host.head_sha = HEAD_2
+            pub2 = app.publish_review(
+                options=options,
+                oidc_token="oidc-2",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=_result(paths=("src/worker.py",)),
+                diff=diff_delete,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                host_outdated_threads=frozenset({tid_r1}),
+                host_resolved_threads=frozenset({tid_r1}),
+            )
+            self.assertEqual(pub2.status, "published")
+            self.assertEqual(pub2.diagnostic, "required_fixes_open")
+            self.assertEqual(host.check_runs[-1]["conclusion"], "failure")
+            self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+            dstate2 = app.drift_state(repository_id=1, pull_request=1)
+            assert dstate2 is not None
+            self.assertEqual(
+                dstate2.inventory.obligations[0].lifecycle_state, "omitted-uncertain"
+            )
+            self.assertEqual(dstate2.active_entries[0].placement, BODY_PLACEMENT)
+            self.assertIn("line_deletion", str(host.reviews[-1]["body"]))
+
+            # Round 3 (HEAD_3): whole_file_rewrite with file-level unanchored finding ->
+            # stays unresolved in body placement!
+            host.head_sha = HEAD_3
+            c3 = _comment(
+                "src/worker.py",
+                line=None,
+                side="FILE",
+                body="Unsynchronized pop persists after rewrite.",
+                symbol="run_job",
+                defect_kind="race_condition",
+            )
+            res3 = _result(c3, paths=("src/worker.py",))
+            pub3 = app.publish_review(
+                options=options,
+                oidc_token="oidc-3",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_3,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res3,
+                diff=diff_rewrite,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=self._blockers(res3),
+            )
+            self.assertEqual(pub3.diagnostic, "required_fixes_open")
+            self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+            self.assertIn("whole_file_rewrite", str(host.reviews[-1]["body"]))
+
+            # Round 4 (HEAD_4): AuthorizedRescan(mode="full") supersedes cleanly -> APPROVE!
+            host.head_sha = HEAD_4
+            pub4 = app.publish_review(
+                options=options,
+                oidc_token="oidc-4",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_4,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=_result(paths=("src/worker.py",)),
+                diff=diff_rewrite,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                authorized_rescan=AuthorizedRescan(
+                    kind="workflow_dispatch",
+                    request_id=404,
+                    source=_published_transaction(HEAD_4),
+                    review_id=405,
+                    mode="full",
+                ),
+            )
+            self.assertEqual(pub4.status, "published")
+            self.assertIsNone(pub4.diagnostic)
+            self.assertEqual(host.check_runs[-1]["conclusion"], "success")
+            self.assertTrue(
+                any(
+                    r["commit_id"] == HEAD_4 and r["state"] == "APPROVED"
+                    for r in host.reviews
+                )
+            )
+
+    def test_ordinary_publisher_copy_split_move_and_duplicate_code_hold_ambiguous_drift_until_all_targets_or_whole_override(
+        self,
+    ) -> None:
+        import tempfile
+
+        from review_sensei_github.errors import GitHubPublicationTransientError
+
+        diff_r1 = (
+            "diff --git a/src/crypto.py b/src/crypto.py\n"
+            "--- a/src/crypto.py\n"
+            "+++ b/src/crypto.py\n"
+            "@@ -1,1 +1,5 @@\n"
+            "-def derive_key(pw): return pw\n"
+            "+def derive_key(pw):\n"
+            "+    return pw.encode('utf-8')\n"
+            "+# line 3\n"
+            "+# line 4\n"
+            "+# line 5\n"
+        )
+        diff_copy = (
+            "diff --git a/src/crypto.py b/src/crypto_v2.py\n"
+            "similarity index 95%\n"
+            "copy from src/crypto.py\n"
+            "copy to src/crypto_v2.py\n"
+            "--- a/src/crypto.py\n"
+            "+++ b/src/crypto_v2.py\n"
+            "@@ -1,5 +1,5 @@\n"
+            " def derive_key(pw):\n"
+            "     return pw.encode('utf-8')\n"
+            " # line 3\n"
+            " # line 4\n"
+            "-# line 5\n"
+            "+# line 5 copy\n"
+        )
+        policy = ReviewConvergencePolicy(mode="strict")
+
+        # Part A: file_copy + transient uncertain thread + negative control (single-path fix)
+        # + positive multi-path fix!
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = _DriftGitHubHost(head_sha=HEAD_1)
+            app, _cmd_app, _pub, options = self._make_app(host, tmpdir, cap=3)
+
+            c1 = _comment(
+                "src/crypto.py",
+                line=2,
+                body="Weak KDF derives raw password bytes without salt.",
+                symbol="derive_key",
+                defect_kind="weak_kdf",
+            )
+            res1 = _result(c1, paths=("src/crypto.py",))
+
+            # Transient review POST failure holds drift binding as uncertain!
+            host.fail_next_review_post_transient = True
+            with self.assertRaises(GitHubPublicationTransientError):
+                app.publish_review(
+                    options=options,
+                    oidc_token="oidc-1a",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD_1,
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    result=res1,
+                    diff=diff_r1,
+                    app_slug="reviewsensei[bot]",
+                    convergence_policy=policy,
+                    blocker_candidates=self._blockers(res1),
+                )
+            dstate_unc = app.drift_state(repository_id=1, pull_request=1)
+            assert dstate_unc is not None
+            self.assertIn("uncertain-native-slot", dstate_unc.withheld_reasons)
+            unc_tb = dstate_unc.inventory.obligations[0].thread_binding
+            assert unc_tb is not None
+            app.reconcile_drift_thread(
+                repository_id=1,
+                pull_request=1,
+                thread_id=unc_tb.thread_id,
+                resolved_state="released",
+                proof_sha256=_sha("readback-absent"),
+            )
+
+            # Retry Round 1 succeeds cleanly:
+            app.publish_review(
+                options=options,
+                oidc_token="oidc-1b",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_1,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res1,
+                diff=diff_r1,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=self._blockers(res1),
+            )
+            dstate1 = app.drift_state(repository_id=1, pull_request=1)
+            assert dstate1 is not None
+            ob1 = dstate1.inventory.obligations[0]
+
+            # Round 2 (HEAD_2): file_copy -> ambiguous-multi-target hold!
+            host.head_sha = HEAD_2
+            pub2 = app.publish_review(
+                options=options,
+                oidc_token="oidc-2",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=_result(paths=("src/crypto.py", "src/crypto_v2.py")),
+                diff=diff_copy,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+            )
+            self.assertEqual(pub2.status, "published")
+            self.assertEqual(pub2.diagnostic, "required_fixes_open")
+            self.assertEqual(host.check_runs[-1]["conclusion"], "failure")
+            self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+            dstate2 = app.drift_state(repository_id=1, pull_request=1)
+            assert dstate2 is not None
+            self.assertEqual(
+                dstate2.inventory.obligations[0].lifecycle_state,
+                "ambiguous-multi-target",
+            )
+            self.assertIn("ambiguous-drift-target", dstate2.withheld_reasons)
+            self.assertIn("Drift hold (file_copy)", str(host.reviews[-1]["body"]))
+            base2 = app.drift_baseline(
+                repository_id=1,
+                pull_request=1,
+                baseline_template=self._baseline_template(HEAD_2),
+            )
+            assert base2 is not None
+            self.assertFalse(base2.complete)
+
+            # Negative control on Round 3 (HEAD_3): single-path ConfirmedFixEvidence
+            # covering ONLY src/crypto.py MUST NOT clear ambiguous-multi-target!
+            host.head_sha = HEAD_3
+            partial_fix = ConfirmedFixEvidence(
+                obligation_id=ob1.obligation_id,
+                resolution_criterion=ob1.criterion.resolution_criterion,
+                head_sha=HEAD_3,
+                evidence_sha256=_sha("single-path-fix"),
+                verified_paths=("src/crypto.py",),
+            )
+            pub3 = app.publish_review(
+                options=options,
+                oidc_token="oidc-3",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_3,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=_result(paths=("src/crypto.py", "src/crypto_v2.py")),
+                diff=diff_copy,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                confirmed_fixes=(partial_fix,),
+            )
+            self.assertNotEqual(pub3.diagnostic, None)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+            dstate3 = app.drift_state(repository_id=1, pull_request=1)
+            assert dstate3 is not None
+            self.assertEqual(
+                dstate3.inventory.obligations[0].lifecycle_state,
+                "ambiguous-multi-target",
+            )
+
+            # Round 4 (HEAD_4): multi-path ConfirmedFixEvidence covering BOTH candidate
+            # paths resolves the ambiguous hold, supersedes old thread, and approves!
+            host.head_sha = HEAD_4
+            full_fix = ConfirmedFixEvidence(
+                obligation_id=ob1.obligation_id,
+                resolution_criterion=ob1.criterion.resolution_criterion,
+                head_sha=HEAD_4,
+                evidence_sha256=_sha("both-paths-fix"),
+                verified_paths=("src/crypto.py", "src/crypto_v2.py"),
+            )
+            pub4 = app.publish_review(
+                options=options,
+                oidc_token="oidc-4",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_4,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=_result(paths=("src/crypto.py", "src/crypto_v2.py")),
+                diff=diff_copy,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                confirmed_fixes=(full_fix,),
+            )
+            self.assertEqual(pub4.status, "published")
+            self.assertIsNone(pub4.diagnostic)
+            self.assertEqual(host.check_runs[-1]["conclusion"], "success")
+            self.assertTrue(
+                any(
+                    r["commit_id"] == HEAD_4 and r["state"] == "APPROVED"
+                    for r in host.reviews
+                )
+            )
+
+        # Part B: split cross_file_move + duplicate_code + whole-obligation maintainer override!
+        diff_split = (
+            "diff --git a/src/a.py b/src/a.py\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/src/a.py\n"
+            "@@ -0,0 +1,4 @@\n"
+            "+def derive_key(pw):\n"
+            "+    return pw.encode('utf-8')\n"
+            "+# line 3\n"
+            "+# line 4\n"
+            "diff --git a/src/b.py b/src/b.py\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/src/b.py\n"
+            "@@ -0,0 +1,4 @@\n"
+            "+def derive_key(pw):\n"
+            "+    return pw.encode('utf-8')\n"
+            "+# line 3\n"
+            "+# line 4\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir2:
+            host2 = _DriftGitHubHost(head_sha=HEAD_1)
+            app2, cmd_app2, _pub2, opts2 = self._make_app(host2, tmpdir2, cap=3)
+
+            c_orig = _comment(
+                "src/crypto.py",
+                line=2,
+                body="Weak KDF derives raw password bytes without salt.",
+                symbol="derive_key",
+                defect_kind="weak_kdf",
+            )
+            res_orig = _result(c_orig, paths=("src/crypto.py",))
+            app2.publish_review(
+                options=opts2,
+                oidc_token="oidc-b1",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_1,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res_orig,
+                diff=diff_r1,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=ReviewConvergencePolicy(),
+                blocker_candidates=self._blockers(res_orig),
+            )
+            host2.threads[0]["isResolved"] = True
+
+            # Round 2 (HEAD_2): duplicate comments across split move targets -> ambiguous-multi-target!
+            host2.head_sha = HEAD_2
+            dup_a = _comment(
+                "src/a.py",
+                line=2,
+                body="Weak KDF duplicated into src/a.py.",
+                symbol="derive_key",
+                defect_kind="weak_kdf",
+            )
+            dup_b = _comment(
+                "src/b.py",
+                line=2,
+                body="Weak KDF duplicated into src/b.py.",
+                symbol="derive_key",
+                defect_kind="weak_kdf",
+            )
+            res_dup = _result(dup_a, dup_b, paths=("src/a.py", "src/b.py"))
+            pub_dup = app2.publish_review(
+                options=opts2,
+                oidc_token="oidc-b2",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res_dup,
+                diff=diff_split,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=ReviewConvergencePolicy(),
+                blocker_candidates=self._blockers(res_dup),
+                drift_descriptors=(
+                    FileDriftDescriptor(
+                        drift_kind="cross_file_move",
+                        source_path="src/crypto.py",
+                        target_paths=("src/a.py", "src/b.py"),
+                        moved_symbols=("derive_key",),
+                    ),
+                    FileDriftDescriptor(
+                        drift_kind="duplicate_code",
+                        source_path="src/crypto.py",
+                        target_paths=("src/a.py", "src/b.py"),
+                    ),
+                ),
+            )
+            self.assertEqual(pub_dup.diagnostic, "required_fixes_open")
+            dstate_dup = app2.drift_state(repository_id=1, pull_request=1)
+            assert dstate_dup is not None
+            ob_dup = dstate_dup.inventory.obligations[0]
+            self.assertEqual(ob_dup.lifecycle_state, "ambiguous-multi-target")
+
+            # Whole-obligation maintainer override resolves the displayed ambiguous hold -> APPROVE!
+            cmd_res = cmd_app2.apply_maintainer_command(
+                options=opts2,
+                oidc_token="oidc-cmd-b2",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD_2,
+                app_slug="reviewsensei[bot]",
+                actor_login="sec-owner",
+                actor_type="User",
+                association="OWNER",
+                body=(
+                    f"@reviewsensei accept-risk {ob_dup.criterion.original_fingerprint} "
+                    "--reason Test-only KDF helper behind local fixture flag"
+                ),
+            )
+            self.assertTrue(cmd_res.applied)
+            dstate_after = app2.drift_state(repository_id=1, pull_request=1)
+            assert dstate_after is not None
+            self.assertEqual(
+                dstate_after.inventory.obligations[0].lifecycle_state,
+                "authorized-override",
+            )
+            self.assertTrue(dstate_after.approved)
+            self.assertTrue(
+                any(
+                    r["commit_id"] == HEAD_2 and r["state"] == "APPROVED"
+                    for r in host2.reviews
+                )
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

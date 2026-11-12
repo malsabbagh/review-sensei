@@ -8,6 +8,7 @@ import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from fake_github_http import json_response
@@ -359,6 +360,68 @@ class Rich250PublicWriterTests(unittest.TestCase):
                 len(complete.to_dict()["human_resolution"]["resolved"]), 250
             )
             self.assertEqual(len(complete.human_review.findings), 250)
+
+    def test_fresh_partitioned_check_observation_is_projection_receipt_only(self):
+        observations = []
+        observe = ReviewPublisher._observe_confirmed_check
+
+        def record(publisher, context, check_run_id):
+            observe(publisher, context, check_run_id)
+            observations.append(publisher._check_observation)
+
+        with tempfile.TemporaryDirectory() as directory:
+            values = self.fixture(directory)
+            with patch.object(ReviewPublisher, "_observe_confirmed_check", record):
+                receipt = self.publish(values)
+            state, _, result, _, _, host = values
+            self.assertEqual(len(observations), 1)
+            observed = observations[0]
+            self.assertEqual(observed.context.repository, "owner/repo")
+            self.assertEqual(observed.context.repository_id, 1)
+            self.assertEqual(observed.context.pull_request, 1)
+            self.assertEqual(observed.context.base_sha, BASE)
+            self.assertEqual(observed.context.head_sha, HEAD)
+            self.assertEqual(
+                observed.context.result_digest, review_result_digest(result)
+            )
+            self.assertFalse(observed.authority_evaluated)
+            self.assertEqual(observed.check_run_id, state.check_runs[-1]["id"])
+            self.assertTrue(receipt.eligibility.facts.check_published)
+            self.assertEqual(host.budget.calls, 49)
+
+    def test_confirmed_partitioned_check_survives_observer_failure_without_retry(self):
+        checked_publishers = []
+
+        def fail_observer(publisher, context, check_run_id):
+            checked_publishers.append(publisher)
+            raise RuntimeError("private observer text must not be published")
+
+        with tempfile.TemporaryDirectory() as directory:
+            values = self.fixture(directory)
+            with patch.object(
+                ReviewPublisher, "_observe_confirmed_check", fail_observer
+            ):
+                receipt = self.publish(values)
+            state, _, _, _, _, host = values
+            self.assertEqual(receipt.diagnostic, "approval_withheld")
+            self.assertFalse(receipt.eligibility.facts.check_published)
+            self.assertEqual(len(checked_publishers), 1)
+            checked = checked_publishers[0]
+            self.assertEqual(
+                checked._confirmed_check,
+                ("owner/repo", HEAD, state.check_runs[-1]["id"]),
+            )
+            self.assertTrue(checked._check_observation_hold)
+            self.assertFalse(getattr(checked, "_check_accounting_unknown", False))
+            check_writes = [
+                call
+                for call in state.calls
+                if call[0] in {"POST", "PATCH"} and "/check-runs" in call[1]
+            ]
+            self.assertEqual(len(check_writes), 2)  # one start, one completion
+            self.assertEqual(host.budget.calls, 49)
+            self.assertNotIn("APPROVE", state.events())
+            self.assertNotIn("private observer text", receipt.body)
 
     def test_every_live_pr_dispatch_receives_original_remaining_timeout(self):
         clock = [0.0]

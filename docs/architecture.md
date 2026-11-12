@@ -268,6 +268,13 @@ validated once and reused by models, stages, and diff analysis; no path is
 silently normalized. The CLI reads at most the diff ceiling plus one byte, and
 each provider adapter owns an equivalent bounded transport read.
 
+## Webhook receipt and lifecycle completion
+
+Prospective ADR 0136 routing separates verified receipt, accepted operations and native completion. Record delivery observations only after successful route construction; seen IDs never suppress unadmitted work. Reinspect current authenticated lifecycle state and accepted-operation history: reuse terminal work; hold pending/uncertain work without new inference/funding. InMemoryDeliveryLedger observations are verifier-process-local (default 10,000 entries; oldest evicted; lost on restart). DeliveryLedger permits alternate adapters, not completed-work authority or new durability requirements. This cache is not durable operation authority: downstream admission, accounting and writer fences remain required. Legacy installation/setup verification retains its deduplication contract.
+
+
+Reference: [ADR 0136](adr/0136-event-routing-convergence-and-queue-boundaries.md).
+
 ## Portable workflow boundary
 
 src/review_sensei/workflow.py owns portable manual GitHub Actions. Before git it validates untrusted base_ref/head_ref/head_repository/review_sensei_version/ diff limits. It fetches explicit refs with list argv, resolves verified base/head commit OIDs, checks merge base and writes bounded triple-dot diffs without head checkout/execution. Installed `review-sensei prepare-diff` exposes it without consumer Code Sensei source.
@@ -1025,9 +1032,11 @@ A missing or malformed inventory cannot establish the engine boundary.
 Opt-in aggregate review triage is described in [review decisions](review-decisions.md)
 and proposed [ADR 0124](adr/0124-review-engine-decision-providers.md).
 
-## Webhook receipt and lifecycle completion
 
-Prospective ADR 0136 routing separates verified receipt, accepted operations and native completion. Record delivery observations only after successful route construction; seen IDs never suppress unadmitted work. Reinspect current authenticated lifecycle state and accepted-operation history: reuse terminal work; hold pending/uncertain work without new inference/funding. InMemoryDeliveryLedger observations are verifier-process-local (default 10,000 entries; oldest evicted; lost on restart). DeliveryLedger permits alternate adapters, not completed-work authority or new durability requirements. This cache is not durable operation authority: downstream admission, accounting and writer fences remain required. Legacy installation/setup verification retains its deduplication contract.
+## Check projection receipts are not artifact authority
 
-
-Reference: [ADR 0136](adr/0136-event-routing-convergence-and-queue-boundaries.md).
+Ordinary, replayed and explicit partitioned publishers bind check observations to
+immutable numeric repository/PR, base/head and result identity. A successful native
+response survives optional observation failure without duplicate dispatch; later
+approval is held for that invocation. The projection receipt expressly does not
+evaluate durable authority. See [ADR 0134](adr/0134-bounded-active-findings-and-artifact-authority.md).

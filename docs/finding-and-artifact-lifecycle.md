@@ -33,6 +33,15 @@ Every review round keeps four state variables strictly separate:
   `ReviewResult.decision_pass` and maps candidate assessments strictly to an
   intra-tier `proposal_rank`. Decision-provider outputs cannot clear an
   obligation, downgrade `blocking`, or bypass `needs_human`.
+- **Ordinary publisher & application entry points:** `GitHubApplication.publish_review`
+  (`max_active_findings`, `confirmed_fixes`, `human_overrides`,
+  `coverage_acceptance`, `authorized_rescan`), `GitHubApplication.apply_maintainer_command`,
+  and `ReviewPublisher.publish` (`_plan_active_window_round`,
+  `project_display_review_result`, `_commit_active_window_success`,
+  `_commit_active_window_uncertain`, `reconcile_active_window_slot`) execute the
+  four-variable window on the ordinary review/verify route, inspecting
+  `active_window_state` and `active_window_public_status` with
+  `assert_no_deferred_leakage` enforced on public summaries and shadow metadata.
 
 ---
 
@@ -72,6 +81,16 @@ Each `DriftTrackedObligation` separates:
   drifted or multi-target obligations to `rescan-superseded` only when all
   present candidate/target paths are included in `reviewed_paths` and any
   uncertain native thread slot has been reconciled first.
+- **Ordinary baseline, verification, and thread-publication integration:**
+  `GitHubApplication.publish_review` (`enable_drift_tracking`,
+  `drift_descriptors`, `host_outdated_threads`, `host_resolved_threads`),
+  `GitHubApplication.apply_maintainer_command`, and `ReviewPublisher.publish`
+  (`_plan_drift_round`, `project_drift_review_result`, `_commit_drift_success`,
+  `_commit_drift_uncertain`, `drift_baseline`, `reconcile_drift_thread`)
+  preserve `OriginalFindingCriterion` independently from `PresentLocationAnchor`
+  and `NativeThreadBinding`, supersede outdated/renamed threads on confirmed
+  native reviews, and hold `ambiguous-multi-target` / `omitted-uncertain`
+  obligations against approval.
 
 ---
 
@@ -94,13 +113,25 @@ Module: `packages/python/review-sensei-github/src/review_sensei_github/artifact_
   reconciles idempotently once (`reconciled-via-owned-readback`). If a human
   edited, duplicated, or deleted the artifact after response loss, state stays
   `uncertain-after-response-loss` with charges and obligations held.
-- **Restricted `reenroll`:** `execute_restricted_operator_reenroll` requires
-  maintainer/admin authority on an open, non-draft PR where ledger status is
-  `missing` (with `enrollment_witness_present=True` and cryptographic
+- **Restricted `reenroll`:** `execute_restricted_operator_reenroll` (exposed via
+  `GitHubApplication.execute_operator_reenroll` and guarded on
+  `GitHubApplication.apply_maintainer_command` for `@reviewsensei review reenroll`)
+  requires maintainer/admin authority on an open, non-draft PR where ledger
+  status is `missing` (with `enrollment_witness_present=True` and cryptographic
   `enrollment_witness_sha256` bound into the audit digest) or `expired`, and
-  **refuses** whenever active blocking obligations, active reservations, ledger
-  `publication_staging` / in-flight publication phases, uncertain writes,
-  quarantine lineage, or assessment queues exist.
+  **refuses** whenever active blocking obligations
+  (`reenroll-blocked-by-active-obligations`), active reservations, ledger
+  `publication_staging` / in-flight publication phases, uncertain writes
+  (`reenroll-blocked-by-uncertain-write`), quarantine lineage, or assessment
+  queues exist.
+- **Ordinary consumer wiring:** `ReviewPublisher` and `GitHubApplication`
+  evaluate `ObservedGitHubArtifact` and `verify_archive_chain` across
+  `GitHubIssueCommentSessionLedger` (`_require_present_marker` and round
+  preparation), `recover_retained_review_result` / `recover_review`,
+  `_eligibility_from_reviews`, `_blocking_root_facts` / `_suppression_root_facts`,
+  `_publish_check_state`, `narrative_archive`, and `_reconcile_marker`
+  (`response_loss_hold` / `reconcile_response_loss_hold`), never auto-recreating
+  deleted inline threads or uncertain reviews.
 
 ---
 
@@ -139,6 +170,25 @@ All seven transitions are evaluated across `before_admission`,
    `actor_meets_operation(operation)` -> refuses until an authorized
    maintainer/admin (`migration.operator_id == target.actor_id`) issues the
    command or override.
+
+### Ordinary Admission, Native-Effect, and Migration Entry Points
+
+- `GitHubApplication.enroll_trust_snapshot`, `trust_snapshot`, `trust_decisions`,
+  `has_unknown_trust_effect`, `reconcile_unknown_trust_effect`, and
+  `migrate_trust_boundary` bind `AuthenticatedTrustSnapshot` to
+  `ReviewPublisher` and `ReviewApprovalFinalizer`.
+- `before_admission` executes at the entry of `GitHubApplication.publish_review`,
+  `GitHubApplication.apply_maintainer_command`, and
+  `GitHubApplication.generate_and_publish_reply` before broker capability
+  exchange, session reservation, or provider execution.
+- `before_native_effect` executes inside `ReviewPublisher._preflight_pr` and
+  `ReviewApprovalFinalizer._preflight` against live PR `base.repo.id`,
+  `base.repo.full_name`, `base.repo.fork`, and `base.repo.owner` (`id`, `login`)
+  before any GitHub review, thread, check, or approval mutation.
+- `after_unknown_effect` executes on unconfirmed review transport/reconciliation
+  failures, holding `(repository_id, pull_request)` in
+  `unknown-effect-reconciliation-required` until explicit reconciliation or
+  authenticated migration.
 
 ### Universal Review Recovery Guarantee Summary
 
