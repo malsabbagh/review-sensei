@@ -17,6 +17,7 @@ from review_sensei.active_finding_window import (
     FORBIDDEN_PUBLIC_DEFERRED_KEYS,
     OVERRIDE_DISPOSITION_ACTIONS,
     ActiveWindowRoundState,
+    AuthoritativeDecisionInventory,
     AuthorizedCoverageAcceptance,
     AuthorizedHumanOverride,
     ConfirmedFixEvidence,
@@ -44,6 +45,7 @@ from review_sensei.diff import DiffAnalysis, analyze_diff
 from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
 from review_sensei.finding_drift import (
     DriftEvaluationResult,
+    DriftInventory,
     FileDriftDescriptor,
     apply_dispositions_to_drift_state,
     commit_drift_publication,
@@ -113,6 +115,13 @@ from .approval import (
     restrict_result_qualification,
 )
 from .approval_progress import ApprovalProgress, build_approval_progress
+from .artifact_authority import (
+    ArchiveChainPartRef,
+    ArtifactEvaluationDecision,
+    ObservedGitHubArtifact,
+    evaluate_observed_artifact,
+    verify_archive_chain_integrity,
+)
 from .branch_lifecycle import (
     evaluate_finalizer_pr_gate,
     evaluate_live_pr_write_gate,
@@ -1612,6 +1621,7 @@ def _blocking_root_facts(
     base_sha,
     app_slug,
     honored_instances=None,
+    decision_sink: list[ArtifactEvaluationDecision] | None = None,
 ):
     open_blocking = False
     resolved_instances: set[str] = set()
@@ -1630,9 +1640,41 @@ def _blocking_root_facts(
             raise GitHubPublicationError("review thread response was invalid")
         root = roots[0]
         author = root.get("author")
+        login = author.get("login") if isinstance(author, dict) else None
         if not graphql_app_author(author, app_slug):
+            if decision_sink is not None:
+                decision_sink.append(
+                    evaluate_observed_artifact(
+                        ObservedGitHubArtifact(
+                            artifact_kind="inline_review_comment",
+                            artifact_id=str(node.get("id") or "foreign-thread"),
+                            present=True,
+                            author_login=login if isinstance(login, str) else None,
+                            author_is_authenticated_app=False,
+                            edited_by_human=True,
+                        )
+                    )
+                )
             continue
         body = root.get("body")
+        if root.get("edited_by_human") is True:
+            if decision_sink is not None:
+                decision_sink.append(
+                    evaluate_observed_artifact(
+                        ObservedGitHubArtifact(
+                            artifact_kind="inline_review_comment",
+                            artifact_id=str(node.get("id") or "edited-thread"),
+                            present=True,
+                            author_login=login if isinstance(login, str) else None,
+                            author_is_authenticated_app=True,
+                            edited_by_human=True,
+                            raw_body=body if isinstance(body, str) else None,
+                        )
+                    )
+                )
+            if not node["isResolved"]:
+                open_blocking = True
+            continue
         instance = finding_instance_from_body(body)
         scope = finding_publication_scope(body)
         if scope is not None:
@@ -1682,7 +1724,14 @@ def _blocking_root_facts(
 
 
 def _suppression_root_facts(
-    nodes, *, repository_id, pull_request, head_sha, base_sha, app_slug
+    nodes,
+    *,
+    repository_id,
+    pull_request,
+    head_sha,
+    base_sha,
+    app_slug,
+    decision_sink: list[ArtifactEvaluationDecision] | None = None,
 ):
     by_fingerprint: dict[str, bool] = {}
     by_location: dict[tuple[str, int], bool] = {}
@@ -1716,13 +1765,41 @@ def _suppression_root_facts(
         # GitHub logins are case-insensitive, so a configured slug that
         # differs only in case must still match its own findings.
         if not graphql_app_author(author, app_slug):
+            if decision_sink is not None:
+                decision_sink.append(
+                    evaluate_observed_artifact(
+                        ObservedGitHubArtifact(
+                            artifact_kind="inline_review_comment",
+                            artifact_id=str(node.get("id") or "foreign-thread"),
+                            present=True,
+                            author_login=login,
+                            author_is_authenticated_app=False,
+                            edited_by_human=True,
+                        )
+                    )
+                )
             continue
         resolved = node.get("isResolved")
         if not isinstance(resolved, bool):
             raise GitHubPublicationError("review thread response was invalid")
         body = root.get("body")
+        human_edited_root = root.get("edited_by_human") is True
         scope = finding_publication_scope(body)
-        if scope is None:
+        if scope is None or human_edited_root:
+            if decision_sink is not None:
+                decision_sink.append(
+                    evaluate_observed_artifact(
+                        ObservedGitHubArtifact(
+                            artifact_kind="inline_review_comment",
+                            artifact_id=str(node.get("id") or "edited-thread"),
+                            present=True,
+                            author_login=login,
+                            author_is_authenticated_app=True,
+                            edited_by_human=True,
+                            raw_body=body if isinstance(body, str) else None,
+                        )
+                    )
+                )
             continue
         repo_id, pr_number, marker_head, marker_base, blocking, needs_human = scope
         thread_id = node.get("id")
@@ -1940,6 +2017,24 @@ class ReviewApprovalFinalizer:
         self._thread_cleanup_token_provider: Callable[[], str] | None = None
         self._active_window_states: dict[tuple[int, int], ActiveWindowRoundState] = {}
         self._drift_states: dict[tuple[int, int], DriftEvaluationResult] = {}
+        self._artifact_decisions: dict[
+            tuple[int, int], list[ArtifactEvaluationDecision]
+        ] = {}
+        self._response_loss_holds: dict[
+            tuple[int, int, str], ArtifactEvaluationDecision
+        ] = {}
+
+    def _record_artifact_decision(
+        self,
+        *,
+        repository_id: int | None,
+        pull_request: int | None,
+        decision: ArtifactEvaluationDecision,
+    ) -> None:
+        if repository_id is not None and pull_request is not None:
+            self._artifact_decisions.setdefault(
+                (repository_id, pull_request), []
+            ).append(decision)
 
     def active_window_state(
         self, *, repository_id: int, pull_request: int
@@ -2398,6 +2493,17 @@ class ReviewApprovalFinalizer:
                     )
                 if drift_state.changed_file_coverage.coverage_uncertainty_accepted:
                     coverage_uncertainty_accepted = True
+            if (
+                preflight.repository_id,
+                pull_request,
+                head_sha,
+            ) in self._response_loss_holds:
+                return known(
+                    PublicationResult(
+                        status="approval_withheld",
+                        diagnostic="approval_withheld",
+                    )
+                )
             if not self._qualification_authorizes(
                 eligibility,
                 repository=repository,
@@ -4377,6 +4483,9 @@ class ReviewApprovalFinalizer:
         withholds.
         """
 
+        decision_sink = self._artifact_decisions.setdefault(
+            (repository_id, pull_request), []
+        )
         native_nodes = self._native_thread_nodes(
             token=token,
             repository=repository,
@@ -4393,6 +4502,7 @@ class ReviewApprovalFinalizer:
                 base_sha=base_sha,
                 app_slug=app_slug,
                 honored_instances=honored_instances,
+                decision_sink=decision_sink,
             )
 
         owner, separator, name = repository.partition("/")
@@ -4455,6 +4565,7 @@ class ReviewApprovalFinalizer:
                 base_sha=base_sha,
                 app_slug=app_slug,
                 honored_instances=honored_instances,
+                decision_sink=decision_sink,
             )
             open_blocking |= page_open
             resolved_instances.update(page_resolved)
@@ -4623,7 +4734,19 @@ class ReviewApprovalFinalizer:
         token: str | None = None,
         repository: str | None = None,
         pull_request: int | None = None,
+        repository_id: int | None = None,
     ) -> ReviewApprovalEligibility | None:
+        resolved_repo_id = repository_id
+        if resolved_repo_id is None and pull_request is not None:
+            known_rids = {
+                rid
+                for (rid, pr) in (
+                    set(self._active_window_states) | set(self._drift_states)
+                )
+                if pr == pull_request
+            }
+            if len(known_rids) == 1:
+                resolved_repo_id = next(iter(known_rids))
         human_reader = self.human_inventory_reader
         if token is not None and repository is not None and pull_request is not None:
             human_reader = self._human_reader_for_scope(
@@ -4640,8 +4763,38 @@ class ReviewApprovalFinalizer:
             user = review.get("user")
             login = user.get("login") if isinstance(user, dict) else None
             if not isinstance(login, str) or login.casefold() != expected:
+                self._record_artifact_decision(
+                    repository_id=resolved_repo_id,
+                    pull_request=pull_request,
+                    decision=evaluate_observed_artifact(
+                        ObservedGitHubArtifact(
+                            artifact_kind="native_review_summary",
+                            artifact_id=str(review.get("id") or "foreign-review"),
+                            present=True,
+                            author_login=login if isinstance(login, str) else None,
+                            author_is_authenticated_app=False,
+                            edited_by_human=True,
+                        )
+                    ),
+                )
                 continue
             body = review.get("body")
+            if review.get("edited_by_human") is True:
+                self._record_artifact_decision(
+                    repository_id=resolved_repo_id,
+                    pull_request=pull_request,
+                    decision=evaluate_observed_artifact(
+                        ObservedGitHubArtifact(
+                            artifact_kind="native_review_summary",
+                            artifact_id=str(review.get("id") or "edited-review"),
+                            present=True,
+                            author_login=login,
+                            author_is_authenticated_app=True,
+                            edited_by_human=True,
+                            raw_body=body if isinstance(body, str) else None,
+                        )
+                    ),
+                )
             if (
                 not isinstance(body, str)
                 or APPROVAL_ELIGIBILITY_MARKER_PREFIX not in body
@@ -4698,12 +4851,42 @@ class ReviewApprovalFinalizer:
                         try:
                             validate(review, reviews)
                         except ReviewInputError as exc:
+                            self._record_artifact_decision(
+                                repository_id=resolved_repo_id,
+                                pull_request=pull_request,
+                                decision=evaluate_observed_artifact(
+                                    ObservedGitHubArtifact(
+                                        artifact_kind="retained_result_part",
+                                        artifact_id=str(
+                                            review.get("id") or "retained-root"
+                                        ),
+                                        present=True,
+                                        author_login=login,
+                                        author_is_authenticated_app=True,
+                                        edited_by_human=True,
+                                    )
+                                ),
+                            )
                             if require_valid:
                                 raise GitHubPublicationError(
                                     "latest human inventory eligibility root conflicts"
                                 ) from exc
                             return None
                 return eligibility
+            self._record_artifact_decision(
+                repository_id=resolved_repo_id,
+                pull_request=pull_request,
+                decision=evaluate_observed_artifact(
+                    ObservedGitHubArtifact(
+                        artifact_kind="session_ledger_marker",
+                        artifact_id=str(review.get("id") or "tampered-eligibility"),
+                        present=True,
+                        author_login=login,
+                        author_is_authenticated_app=True,
+                        edited_by_human=True,
+                    )
+                ),
+            )
             if require_valid:
                 raise GitHubPublicationError(
                     "latest review eligibility is invalid; rerun a full review for the current head before reassessment"
@@ -4849,6 +5032,135 @@ class ReviewPublisher:
         self._drift_inputs: dict[tuple[int, int], tuple[str, str, str]] = {}
         self._drift_concern_history: dict[tuple[int, int, str], frozenset[str]] = {}
         self.finalizer._drift_states = self._drift_states
+        self._artifact_decisions = self.finalizer._artifact_decisions
+        self._response_loss_holds = self.finalizer._response_loss_holds
+        self._last_review_payload: list[Any] = []
+
+    def _current_authoritative_inventory(
+        self, *, repository_id: int, pull_request: int
+    ) -> AuthoritativeDecisionInventory | DriftInventory | None:
+        drift_state = self._drift_states.get((repository_id, pull_request))
+        if drift_state is not None:
+            return drift_state.inventory
+        window_state = self._active_window_states.get((repository_id, pull_request))
+        if window_state is not None:
+            return window_state.authoritative_decision_inventory
+        return None
+
+    def active_blocking_obligations_count(
+        self, *, repository_id: int, pull_request: int
+    ) -> int:
+        inv = self._current_authoritative_inventory(
+            repository_id=repository_id, pull_request=pull_request
+        )
+        return 0 if inv is None else len(inv.blocking_obligations)
+
+    def artifact_decisions(
+        self, *, repository_id: int, pull_request: int
+    ) -> tuple[ArtifactEvaluationDecision, ...]:
+        return tuple(self._artifact_decisions.get((repository_id, pull_request), ()))
+
+    def response_loss_hold(
+        self, *, repository_id: int, pull_request: int, head_sha: str
+    ) -> ArtifactEvaluationDecision | None:
+        return self._response_loss_holds.get((repository_id, pull_request, head_sha))
+
+    def observe_artifact(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        observed: ObservedGitHubArtifact,
+        identity: Any | None = None,
+        enrollment_witness_present: bool = False,
+        has_active_reservation: bool = False,
+    ) -> ArtifactEvaluationDecision:
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ReviewInputError("repository_id must be a positive integer")
+        if type(pull_request) is not int or pull_request <= 0:
+            raise ReviewInputError("pull_request must be a positive integer")
+        decision = evaluate_observed_artifact(
+            observed,
+            identity=identity,
+            inventory=self._current_authoritative_inventory(
+                repository_id=repository_id, pull_request=pull_request
+            ),
+            enrollment_witness_present=enrollment_witness_present,
+            has_active_reservation=has_active_reservation,
+        )
+        self._artifact_decisions.setdefault((repository_id, pull_request), []).append(
+            decision
+        )
+        return decision
+
+    def verify_archive_chain(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        expected_chain: Sequence[ArchiveChainPartRef],
+        observed_comments: Mapping[int, ObservedGitHubArtifact],
+    ) -> ArtifactEvaluationDecision:
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ReviewInputError("repository_id must be a positive integer")
+        if type(pull_request) is not int or pull_request <= 0:
+            raise ReviewInputError("pull_request must be a positive integer")
+        decision = verify_archive_chain_integrity(expected_chain, observed_comments)
+        self._artifact_decisions.setdefault((repository_id, pull_request), []).append(
+            decision
+        )
+        return decision
+
+    def reconcile_response_loss_hold(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        observed: ObservedGitHubArtifact | None = None,
+        absent_proof_sha256: str | None = None,
+    ) -> ArtifactEvaluationDecision:
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ReviewInputError("repository_id must be a positive integer")
+        if type(pull_request) is not int or pull_request <= 0:
+            raise ReviewInputError("pull_request must be a positive integer")
+        if not isinstance(head_sha, str) or GIT_SHA_HEX.fullmatch(head_sha) is None:
+            raise ReviewInputError("head_sha must be a commit SHA")
+        hold_key = (repository_id, pull_request, head_sha)
+        if hold_key not in self._response_loss_holds:
+            raise ReviewInputError("no uncertain response-loss hold exists for head")
+        if observed is not None:
+            decision = self.observe_artifact(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                observed=replace(observed, response_lost=True),
+            )
+            if decision.verdict != "reconciled":
+                raise GitHubPublicationError(
+                    f"response-loss hold remains uncertain: {decision.reason_code}"
+                )
+            self._response_loss_holds.pop(hold_key, None)
+            return decision
+        if (
+            not isinstance(absent_proof_sha256, str)
+            or re.fullmatch(r"[a-f0-9]{64}", absent_proof_sha256) is None
+        ):
+            raise ReviewInputError(
+                "reconcile_response_loss_hold requires observed readback or 64-hex absent_proof_sha256"
+            )
+        decision = self.observe_artifact(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            observed=ObservedGitHubArtifact(
+                artifact_kind="owned_readback_receipt",
+                artifact_id=f"absent-proof:{pull_request}:{head_sha}",
+                present=True,
+                expected_sha256=absent_proof_sha256,
+                observed_sha256=absent_proof_sha256,
+            ),
+        )
+        self._response_loss_holds.pop(hold_key, None)
+        return decision
 
     def active_window_state(
         self, *, repository_id: int, pull_request: int
@@ -4905,6 +5217,10 @@ class ReviewPublisher:
             proof_sha256=proof_sha256,
         )
         self._drift_states[(repository_id, pull_request)] = reconciled
+        if resolved_state in {"released", "confirmed_live"}:
+            self._response_loss_holds.pop(
+                (repository_id, pull_request, reconciled.head_sha), None
+            )
         return reconciled
 
     def reconcile_active_window_slot(
@@ -4926,6 +5242,10 @@ class ReviewPublisher:
             proof_sha256=proof_sha256,
         )
         self._active_window_states[(repository_id, pull_request)] = reconciled
+        if resolved_state in {"released", "confirmed_live"}:
+            self._response_loss_holds.pop(
+                (repository_id, pull_request, reconciled.head_sha), None
+            )
         return reconciled
 
     def _plan_active_window_round(
@@ -5952,6 +6272,31 @@ class ReviewPublisher:
             return "check_publication_failed"
         if outcome is not None:
             self._confirmed_check = (repository, head_sha, result.check_run_id)
+            pr_ctx = self._carried_context.get("pull_request")
+            if type(pr_ctx) is int and pr_ctx > 0:
+                known_rids = {
+                    rid
+                    for (rid, pr) in (
+                        set(self._active_window_states) | set(self._drift_states)
+                    )
+                    if pr == pr_ctx
+                }
+                if len(known_rids) == 1:
+                    rid = next(iter(known_rids))
+                    self.finalizer._record_artifact_decision(
+                        repository_id=rid,
+                        pull_request=pr_ctx,
+                        decision=evaluate_observed_artifact(
+                            ObservedGitHubArtifact(
+                                artifact_kind="check_run_text",
+                                artifact_id=str(result.check_run_id),
+                                present=True,
+                            ),
+                            inventory=self._current_authoritative_inventory(
+                                repository_id=rid, pull_request=pr_ctx
+                            ),
+                        ),
+                    )
         return None
 
     def _check_state_or_diagnostic(
@@ -6198,6 +6543,11 @@ class ReviewPublisher:
         drift_descriptors: Sequence[FileDriftDescriptor] = (),
         host_outdated_threads: frozenset[str] = frozenset(),
         host_resolved_threads: frozenset[str] = frozenset(),
+        observed_artifacts: Sequence[ObservedGitHubArtifact] = (),
+        archive_chain: tuple[
+            Sequence[ArchiveChainPartRef], Mapping[int, ObservedGitHubArtifact]
+        ]
+        | None = None,
     ) -> PublicationResult:
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError(
@@ -6277,6 +6627,8 @@ class ReviewPublisher:
                 drift_descriptors=drift_descriptors,
                 host_outdated_threads=host_outdated_threads,
                 host_resolved_threads=host_resolved_threads,
+                observed_artifacts=observed_artifacts,
+                archive_chain=archive_chain,
             )
             return (
                 publication
@@ -6338,6 +6690,11 @@ class ReviewPublisher:
         drift_descriptors: Sequence[FileDriftDescriptor] = (),
         host_outdated_threads: frozenset[str] = frozenset(),
         host_resolved_threads: frozenset[str] = frozenset(),
+        observed_artifacts: Sequence[ObservedGitHubArtifact] = (),
+        archive_chain: tuple[
+            Sequence[ArchiveChainPartRef], Mapping[int, ObservedGitHubArtifact]
+        ]
+        | None = None,
     ) -> PublicationResult:
         from .checkpoint_result_store import uses_grouped_publication
 
@@ -6373,6 +6730,32 @@ class ReviewPublisher:
             raise GitHubPublicationError("review identity is invalid")
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubPublicationError("review head sha is invalid")
+        if (repository_id, pull_request, head_sha) in self._response_loss_holds:
+            raise GitHubPublicationError(
+                "review publication held uncertain after response loss; reconcile before retrying"
+            )
+        for observed_item in observed_artifacts:
+            decision = self.observe_artifact(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                observed=observed_item,
+            )
+            if not decision.authority_intact:
+                raise GitHubPublicationError(
+                    f"review artifact integrity refused: {decision.reason_code}"
+                )
+        if archive_chain is not None:
+            expected_refs, observed_map = archive_chain
+            chain_decision = self.verify_archive_chain(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                expected_chain=expected_refs,
+                observed_comments=observed_map,
+            )
+            if not chain_decision.authority_intact:
+                raise GitHubPublicationError(
+                    f"archive chain integrity refused: {chain_decision.reason_code}"
+                )
         if not isinstance(base_branch, str) or not base_branch.strip():
             raise GitHubPublicationError("review base branch is invalid")
         if not GIT_SHA_HEX.fullmatch(base_sha):
@@ -6563,6 +6946,17 @@ class ReviewPublisher:
             )
             window_approved = planned_drift_state.approved and not has_uncertain_drift
         elif planned_window_state is not None:
+            prior_wstate_for_block = self._active_window_states.get(
+                (repository_id, pull_request)
+            )
+            prev_displayed_ids_for_block = (
+                {
+                    entry.obligation_id
+                    for entry in prior_wstate_for_block.display_active_findings.entries
+                }
+                if prior_wstate_for_block is not None and authorized_rescan is None
+                else set()
+            )
             displayed_ob_ids = {
                 entry.obligation_id
                 for entry in planned_window_state.display_active_findings.entries
@@ -6577,6 +6971,7 @@ class ReviewPublisher:
                 planned_window_state.display_active_findings.has_uncertain_slots
                 or any(
                     ob.obligation_id not in displayed_ob_ids
+                    or ob.obligation_id in prev_displayed_ids_for_block
                     or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
                     for ob in planned_window_state.authoritative_decision_inventory.blocking_obligations
                 )
@@ -6858,8 +7253,49 @@ class ReviewPublisher:
                     ):
                         from .publication_recovery import ConfirmedNarrativeArchive
 
-                        archive = narrative_archive()
+                        try:
+                            archive = narrative_archive()
+                        except (
+                            ReviewInputError,
+                            GitHubPublicationError,
+                        ) as archive_exc:
+                            msg_lower = str(archive_exc).lower()
+                            missing_part = any(
+                                word in msg_lower
+                                for word in (
+                                    "missing",
+                                    "absent",
+                                    "not found",
+                                    "unavailable",
+                                )
+                            )
+                            self.observe_artifact(
+                                repository_id=repository_id,
+                                pull_request=pull_request,
+                                observed=ObservedGitHubArtifact(
+                                    artifact_kind="archive_chain_part",
+                                    artifact_id=f"narrative:{pull_request}:{head_sha}",
+                                    present=not missing_part,
+                                    duplicate_count=0 if missing_part else 1,
+                                    edited_by_human=not missing_part,
+                                    expected_sha256="0" * 64,
+                                    observed_sha256="f" * 64
+                                    if not missing_part
+                                    else None,
+                                ),
+                            )
+                            raise
                         if type(archive) is not ConfirmedNarrativeArchive:
+                            self.observe_artifact(
+                                repository_id=repository_id,
+                                pull_request=pull_request,
+                                observed=ObservedGitHubArtifact(
+                                    artifact_kind="archive_chain_part",
+                                    artifact_id=f"narrative:{pull_request}:{head_sha}",
+                                    present=False,
+                                    duplicate_count=0,
+                                ),
+                            )
                             raise ReviewInputError(
                                 "retained narrative confirmation is unavailable"
                             )
@@ -7645,6 +8081,22 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 base_sha=base_sha,
             )
+        prior_wstate_for_suppression = (
+            self._active_window_states.get((repository_id, pull_request))
+            if planned_window_state is not None and authorized_rescan is None
+            else None
+        )
+        prev_published_window_fps: set[str] = set()
+        if prior_wstate_for_suppression is not None:
+            prev_disp_ids = {
+                entry.obligation_id
+                for entry in prior_wstate_for_suppression.display_active_findings.entries
+            }
+            prev_published_window_fps = {
+                ob.fingerprint
+                for ob in prior_wstate_for_suppression.authoritative_decision_inventory.obligations
+                if ob.obligation_id in prev_disp_ids
+            }
         comments = []
         for comment, fingerprint, comment_body, anchor in prepared_comments:
             if _should_suppress_published_finding(
@@ -7655,6 +8107,18 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 base_sha=base_sha,
             ):
+                continue
+            if fingerprint in prev_published_window_fps:
+                self.observe_artifact(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    observed=ObservedGitHubArtifact(
+                        artifact_kind="inline_review_comment",
+                        artifact_id=f"inline:{comment.path}:{comment.line or 0}",
+                        present=False,
+                        duplicate_count=0,
+                    ),
+                )
                 continue
             comment_payload: dict[str, object] = {
                 "path": comment.path,
@@ -7841,6 +8305,8 @@ class ReviewPublisher:
                 repository_id=repository_id,
                 base_sha=base_sha,
                 result_digest=review_result_digest(result),
+                response_lost=True,
+                expected_body_sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
             ):
                 self._commit_active_window_success(
                     repository_id=repository_id,
@@ -8076,6 +8542,8 @@ class ReviewPublisher:
                 repository_id=repository_id,
                 base_sha=base_sha,
                 result_digest=review_result_digest(result),
+                response_lost=True,
+                expected_body_sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
             ):
                 self._commit_active_window_success(
                     repository_id=repository_id,
@@ -8379,6 +8847,39 @@ class ReviewPublisher:
         suppress the current head.
         """
 
+        decision_sink = self._artifact_decisions.setdefault(
+            (repository_id, pull_request), []
+        )
+        expected_bound_threads: set[str] = set()
+        dstate = self._drift_states.get((repository_id, pull_request))
+        if dstate is not None:
+            for ob in dstate.inventory.obligations:
+                if ob.unresolved and ob.thread_binding is not None:
+                    expected_bound_threads.add(ob.thread_binding.thread_id)
+        wstate = self._active_window_states.get((repository_id, pull_request))
+        if wstate is not None:
+            for slot in wstate.display_active_findings.slots:
+                if slot.state == "active" and not slot.target.startswith(
+                    ("inline:", "body:")
+                ):
+                    expected_bound_threads.add(slot.target)
+
+        def record_missing_threads(observed_ids: set[str]) -> None:
+            for tid in sorted(expected_bound_threads - observed_ids):
+                decision_sink.append(
+                    evaluate_observed_artifact(
+                        ObservedGitHubArtifact(
+                            artifact_kind="inline_review_comment",
+                            artifact_id=tid,
+                            present=False,
+                            duplicate_count=0,
+                        ),
+                        inventory=self._current_authoritative_inventory(
+                            repository_id=repository_id, pull_request=pull_request
+                        ),
+                    )
+                )
+
         native_nodes = self.finalizer._native_thread_nodes(
             token=token,
             repository=repository,
@@ -8387,6 +8888,12 @@ class ReviewPublisher:
             app_slug=app_slug,
         )
         if native_nodes is not None:
+            seen_native_ids = {
+                str(n["id"])
+                for n in native_nodes
+                if isinstance(n, dict) and isinstance(n.get("id"), str)
+            }
+            record_missing_threads(seen_native_ids)
             return _suppression_root_facts(
                 native_nodes,
                 repository_id=repository_id,
@@ -8394,6 +8901,7 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 base_sha=base_sha,
                 app_slug=app_slug,
+                decision_sink=decision_sink,
             )
 
         owner, separator, name = repository.partition("/")
@@ -8403,6 +8911,7 @@ class ReviewPublisher:
         by_location: dict[tuple[str, int], bool] = {}
         by_instance: dict[str, PublishedInstance] = {}
         superseded: list[tuple[str, str]] = []
+        observed_graphql_ids: set[str] = set()
         after: str | None = None
         pages = BoundedGraphQLPages(self.http, max_requests=MAX_REVIEW_THREAD_PAGES)
         for _ in range(MAX_REVIEW_THREAD_PAGES):
@@ -8459,6 +8968,9 @@ class ReviewPublisher:
                 or not isinstance(page_info, dict)
             ):
                 raise GitHubPublicationError("review thread response was invalid")
+            for node in nodes:
+                if isinstance(node, dict) and isinstance(node.get("id"), str):
+                    observed_graphql_ids.add(node["id"])
             page = _suppression_root_facts(
                 nodes,
                 repository_id=repository_id,
@@ -8466,6 +8978,7 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 base_sha=base_sha,
                 app_slug=app_slug,
+                decision_sink=decision_sink,
             )
             by_fingerprint.update(page.by_fingerprint)
             by_location.update(page.by_location)
@@ -8475,6 +8988,7 @@ class ReviewPublisher:
             if not isinstance(has_next, bool):
                 raise GitHubPublicationError("review thread response was invalid")
             if not has_next:
+                record_missing_threads(observed_graphql_ids)
                 return PublishedFindingSuppression(
                     by_fingerprint,
                     by_location,
@@ -8833,6 +9347,7 @@ class ReviewPublisher:
         payload = filter_reviews(
             self.http, payload, repository=repository, head_sha=head_sha
         )
+        self._last_review_payload = list(payload)
         for review in payload:
             if not isinstance(review, dict):
                 continue
@@ -8894,6 +9409,7 @@ class ReviewPublisher:
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
+                repository_id=lookup_repository_id or repository_id,
             )
         except GitHubPublicationTransientError:
             raise
@@ -9194,6 +9710,8 @@ class ReviewPublisher:
         repository_id: int | None = None,
         base_sha: str | None = None,
         result_digest: str | None = None,
+        response_lost: bool = False,
+        expected_body_sha256: str | None = None,
     ) -> bool:
         try:
             if complete_review is not None:
@@ -9210,15 +9728,89 @@ class ReviewPublisher:
                     base_sha=base_sha,
                     result_digest=result_digest,
                 )
-                return expected_state in states
-            return expected_state in self._published_states(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                marker=marker,
-                app_slug=app_slug,
+                matched = expected_state in states
+            else:
+                matched = expected_state in self._published_states(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    marker=marker,
+                    app_slug=app_slug,
+                )
+            if not response_lost:
+                return matched
+            matching_reviews = [
+                rev
+                for rev in self._last_review_payload
+                if isinstance(rev, dict)
+                and rev.get("commit_id") == head_sha
+                and rev.get("state") == expected_state
+                and isinstance(rev.get("user"), dict)
+                and rev["user"].get("login") == app_slug
+                and isinstance(rev.get("body"), str)
+                and marker in rev["body"]
+            ]
+            if not matched or not matching_reviews:
+                observed_item = ObservedGitHubArtifact(
+                    artifact_kind="native_review_summary",
+                    artifact_id=f"review:{pull_request}:{head_sha}",
+                    present=False,
+                    duplicate_count=0,
+                    expected_sha256=expected_body_sha256,
+                    response_lost=True,
+                )
+            else:
+                rev0 = matching_reviews[0]
+                body0 = str(rev0["body"])
+                edited0 = rev0.get("edited_by_human") is True
+                obs_sha = hashlib.sha256(body0.encode("utf-8")).hexdigest()
+                exp_sha = (
+                    obs_sha
+                    if complete_review is None and body0 == marker and not edited0
+                    else expected_body_sha256
+                )
+                observed_item = ObservedGitHubArtifact(
+                    artifact_kind="native_review_summary",
+                    artifact_id=str(
+                        rev0.get("id") or f"review:{pull_request}:{head_sha}"
+                    ),
+                    present=True,
+                    author_login=app_slug,
+                    author_is_authenticated_app=True,
+                    edited_by_human=edited0,
+                    expected_sha256=exp_sha,
+                    observed_sha256=obs_sha,
+                    raw_body=body0,
+                    duplicate_count=len(matching_reviews),
+                    response_lost=True,
+                )
+            decision = evaluate_observed_artifact(
+                observed_item,
+                inventory=(
+                    self._current_authoritative_inventory(
+                        repository_id=repository_id, pull_request=pull_request
+                    )
+                    if repository_id is not None
+                    else None
+                ),
             )
+            self.finalizer._record_artifact_decision(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                decision=decision,
+            )
+            if decision.verdict == "reconciled":
+                if repository_id is not None:
+                    self._response_loss_holds.pop(
+                        (repository_id, pull_request, head_sha), None
+                    )
+                return True
+            if repository_id is not None:
+                self._response_loss_holds[(repository_id, pull_request, head_sha)] = (
+                    decision
+                )
+            return False
         except GitHubHTTPTransientError as exc:
             raise GitHubPublicationTransientError(
                 "review reconciliation failed temporarily"
