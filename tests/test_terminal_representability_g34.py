@@ -2205,6 +2205,52 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                 ),
             }
         )
+        with self.assertRaisesRegex(
+            ReviewInputError, "cached partition JSON is invalid"
+        ):
+            preview_session_command_representability(
+                identity=IDENTITY,
+                current_record=snap_record,
+                command=MaintainerCommand(action="status", actor="alice"),
+                intent_sha256="1" * 64,
+                binding=self._default_binding(),
+                source_ledger=SimpleNamespace(
+                    _part_documents={(IDENTITY, part_ids[0]): (None, b"not-json")}
+                ),
+            )
+
+        for unknown_ledger in (
+            None,
+            SimpleNamespace(),
+            SimpleNamespace(_comments_by_id=None),
+        ):
+            with (
+                self.subTest(ledger=unknown_ledger),
+                self.assertRaisesRegex(
+                    ReviewInputError, "snapshot read pricing capability is unavailable"
+                ),
+            ):
+                _unlisted_snapshot_part_reads(
+                    unknown_ledger, snap_record, action="verify", writes_enabled=True
+                )
+
+        with (
+            patch(
+                "review_sensei.terminal_representability._InMemoryPreviewLedger.read_disposition_snapshot",
+                side_effect=ReviewInputError(
+                    "disposition snapshot producer does not match session"
+                ),
+            ),
+            self.assertRaisesRegex(ReviewInputError, "producer does not match"),
+        ):
+            preview_session_command_representability(
+                identity=IDENTITY,
+                current_record=snap_record,
+                command=MaintainerCommand(action="status", actor="alice"),
+                intent_sha256="1" * 64,
+                binding=self._default_binding(),
+            )
+
         hosted_ledger = SimpleNamespace(
             _comments_by_id={1001: {"id": 1001}},
             _verified_parts={},

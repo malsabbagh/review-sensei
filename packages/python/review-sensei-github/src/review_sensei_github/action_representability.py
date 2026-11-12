@@ -47,11 +47,6 @@ def _unlisted_snapshot_part_reads(
         }
     ):
         return 0
-    comments_by_id = getattr(ledger, "_comments_by_id", None)
-    if not isinstance(comments_by_id, Mapping):
-        return 0
-    verified = getattr(ledger, "_verified_parts", None)
-    verified_map = verified if isinstance(verified, Mapping) else {}
     state_manifest = current_record.disposition_snapshot.get("state_manifest")
     if not isinstance(state_manifest, Mapping) or (
         state_manifest.get("encoding") != "partitioned-json-v1"
@@ -60,6 +55,11 @@ def _unlisted_snapshot_part_reads(
     parts = state_manifest.get("parts")
     if not isinstance(parts, list):
         return 0
+    comments_by_id = getattr(ledger, "_comments_by_id", None)
+    if not isinstance(comments_by_id, Mapping):
+        raise ReviewInputError("snapshot read pricing capability is unavailable")
+    verified = getattr(ledger, "_verified_parts", None)
+    verified_map = verified if isinstance(verified, Mapping) else {}
     cold = 0
     for ref in parts:
         if not isinstance(ref, Mapping):

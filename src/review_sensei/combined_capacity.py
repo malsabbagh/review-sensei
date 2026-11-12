@@ -2722,7 +2722,9 @@ def qualify_retained_interruption_replay(
     if interruption_mode not in INTERRUPTION_MODES:
         raise ReviewInputError(f"unsupported interruption_mode: {interruption_mode!r}")
 
-    repo_id = identity.repository_id if identity.repository_id is not None else 1
+    if identity.repository_id is None:
+        raise ReviewInputError("retained qualification repository_id is required")
+    repo_id = identity.repository_id
     in_flight_charge = (
         1
         if interruption_mode

@@ -965,9 +965,12 @@ def _extract_part_from_source_ledger(
         if isinstance(local_cached, tuple) and len(local_cached) == 2:
             raw_bytes = local_cached[1]
             if isinstance(raw_bytes, (bytes, bytearray)):
-                doc = json.loads(bytes(raw_bytes))
-                if canonical_bytes(doc) == bytes(raw_bytes):
-                    return AuthenticatedPart(doc, producer)
+                try:
+                    doc = json.loads(bytes(raw_bytes))
+                    if canonical_bytes(doc) == bytes(raw_bytes):
+                        return AuthenticatedPart(doc, producer)
+                except (ValueError, UnicodeError) as exc:
+                    raise ReviewInputError("cached partition JSON is invalid") from exc
 
     root_dir = getattr(source_ledger, "root", None)
     if isinstance(root_dir, Path) and re.fullmatch(r"[a-f0-9]{64}", storage_id):
@@ -1317,6 +1320,7 @@ class _InMemoryPreviewLedger:
                     expected_binding=expected_binding,
                     budget=self.evidence_budget,
                 )
+            raise ReviewInputError("preview part is unavailable")
         raise ReviewInputError("preview partition binding or manifest mismatch")
 
     def read_disposition_snapshot(
@@ -1744,8 +1748,18 @@ def preview_session_command_representability(
                 resolved_dispositions = sandbox_ledger.read_disposition_snapshot(
                     identity, preview_record
                 )
-            except ReviewInputError:
-                resolved_dispositions = None
+            except ReviewInputError as exc:
+                # Commands that do not read or change dispositions can price the
+                # retained root without hydration. Never hide authentication or
+                # binding errors, or unavailable data for a snapshot mutation.
+                if str(exc) != "preview part is unavailable" or command.action in {
+                    "accept-risk",
+                    "dismiss",
+                    "defer",
+                    "accept-coverage-uncertainty",
+                    "verify",
+                }:
+                    raise
         else:
             resolved_dispositions = preview_record.dispositions
 

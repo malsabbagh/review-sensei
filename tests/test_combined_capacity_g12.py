@@ -1366,6 +1366,18 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                     **args,
                 )
 
+    def test_retained_qualification_rejects_missing_repository_scope(self) -> None:
+        from dataclasses import replace
+
+        args = dict(
+            interruption_stage="review_publication", interruption_mode="before_dispatch"
+        )
+        missing_id = replace(IDENTITY, repository_id=None)
+        with self.assertRaisesRegex(ReviewInputError, "repository_id is required"):
+            qualify_retained_interruption_replay(
+                SessionRecord.create(missing_id), identity=missing_id, **args
+            )
+
     def test_snapshot_probe_pins_reader_and_bounds_live_output(self) -> None:
         import review_sensei.combined_capacity as capacity
 
