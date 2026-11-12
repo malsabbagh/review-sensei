@@ -1608,6 +1608,29 @@ class OrdinaryEntryHostedAndCliRecoveryG17Tests(
                     self.assertEqual(self.ledger_bytes(local), before)
                     self.assertEqual(handoff.read_bytes(), before_handoff)
 
+                    # Omitting the selected original ledger must not bypass the
+                    # accounting hold. The existing transaction-binding gate
+                    # rejects this before any native business effect.
+                    real_main = trusted_recovery.github_main
+
+                    def omit_selected_ledger(argv):
+                        argv = list(argv)
+                        index = argv.index("--session-ledger")
+                        del argv[index : index + 2]
+                        return real_main(argv)
+
+                    with patch.object(
+                        trusted_recovery, "github_main", omit_selected_ledger
+                    ):
+                        omitted_code, _, omitted_error = self.invoke(
+                            local, state, reconstruct=reconstruct, extra=handoff_args
+                        )
+                    self.assertEqual(omitted_code, 1, omitted_error)
+                    self.assertIn("requires a session ledger", omitted_error)
+                    self.assertEqual(state.reviews, [])
+                    self.assertEqual(self.ledger_bytes(local), before)
+                    self.assertEqual(handoff.read_bytes(), before_handoff)
+
     @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_cli_publish_refusal_controls_explicit_context_mode_and_retention_cleanup(
         self,
