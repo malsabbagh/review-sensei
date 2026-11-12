@@ -1,10 +1,10 @@
 # ADR 0134: Bounded active finding window, cross-file drift, and artifact/trust authority
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-11
 - Decision owner/reviewers: ReviewSensei maintainers; independent source review
 - Linked GitHub Issue: pending; user-directed lifecycle gap qualification (G10, G16, G14, G15)
-- Linked PR: pending; independent prospective qualification
+- Linked PR: Stage B ordinary publisher/application integration (`fix/stage-b-g10-g16-g14-g15-publisher-integration`)
 
 ## Context
 
@@ -136,10 +136,16 @@ session charges, reservations, and obligation history
 
 ## Scope
 
-Prospective core and GitHub-adapter qualification modules and deterministic test
-suites for G10, G16, G14, and G15. Existing wire schemas, workflow definitions,
-broker endpoints, and historical incident ledgers remain unchanged and are not
-live-activated by this ADR.
+Core domain modules (`review_sensei.active_finding_window`,
+`review_sensei.finding_drift`), GitHub adapter authority/trust modules
+(`review_sensei_github.artifact_authority`,
+`review_sensei_github.trust_transitions`), ordinary review/verify/command/reply
+entry-point integration in `review_sensei_github.publication` (`ReviewPublisher`,
+`ReviewApprovalFinalizer`) and `review_sensei_github.application`
+(`GitHubApplication`), and deterministic end-to-end qualification suites for
+G10, G16, G14, and G15. Existing wire schemas, workflow definitions, broker
+endpoints, and historical incident ledgers remain unchanged, and all new guards
+remain 100% backward-compatible with legacy callers.
 
 ## Consequences
 
@@ -175,9 +181,13 @@ Qualified by provider-free deterministic suites:
 
 ## Rollout and rollback
 
-Normal source review and CI precede any release or wiring into live hosted
-entrypoints. Rollback removes these modules cleanly without schema migration or
-historical ledger mutation.
+Wired into ordinary `GitHubApplication` (`publish_review`,
+`apply_maintainer_command`, `generate_and_publish_reply`, `recover_review`,
+`execute_operator_reenroll`, `migrate_trust_boundary`) and `ReviewPublisher` /
+`ReviewApprovalFinalizer` entry points behind additive options and enrolled
+snapshots without live repository access mutations. Rollback reverts the
+additive integration commits cleanly without schema migration or historical
+ledger mutation.
 
 ## Follow-up work
 

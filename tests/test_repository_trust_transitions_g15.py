@@ -1091,5 +1091,824 @@ class RepositoryTrustTransitionsG15Tests(unittest.TestCase):
         self.assertNotEqual(rec_a.audit_sha256, rec_b.audit_sha256)
 
 
+class _TrustFakeBroker:
+    def __init__(self) -> None:
+        self.exchanges: list[str] = []
+
+    def request_oidc_token(self) -> str:
+        return "oidc-trust-test"
+
+    def exchange(self, _oidc: str, *, capability: str) -> str:
+        self.exchanges.append(capability)
+        return f"tok-{capability}"
+
+
+class _TrustGitHubHost:
+    """Stateful fake GitHub host exercising ordinary G15 admission & preflight."""
+
+    def __init__(
+        self,
+        *,
+        repository_id: int = 9001,
+        owner_id: int = 501,
+        owner_login: str = "acme",
+        repository_slug: str = "acme/widgets",
+        is_fork: bool = False,
+        pull_request: int = 88,
+        head_sha: str = HEAD_SHA,
+        base_sha: str = BASE_SHA,
+        app_slug: str = "reviewsensei[bot]",
+    ) -> None:
+        import json
+
+        from review_sensei_github import GitHubHttp
+
+        try:
+            from fake_github_http import json_response
+        except ImportError:
+            from tests.fake_github_http import json_response
+
+        self._json = json
+        self._json_response = json_response
+        self.repository_id = repository_id
+        self.owner_id = owner_id
+        self.owner_login = owner_login
+        self.repository_slug = repository_slug
+        self.is_fork = is_fork
+        self.pull_request = pull_request
+        self.head_sha = head_sha
+        self.base_sha = base_sha
+        self.app_slug = app_slug
+        self.reviews: list[dict[str, object]] = []
+        self.threads: list[dict[str, object]] = []
+        self.check_runs: list[dict[str, object]] = []
+        self.issue_comments: list[dict[str, object]] = []
+        self.fail_next_review_post_transient = False
+        self.calls: list[tuple[str, str, object]] = []
+        self.http = GitHubHttp(api_url="https://api.github.test", opener=self._open)
+
+    def _resp(self, payload: object, status: int = 200):
+        return self._json_response(payload, status)
+
+    def _open(self, request, timeout=None):
+        del timeout
+        from urllib.parse import urlparse
+
+        from review_sensei_github.errors import GitHubHTTPTransientError
+
+        parsed = urlparse(request.full_url)
+        path = parsed.path
+        body = self._json.loads(request.data.decode("utf-8")) if request.data else None
+        self.calls.append((request.method, path, body))
+
+        pr_suffix = f"/pulls/{self.pull_request}"
+        if request.method == "GET":
+            if path.endswith(pr_suffix):
+                return self._resp(
+                    {
+                        "state": "open",
+                        "draft": False,
+                        "changed_files": 1,
+                        "user": {"login": "dev-author", "type": "User"},
+                        "head": {
+                            "sha": self.head_sha,
+                            "ref": "feature",
+                            "repo": {
+                                "full_name": self.repository_slug,
+                                "fork": self.is_fork,
+                            },
+                        },
+                        "base": {
+                            "sha": self.base_sha,
+                            "ref": "main",
+                            "repo": {
+                                "id": self.repository_id,
+                                "full_name": self.repository_slug,
+                                "fork": self.is_fork,
+                                "owner": {
+                                    "id": self.owner_id,
+                                    "login": self.owner_login,
+                                },
+                            },
+                        },
+                    }
+                )
+            if path.endswith(f"{pr_suffix}/reviews"):
+                return self._resp(list(self.reviews))
+            if "/reviews/" in path and path.endswith("/comments"):
+                rid = int(path.split("/reviews/")[1].split("/")[0])
+                matched = [
+                    c
+                    for t in self.threads
+                    for c in t["comments"]["nodes"]  # type: ignore[index]
+                    if c.get("pull_request_review_id") == rid
+                ]
+                return self._resp(matched)
+            if path.endswith(f"{pr_suffix}/comments"):
+                return self._resp([])
+            if path.endswith(f"/issues/{self.pull_request}/comments"):
+                return self._resp(list(self.issue_comments))
+            if path.endswith("/check-runs"):
+                matching = [
+                    r for r in self.check_runs if r.get("head_sha") == self.head_sha
+                ]
+                return self._resp({"check_runs": matching})
+            if "/rules/branches/" in path:
+                return self._resp([])
+            if path.endswith("/protection"):
+                return self._resp({"message": "Not Found"}, 404)
+            if path == "/user" or path.startswith("/users/"):
+                return self._resp({"id": 9001, "login": self.app_slug, "type": "Bot"})
+            if "/collaborators/" in path and path.endswith("/permission"):
+                return self._resp({"permission": "maintain"})
+
+        if request.method == "POST":
+            if path.endswith(f"{pr_suffix}/reviews"):
+                if self.fail_next_review_post_transient:
+                    self.fail_next_review_post_transient = False
+                    raise GitHubHTTPTransientError("simulated review POST timeout")
+                assert isinstance(body, dict)
+                review_id = 100 + len(self.reviews)
+                state_map = {
+                    "APPROVE": "APPROVED",
+                    "REQUEST_CHANGES": "CHANGES_REQUESTED",
+                    "COMMENT": "COMMENTED",
+                }
+                ev = str(body.get("event", "COMMENT"))
+                record: dict[str, object] = {
+                    "id": review_id,
+                    "commit_id": body["commit_id"],
+                    "state": state_map.get(ev, "COMMENTED"),
+                    "body": body.get("body", ""),
+                    "pull_request_url": (
+                        f"https://api.github.test/repos/{self.repository_slug}/pulls/{self.pull_request}"
+                    ),
+                    "user": {"id": 9001, "login": self.app_slug, "type": "Bot"},
+                }
+                self.reviews.append(record)
+                for idx, comment in enumerate(body.get("comments") or ()):
+                    thread_id = f"PRRT_{review_id}_{idx}"
+                    self.threads.append(
+                        {
+                            "id": thread_id,
+                            "isResolved": False,
+                            "path": comment["path"],
+                            "line": comment["line"],
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "id": f"PRRC_{review_id}_{idx}",
+                                        "databaseId": review_id * 100 + idx,
+                                        "pull_request_review_id": review_id,
+                                        "body": comment["body"],
+                                        "author": {
+                                            "login": self.app_slug,
+                                            "__typename": "Bot",
+                                        },
+                                    }
+                                ]
+                            },
+                        }
+                    )
+                return self._resp(record, 200)
+            if path.endswith("/check-runs"):
+                assert isinstance(body, dict)
+                run_id = 500 + len(self.check_runs)
+                run: dict[str, object] = {
+                    "id": run_id,
+                    "name": body["name"],
+                    "head_sha": body["head_sha"],
+                    "status": body.get("status"),
+                    "conclusion": body.get("conclusion"),
+                    "output": body.get("output", {}),
+                    "app": {"slug": "reviewsensei"},
+                }
+                self.check_runs.append(run)
+                return self._resp(run, 201)
+            if path == "/graphql":
+                assert isinstance(body, dict)
+                query = str(body.get("query", ""))
+                variables = body.get("variables") or {}
+                if "resolveReviewThread" in query:
+                    tid = (variables.get("input") or {}).get(
+                        "threadId"
+                    ) or variables.get("threadId")
+                    for thread in self.threads:
+                        if thread["id"] == tid:
+                            thread["isResolved"] = True
+                            return self._resp(
+                                {
+                                    "data": {
+                                        "resolveReviewThread": {
+                                            "thread": {"id": tid, "isResolved": True}
+                                        }
+                                    }
+                                }
+                            )
+                return self._resp(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {
+                                        "nodes": list(self.threads),
+                                        "pageInfo": {
+                                            "hasNextPage": False,
+                                            "endCursor": None,
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+
+        if request.method == "PATCH" and "/check-runs/" in path:
+            assert isinstance(body, dict)
+            cid = int(path.rsplit("/", 1)[-1])
+            for run in self.check_runs:
+                if run["id"] == cid:
+                    run.update(body)
+                    return self._resp(run, 200)
+
+        raise AssertionError(f"Unhandled request: {request.method} {path}")
+
+
+class OrdinaryPublisherTrustTransitionTests(unittest.TestCase):
+    """End-to-end ordinary GitHubApplication & ReviewPublisher G15 tests."""
+
+    DIFF_1 = (
+        "diff --git a/src/security.py b/src/security.py\n"
+        "--- a/src/security.py\n"
+        "+++ b/src/security.py\n"
+        "@@ -1,1 +1,5 @@\n"
+        "-def verify_webhook(sig): return False\n"
+        "+def verify_webhook(sig):\n"
+        "+    if not sig:\n"
+        "+        return True\n"
+        "+    return True\n"
+        "+# trailing\n"
+    )
+    DIFF_CLEAN = (
+        "diff --git a/src/security.py b/src/security.py\n"
+        "--- a/src/security.py\n"
+        "+++ b/src/security.py\n"
+        "@@ -1,5 +1,5 @@\n"
+        " def verify_webhook(sig):\n"
+        "     if not sig:\n"
+        "-        return True\n"
+        "+        return False\n"
+        "     return True\n"
+        " # trailing\n"
+    )
+
+    @staticmethod
+    def _make_apps(host: _TrustGitHubHost, ledger_dir: str):
+        from pathlib import Path
+
+        from review_sensei_github import (
+            ConversationPublisher,
+            GitHubApplication,
+            GitHubWriteOptions,
+            LearningPRPublisher,
+            ReviewPublisher,
+        )
+
+        from review_sensei.session import LocalSessionLedger
+
+        broker = _TrustFakeBroker()
+        publisher = ReviewPublisher(http=host.http)
+        ledger = LocalSessionLedger(Path(ledger_dir))
+        ledger.initialize(
+            SessionIdentity(
+                repository="acme/widgets", pull_request=88, repository_id=9001
+            )
+        )
+        app = GitHubApplication(
+            http=host.http,
+            broker=broker,  # type: ignore[arg-type]
+            reviewer=publisher,
+            learner=LearningPRPublisher(http=host.http),
+            replier=ConversationPublisher(http=host.http),
+            session_ledger=None,
+        )
+        cmd_app = GitHubApplication(
+            http=host.http,
+            broker=broker,  # type: ignore[arg-type]
+            reviewer=publisher,
+            learner=LearningPRPublisher(http=host.http),
+            replier=ConversationPublisher(http=host.http),
+            session_ledger=ledger,
+        )
+        options = GitHubWriteOptions(
+            auto_review=True,
+            auto_approve=True,
+            github_writes=True,
+            mention_replies=True,
+            operation_entry="disabled",
+            max_active_findings=3,
+        )
+        return app, cmd_app, publisher, broker, ledger, options
+
+    @staticmethod
+    def _blocking_result():
+        from review_sensei.convergence import derive_blocker_candidate
+
+        comment = ReviewComment(
+            path="src/security.py",
+            line=3,
+            body="Missing signature check allows unauthenticated webhook payloads.",
+            blocking=True,
+            effective_blocking=True,
+            severity="critical",
+            symbol="verify_webhook",
+            defect_kind="auth_bypass",
+        )
+        res = ReviewResult(
+            summary="Found 1 critical webhook signature blocker.",
+            comments=(comment,),
+            provider="fixture",
+            review_status="complete",
+            coverage=CoverageManifest(
+                files=(FileCoverage("src/security.py", "reviewed"),),
+                enumerated_paths=("src/security.py",),
+                enumeration_complete=True,
+            ),
+        )
+        blockers = (
+            derive_blocker_candidate(
+                comment,
+                on_changed_path=True,
+                evidence_locations_validated=True,
+                has_failure_condition=True,
+                has_actionable_remedy=True,
+                has_specific_violation=True,
+                named_mandatory_rule="SEC-WEBHOOK-01",
+                has_required_contract=True,
+            ),
+        )
+        return res, blockers
+
+    @staticmethod
+    def _clean_result() -> ReviewResult:
+        return ReviewResult(
+            summary="Webhook signature verification enforced.",
+            comments=(),
+            provider="fixture",
+            review_status="complete",
+            coverage=CoverageManifest(
+                files=(FileCoverage("src/security.py", "reviewed"),),
+                enumerated_paths=("src/security.py",),
+                enumeration_complete=True,
+            ),
+        )
+
+    def test_ordinary_admission_and_live_preflight_refuse_all_untrusted_transitions_with_zero_writes(
+        self,
+    ) -> None:
+        import tempfile
+
+        from review_sensei_github.errors import GitHubPublicationError
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+
+        policy = ReviewConvergencePolicy(mode="strict")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = _TrustGitHubHost()
+            app, cmd_app, _pub, broker, _ledger, options = self._make_apps(host, tmpdir)
+            enrolled = _enrolled_snapshot()
+            app.enroll_trust_snapshot(snapshot=enrolled)
+            self.assertEqual(
+                app.trust_snapshot(repository_id=9001, pull_request=88), enrolled
+            )
+
+            # Round 1 succeeds under matching enrolled trust boundary:
+            res1, blockers1 = self._blocking_result()
+            pub1 = app.publish_review(
+                options=options,
+                oidc_token="oidc-1",
+                repository="acme/widgets",
+                repository_id=9001,
+                pull_request=88,
+                head_sha=HEAD_SHA,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res1,
+                diff=self.DIFF_1,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=blockers1,
+            )
+            self.assertEqual(pub1.status, "published")
+            self.assertEqual(pub1.diagnostic, "required_fixes_open")
+            self.assertEqual(len(host.reviews), 1)
+            self.assertEqual(len(host.threads), 1)
+
+            # Negative controls at before_admission (zero HTTP calls & zero broker exchanges!):
+            exchanges_before = len(broker.exchanges)
+            http_calls_before = len(host.calls)
+            low_perms = dict(DEFAULT_REQUIRED_INSTALLATION_PERMISSIONS)
+            low_perms["checks"] = "none"
+
+            admission_cases = (
+                # 1. repository_rename
+                (
+                    "acme/widgets-renamed",
+                    9001,
+                    replace(enrolled, repository_slug="acme/widgets-renamed"),
+                    "trust-transition-refused:repository_rename",
+                ),
+                # 2. ownership_transfer with IDENTICAL numeric repository_id=9001!
+                (
+                    "newcorp/widgets",
+                    9001,
+                    replace(
+                        enrolled,
+                        owner_id=888,
+                        owner_login="newcorp",
+                        repository_slug="newcorp/widgets",
+                    ),
+                    "trust-transition-refused:ownership_transfer",
+                ),
+                # 3. fork_status_change
+                (
+                    "acme/widgets",
+                    9001,
+                    replace(enrolled, is_fork=True),
+                    "trust-transition-refused:fork_status_change",
+                ),
+                # 4. app_reinstall (installation_id changed)
+                (
+                    "acme/widgets",
+                    9001,
+                    replace(enrolled, installation_id=7777),
+                    "trust-transition-refused:app_reinstall",
+                ),
+                # 5. repository_selection_change
+                (
+                    "acme/widgets",
+                    9001,
+                    replace(enrolled, repository_selected=False),
+                    "trust-transition-refused:repository_selection_change",
+                ),
+                # 6. permission_revoke_or_restore
+                (
+                    "acme/widgets",
+                    9001,
+                    replace(enrolled, granted_permissions=low_perms),
+                    "trust-transition-refused:permission_revoke_or_restore",
+                ),
+            )
+            for slug, rid, obs_snap, expected_code in admission_cases:
+                with self.assertRaisesRegex(GitHubPublicationError, expected_code):
+                    app.publish_review(
+                        options=options,
+                        oidc_token="oidc-refused",
+                        repository=slug,
+                        repository_id=rid,
+                        pull_request=88,
+                        head_sha=HEAD_SHA_2,
+                        base_branch="main",
+                        base_sha=BASE_SHA,
+                        result=self._clean_result(),
+                        diff=self.DIFF_CLEAN,
+                        app_slug="reviewsensei[bot]",
+                        convergence_policy=policy,
+                        observed_trust=obs_snap,
+                    )
+            self.assertEqual(len(broker.exchanges), exchanges_before)
+            self.assertEqual(len(host.calls), http_calls_before)
+            self.assertEqual(len(host.reviews), 1)
+
+            # 7. actor_privilege_downgrade on apply_maintainer_command & generate_and_publish_reply:
+            cmd_res = cmd_app.apply_maintainer_command(
+                options=options,
+                oidc_token="oidc-cmd-low",
+                repository="acme/widgets",
+                repository_id=9001,
+                pull_request=88,
+                head_sha=HEAD_SHA,
+                body="@reviewsensei verify",
+                actor_login="alice-maintainer",
+                actor_id=42,
+                association="CONTRIBUTOR",
+                actor_permission="read",
+                app_slug="reviewsensei[bot]",
+            )
+            self.assertFalse(cmd_res.applied)
+            self.assertEqual(
+                cmd_res.summary, "trust-transition-refused:actor_privilege_downgrade"
+            )
+
+            with self.assertRaisesRegex(
+                GitHubPublicationError, "trust-transition-refused:app_reinstall"
+            ):
+                app.generate_and_publish_reply(
+                    options=options,
+                    oidc_token="oidc-reply",
+                    read_token="tok-read",
+                    repository="acme/widgets",
+                    repository_id=9001,
+                    pull_request=88,
+                    source_comment_id=10,
+                    source_updated_at="2026-11-11T00:00:00Z",
+                    expected_head_sha=HEAD_SHA,
+                    reply_provider=None,  # type: ignore[arg-type]
+                    model=None,
+                    app_slug="reviewsensei[bot]",
+                    root_comment_id=None,
+                    observed_trust=replace(enrolled, installation_id=9999),
+                )
+
+            # Live preflight (before_native_effect) catches mid-run ownership transfer on
+            # identical repository_id=9001 even when caller passed enrolled slug at admission!
+            host.owner_id = 999
+            host.owner_login = "shadow-org"
+            host.repository_slug = "shadow-org/widgets"
+            host.head_sha = HEAD_SHA_2
+            with self.assertRaisesRegex(
+                GitHubPublicationError,
+                r"repository trust transition refused \(before_native_effect\): trust-transition-refused:ownership_transfer",
+            ):
+                app.publish_review(
+                    options=options,
+                    oidc_token="oidc-live-transfer",
+                    repository="acme/widgets",
+                    repository_id=9001,
+                    pull_request=88,
+                    head_sha=HEAD_SHA_2,
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    result=self._clean_result(),
+                    diff=self.DIFF_CLEAN,
+                    app_slug="reviewsensei[bot]",
+                    convergence_policy=policy,
+                )
+            # Zero new reviews posted across cross-owner boundary!
+            self.assertEqual(len(host.reviews), 1)
+            last_dec = app.trust_decisions(repository_id=9001, pull_request=88)[-1]
+            self.assertEqual(last_dec.phase, "before_native_effect")
+            self.assertTrue(last_dec.cross_repository_write_blocked)
+            self.assertFalse(last_dec.fresh_allowance_minted)
+            self.assertTrue(last_dec.obligations_preserved)
+
+    def test_ordinary_unknown_effect_hold_and_dual_attested_transfer_migration_recover_to_approval(
+        self,
+    ) -> None:
+        import tempfile
+
+        from review_sensei_github.errors import (
+            GitHubPublicationError,
+            GitHubPublicationTransientError,
+        )
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+
+        policy = ReviewConvergencePolicy(mode="strict")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = _TrustGitHubHost()
+            app, _cmd_app, pub, _broker, _ledger, options = self._make_apps(
+                host, tmpdir
+            )
+            enrolled = _enrolled_snapshot()
+            app.enroll_trust_snapshot(snapshot=enrolled)
+
+            # Round 1: initial blocking review on acme/widgets (repository_id=9001)
+            res1, blockers1 = self._blocking_result()
+            pub1 = app.publish_review(
+                options=options,
+                oidc_token="oidc-1",
+                repository="acme/widgets",
+                repository_id=9001,
+                pull_request=88,
+                head_sha=HEAD_SHA,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=res1,
+                diff=self.DIFF_1,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                blocker_candidates=blockers1,
+            )
+            self.assertEqual(pub1.status, "published")
+
+            # Round 2a: review POST fails transiently -> records after_unknown_effect hold!
+            host.head_sha = HEAD_SHA_2
+            host.fail_next_review_post_transient = True
+            with self.assertRaises(GitHubPublicationTransientError):
+                app.publish_review(
+                    options=options,
+                    oidc_token="oidc-2-loss",
+                    repository="acme/widgets",
+                    repository_id=9001,
+                    pull_request=88,
+                    head_sha=HEAD_SHA_2,
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    result=self._clean_result(),
+                    diff=self.DIFF_CLEAN,
+                    app_slug="reviewsensei[bot]",
+                    convergence_policy=policy,
+                )
+            self.assertTrue(
+                app.has_unknown_trust_effect(repository_id=9001, pull_request=88)
+            )
+            self.assertTrue(
+                any(
+                    d.phase == "after_unknown_effect"
+                    and d.reason_code == "unknown-effect-reconciliation-required"
+                    and d.unknown_effect_held
+                    for d in app.trust_decisions(repository_id=9001, pull_request=88)
+                )
+            )
+
+            # Repository transfers to newcorp/widgets (SAME numeric repository_id=9001!)
+            # and installs new GitHub App installation_id=6002 at permission_epoch=2:
+            host.owner_id = 777
+            host.owner_login = "newcorp"
+            host.repository_slug = "newcorp/widgets"
+            transferred = AuthenticatedTrustSnapshot(
+                repository_id=9001,
+                owner_id=777,
+                owner_login="newcorp",
+                repository_slug="newcorp/widgets",
+                is_fork=False,
+                installation_id=6002,
+                repository_selected=True,
+                granted_permissions=dict(DEFAULT_REQUIRED_INSTALLATION_PERMISSIONS),
+                actor_id=84,
+                actor_login="newcorp-admin",
+                actor_association="OWNER",
+                actor_permission="admin",
+                pull_request=88,
+                head_sha=HEAD_SHA,
+                permission_epoch=2,
+            )
+
+            # Negative control: migration WITHOUT previous_owner_transfer_attestation_sha256 fails closed!
+            with self.assertRaisesRegex(
+                ReviewInputError,
+                "unchanged numeric repository_id alone never proves transfer trust",
+            ):
+                app.migrate_trust_boundary(
+                    repository_id=9001,
+                    pull_request=88,
+                    target=transferred,
+                    migration=AuthenticatedTrustMigration(
+                        old_snapshot_sha256=enrolled.digest(),
+                        new_snapshot_sha256=transferred.digest(),
+                        operator_id=84,
+                        operator_login="newcorp-admin",
+                        operator_association="OWNER",
+                        operator_permission="admin",
+                        reason="Missing prior-owner attestation.",
+                        operator_attestation_sha256=_sha("newcorp-only"),
+                        reconciled_effect_sha256=_sha("reconciled-effect"),
+                    ),
+                )
+
+            # Negative control: migration WITHOUT reconciled_effect_sha256 while unknown_effect held fails!
+            transfer_attest = compute_transfer_attestation_sha256(
+                repository_id=9001,
+                previous_owner_id=501,
+                previous_owner_login="acme",
+                new_owner_id=777,
+                new_owner_login="newcorp",
+                pull_request=88,
+                head_sha=HEAD_SHA,
+                permission_epoch=2,
+                previous_owner_witness="Acme owner approved transfer to NewCorp.",
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError, "unknown native effect must be reconciled"
+            ):
+                app.migrate_trust_boundary(
+                    repository_id=9001,
+                    pull_request=88,
+                    target=transferred,
+                    migration=AuthenticatedTrustMigration(
+                        old_snapshot_sha256=enrolled.digest(),
+                        new_snapshot_sha256=transferred.digest(),
+                        operator_id=84,
+                        operator_login="newcorp-admin",
+                        operator_association="OWNER",
+                        operator_permission="admin",
+                        reason="Dual-attested transfer missing reconciled effect.",
+                        operator_attestation_sha256=_sha("newcorp-op"),
+                        previous_owner_transfer_attestation_sha256=transfer_attest,
+                    ),
+                    expected_transfer_attestation_sha256=transfer_attest,
+                )
+
+            # Valid dual-attested migration + response-loss/slot reconciliation succeeds,
+            # preserving 100% of blocking obligations and session charges!
+            session_before = _session_with_charges(enrolled)
+            receipt = app.migrate_trust_boundary(
+                repository_id=9001,
+                pull_request=88,
+                target=transferred,
+                session_record=session_before,
+                migration=AuthenticatedTrustMigration(
+                    old_snapshot_sha256=enrolled.digest(),
+                    new_snapshot_sha256=transferred.digest(),
+                    operator_id=84,
+                    operator_login="newcorp-admin",
+                    operator_association="OWNER",
+                    operator_permission="admin",
+                    reason="Dual-attested org transfer with reconciled effect.",
+                    operator_attestation_sha256=_sha("newcorp-op"),
+                    previous_owner_transfer_attestation_sha256=transfer_attest,
+                    reconciled_effect_sha256=_sha("reconciled-effect"),
+                ),
+                expected_transfer_attestation_sha256=transfer_attest,
+            )
+            self.assertFalse(receipt.fresh_allowance_minted)
+            self.assertEqual(receipt.migrated_session.repository, "newcorp/widgets")
+            self.assertEqual(
+                receipt.migrated_session.completed_initial_reviews,
+                session_before.completed_initial_reviews,
+            )
+            self.assertEqual(len(receipt.preserved_inventory.blocking_obligations), 1)
+            self.assertFalse(
+                app.has_unknown_trust_effect(repository_id=9001, pull_request=88)
+            )
+
+            # Also clear G14 response-loss hold and uncertain active-window slot from Round 2a:
+            app.reconcile_response_loss_hold(
+                repository_id=9001,
+                pull_request=88,
+                head_sha=HEAD_SHA_2,
+                absent_proof_sha256=_sha("absent-proof-88-head2"),
+            )
+            wstate = app.active_window_state(repository_id=9001, pull_request=88)
+            assert wstate is not None
+            for slot in wstate.display_active_findings.slots:
+                if slot.state == "uncertain":
+                    app.reconcile_active_window_slot(
+                        repository_id=9001,
+                        pull_request=88,
+                        target=slot.target,
+                        resolved_state="active",
+                        proof_sha256=_sha("slot-active-88"),
+                    )
+            wstate = app.active_window_state(repository_id=9001, pull_request=88)
+            assert wstate is not None
+            ob = wstate.authoritative_decision_inventory.obligations[0]
+
+            # Old slug acme/widgets is now refused because snapshot migrated to newcorp/widgets!
+            with self.assertRaisesRegex(
+                GitHubPublicationError, "trust-transition-refused:ownership_transfer"
+            ):
+                app.publish_review(
+                    options=options,
+                    oidc_token="oidc-stale-slug",
+                    repository="acme/widgets",
+                    repository_id=9001,
+                    pull_request=88,
+                    head_sha=HEAD_SHA_2,
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    result=self._clean_result(),
+                    diff=self.DIFF_CLEAN,
+                    app_slug="reviewsensei[bot]",
+                    convergence_policy=policy,
+                )
+
+            # Migrated repository newcorp/widgets publishes verified fix and converges to APPROVED!
+            host.threads[0]["isResolved"] = True
+            pub_recovered = app.publish_review(
+                options=options,
+                oidc_token="oidc-recovered",
+                repository="newcorp/widgets",
+                repository_id=9001,
+                pull_request=88,
+                head_sha=HEAD_SHA_2,
+                base_branch="main",
+                base_sha=BASE_SHA,
+                result=self._clean_result(),
+                diff=self.DIFF_CLEAN,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=policy,
+                observed_trust=replace(transferred, head_sha=HEAD_SHA_2),
+                confirmed_fixes=(
+                    ConfirmedFixEvidence(
+                        obligation_id=ob.obligation_id,
+                        resolution_criterion=ob.resolution_criterion,
+                        head_sha=HEAD_SHA_2,
+                        evidence_sha256=_sha("webhook-sig-fix-proof"),
+                        verified_paths=("src/security.py",),
+                    ),
+                ),
+            )
+            self.assertEqual(pub_recovered.status, "published")
+            self.assertEqual(
+                pub.active_blocking_obligations_count(
+                    repository_id=9001, pull_request=88
+                ),
+                0,
+            )
+            self.assertTrue(any(r["state"] == "APPROVED" for r in host.reviews))
+
+
 if __name__ == "__main__":
     unittest.main()

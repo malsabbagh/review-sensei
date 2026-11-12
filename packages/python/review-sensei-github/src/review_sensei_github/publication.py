@@ -25,6 +25,7 @@ from review_sensei.active_finding_window import (
     assert_no_deferred_leakage,
     commit_window_publication,
     evaluate_active_window_round,
+    obligation_from_comment,
     project_display_review_result,
     reconcile_uncertain_slot,
 )
@@ -154,6 +155,15 @@ from .native_union import NATIVE_UNION_FRAME_RESERVE
 from .operation_diagnostics import OperationDiagnostics, OperationObserver
 from .qualification import TrustedOpenRouterQualification
 from .thread_resolution import graphql_app_author
+from .trust_transitions import (
+    PERMISSION_RANKS,
+    AuthenticatedTrustMigration,
+    AuthenticatedTrustSnapshot,
+    TrustMigrationReceipt,
+    TrustTransitionDecision,
+    evaluate_trust_boundary,
+    verify_and_migrate_trust_boundary,
+)
 
 if TYPE_CHECKING:
     from .default_human_inventory import HumanInventoryReference, HumanInventoryStore
@@ -2023,6 +2033,123 @@ class ReviewApprovalFinalizer:
         self._response_loss_holds: dict[
             tuple[int, int, str], ArtifactEvaluationDecision
         ] = {}
+        self._trust_snapshots: dict[tuple[int, int], AuthenticatedTrustSnapshot] = {}
+        self._trust_decisions: dict[tuple[int, int], list[TrustTransitionDecision]] = {}
+        self._unknown_effect_holds: set[tuple[int, int]] = set()
+        self._observed_trust_context: AuthenticatedTrustSnapshot | None = None
+
+    def _evaluate_live_pr_trust_boundary(
+        self,
+        payload: Any,
+        *,
+        repository: str,
+        repository_id: int | None,
+        pull_request: int,
+        head_sha: str,
+        observed_override: AuthenticatedTrustSnapshot | None = None,
+    ) -> TrustTransitionDecision | None:
+        enrolled: AuthenticatedTrustSnapshot | None = None
+        if type(repository_id) is int and repository_id > 0:
+            enrolled = self._trust_snapshots.get((repository_id, pull_request))
+        if enrolled is None:
+            matching = [
+                snap
+                for (_rid, pr), snap in self._trust_snapshots.items()
+                if pr == pull_request
+                and (
+                    observed_override is not None
+                    or snap.repository_slug == repository
+                    or (repository_id is None)
+                )
+            ]
+            if len(matching) == 1:
+                enrolled = matching[0]
+        if enrolled is None:
+            return None
+
+        live_repo_id: int | None = repository_id
+        live_slug: str | None = repository
+        live_fork: bool | None = None
+        live_owner_id: int | None = None
+        live_owner_login: str | None = None
+        if isinstance(payload, dict):
+            base = payload.get("base")
+            repo_obj = base.get("repo") if isinstance(base, dict) else None
+            if isinstance(repo_obj, dict):
+                raw_id = repo_obj.get("id")
+                if type(raw_id) is int and raw_id > 0:
+                    live_repo_id = raw_id
+                raw_full = repo_obj.get("full_name")
+                if isinstance(raw_full, str) and raw_full:
+                    live_slug = raw_full
+                raw_fork = repo_obj.get("fork")
+                if type(raw_fork) is bool:
+                    live_fork = raw_fork
+                owner_obj = repo_obj.get("owner")
+                if isinstance(owner_obj, dict):
+                    raw_oid = owner_obj.get("id")
+                    if type(raw_oid) is int and raw_oid > 0:
+                        live_owner_id = raw_oid
+                    raw_ologin = owner_obj.get("login")
+                    if isinstance(raw_ologin, str) and raw_ologin:
+                        live_owner_login = raw_ologin
+
+        base_obs = observed_override or enrolled
+        eff_repo_id = (
+            live_repo_id
+            if type(live_repo_id) is int and live_repo_id > 0
+            else base_obs.repository_id
+        )
+        eff_slug = (
+            live_slug
+            if isinstance(live_slug, str) and live_slug
+            else base_obs.repository_slug
+        )
+        slug_owner, _sep, slug_repo = eff_slug.partition("/")
+        eff_owner_login = (
+            live_owner_login
+            if isinstance(live_owner_login, str) and live_owner_login
+            else (
+                slug_owner
+                if slug_owner and slug_owner.lower() != base_obs.owner_login.lower()
+                else base_obs.owner_login
+            )
+        )
+        if slug_owner.lower() != eff_owner_login.lower():
+            eff_slug = f"{eff_owner_login}/{slug_repo or 'repo'}"
+        eff_owner_id = (
+            live_owner_id
+            if type(live_owner_id) is int and live_owner_id > 0
+            else base_obs.owner_id
+        )
+        eff_fork = live_fork if type(live_fork) is bool else base_obs.is_fork
+        eff_head = (
+            head_sha
+            if isinstance(head_sha, str) and GIT_SHA_HEX.fullmatch(head_sha)
+            else base_obs.head_sha
+        )
+        observed = replace(
+            base_obs,
+            repository_id=eff_repo_id,
+            owner_id=eff_owner_id,
+            owner_login=eff_owner_login,
+            repository_slug=eff_slug,
+            is_fork=eff_fork,
+            head_sha=eff_head,
+        )
+        key = (enrolled.repository_id, enrolled.pull_request)
+        decision = evaluate_trust_boundary(
+            enrolled,
+            observed,
+            phase="before_native_effect",
+            operation="review",
+            has_prior_charges=bool(
+                key in self._active_window_states or key in self._drift_states
+            ),
+            has_unknown_effect=key in self._unknown_effect_holds,
+        )
+        self._trust_decisions.setdefault(key, []).append(decision)
+        return decision
 
     def _record_artifact_decision(
         self,
@@ -3818,6 +3945,18 @@ class ReviewApprovalFinalizer:
             raise GitHubPublicationError("review target was not found")
         if status < 200 or status >= 300:
             raise GitHubPublicationError("approval finalization preflight failed")
+        trust_dec = self._evaluate_live_pr_trust_boundary(
+            payload,
+            repository=repository,
+            repository_id=None,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            observed_override=self._observed_trust_context,
+        )
+        if trust_dec is not None and not trust_dec.allowed:
+            raise GitHubPublicationError(
+                f"repository trust transition refused ({trust_dec.phase}): {trust_dec.reason_code}"
+            )
         decision = evaluate_finalizer_pr_gate(
             payload,
             repository=repository,
@@ -5034,7 +5173,265 @@ class ReviewPublisher:
         self.finalizer._drift_states = self._drift_states
         self._artifact_decisions = self.finalizer._artifact_decisions
         self._response_loss_holds = self.finalizer._response_loss_holds
+        self._trust_snapshots = self.finalizer._trust_snapshots
+        self._trust_decisions = self.finalizer._trust_decisions
+        self._unknown_effect_holds = self.finalizer._unknown_effect_holds
         self._last_review_payload: list[Any] = []
+
+    def enroll_trust_snapshot(
+        self, *, snapshot: AuthenticatedTrustSnapshot
+    ) -> AuthenticatedTrustSnapshot:
+        if not isinstance(snapshot, AuthenticatedTrustSnapshot):
+            raise ReviewInputError("snapshot must be an AuthenticatedTrustSnapshot")
+        self._trust_snapshots[(snapshot.repository_id, snapshot.pull_request)] = (
+            snapshot
+        )
+        return snapshot
+
+    def trust_snapshot(
+        self, *, repository_id: int, pull_request: int
+    ) -> AuthenticatedTrustSnapshot | None:
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ReviewInputError("repository_id must be a positive integer")
+        if type(pull_request) is not int or pull_request <= 0:
+            raise ReviewInputError("pull_request must be a positive integer")
+        return self._trust_snapshots.get((repository_id, pull_request))
+
+    def trust_decisions(
+        self, *, repository_id: int, pull_request: int
+    ) -> tuple[TrustTransitionDecision, ...]:
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ReviewInputError("repository_id must be a positive integer")
+        if type(pull_request) is not int or pull_request <= 0:
+            raise ReviewInputError("pull_request must be a positive integer")
+        return tuple(self._trust_decisions.get((repository_id, pull_request), ()))
+
+    def has_unknown_trust_effect(
+        self, *, repository_id: int, pull_request: int
+    ) -> bool:
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ReviewInputError("repository_id must be a positive integer")
+        if type(pull_request) is not int or pull_request <= 0:
+            raise ReviewInputError("pull_request must be a positive integer")
+        return (repository_id, pull_request) in self._unknown_effect_holds
+
+    def reconcile_unknown_trust_effect(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        reconciled_effect_sha256: str,
+    ) -> None:
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ReviewInputError("repository_id must be a positive integer")
+        if type(pull_request) is not int or pull_request <= 0:
+            raise ReviewInputError("pull_request must be a positive integer")
+        if (
+            not isinstance(reconciled_effect_sha256, str)
+            or re.fullmatch(r"[a-f0-9]{64}", reconciled_effect_sha256) is None
+        ):
+            raise ReviewInputError(
+                "reconciled_effect_sha256 must be a 64-character lowercase hex SHA-256"
+            )
+        self._unknown_effect_holds.discard((repository_id, pull_request))
+
+    def check_trust_boundary(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        phase: str,
+        operation: str = "review",
+        observed: AuthenticatedTrustSnapshot | None = None,
+        repository_slug: str | None = None,
+        owner_id: int | None = None,
+        owner_login: str | None = None,
+        is_fork: bool | None = None,
+        head_sha: str | None = None,
+        actor_id: int | None = None,
+        actor_login: str | None = None,
+        actor_association: str | None = None,
+        actor_permission: str | None = None,
+        has_prior_charges: bool = False,
+    ) -> TrustTransitionDecision | None:
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ReviewInputError("repository_id must be a positive integer")
+        if type(pull_request) is not int or pull_request <= 0:
+            raise ReviewInputError("pull_request must be a positive integer")
+        enrolled = self._trust_snapshots.get((repository_id, pull_request))
+        if enrolled is None:
+            matching = [
+                snap
+                for (_rid, pr), snap in self._trust_snapshots.items()
+                if pr == pull_request
+                and (
+                    observed is not None
+                    or (
+                        repository_slug is not None
+                        and snap.repository_slug == repository_slug
+                    )
+                )
+            ]
+            if len(matching) == 1:
+                enrolled = matching[0]
+        if enrolled is None:
+            return None
+        key = (enrolled.repository_id, enrolled.pull_request)
+        if observed is None:
+            eff_slug = (
+                repository_slug
+                if isinstance(repository_slug, str) and repository_slug
+                else enrolled.repository_slug
+            )
+            slug_owner, _sep, slug_repo = eff_slug.partition("/")
+            eff_owner_login = (
+                owner_login
+                if isinstance(owner_login, str) and owner_login
+                else (
+                    slug_owner
+                    if slug_owner and slug_owner.lower() != enrolled.owner_login.lower()
+                    else enrolled.owner_login
+                )
+            )
+            if slug_owner.lower() != eff_owner_login.lower():
+                eff_slug = f"{eff_owner_login}/{slug_repo or 'repo'}"
+            eff_owner_id = (
+                owner_id
+                if type(owner_id) is int and owner_id > 0
+                else enrolled.owner_id
+            )
+            eff_fork = is_fork if type(is_fork) is bool else enrolled.is_fork
+            eff_head = (
+                head_sha
+                if isinstance(head_sha, str) and GIT_SHA_HEX.fullmatch(head_sha)
+                else enrolled.head_sha
+            )
+            eff_actor_login = (
+                actor_login
+                if isinstance(actor_login, str) and actor_login
+                else enrolled.actor_login
+            )
+            if type(actor_id) is int and actor_id > 0:
+                eff_actor_id = actor_id
+            elif eff_actor_login.lower() != enrolled.actor_login.lower():
+                derived = (
+                    int(
+                        hashlib.sha256(
+                            eff_actor_login.lower().encode("utf-8")
+                        ).hexdigest()[:8],
+                        16,
+                    )
+                    % 1_000_000_000
+                ) + 1
+                eff_actor_id = derived + 1 if derived == enrolled.actor_id else derived
+            else:
+                eff_actor_id = enrolled.actor_id
+            eff_assoc = (
+                actor_association.upper()
+                if isinstance(actor_association, str)
+                and actor_association.upper()
+                in {
+                    "OWNER",
+                    "MEMBER",
+                    "COLLABORATOR",
+                    "CONTRIBUTOR",
+                    "FIRST_TIMER",
+                    "FIRST_TIME_CONTRIBUTOR",
+                    "NONE",
+                }
+                else enrolled.actor_association
+            )
+            eff_perm = (
+                actor_permission
+                if isinstance(actor_permission, str)
+                and actor_permission in PERMISSION_RANKS
+                else enrolled.actor_permission
+            )
+            observed = replace(
+                enrolled,
+                repository_id=repository_id,
+                owner_id=eff_owner_id,
+                owner_login=eff_owner_login,
+                repository_slug=eff_slug,
+                is_fork=eff_fork,
+                head_sha=eff_head,
+                actor_id=eff_actor_id,
+                actor_login=eff_actor_login,
+                actor_association=eff_assoc,
+                actor_permission=eff_perm,
+            )
+        prior_charges = bool(
+            has_prior_charges
+            or key in self._active_window_states
+            or key in self._drift_states
+        )
+        decision = evaluate_trust_boundary(
+            enrolled,
+            observed,
+            phase=phase,
+            operation=operation,
+            has_prior_charges=prior_charges,
+            has_unknown_effect=key in self._unknown_effect_holds,
+        )
+        self._trust_decisions.setdefault(key, []).append(decision)
+        return decision
+
+    def migrate_trust_boundary(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        target: AuthenticatedTrustSnapshot,
+        migration: AuthenticatedTrustMigration,
+        session_record: Any | None = None,
+        inventory: AuthoritativeDecisionInventory | None = None,
+        expected_transfer_attestation_sha256: str | None = None,
+    ) -> TrustMigrationReceipt:
+        if type(repository_id) is not int or repository_id <= 0:
+            raise ReviewInputError("repository_id must be a positive integer")
+        if type(pull_request) is not int or pull_request <= 0:
+            raise ReviewInputError("pull_request must be a positive integer")
+        enrolled = self._trust_snapshots.get((repository_id, pull_request))
+        if enrolled is None:
+            raise ReviewInputError("no enrolled trust snapshot exists for pull request")
+        resolved_inventory = inventory
+        if resolved_inventory is None:
+            wstate = self._active_window_states.get((repository_id, pull_request))
+            if wstate is not None:
+                resolved_inventory = wstate.authoritative_decision_inventory
+            else:
+                dstate = self._drift_states.get((repository_id, pull_request))
+                if dstate is not None:
+                    resolved_inventory = AuthoritativeDecisionInventory(
+                        obligations=tuple(
+                            obligation_from_comment(ob.latest_comment)
+                            for ob in dstate.inventory.obligations
+                            if ob.latest_comment is not None and ob.unresolved
+                        )
+                    )
+                else:
+                    resolved_inventory = AuthoritativeDecisionInventory(obligations=())
+        resolved_session = session_record
+        if resolved_session is None:
+            from review_sensei.session import SessionRecord
+
+            resolved_session = SessionRecord.create(enrolled.to_session_identity())
+        key = (repository_id, pull_request)
+        receipt = verify_and_migrate_trust_boundary(
+            enrolled=enrolled,
+            target=target,
+            session_record=resolved_session,
+            inventory=resolved_inventory,
+            migration=migration,
+            has_unknown_effect=key in self._unknown_effect_holds,
+            expected_transfer_attestation_sha256=expected_transfer_attestation_sha256,
+        )
+        self._trust_snapshots[(target.repository_id, target.pull_request)] = (
+            receipt.migrated_snapshot
+        )
+        if migration.reconciled_effect_sha256 is not None:
+            self._unknown_effect_holds.discard(key)
+        return receipt
 
     def _current_authoritative_inventory(
         self, *, repository_id: int, pull_request: int
@@ -5160,6 +5557,7 @@ class ReviewPublisher:
             ),
         )
         self._response_loss_holds.pop(hold_key, None)
+        self._unknown_effect_holds.discard((repository_id, pull_request))
         return decision
 
     def active_window_state(
@@ -6548,6 +6946,7 @@ class ReviewPublisher:
             Sequence[ArchiveChainPartRef], Mapping[int, ObservedGitHubArtifact]
         ]
         | None = None,
+        observed_trust: AuthenticatedTrustSnapshot | None = None,
     ) -> PublicationResult:
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError(
@@ -6571,6 +6970,8 @@ class ReviewPublisher:
         self._check_accounting_approval: PublicationResult | None = None
         self._check_accounting_review_id: int | None = None
         self._check_accounting_unknown = False
+        prev_observed_trust = self.finalizer._observed_trust_context
+        self.finalizer._observed_trust_context = observed_trust
         owns_operation_budget = (
             self.finalizer.evidence_budget is None
             and self.finalizer._operation_budget is None
@@ -6636,6 +7037,7 @@ class ReviewPublisher:
                 else self._finish_thread_cleanup(publication)
             )
         finally:
+            self.finalizer._observed_trust_context = prev_observed_trust
             if owns_operation_budget:
                 self.finalizer._operation_budget = None
 
@@ -8362,6 +8764,18 @@ class ReviewPublisher:
                 planned_drift=planned_drift_state,
                 input_key=drift_input_key,
             )
+            if (repository_id, pull_request) in self._trust_snapshots:
+                self._unknown_effect_holds.add((repository_id, pull_request))
+                self.check_trust_boundary(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    phase="after_unknown_effect",
+                    operation="review",
+                    observed=self.finalizer._observed_trust_context,
+                    repository_slug=repository,
+                    head_sha=head_sha,
+                    has_prior_charges=True,
+                )
             self._complete_failed_check(
                 check_token=check_token,
                 repository=repository,
@@ -8599,6 +9013,18 @@ class ReviewPublisher:
                 planned_drift=planned_drift_state,
                 input_key=drift_input_key,
             )
+            if (repository_id, pull_request) in self._trust_snapshots:
+                self._unknown_effect_holds.add((repository_id, pull_request))
+                self.check_trust_boundary(
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    phase="after_unknown_effect",
+                    operation="review",
+                    observed=self.finalizer._observed_trust_context,
+                    repository_slug=repository,
+                    head_sha=head_sha,
+                    has_prior_charges=True,
+                )
             self._complete_failed_check(
                 check_token=check_token,
                 repository=repository,
@@ -9268,6 +9694,18 @@ class ReviewPublisher:
             raise GitHubPublicationError("review target was not found")
         if status < 200 or status >= 300:
             raise GitHubPublicationError("review preflight failed")
+        trust_dec = self.finalizer._evaluate_live_pr_trust_boundary(
+            payload,
+            repository=repository,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            observed_override=self.finalizer._observed_trust_context,
+        )
+        if trust_dec is not None and not trust_dec.allowed:
+            raise GitHubPublicationError(
+                f"repository trust transition refused ({trust_dec.phase}): {trust_dec.reason_code}"
+            )
         decision = evaluate_live_pr_write_gate(
             payload,
             repository=repository,

@@ -120,6 +120,12 @@ from .publication import (
     prepare_publication_review,
 )
 from .session_ledger import GitHubIssueCommentSessionLedger, _marker_shaped
+from .trust_transitions import (
+    AuthenticatedTrustMigration,
+    AuthenticatedTrustSnapshot,
+    TrustMigrationReceipt,
+    TrustTransitionDecision,
+)
 
 
 class _ConversationBaseBinding(TypedDict, total=False):
@@ -802,6 +808,91 @@ class GitHubApplication:
                 )
         return execute_restricted_operator_reenroll(ledger, enriched, now=now)
 
+    def enroll_trust_snapshot(
+        self, *, snapshot: AuthenticatedTrustSnapshot
+    ) -> AuthenticatedTrustSnapshot:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError(
+                "trust snapshot enrollment requires a ReviewPublisher"
+            )
+        return self.reviewer.enroll_trust_snapshot(snapshot=snapshot)
+
+    def trust_snapshot(
+        self, *, repository_id: int, pull_request: int
+    ) -> AuthenticatedTrustSnapshot | None:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.trust_snapshot(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return None
+
+    def trust_decisions(
+        self, *, repository_id: int, pull_request: int
+    ) -> tuple[TrustTransitionDecision, ...]:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.trust_decisions(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return ()
+
+    def has_unknown_trust_effect(
+        self, *, repository_id: int, pull_request: int
+    ) -> bool:
+        if isinstance(self.reviewer, ReviewPublisher):
+            return self.reviewer.has_unknown_trust_effect(
+                repository_id=repository_id, pull_request=pull_request
+            )
+        return False
+
+    def reconcile_unknown_trust_effect(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        reconciled_effect_sha256: str,
+    ) -> None:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError(
+                "unknown trust effect reconciliation requires a ReviewPublisher"
+            )
+        self.reviewer.reconcile_unknown_trust_effect(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            reconciled_effect_sha256=reconciled_effect_sha256,
+        )
+
+    def migrate_trust_boundary(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        target: AuthenticatedTrustSnapshot,
+        migration: AuthenticatedTrustMigration,
+        session_record: Any | None = None,
+        inventory: Any | None = None,
+        expected_transfer_attestation_sha256: str | None = None,
+    ) -> TrustMigrationReceipt:
+        if not isinstance(self.reviewer, ReviewPublisher):
+            raise ReviewInputError("trust migration requires a ReviewPublisher")
+        resolved_session = session_record
+        if resolved_session is None and self.session_ledger is not None:
+            enrolled = self.reviewer.trust_snapshot(
+                repository_id=repository_id, pull_request=pull_request
+            )
+            if enrolled is not None:
+                loaded = self.session_ledger.load(enrolled.to_session_identity())
+                if loaded.record is not None:
+                    resolved_session = loaded.record
+        return self.reviewer.migrate_trust_boundary(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            target=target,
+            migration=migration,
+            session_record=resolved_session,
+            inventory=inventory,
+            expected_transfer_attestation_sha256=expected_transfer_attestation_sha256,
+        )
+
     def publish_review(
         self,
         *,
@@ -848,6 +939,7 @@ class GitHubApplication:
             Sequence[ArchiveChainPartRef], Mapping[int, ObservedGitHubArtifact]
         ]
         | None = None,
+        observed_trust: AuthenticatedTrustSnapshot | None = None,
     ) -> PublicationResult:
         reviewer = self.reviewer
         resume_thread_cleanup = (
@@ -865,6 +957,22 @@ class GitHubApplication:
         if options.operation_entry not in {"enabled", "disabled"}:
             raise GitHubPublicationError("operation entry mode is invalid")
         if isinstance(reviewer, ReviewPublisher):
+            trust_adm = reviewer.check_trust_boundary(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                phase="before_admission",
+                operation="review",
+                observed=observed_trust,
+                repository_slug=repository,
+                head_sha=head_sha,
+                has_prior_charges=bool(
+                    self.session_ledger is not None or options.github_session_ledger
+                ),
+            )
+            if trust_adm is not None and not trust_adm.allowed:
+                raise GitHubPublicationError(
+                    f"repository trust transition refused ({trust_adm.phase}): {trust_adm.reason_code}"
+                )
             if (
                 reviewer.response_loss_hold(
                     repository_id=repository_id,
@@ -1971,6 +2079,12 @@ class GitHubApplication:
                     host_outdated_threads=host_outdated_threads,
                     host_resolved_threads=host_resolved_threads,
                     **(
+                        {"observed_trust": observed_trust}
+                        if isinstance(reviewer, ReviewPublisher)
+                        and observed_trust is not None
+                        else {}
+                    ),
+                    **(
                         {
                             "observed_artifacts": observed_artifacts,
                             "archive_chain": archive_chain,
@@ -2424,6 +2538,8 @@ class GitHubApplication:
         operation_parts: object | None = None,
         reviews_policy: str | None = None,
         convergence_policy: ReviewConvergencePolicy | None = None,
+        actor_id: int | None = None,
+        observed_trust: AuthenticatedTrustSnapshot | None = None,
     ):
         """Apply a maintainer command through its applicable authority boundary.
 
@@ -2522,6 +2638,50 @@ class GitHubApplication:
                 operator_paused=False,
                 summary="not-a-command",
             )
+        if (
+            isinstance(self.reviewer, ReviewPublisher)
+            and parsed_command.action != "status"
+        ):
+            cmd_op = (
+                "override"
+                if (
+                    parsed_command.action
+                    in {
+                        "accept-risk",
+                        "dismiss",
+                        "defer",
+                        "accept-coverage-uncertainty",
+                        "approve-media",
+                        "reenroll",
+                    }
+                    or parsed_command.finding_reference
+                    or parsed_command.finding_references
+                )
+                else "command"
+            )
+            cmd_trust = self.reviewer.check_trust_boundary(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                phase="before_admission",
+                operation=cmd_op,
+                observed=observed_trust,
+                repository_slug=repository,
+                head_sha=head_sha,
+                actor_id=actor_id,
+                actor_login=actor_login,
+                actor_association=association,
+                actor_permission=actor_permission,
+                has_prior_charges=bool(
+                    self.session_ledger is not None or options.github_session_ledger
+                ),
+            )
+            if cmd_trust is not None and not cmd_trust.allowed:
+                return MaintainerCommandResult(
+                    action=parsed_command.action,
+                    applied=False,
+                    operator_paused=False,
+                    summary=cmd_trust.reason_code,
+                )
         from .run_authority import VerifiedRunAction
 
         current_mutation = isinstance(current_action, VerifiedRunAction)
@@ -4132,11 +4292,31 @@ class GitHubApplication:
         operation_parts: object | None = None,
         evidence_budget: EvidenceReadBudget | None = None,
         current_action: object | None = None,
+        observed_trust: AuthenticatedTrustSnapshot | None = None,
     ) -> ReplyResult:
         """Authorize, generate, validate, and publish one mention reply."""
 
         if not options.github_writes or not options.mention_replies:
             return ReplyResult(status="disabled")
+        if (
+            isinstance(self.reviewer, ReviewPublisher)
+            and type(repository_id) is int
+            and repository_id > 0
+        ):
+            reply_trust = self.reviewer.check_trust_boundary(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                phase="before_admission",
+                operation="reply",
+                observed=observed_trust,
+                repository_slug=repository,
+                head_sha=expected_head_sha,
+                has_prior_charges=bool(self.session_ledger is not None),
+            )
+            if reply_trust is not None and not reply_trust.allowed:
+                raise GitHubPublicationError(
+                    f"repository trust transition refused ({reply_trust.phase}): {reply_trust.reason_code}"
+                )
         if current_action is not None:
             from .run_authority import VerifiedRunAction
 
