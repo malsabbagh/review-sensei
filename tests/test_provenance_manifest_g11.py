@@ -17,6 +17,7 @@ from review_sensei.provenance_manifest import (
     UNKNOWN_PROVENANCE,
     AttemptBudgetSummary,
     AttemptEvidencePacket,
+    CiRunObservation,
     GateObservations,
     LifecycleReceipts,
     NoDuplicateWorkAssertion,
@@ -27,6 +28,7 @@ from review_sensei.provenance_manifest import (
     SourceEventIdentity,
     UncertainDispatchRecord,
     build_attempt_evidence_packet,
+    build_provenance_manifest,
     classify_provenance_compatibility,
     inspect_installed_package_versions,
     prescribe_recovery,
@@ -39,7 +41,7 @@ def _complete_manifest() -> ProvenanceManifest:
         repository="malsabbagh/review-sensei",
         repository_id=123456,
         pull_request=421,
-        main_sha="e" * 40,
+        main_sha="07179c0f2bd6b761a95449ce3ce29d4633c80094",
         base_ref="main",
         base_sha="a" * 40,
         head_sha="b" * 40,
@@ -53,6 +55,9 @@ def _complete_manifest() -> ProvenanceManifest:
         reusable_workflow_ref="malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
         reusable_workflow_tag_object="a72527097205110337a6841a545f548610c7fbaa",
         reusable_workflow_peeled_commit="d626185fff387dab14aedd48b2b0684e92c84739",
+        latest_release_tag="v0.8.20",
+        latest_release_tag_object="ffaf25468dbf682e43cb09bbfb047b6bd86c393e",
+        latest_release_commit="a4c605c51162dd37dc1b938e6e77fb535ff6a566",
         installed_core_version="0.8.18",
         installed_hosted_version="0.3.24",
         selected_executor="github-actions:a72527097205110337a6841a545f548610c7fbaa",
@@ -90,21 +95,29 @@ class ProvenanceManifestG11Tests(unittest.TestCase):
         manifest = _complete_manifest()
         self.assertTrue(manifest.has_complete_runtime_identity)
         self.assertEqual(manifest.unknown_fields, ())
-        self.assertEqual(len(manifest.known_fields), 25)
+        self.assertEqual(len(manifest.known_fields), 28)
         self.assertNotEqual(
             manifest.reusable_workflow_tag_object,
             manifest.reusable_workflow_peeled_commit,
         )
         self.assertNotEqual(manifest.main_sha, manifest.reusable_workflow_peeled_commit)
+        self.assertNotEqual(manifest.main_sha, manifest.latest_release_commit)
+        self.assertNotEqual(
+            manifest.latest_release_commit,
+            manifest.reusable_workflow_peeled_commit,
+        )
         self.assertFalse(manifest.authority)
         self.assertFalse(manifest.grants_execution_authority)
         self.assertFalse(manifest.grants_recovery_authority)
+        self.assertFalse(manifest.grants_deployment_proof)
 
         serialized = manifest.to_dict()
         self.assertEqual(
             serialized["schema_version"], PROVENANCE_MANIFEST_SCHEMA_VERSION
         )
         self.assertFalse(serialized["main_sha_is_runtime_proof"])
+        self.assertFalse(serialized["release_is_deployment_proof"])
+        self.assertFalse(serialized["ci_status_is_deployment_proof"])
         self.assertEqual(ProvenanceManifest.from_dict(serialized), manifest)
 
         local_manifest = replace(
@@ -120,7 +133,7 @@ class ProvenanceManifestG11Tests(unittest.TestCase):
     def test_missing_telemetry_uses_unknown_without_network_or_retries(self) -> None:
         default_manifest = ProvenanceManifest()
         self.assertFalse(default_manifest.has_complete_runtime_identity)
-        self.assertEqual(len(default_manifest.unknown_fields), 25)
+        self.assertEqual(len(default_manifest.unknown_fields), 28)
         self.assertEqual(default_manifest.known_fields, ())
         self.assertEqual(
             ProvenanceManifest.from_dict(default_manifest.to_dict()),
@@ -785,6 +798,219 @@ class ProvenanceManifestG11Tests(unittest.TestCase):
                 manifest, broker_route=UNKNOWN_PROVENANCE
             ).has_complete_runtime_identity
         )
+
+    def test_nov_2026_snapshot_separates_main_v5_peel_v0820_release_ci_and_unknown_runtime(
+        self,
+    ) -> None:
+        ci_artifact_5xx = CiRunObservation(
+            run_id=43094461694,
+            workflow_name="CI",
+            head_sha="07179c0f2bd6b761a95449ce3ce29d4633c80094",
+            conclusion="failure",
+            failure_classification="transient_artifact_upload_5xx",
+            failed_step_names=(
+                "Retain installed suite inventory",
+                "Archive CodeQL SARIF",
+                "Retain checkout inventory",
+            ),
+            observed_at="2026-11-11T23:06:17Z",
+        )
+        push_main_green = CiRunObservation(
+            run_id=43094456791,
+            workflow_name="Push on main",
+            head_sha="07179c0f2bd6b761a95449ce3ce29d4633c80094",
+            conclusion="success",
+            failure_classification="none",
+            failed_step_names=(),
+            observed_at="2026-11-11T23:06:17Z",
+        )
+        lookup_calls: list[str] = []
+        snapshot = build_provenance_manifest(
+            repository="malsabbagh/review-sensei",
+            main_sha="07179c0f2bd6b761a95449ce3ce29d4633c80094",
+            caller_workflow=".github/workflows/review-sensei-review.yml@refs/heads/main",
+            reusable_workflow_ref="malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
+            reusable_workflow_tag_object="a72527097205110337a6841a545f548610c7fbaa",
+            reusable_workflow_peeled_commit="d626185fff387dab14aedd48b2b0684e92c84739",
+            latest_release_tag="v0.8.20",
+            latest_release_tag_object="ffaf25468dbf682e43cb09bbfb047b6bd86c393e",
+            latest_release_commit="a4c605c51162dd37dc1b938e6e77fb535ff6a566",
+            frozen_policy_commit="07179c0f2bd6b761a95449ce3ce29d4633c80094",
+            ci_observations=(ci_artifact_5xx, push_main_green),
+            version_lookup=lambda name: (lookup_calls.append(name), "0.8.20")[1],
+            require_distinct_annotated_tag=True,
+        )
+        # Default auto_inspect_local_packages=False never infers runtime from local venv, release, or green CI:
+        self.assertEqual(lookup_calls, [])
+        self.assertEqual(snapshot.installed_core_version, UNKNOWN_PROVENANCE)
+        self.assertEqual(snapshot.installed_hosted_version, UNKNOWN_PROVENANCE)
+        self.assertEqual(snapshot.selected_executor, UNKNOWN_PROVENANCE)
+        self.assertEqual(snapshot.broker_route, UNKNOWN_PROVENANCE)
+        self.assertEqual(snapshot.broker_revision, UNKNOWN_PROVENANCE)
+        self.assertFalse(snapshot.has_complete_runtime_identity)
+        self.assertFalse(snapshot.grants_deployment_proof)
+        self.assertEqual(
+            ProvenanceManifest.from_dict(snapshot.to_dict(), require_digest=True),
+            snapshot,
+        )
+
+        # Compatibility classifier keeps source/tag/release/CI/runtime distinct:
+        obs_report = classify_provenance_compatibility(
+            snapshot,
+            expected_main_sha="07179c0f2bd6b761a95449ce3ce29d4633c80094",
+            expected_tag_object="a72527097205110337a6841a545f548610c7fbaa",
+            expected_peeled_commit="d626185fff387dab14aedd48b2b0684e92c84739",
+            expected_release_tag="v0.8.20",
+            expected_release_tag_object="ffaf25468dbf682e43cb09bbfb047b6bd86c393e",
+            expected_release_commit="a4c605c51162dd37dc1b938e6e77fb535ff6a566",
+            expected_core_version="0.8.20",
+            expected_hosted_version="0.3.24",
+            require_annotated_tag_peel=True,
+        )
+        self.assertEqual(obs_report.status, "incomplete")
+        self.assertEqual(
+            obs_report.missing_fields,
+            ("installed_core_version", "installed_hosted_version"),
+        )
+        for expected_note in (
+            "main_sha_differs_from_executing_workflow_commit",
+            "main_sha_differs_from_latest_release_commit",
+            "latest_release_differs_from_executing_workflow_commit",
+            "release_tag_present_without_installed_runtime_proof",
+            "green_ci_observation_does_not_prove_deployment",
+            "exact_head_ci_transient_artifact_upload_5xx_observed",
+        ):
+            self.assertIn(expected_note, obs_report.notes)
+
+        # Public summary carries sanitized release/workflow/main markers under 4,096B:
+        pkt = build_attempt_evidence_packet(provenance=snapshot)
+        pub = pkt.to_public_summary()
+        self.assertEqual(pub["main_sha"], "07179c0f2bd6b761a95449ce3ce29d4633c80094")
+        self.assertEqual(
+            pub["reusable_workflow_tag_object"],
+            "a72527097205110337a6841a545f548610c7fbaa",
+        )
+        self.assertEqual(
+            pub["reusable_workflow_peeled_commit"],
+            "d626185fff387dab14aedd48b2b0684e92c84739",
+        )
+        self.assertEqual(pub["latest_release_tag"], "v0.8.20")
+        self.assertEqual(
+            pub["latest_release_commit"],
+            "a4c605c51162dd37dc1b938e6e77fb535ff6a566",
+        )
+        self.assertFalse(pub["release_is_deployment_proof"])
+        self.assertFalse(pub["ci_status_is_deployment_proof"])
+
+        # Explicit local self-inspection only runs when auto_inspect_local_packages=True:
+        local_inspected = build_provenance_manifest(
+            auto_inspect_local_packages=True,
+            version_lookup=lambda name: (
+                "0.8.20" if name == "review-sensei" else "0.3.25"
+            ),
+        )
+        self.assertEqual(local_inspected.installed_core_version, "0.8.20")
+        self.assertEqual(local_inspected.installed_hosted_version, "0.3.25")
+
+        # Swapped/conflated annotated tag vs peeled commit is explicitly caught:
+        conflated = replace(
+            snapshot,
+            reusable_workflow_peeled_commit="a72527097205110337a6841a545f548610c7fbaa",
+        )
+        conflated_report = classify_provenance_compatibility(
+            conflated,
+            expected_tag_object="a72527097205110337a6841a545f548610c7fbaa",
+            expected_peeled_commit="d626185fff387dab14aedd48b2b0684e92c84739",
+            require_annotated_tag_peel=True,
+        )
+        self.assertEqual(conflated_report.status, "mismatch")
+        self.assertIn(
+            "annotated_tag_object_and_peeled_commit_conflated", conflated_report.notes
+        )
+        self.assertIn(
+            "reusable_workflow_tag_object", conflated_report.mismatched_fields
+        )
+        self.assertIn(
+            "reusable_workflow_peeled_commit", conflated_report.mismatched_fields
+        )
+
+        with self.assertRaisesRegex(ReviewInputError, "must differ"):
+            build_provenance_manifest(
+                reusable_workflow_tag_object="d626185fff387dab14aedd48b2b0684e92c84739",
+                reusable_workflow_peeled_commit="d626185fff387dab14aedd48b2b0684e92c84739",
+                require_distinct_annotated_tag=True,
+            )
+        with self.assertRaisesRegex(ReviewInputError, "require_distinct_annotated_tag"):
+            build_provenance_manifest(
+                reusable_workflow_peeled_commit="d626185fff387dab14aedd48b2b0684e92c84739",
+                require_distinct_annotated_tag=True,
+            )
+
+        # Legacy 23-key v1 payload (without release/CI keys or manifest_sha256) deserializes cleanly:
+        legacy_raw = snapshot.to_dict()
+        for key in (
+            "latest_release_tag",
+            "latest_release_tag_object",
+            "latest_release_commit",
+            "release_is_deployment_proof",
+            "ci_status_is_deployment_proof",
+            "ci_observations",
+            "manifest_sha256",
+        ):
+            del legacy_raw[key]
+        legacy_loaded = ProvenanceManifest.from_dict(legacy_raw)
+        self.assertEqual(legacy_loaded.latest_release_tag, UNKNOWN_PROVENANCE)
+        self.assertEqual(legacy_loaded.ci_observations, ())
+
+        # Tamper and validation guards on release/CI fields:
+        for proof_key in (
+            "release_is_deployment_proof",
+            "ci_status_is_deployment_proof",
+        ):
+            bad_raw = snapshot.to_dict()
+            bad_raw[proof_key] = True
+            with self.assertRaises(ReviewInputError):
+                ProvenanceManifest.from_dict(bad_raw)
+        with self.assertRaises(ReviewInputError):
+            CiRunObservation(
+                run_id=True,  # type: ignore[arg-type]
+                workflow_name="CI",
+                head_sha="07179c0f2bd6b761a95449ce3ce29d4633c80094",
+            )
+        with self.assertRaises(ReviewInputError):
+            CiRunObservation(
+                run_id=1,
+                workflow_name="Push on main",
+                head_sha="07179c0f2bd6b761a95449ce3ce29d4633c80094",
+                conclusion="success",
+                failure_classification="transient_artifact_upload_5xx",
+            )
+        with self.assertRaises(ReviewInputError):
+            CiRunObservation(
+                run_id=1,
+                workflow_name="CI",
+                head_sha="unknown",
+            )
+        with self.assertRaises(ReviewInputError):
+            CiRunObservation(
+                run_id=1,
+                workflow_name="CI",
+                head_sha="07179c0f2bd6b761a95449ce3ce29d4633c80094",
+                observed_at="2026-11-11 23:06:17",
+            )
+        with self.assertRaises(ReviewInputError):
+            CiRunObservation(
+                run_id=1,
+                workflow_name="CI",
+                head_sha="07179c0f2bd6b761a95449ce3ce29d4633c80094",
+                is_deployment_proof=True,
+            )
+        with self.assertRaises(ReviewInputError):
+            ProvenanceManifest(latest_release_tag="refs/heads/main")
+        with self.assertRaises(ReviewInputError):
+            classify_provenance_compatibility(snapshot, expected_main_sha="unknown")
+        with self.assertRaises(ReviewInputError):
+            classify_provenance_compatibility(snapshot, expected_release_tag="unknown")
 
 
 if __name__ == "__main__":
