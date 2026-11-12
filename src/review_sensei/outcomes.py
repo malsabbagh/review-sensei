@@ -87,6 +87,7 @@ PUBLIC_DIAGNOSTICS = frozenset(
         "baseline_capacity_exceeded",
         "deadline_exceeded",
         "durable_baseline_recovery_required",
+        "durable_finding_inventory_recovery_required",
         "draft_pr",
         "failed-attempt-budget-exhausted",
         "fork_not_allowed",

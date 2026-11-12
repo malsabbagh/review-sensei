@@ -428,3 +428,20 @@ ordinary hosted `review-run` recovery route with its authenticated original-call
 transport. Do not supply a fresh allowance or change run IDs to bypass the hold.
 The standalone route's evidence budget is not that transport. Local unbound CLI
 recovery remains supported; standalone metered recovery integration remains open.
+
+## Active-finding reconstruction hold (unreleased source correction)
+
+`durable_finding_inventory_recovery_required` means an opted-in active-window or
+drift publication has prior-review context but cannot reconstruct its complete
+finding inventory and native-effect holds in this process. A reduced persisted
+baseline is not that proof, even when all changed text is reviewed or GitHub
+threads were resolved, edited or deleted.
+
+This path stops before native publication/reconciliation writes. Preserve the
+original result, baseline criteria, receipts, budget/accounting and uncertain
+writes. Do not retry unchanged, omit the baseline, relabel the result as an
+initial full review, or recreate native artifacts to bypass the hold. Full
+durable lifecycle retention and ordinary cold-process reconstruction remain
+unqualified; this correction does not supply them or establish historical
+settlement. Existing supported rescan/verify contracts are separate and do not
+implicitly grant missing lifecycle authority.
