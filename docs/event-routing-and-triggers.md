@@ -76,8 +76,15 @@ GitHub webhooks do not provide durable FIFO ordering, and the per-PR Actions
 concurrency group (`reviewsensei-provider-review-<owner>/<repo>-<pr>`,
 `cancel-in-progress: false`) holds at most one active run and one pending run.
 
-ReviewSensei converges onto authenticated current PR state (`LivePullRequestTarget`)
-rather than arrival order:
+The bounded G13 reconciliation model evaluates authenticated current PR state
+(`LivePullRequestTarget`) rather than arrival order. The outcomes below are
+qualified for that model with supplied history, not as an end-to-end ordinary
+runner guarantee. Ordinary review/command/reply runners do not yet durably produce
+the accepted-operation and semantic-progress history or consume the model's
+finite-stop verdict. G13 durable history and finite-stop integration remain open;
+read-time source/session fences and original accounting still apply.
+
+Model outcomes:
 
 - **Duplicate delivery:** Re-delivering an already completed comment source key
   or an unchanged `(base_sha, head_sha)` review snapshot reuses the retained
@@ -104,16 +111,17 @@ rather than arrival order:
   classified explicitly (`queued_command_replaced`, `queued_reply_replaced`, or
   `queued_review_superseded`) with the exact recovery command (for example,
   re-issuing the displaced `@reviewsensei verify` command or `workflow_dispatch`).
-- **Reconciliation ownership and finite no-progress stop rule:** Every
+- **Model ownership and finite no-progress stop rule:** Every
   reconciliation verdict assigns an explicit owner from `RECONCILIATION_OWNERS`
   (`caller_workflow_preflight`, `hosted_review_admission`,
   `hosted_command_executor`, `hosted_reply_executor`, or
   `operator_manual_recovery`). Repeated reconciliation attempts on an identical
   `(base_sha, head_sha, state_fingerprint, open_finding_ids)` tuple that make
   no progress halt deterministically at `MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS`
-  (`2`) with `finite_no_progress_stop` (`stopped_no_progress`) — never launching
-  background reconcilers or paid retries — and reset immediately when PR state
-  or progress advances.
+  (`2`) with `finite_no_progress_stop` (`stopped_no_progress`) in the model,
+  without background reconcilers or paid retries; the model resets the count
+  when PR state or progress advances. This is not a durable ordinary-runner
+  stop guarantee.
 
 ## Merge queue (`merge_group`) unsupported boundary (`G07`)
 
