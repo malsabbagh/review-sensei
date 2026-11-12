@@ -11,15 +11,18 @@ request allowance.
 
 This module inventories the authoritative representation limits across all layers,
 evaluates both individual component bounds and combined cross-stage envelopes
-(including multibyte UTF-8 byte accounting and maximum histories), and qualifies
-interruption + fresh-process replay invariants across every retained,
-publication, and terminal stage without conferring runtime authority.
+(including multibyte UTF-8 byte accounting and maximum histories). Scenario
+simulation is not observed recovery evidence. Optional subprocess qualification
+covers only an actual retained session root and its disposition snapshot graph,
+without conferring runtime authority or claiming native replay.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -49,6 +52,7 @@ from .bounded_evidence import (
     MAX_STORED_PARTS,
     PACKED_CHUNK_BYTES,
     PART_FRAMING_RESERVE,
+    PART_READ_SECONDS,
     PARTITION_ENCODING,
     EvidenceReadBudget,
     canonical_bytes,
@@ -105,6 +109,7 @@ from .session import (
     SessionRecord,
     disposition_array_bytes,
     disposition_snapshot_capacity,
+    read_session_dispositions,
 )
 from .terminal_representability import (
     MAX_COVERAGE_ENTRY_COUNT,
@@ -2226,7 +2231,12 @@ def simulate_interruption_and_fresh_replay(
     recovery_bundle: OriginalRecoveryContextBundle | None = None,
     verify_fresh_handoff: bool = True,
 ) -> InterruptionReplayResult:
-    """Qualify interruption handling and fresh-process replay for one G12 scenario."""
+    """Simulate one G12 scenario; optional context roundtrip is process-local.
+
+    Scenario outcomes are modelled estimates, not observed native replay evidence.
+    Use ``qualify_retained_interruption_replay`` for scoped subprocess snapshot
+    authentication against actual retained artifacts.
+    """
 
     _exact_bool(verify_fresh_handoff, field="verify_fresh_handoff")
     explicit_handoff_args = (handoff_directory, handoff_key, recovery_bundle)
@@ -2411,7 +2421,11 @@ def build_supported_scenario_matrix() -> tuple[InterruptionScenario, ...]:
 
 @dataclass(frozen=True)
 class BoundaryInterruptionResult:
-    """Result of crossing an actual retained state boundary with interruption and fresh replay."""
+    """Capacity estimates plus explicitly scoped read-only artifact qualification.
+
+    Existing flags remain conservative compatibility projections. Null counters
+    mean native effects and inference replay were not exercised, not zero work.
+    """
 
     interruption_stage: str
     interruption_mode: str
@@ -2422,10 +2436,13 @@ class BoundaryInterruptionResult:
     retained_snapshot_preserved: bool
     retained_unknown_charges: int
     protected_fence_tail_preserved: bool
-    duplicate_side_effects: int
-    fresh_inference_calls: int
+    duplicate_side_effects: int | None
+    fresh_inference_calls: int | None
     recovery: RecoveryPrescription
     authority: bool = False
+    qualification_status: str = "not_exercised"
+    qualified_components: tuple[str, ...] = ()
+    physical_reads: int | None = None
 
     def __post_init__(self) -> None:
         _exact_false_authority(self.authority, field="authority")
@@ -2437,9 +2454,42 @@ class BoundaryInterruptionResult:
             raise ReviewInputError(
                 f"unsupported interruption_mode: {self.interruption_mode!r}"
             )
-        if self.duplicate_side_effects != 0 or self.fresh_inference_calls != 0:
+        if (
+            self.duplicate_side_effects is not None
+            or self.fresh_inference_calls is not None
+        ):
             raise ReviewInputError(
-                "boundary replay must never duplicate side effects or run fresh inference"
+                "read-only snapshot qualification does not measure effect or inference replay"
+            )
+        expected_status = {
+            (): {"not_exercised", "capacity_refused", "retained_artifacts_required"},
+            ("session_root",): {"root_verified"},
+            ("session_root", "disposition_snapshot"): {"snapshot_graph_verified"},
+        }
+        if self.qualification_status not in expected_status.get(
+            self.qualified_components, set()
+        ):
+            raise ReviewInputError(
+                "snapshot qualification status does not match evidence"
+            )
+        if (
+            self.fresh_handoff_verified
+            or self.fresh_ledger_reloaded != bool(self.qualified_components)
+            or self.retained_snapshot_preserved
+            != ("disposition_snapshot" in self.qualified_components)
+        ):
+            raise ReviewInputError(
+                "snapshot qualification flags exceed exercised evidence"
+            )
+        if self.qualified_components:
+            if (
+                type(self.physical_reads) is not int
+                or not 0 < self.physical_reads <= ORDINARY_EVIDENCE_READ_LIMIT
+            ):
+                raise ReviewInputError("snapshot physical read observation is invalid")
+        elif self.physical_reads is not None:
+            raise ReviewInputError(
+                "unexercised snapshot has no physical read observation"
             )
         if not self.protected_fence_tail_preserved:
             raise ReviewInputError(
@@ -2460,7 +2510,106 @@ class BoundaryInterruptionResult:
             "fresh_inference_calls": self.fresh_inference_calls,
             "recovery": self.recovery.to_dict(),
             "authority": False,
+            "qualification_status": self.qualification_status,
+            "qualified_components": list(self.qualified_components),
+            "physical_reads": self.physical_reads,
+            "unqualified_components": [
+                "retained_result",
+                "archive",
+                "quarantined_state",
+                "historical_assessments",
+                "assessment_queue",
+                "convergence_history",
+                "recovery_context",
+                "publication",
+                "terminal_accounting",
+                "historical_settlement",
+            ],
         }
+
+
+def _snapshot_probe_main() -> None:
+    """Bounded read-only subprocess worker; emits no retained source bytes."""
+    request = json.loads(sys.stdin.buffer.read(16_385))
+    identity = SessionIdentity(**request["identity"])
+    budget = EvidenceReadBudget()
+    ledger = LocalSessionLedger(Path(request["directory"]), evidence_budget=budget)
+    record = ledger.load(identity).record
+    if (
+        record is None
+        or hashlib.sha256(canonical_bytes(record.to_dict())).hexdigest()
+        != request["root_sha256"]
+    ):
+        raise ReviewInputError("retained root missing or changed")
+    components = ["session_root"]
+    if record.disposition_snapshot is not None:
+        read_session_dispositions(ledger, record)
+        components.append("disposition_snapshot")
+    budget.check()
+    print(json.dumps({"components": components, "physical_reads": budget.calls}))
+
+
+def _qualify_snapshot_subprocess(
+    directory: Path, *, identity: SessionIdentity, record: SessionRecord
+) -> tuple[tuple[str, ...], int]:
+    if not directory.is_dir():
+        raise ReviewInputError("retained ledger directory is required")
+    if (record.repository, record.repository_id, record.pull_request) != (
+        identity.repository,
+        identity.repository_id,
+        identity.pull_request,
+    ):
+        raise ReviewInputError("retained ledger identity does not match")
+    request = canonical_bytes(
+        {
+            "directory": str(directory.resolve()),
+            "identity": {
+                "repository": identity.repository,
+                "repository_id": identity.repository_id,
+                "pull_request": identity.pull_request,
+            },
+            "root_sha256": hashlib.sha256(
+                canonical_bytes(record.to_dict())
+            ).hexdigest(),
+        }
+    )
+    if len(request) > 16_384:
+        raise ReviewInputError("retained snapshot qualification input exceeds bound")
+    try:
+        process = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                "from review_sensei.combined_capacity import _snapshot_probe_main; _snapshot_probe_main()",
+            ],
+            input=request,
+            capture_output=True,
+            timeout=PART_READ_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ReviewInputError(
+            "retained snapshot subprocess unavailable or timed out"
+        ) from exc
+    if process.returncode != 0 or len(process.stdout) > 1_024:
+        raise ReviewInputError("retained snapshot subprocess authentication failed")
+    try:
+        observed = json.loads(process.stdout)
+        components = observed["components"]
+        calls = observed["physical_reads"]
+        expected = ["session_root"] + (
+            ["disposition_snapshot"] if record.disposition_snapshot is not None else []
+        )
+        if (
+            components != expected
+            or type(calls) is not int
+            or not 0 < calls <= ORDINARY_EVIDENCE_READ_LIMIT
+        ):
+            raise ValueError("invalid observation")
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ReviewInputError("retained snapshot subprocess receipt invalid") from exc
+    return tuple(components), calls
 
 
 def qualify_retained_interruption_replay(
@@ -2490,7 +2639,13 @@ def qualify_retained_interruption_replay(
     original_api_limit: int = DEFAULT_API_REQUEST_LIMIT,
     ledger_directory: Path | None = None,
 ) -> BoundaryInterruptionResult:
-    """Qualify actual ``SessionRecord`` + ``ReviewResult`` state across interruption and fresh-process replay."""
+    """Estimate an interruption envelope and optionally qualify retained snapshots.
+
+    Actual artifacts are mandatory for qualification. A separate interpreter
+    authenticates the root and all disposition snapshot parts through production
+    readers. This does not replay publication, results, archives or recovery
+    contexts, and supplies no original-budget or historical-settlement authority.
+    """
 
     if interruption_stage not in INTERRUPTION_STAGES:
         raise ReviewInputError(
@@ -2579,160 +2734,32 @@ def qualify_retained_interruption_replay(
             envelope_evaluation=evaluation,
             fresh_ledger_reloaded=False,
             fresh_handoff_verified=False,
-            retained_snapshot_preserved=(record.disposition_snapshot is not None),
+            retained_snapshot_preserved=False,
             retained_unknown_charges=footprint.unknown_usage_requests,
             protected_fence_tail_preserved=(
                 footprint.protected_tail_requests >= RESERVED_FENCE_READS
             ),
-            duplicate_side_effects=0,
-            fresh_inference_calls=0,
+            duplicate_side_effects=None,
+            fresh_inference_calls=None,
             recovery=evaluation.recovery,
+            qualification_status="capacity_refused",
         )
 
-    # Fresh-process ledger reload + fresh-process RecoveryContextStore roundtrip:
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_root = Path(tmp_dir)
-        eff_ledger_dir = (
-            ledger_directory if ledger_directory is not None else (tmp_root / "ledger")
+    # Estimates remain available without artifacts, but never count as replay.
+    qualified: tuple[str, ...] = ()
+    physical_reads: int | None = None
+    status = "retained_artifacts_required"
+    if ledger_directory is not None:
+        qualified, physical_reads = _qualify_snapshot_subprocess(
+            ledger_directory, identity=identity, record=record
         )
-        if ledger_directory is None:
-            writer_ledger = LocalSessionLedger(
-                eff_ledger_dir,
-                enable_disposition_snapshot_writes=True,
-                evidence_budget=EvidenceReadBudget(),
-            )
-            writer_ledger.initialize(identity)
-            writer_ledger.replace(identity, lambda _r: record)
-
-        fresh_budget = EvidenceReadBudget()
-        fresh_ledger = LocalSessionLedger(
-            eff_ledger_dir,
-            enable_disposition_snapshot_writes=True,
-            evidence_budget=fresh_budget,
+        status = (
+            "snapshot_graph_verified"
+            if "disposition_snapshot" in qualified
+            else "root_verified"
         )
-        reloaded = fresh_ledger.load(identity).record
-        if reloaded is None or reloaded.to_dict() != record.to_dict():
-            raise ReviewInputError(
-                "fresh-process ledger reload failed to preserve exact SessionRecord"
-            )
-        snapshot_ok = reloaded.disposition_snapshot == record.disposition_snapshot
-        fence_tail_ok = (
-            fresh_budget.ordinary_remaining() >= 0
-            and footprint.total_ordinary_part_reads <= ORDINARY_EVIDENCE_READ_LIMIT
-            and footprint.protected_tail_requests >= RESERVED_FENCE_READS
-        )
-
-        seed = hashlib.sha256(
-            canonical_bytes(
-                {
-                    "record_sha": hashlib.sha256(
-                        canonical_bytes(record.to_dict())
-                    ).hexdigest(),
-                    "stage": interruption_stage,
-                    "mode": interruption_mode,
-                }
-            )
-        ).hexdigest()
-        tx_id = (
-            record.transaction.transaction_id
-            if record.transaction is not None
-            else seed
-        )
-        res_sha = (
-            retained_result.content_digest()
-            if retained_result is not None
-            else (
-                record.transaction.result_sha256
-                if record.transaction is not None
-                and record.transaction.result_sha256 is not None
-                else hashlib.sha256(f"result:{seed}".encode("utf-8")).hexdigest()
-            )
-        )
-        bundle = OriginalRecoveryContextBundle(
-            repository=identity.repository,
-            repository_id=repo_id,
-            pull_request=identity.pull_request,
-            base_ref="main",
-            base_sha=(
-                record.transaction.base_sha
-                if record.transaction is not None
-                else "a" * 40
-            ),
-            head_sha=(
-                record.transaction.head_sha
-                if record.transaction is not None
-                else "b" * 40
-            ),
-            policy_commit="e" * 40,
-            transaction_id=tx_id,
-            generation=max(1, record.generation),
-            reservation_id=(
-                record.transaction.reservation_id
-                if record.transaction is not None
-                else f"res:{seed[:16]}"
-            ),
-            accepted_result_sha256=res_sha,
-            configuration_digest=(
-                record.transaction.configuration_digest
-                if record.transaction is not None
-                else "d" * 64
-            ),
-            evidence_digest=(
-                record.transaction.evidence_digest
-                if record.transaction is not None
-                else "c" * 64
-            ),
-            convergence_policy_digest="5" * 64,
-            work_policy_digest="6" * 64,
-            decision_policy_digest="7" * 64,
-            provider_identity=(
-                retained_result.provider
-                if retained_result is not None and ":" in retained_result.provider
-                else "openai:gpt-5"
-            ),
-            selected_context_digest="8" * 64,
-            learnings_digest="9" * 64,
-            baseline_digest=None,
-            diff_sha256="f" * 64,
-            placement_mode=(
-                "bounded"
-                if retained_result is not None
-                and retained_result.review_status == "partial"
-                else "complete"
-            ),
-        )
-        handoff_dir = tmp_root / "handoff"
-        handoff_key = hashlib.sha256(f"key:{seed}".encode("utf-8")).digest()
-        writer_store = RecoveryContextStore(handoff_dir, key=handoff_key)
-        writer_store.save(bundle)
-        fresh_reader_store = RecoveryContextStore(handoff_dir, key=handoff_key)
-        decision = fresh_reader_store.load_for_fresh_process(
-            bundle.transaction_id,
-            expected_repository=bundle.repository,
-            expected_pull_request=bundle.pull_request,
-            expected_base_sha=bundle.base_sha,
-            expected_head_sha=bundle.head_sha,
-            expected_policy_commit=bundle.policy_commit,
-            expected_result_sha256=bundle.accepted_result_sha256,
-            current_run_id=bundle.run_id + 1,
-            current_root_bytes=footprint.projected_record_bytes,
-            intermediate_root_bytes=footprint.max_intermediate_record_bytes,
-            result_part_count=max(1, footprint.retained_result_part_reads),
-            total_decoded_bytes=max(
-                1_024, footprint.published_review_summary_utf8_bytes
-            ),
-            original_api_limit=footprint.original_api_limit,
-            already_consumed_requests=footprint.committed_requests,
-            unknown_usage_requests=footprint.unknown_usage_requests,
-            active_reserved_requests=footprint.active_reserved_requests,
-        )
-        if decision.authority is not False or decision.refusal_code in {
-            "tampered_authentication_or_digest",
-            "truncated_or_corrupt_context",
-            "snapshot_or_transaction_mismatch",
-        }:
-            raise ReviewInputError("fresh-process recovery handoff integrity mismatch")
-        handoff_admitted = decision.admitted
+    snapshot_ok = "disposition_snapshot" in qualified
+    fence_tail_ok = footprint.protected_tail_requests >= RESERVED_FENCE_READS
 
     if (interruption_stage, interruption_mode) in CHECK_DEFINITE_REJECTION_CASES:
         rx = prescribe_recovery(
@@ -2757,14 +2784,17 @@ def qualify_retained_interruption_replay(
         interruption_mode=interruption_mode,
         footprint=footprint,
         envelope_evaluation=evaluation,
-        fresh_ledger_reloaded=True,
-        fresh_handoff_verified=handoff_admitted,
+        fresh_ledger_reloaded="session_root" in qualified,
+        fresh_handoff_verified=False,
         retained_snapshot_preserved=snapshot_ok,
         retained_unknown_charges=footprint.unknown_usage_requests,
         protected_fence_tail_preserved=fence_tail_ok,
-        duplicate_side_effects=0,
-        fresh_inference_calls=0,
+        duplicate_side_effects=None,
+        fresh_inference_calls=None,
         recovery=rx,
+        qualification_status=status,
+        qualified_components=qualified,
+        physical_reads=physical_reads,
     )
 
 

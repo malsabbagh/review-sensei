@@ -33,7 +33,9 @@ Four coupled lifecycle boundaries previously lacked explicit cross-stage admissi
 
 4. **Combined capacity inventory and cross-stage interruption qualification (`review_sensei.combined_capacity`, G12):**
    - Maintain a runtime-verified `REPRESENTATION_LIMIT_INVENTORY` across `session_root`, `bounded_evidence`, `recovery_context`, `terminal_action`, and `publication_and_api`, paired with UTF-8 byte vs. codepoint accounting (`measure_utf8_text`, rejecting NULs and lone surrogates), complete retained `ReviewResult` + `SessionRecord` decomposition (`decompose_session_and_result_footprint`, `estimate_lifecycle_future_growth_bytes`, `evaluate_live_session_envelope`), and strict fail-closed validation on malformed `api_run_accounting`.
-   - Qualify interruption and fresh-process replay invariants across all nine retained, publication, and terminal stages (`qualify_retained_interruption_replay` and `simulate_interruption_and_fresh_replay` across `before_dispatch`, `in_flight_not_stored`, `in_flight_stored_response_lost`, `definite_rejection`), preserving prior and in-flight unknown request charges, rejecting unreferenced orphan parts, reconciling stored lost-response writes via owned readback without duplicate side effects, and replaying retained results with zero fresh inference while preserving the `4`-call protected fence tail.
+   - Keep all nine interruption-stage capacity scenarios as estimates, not evidence that a native operation was replayed. `simulate_interruption_and_fresh_replay` models outcomes; its optional private-context roundtrip uses separate instances in the same process.
+   - `qualify_retained_interruption_replay` requires an existing retained ledger directory to qualify anything. A separate Python interpreter loads the exact expected session root and authenticates every referenced disposition snapshot part through `read_session_dispositions`, under the unchanged physical read budget. Missing/corrupt parts, a changed root, an unavailable process or timeout refuse qualification. The qualifier never manufactures retained roots, keys, policy digests, provider identities or original contexts.
+   - Report `retained_artifacts_required`, `capacity_refused`, `root_verified` or `snapshot_graph_verified`, exact `qualified_components` and observed `physical_reads`. Legacy booleans are conservative projections. Native-effect/inference counters are null because these operations were not exercised; `fresh_handoff_verified` is false. Retained results, archives, recovery contexts, publication, terminal accounting and historical settlement remain explicitly unqualified, even when their capacity estimates fit. Existing unknown-charge estimates are retained, not presented as an observed original-budget recovery receipt.
 
 ## Scope
 
@@ -62,3 +64,20 @@ Ships through normal source review and CI with no schema migration, workflow cha
 ## Follow-up work
 
 Qualify partitioned `caller-requests-v3` writer activation and automated multi-part compaction independently once cross-writer fencing and historical settlement rules are established.
+
+### Narrow snapshot qualification correction (PR #452)
+
+The prior root-only roundtrip compared snapshot manifests without opening their
+parts and generated synthetic recovery context. Its positive preservation and
+zero-effect fields were not full-graph replay evidence. The replacement preserves
+the capacity API while deliberately returning unknown counters and explicit
+qualification scope. Callers must tolerate null counters and inspect status
+rather than infer successful recovery from a fitting envelope.
+
+Validation uses production snapshot writers and a fresh interpreter, including
+missing/corrupt part and changed-root controls. Read counts belong to the
+read-only qualification attempt, not a reconstructed historical caller allowance.
+No publication, provider call, mutation, schema migration or live cutover is
+performed. Rollback must retain this evidence limitation; reverting executable
+qualification must not restore unsupported success claims. Broader graph and
+ordinary-route recovery qualification remains outstanding.

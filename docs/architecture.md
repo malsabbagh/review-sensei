@@ -1340,3 +1340,14 @@ A missing or malformed inventory cannot establish the engine boundary.
 
 Opt-in aggregate review triage is described in [review decisions](review-decisions.md)
 and proposed [ADR 0124](adr/0124-review-engine-decision-providers.md).
+
+## Scoped retained-state qualification
+
+The G12 capacity model is separate from executable recovery evidence. As detailed
+in ADR 0131, the retained-state qualifier opens an existing local session in a
+fresh interpreter and authenticates its disposition snapshot graph through the
+production readers. Its receipt names only the components exercised and counts
+physical reads. Missing artifacts remain unqualified; no synthetic original
+context is created. Native-effect and inference replay counters remain unknown.
+Result/archive/context recovery, terminal closure and historical settlement are
+separate gates, not consequences of matching roots or fitting capacity estimates.

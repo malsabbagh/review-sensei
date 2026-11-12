@@ -1163,7 +1163,8 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 g34_replay.envelope_evaluation.reason,
             )
             self.assertFalse(g34_replay.fresh_ledger_reloaded)
-            self.assertTrue(g34_replay.retained_snapshot_preserved)
+            self.assertFalse(g34_replay.retained_snapshot_preserved)
+            self.assertEqual(g34_replay.qualification_status, "capacity_refused")
 
             # Valid retained 2-decision snapshot state crossed with all 4 interruption modes + fresh-process replay:
             for mode in INTERRUPTION_MODES:
@@ -1177,14 +1178,191 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 )
                 self.assertTrue(ok_replay.envelope_evaluation.combined_envelope_fits)
                 self.assertTrue(ok_replay.fresh_ledger_reloaded)
-                self.assertTrue(ok_replay.fresh_handoff_verified)
+                self.assertFalse(ok_replay.fresh_handoff_verified)
                 self.assertTrue(ok_replay.retained_snapshot_preserved)
                 self.assertTrue(ok_replay.protected_fence_tail_preserved)
-                self.assertEqual(ok_replay.duplicate_side_effects, 0)
-                self.assertEqual(ok_replay.fresh_inference_calls, 0)
+                self.assertIsNone(ok_replay.duplicate_side_effects)
+                self.assertIsNone(ok_replay.fresh_inference_calls)
                 self.assertFalse(ok_replay.to_dict()["authority"])
+                self.assertEqual(
+                    ok_replay.qualification_status, "snapshot_graph_verified"
+                )
+                self.assertEqual(
+                    ok_replay.qualified_components,
+                    ("session_root", "disposition_snapshot"),
+                )
+                self.assertGreater(ok_replay.physical_reads, 0)
+                self.assertIn("archive", ok_replay.to_dict()["unqualified_components"])
                 if mode in {"in_flight_not_stored", "in_flight_stored_response_lost"}:
                     self.assertGreaterEqual(ok_replay.retained_unknown_charges, 2)
+
+            # A matching root is insufficient: its referenced bytes must exist
+            # and authenticate in the child, independently of this warm ledger.
+            assert rec.disposition_snapshot is not None
+            manifest = rec.disposition_snapshot["state_manifest"]
+            part_id = manifest["parts"][0]["storage_id"]
+            part_path = next(Path(tmp).rglob(part_id))
+            original = part_path.read_bytes()
+            for mutation in ("missing", "corrupt"):
+                with self.subTest(mutation=mutation):
+                    if mutation == "missing":
+                        part_path.unlink()
+                    else:
+                        part_path.write_bytes(b"{}")
+                    try:
+                        with self.assertRaisesRegex(
+                            ReviewInputError, "subprocess authentication failed"
+                        ):
+                            qualify_retained_interruption_replay(
+                                rec,
+                                identity=IDENTITY,
+                                interruption_stage="review_publication",
+                                interruption_mode="before_dispatch",
+                                ledger_directory=Path(tmp),
+                            )
+                    finally:
+                        part_path.write_bytes(original)
+
+    def test_paged_snapshot_subprocess_authenticates_each_retained_part(self) -> None:
+        from test_paged_disposition_snapshots import (
+            HEAD as SNAPSHOT_HEAD,
+        )
+        from test_paged_disposition_snapshots import (
+            IDENTITY as SNAPSHOT_IDENTITY,
+        )
+        from test_paged_disposition_snapshots import (
+            BatchCandidateLedger,
+            LocalDispositionBatchTests,
+            decision,
+        )
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from review_sensei.session import stage_session_dispositions
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            record = LocalDispositionBatchTests.record()
+            seed = LocalSessionLedger(path)
+            seed.initialize(SNAPSHOT_IDENTITY)
+            seed.replace(
+                SNAPSHOT_IDENTITY,
+                lambda current: current.evolve(
+                    generation=1,
+                    transaction=record.transaction,
+                    last_committed_reservation_id=record.last_committed_reservation_id,
+                ),
+            )
+            writer = BatchCandidateLedger(
+                path,
+                evidence_budget=EvidenceReadBudget(),
+                enable_disposition_snapshot_writes=True,
+            )
+            values = tuple(decision(i) for i in range(33))
+            written = writer.replace(
+                SNAPSHOT_IDENTITY,
+                lambda current: stage_session_dispositions(
+                    writer,
+                    current,
+                    values,
+                    head_sha=SNAPSHOT_HEAD,
+                    now=None,
+                ),
+            )
+            args = dict(
+                identity=SNAPSHOT_IDENTITY,
+                interruption_stage="review_publication",
+                interruption_mode="before_dispatch",
+                ledger_directory=path,
+            )
+            receipt = qualify_retained_interruption_replay(written, **args)
+            self.assertEqual(receipt.qualification_status, "snapshot_graph_verified")
+            self.assertEqual(written.disposition_snapshot["schema_version"], "2.0")
+            parts = LocalDispositionBatchTests.parts(path)
+            self.assertGreater(len(parts), 1)
+            for relative, original in parts.items():
+                with self.subTest(part=relative):
+                    target = path / relative
+                    target.write_bytes(b"{}")
+                    try:
+                        with self.assertRaisesRegex(
+                            ReviewInputError, "subprocess authentication failed"
+                        ):
+                            qualify_retained_interruption_replay(written, **args)
+                    finally:
+                        target.write_bytes(original)
+
+    def test_snapshot_qualification_requires_actual_artifacts_and_reports_root_only(
+        self,
+    ) -> None:
+        record = SessionRecord.create(IDENTITY)
+        args = dict(
+            identity=IDENTITY,
+            interruption_stage="review_publication",
+            interruption_mode="before_dispatch",
+        )
+        missing = qualify_retained_interruption_replay(record, **args)
+        self.assertEqual(missing.qualification_status, "retained_artifacts_required")
+        self.assertFalse(missing.fresh_ledger_reloaded)
+        self.assertFalse(missing.fresh_handoff_verified)
+        self.assertEqual(missing.qualified_components, ())
+        self.assertIsNone(missing.physical_reads)
+        self.assertIsNone(missing.duplicate_side_effects)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ReviewInputError, "directory is required"):
+                qualify_retained_interruption_replay(
+                    record, ledger_directory=root / "absent", **args
+                )
+            self.assertFalse((root / "absent").exists())
+            ledger = LocalSessionLedger(root)
+            stored = ledger.initialize(IDENTITY)
+            receipt = qualify_retained_interruption_replay(
+                stored, ledger_directory=root, **args
+            )
+            self.assertEqual(receipt.qualification_status, "root_verified")
+            self.assertEqual(receipt.qualified_components, ("session_root",))
+            self.assertFalse(receipt.retained_snapshot_preserved)
+            self.assertFalse(receipt.fresh_handoff_verified)
+            self.assertGreater(receipt.physical_reads, 0)
+            with patch(
+                "review_sensei.combined_capacity.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("snapshot-probe", 1),
+            ):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "subprocess unavailable or timed out"
+                ):
+                    qualify_retained_interruption_replay(
+                        stored, ledger_directory=root, **args
+                    )
+            for output in (
+                b"not-json",
+                b'{"components": ["session_root"], "physical_reads": true}',
+                b"x" * 1025,
+            ):
+                with (
+                    self.subTest(output_size=len(output)),
+                    patch(
+                        "review_sensei.combined_capacity.subprocess.run",
+                        return_value=subprocess.CompletedProcess(
+                            [], 0, stdout=output, stderr=b""
+                        ),
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        ReviewInputError,
+                        "subprocess (receipt invalid|authentication failed)",
+                    ):
+                        qualify_retained_interruption_replay(
+                            stored, ledger_directory=root, **args
+                        )
+            with self.assertRaisesRegex(
+                ReviewInputError, "subprocess authentication failed"
+            ):
+                qualify_retained_interruption_replay(
+                    stored.evolve(completed_initial_reviews=1),
+                    ledger_directory=root,
+                    **args,
+                )
 
     def test_exact_boundary_sizes_crossed_with_interruption_and_fresh_replay(
         self,
@@ -1210,7 +1388,11 @@ class CombinedCapacityG12Tests(unittest.TestCase):
             self.assertEqual(
                 res.envelope_evaluation.combined_envelope_fits, expected_ok
             )
-            self.assertEqual(res.fresh_ledger_reloaded, expected_ok)
+            self.assertFalse(res.fresh_ledger_reloaded)
+            self.assertEqual(
+                res.qualification_status,
+                "retained_artifacts_required" if expected_ok else "capacity_refused",
+            )
 
         # 2. 10,239 / 10,240 / 10,241 inline disposition bytes:
         for disp_b, expected_ok in ((10_239, True), (10_240, True), (10_241, False)):
@@ -1322,7 +1504,7 @@ class CombinedCapacityG12Tests(unittest.TestCase):
             interruption_stage="check_publication",
             interruption_mode="definite_rejection",
         )
-        self.assertTrue(def_rej_check.fresh_handoff_verified)
+        self.assertFalse(def_rej_check.fresh_handoff_verified)
         def_rej_other = qualify_retained_interruption_replay(
             record,
             identity=IDENTITY,
