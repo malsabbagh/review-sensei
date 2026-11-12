@@ -244,6 +244,11 @@ class ApiRunRequestTransport:
         self._terminal_reason: str | None = None
         self._budget_view: Any = None
         self._logical_phase = "startup"
+        self._authentication_endpoints: set[str] = set()
+        self._control_write_candidates: dict[str, tuple[str, str]] = {}
+        self._confirmed_control_writes: dict[str, tuple[str, str]] = {}
+        self._admitting_action = False
+        self._physical_mutation_ids: set[str] = set()
         self.native_walks: dict[str, int] = {}
         self._active_operation: CallerOperation | None = None
         self._staged_part_operation: CallerOperation | None = None
@@ -680,6 +685,33 @@ class ApiRunRequestTransport:
                 self._failed_operations.add(identity)
             self._staged_part_operation = None
 
+    def _register_authentication_endpoints(self, token_url: str) -> None:
+        # Called by the configured BrokerClient, never inferred from a URL suffix.
+        self._authentication_endpoints.update(
+            (token_url, token_url.removesuffix("/token") + "/session-grant")
+        )
+
+    def _confirm_control_write(
+        self,
+        request_id: str | None,
+        record: SessionRecord,
+        kind: str,
+        ledger: GitHubIssueCommentSessionLedger,
+    ) -> None:
+        candidate = self._control_write_candidates.get(request_id or "")
+        if candidate is None or candidate[0] != record.record_sha256:
+            return
+        requested, configured = urlsplit(candidate[1]), urlsplit(ledger.http.api_url)
+        if (requested.scheme, requested.netloc) != (
+            configured.scheme,
+            configured.netloc,
+        ):
+            return
+        if requested.query or requested.fragment:
+            return
+        assert request_id is not None
+        self._confirmed_control_writes[request_id] = (kind, record.record_sha256)
+
     def open(self, request: Request, *, timeout: float) -> _AccountedResponse:
         from .api_run_plan import WRITE_CONFIRMATION_TAIL
 
@@ -766,6 +798,61 @@ class ApiRunRequestTransport:
             "outcome": "unknown",
         }
         observation["mutation"] = is_mutation
+        if is_mutation:
+            self._physical_mutation_ids.add(request_id)
+            if (
+                request.get_method() == "POST"
+                and request.full_url in self._authentication_endpoints
+            ):
+                self._confirmed_control_writes[request_id] = (
+                    "broker_authentication",
+                    str(self.run.run_id),
+                )
+            expected_root = (
+                self._checkpoint
+                if self._admitting_action
+                else (
+                    self._activation[0]
+                    if self._state is None and self._activation is not None
+                    else None
+                )
+            )
+            if expected_root is not None and request.get_method() in {"PATCH", "POST"}:
+                from .session_ledger import parse_session_comment
+
+                try:
+                    raw_body = request.data
+                    if not isinstance(raw_body, (bytes, bytearray)):
+                        raise ValueError("control write body is unavailable")
+                    payload = json.loads(raw_body)
+                    body = payload.get("body") if isinstance(payload, dict) else None
+                    parsed = (
+                        parse_session_comment(body, identity=expected_root.identity())
+                        if isinstance(body, str)
+                        else None
+                    )
+                    path = urlsplit(request.full_url).path
+                    repository = expected_root.repository
+                    target_matches = (
+                        request.get_method() == "PATCH"
+                        and path.startswith(f"/repos/{repository}/issues/comments/")
+                        and path.rsplit("/", 1)[-1].isdigit()
+                    ) or (
+                        request.get_method() == "POST"
+                        and path
+                        == f"/repos/{repository}/issues/{expected_root.pull_request}/comments"
+                    )
+                    if (
+                        target_matches
+                        and parsed is not None
+                        and parsed.record_sha256 == expected_root.record_sha256
+                    ):
+                        self._control_write_candidates[request_id] = (
+                            expected_root.record_sha256,
+                            request.full_url,
+                        )
+                except (ValueError, TypeError, ReviewInputError):
+                    pass
         self.observations.append(observation)
         try:
             from .check_accounting import _dispatch
@@ -915,6 +1002,9 @@ class ApiRunRequestTransport:
         self._has_historical_assessments = record.historical_assessments is not None
         if self._activation_write_request_id is not None:
             self._reconciled_mutations.add(self._activation_write_request_id)
+        self._confirm_control_write(
+            self._activation_write_request_id, record, "owned_root_activation", ledger
+        )
         return state
 
     def reserve_and_activate(
@@ -1317,6 +1407,13 @@ class ApiRunRequestTransport:
                         ledger.token,
                     )
                 )
+            archive_mutations = [
+                o for o in self.observations[before_archive:] if o.get("mutation")
+            ]
+            if len(archive_mutations) == 1:
+                self._confirmed_control_writes[
+                    str(archive_mutations[0]["request_id"])
+                ] = ("owned_predecessor_archive", record.record_sha256)
             # The issuer authenticated the exact immutable part readback.
             # Charge the lost response permanently; only its effect is settled.
             self._reconciled_mutations.update(
@@ -1529,7 +1626,11 @@ class ApiRunRequestTransport:
             self._state = replace(self.accounting, action=action)
             return record.evolve(generation=record.generation + 1)
 
-        confirmed = self._action_checkpoint(ledger, identity, prepare)
+        self._admitting_action = True
+        try:
+            confirmed = self._action_checkpoint(ledger, identity, prepare)
+        finally:
+            self._admitting_action = False
         retained = ApiRunAccounting.from_document(confirmed.api_run_accounting).action
         if retained is None or retained["intent"] != intent:
             raise ReviewInputError("caller action intent publication is unconfirmed")
@@ -1978,6 +2079,13 @@ class ApiRunRequestTransport:
         from .quarantine_checkpoint import expire
 
         expire(getattr(self, "_quarantine_checkpoint_snapshot", None))
+        if self._admitting_action:
+            self._confirm_control_write(
+                self._checkpoint_write_request_id,
+                record,
+                "owned_action_admission",
+                ledger,
+            )
         self._root, self._checkpoint = record.record_sha256, None
         self._effect_record = record
         if (

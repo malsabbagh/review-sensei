@@ -2,25 +2,35 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from review_sensei_github.event_routing_contract import (
     CALLER_SUBSCRIBED_EVENTS,
     EVENT_DECISION_TABLE,
+    INSTALLED_CALLER_SUBSCRIPTION_ROUTES,
     MAX_EVENT_PAYLOAD_BYTES,
     REQUIRED_EVENT_FAMILIES,
     RetainedSnapshotState,
     decision_rule_for,
     evaluate_github_event,
     inspect_caller_subscription_contract,
+    map_installed_caller_subscription,
 )
 from review_sensei_github.setup import (
     SetupPlanBuilder,
     migrate_caller_preserving_customizations,
 )
+from review_sensei_github.webhooks import WebhookVerifier
+
+from review_sensei.hosting.github import trigger as hosting_trigger
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_SHA_1 = "1" * 40
@@ -889,6 +899,314 @@ class TriggerCoverageG01Tests(unittest.TestCase):
             ).outcome_code,
             "pull_request_number_mismatch",
         )
+
+    def test_installed_caller_subscriptions_map_to_real_trigger_webhook_and_action_routes(
+        self,
+    ) -> None:
+        from argparse import Namespace
+
+        from review_sensei_github import action_run
+
+        from review_sensei.errors import ReviewInputError
+
+        checked_in = (ROOT / ".github/workflows/review-sensei-review.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(len(INSTALLED_CALLER_SUBSCRIPTION_ROUTES), 6)
+
+        class _Secret:
+            def load_webhook_secret(self) -> bytes:
+                return b"g01-secret"
+
+        verifier = WebhookVerifier(app_id=55, secret_source=_Secret())
+        pull = _pull_payload()
+
+        def _sign(obj: dict[str, Any]) -> tuple[bytes, str]:
+            raw = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+            return (
+                raw,
+                "sha256=" + hmac.new(b"g01-secret", raw, hashlib.sha256).hexdigest(),
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            pull_file = tmp_dir / "pull.json"
+            out_file = tmp_dir / "out.txt"
+            pull_file.write_text(json.dumps(pull), encoding="utf-8")
+
+            # 1. Subscribed supported routes map cleanly across YAML -> trigger.py -> webhooks.py -> action_run
+            supported_cases = (
+                (
+                    "pr_opened",
+                    "pull_request",
+                    {"action": "opened", "pull_request": pull},
+                    "",
+                    "review",
+                    "review_run.run_review",
+                    True,
+                ),
+                (
+                    "manual_dispatch",
+                    "workflow_dispatch",
+                    {"inputs": {"pull_request_number": 42}},
+                    "",
+                    "review",
+                    "review_run.run_review",
+                    True,
+                ),
+                (
+                    "issue_rescan",
+                    "issue_comment",
+                    {
+                        "action": "created",
+                        "issue": {
+                            "number": 42,
+                            "pull_request": {
+                                "url": "https://api.github.com/repos/owner/repo/pulls/42"
+                            },
+                        },
+                        "comment": {
+                            "id": 901,
+                            "body": "@reviewsensei rescan",
+                            "updated_at": "2026-11-11T00:00:00Z",
+                            "author_association": "MEMBER",
+                            "user": {"login": "alice", "type": "User"},
+                        },
+                    },
+                    "@reviewsensei rescan",
+                    "review",
+                    "review_run.run_review",
+                    True,
+                ),
+                (
+                    "issue_command",
+                    "issue_comment",
+                    {
+                        "action": "created",
+                        "issue": {
+                            "number": 42,
+                            "pull_request": {
+                                "url": "https://api.github.com/repos/owner/repo/pulls/42"
+                            },
+                        },
+                        "comment": {
+                            "id": 902,
+                            "body": "@reviewsensei verify",
+                            "updated_at": "2026-11-11T00:00:00Z",
+                            "author_association": "OWNER",
+                            "user": {"login": "alice", "type": "User"},
+                        },
+                    },
+                    "@reviewsensei verify",
+                    "command",
+                    "action_run.run_action(purpose='command')",
+                    False,
+                ),
+                (
+                    "inline_reply",
+                    "pull_request_review_comment",
+                    {
+                        "action": "created",
+                        "pull_request": pull,
+                        "comment": {
+                            "id": 903,
+                            "body": "@reviewsensei why?",
+                            "updated_at": "2026-11-11T00:00:00Z",
+                            "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/42",
+                            "author_association": "COLLABORATOR",
+                            "user": {"login": "alice", "type": "User"},
+                        },
+                    },
+                    "@reviewsensei why?",
+                    "reply",
+                    "action_run.run_action(purpose='reply')",
+                    True,
+                ),
+            )
+
+            for (
+                label,
+                ev_name,
+                payload,
+                c_body,
+                expected_op,
+                expected_entry,
+                needs_inf,
+            ) in supported_cases:
+                with self.subTest(supported=label):
+                    mapped = map_installed_caller_subscription(
+                        checked_in,
+                        event_name=ev_name,
+                        payload=payload,
+                        live_pull_request=pull,
+                    )
+                    self.assertTrue(mapped.caller_job_admitted)
+                    self.assertEqual(mapped.routing.operation, expected_op)
+                    self.assertEqual(
+                        mapped.reusable_workflow_entrypoint, expected_entry
+                    )
+                    self.assertTrue(mapped.performs_native_effects)
+                    self.assertEqual(mapped.requires_model_inference, needs_inf)
+
+                    out_file.write_text("", encoding="utf-8")
+                    with patch.dict(
+                        os.environ, {"GITHUB_OUTPUT": str(out_file)}, clear=False
+                    ):
+                        rc = hosting_trigger.main(
+                            [
+                                "--event",
+                                ev_name,
+                                "--comment-body",
+                                c_body,
+                                "--pull-json",
+                                str(pull_file),
+                            ]
+                        )
+                    self.assertEqual(rc, 0)
+                    cli_kv = dict(
+                        line.split("=", 1)
+                        for line in out_file.read_text(encoding="utf-8").splitlines()
+                    )
+                    self.assertEqual(cli_kv["operation"], expected_op)
+
+                    raw, sig = _sign(payload)
+                    verified = verifier.verify_event_route(
+                        body=raw,
+                        signature=sig,
+                        event=ev_name,
+                        delivery_id=f"deliv-{label}",
+                        live_pull_request=pull,
+                    )
+                    self.assertTrue(verified.routing.admitted)
+                    self.assertEqual(verified.routing.operation, expected_op)
+
+            # 2. Explicit no-op and unsupported event classes across all boundaries
+            unsupported_or_noop = (
+                (
+                    "pr_edited",
+                    "pull_request",
+                    {"action": "edited", "pull_request": pull},
+                    False,
+                ),
+                (
+                    "pr_closed",
+                    "pull_request",
+                    {"action": "closed", "pull_request": pull},
+                    False,
+                ),
+                (
+                    "comment_edited",
+                    "issue_comment",
+                    {
+                        "action": "edited",
+                        "issue": {"number": 42, "pull_request": {}},
+                        "comment": {
+                            "id": 910,
+                            "body": "@reviewsensei verify",
+                            "updated_at": "2026-11-11T00:01:00Z",
+                            "author_association": "OWNER",
+                            "user": {"login": "alice", "type": "User"},
+                        },
+                    },
+                    False,
+                ),
+                (
+                    "bot_comment",
+                    "issue_comment",
+                    {
+                        "action": "created",
+                        "issue": {
+                            "number": 42,
+                            "pull_request": {
+                                "url": "https://api.github.com/repos/owner/repo/pulls/42"
+                            },
+                        },
+                        "comment": {
+                            "id": 911,
+                            "body": "@reviewsensei verify",
+                            "updated_at": "2026-11-11T00:01:00Z",
+                            "author_association": "OWNER",
+                            "user": {"login": "bot[bot]", "type": "Bot"},
+                        },
+                    },
+                    True,
+                ),
+                (
+                    "merge_group",
+                    "merge_group",
+                    {"action": "checks_requested"},
+                    False,
+                ),
+                (
+                    "thread_resolved",
+                    "pull_request_review_thread",
+                    {"action": "resolved", "pull_request": {"number": 42}},
+                    False,
+                ),
+                (
+                    "human_review",
+                    "pull_request_review",
+                    {
+                        "action": "submitted",
+                        "pull_request": pull,
+                        "review": {
+                            "state": "approved",
+                            "commit_id": HEAD_SHA_1,
+                            "user": {"login": "bob", "type": "User"},
+                        },
+                    },
+                    False,
+                ),
+            )
+            for label, ev_name, payload, expected_sub in unsupported_or_noop:
+                with self.subTest(noop_or_unsupported=label):
+                    mapped = map_installed_caller_subscription(
+                        checked_in,
+                        event_name=ev_name,
+                        payload=payload,
+                        live_pull_request=pull,
+                    )
+                    self.assertEqual(mapped.routing.caller_subscribed, expected_sub)
+                    self.assertFalse(mapped.caller_job_admitted)
+                    self.assertIsNone(mapped.reusable_workflow_entrypoint)
+                    self.assertFalse(mapped.performs_native_effects)
+                    self.assertFalse(mapped.requires_model_inference)
+
+            # Edited comment event reaching action_run.event_source is refused fail-closed
+            ev_path = tmp_dir / "edited-comment.json"
+            ev_path.write_text(json.dumps(unsupported_or_noop[2][2]), encoding="utf-8")
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GITHUB_EVENT_NAME": "issue_comment",
+                        "GITHUB_EVENT_PATH": str(ev_path),
+                    },
+                    clear=False,
+                ),
+                self.assertRaisesRegex(ReviewInputError, "source_edited"),
+            ):
+                action_run.event_source(
+                    Namespace(
+                        pull_request=42,
+                        source_comment_id=910,
+                        comment_body="@reviewsensei verify",
+                        source_updated_at="2026-11-11T00:01:00Z",
+                    ),
+                    purpose="command",
+                )
+
+            # Unapproved caller workflow triggers raise ValueError in map_installed_caller_subscription
+            drifted_workflow = checked_in.replace(
+                "  pull_request:\n",
+                "  merge_group: [checks_requested]\n  pull_request:\n",
+            )
+            with self.assertRaises(ValueError):
+                map_installed_caller_subscription(
+                    drifted_workflow,
+                    event_name="pull_request",
+                    payload={"action": "opened", "pull_request": pull},
+                )
 
 
 if __name__ == "__main__":

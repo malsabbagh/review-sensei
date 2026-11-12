@@ -382,6 +382,144 @@ class MergeQueueBoundaryG07Tests(unittest.TestCase):
                 pr_receipt=receipt,
             )
 
+    def test_real_trigger_cli_webhook_route_and_action_run_refuse_merge_group(
+        self,
+    ) -> None:
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from review_sensei_github import action_run
+        from review_sensei_github.event_routing_contract import (
+            map_installed_caller_subscription,
+        )
+
+        from review_sensei.hosting.github import trigger as hosting_trigger
+
+        checked_in = (ROOT / ".github/workflows/review-sensei-review.yml").read_text(
+            encoding="utf-8"
+        )
+        mg_payload = {
+            "action": "checks_requested",
+            "merge_group": {
+                "head_sha": QUEUE_SYNTHETIC_SHA,
+                "head_ref": "refs/heads/gh-readonly-queue/main/pr-42-aaaaaaaa",
+                "base_sha": BASE_SHA_2,
+                "base_ref": "refs/heads/main",
+            },
+            "repository": {"id": 101, "full_name": "owner/repo"},
+        }
+
+        # 1. Installed caller mapping marks merge_group unsubscribed with zero effects
+        mapped = map_installed_caller_subscription(
+            checked_in,
+            event_name="merge_group",
+            payload=mg_payload,
+        )
+        self.assertFalse(mapped.caller_job_admitted)
+        self.assertEqual(mapped.routing.rule_id, "merge_group.queue")
+        self.assertEqual(mapped.routing.outcome_code, "merge_group_unsupported")
+        self.assertIsNone(mapped.reusable_workflow_entrypoint)
+        self.assertFalse(mapped.performs_native_effects)
+        self.assertFalse(mapped.requires_model_inference)
+
+        # 2. WebhookVerifier.verify_event_route supports both truthful classification and strict refusal
+        verifier = WebhookVerifier(app_id=321, secret_source=_SecretSource())
+        raw = json.dumps(mg_payload, separators=(",", ":")).encode("utf-8")
+        sig = _sign(raw)
+        routed = verifier.verify_event_route(
+            body=raw,
+            signature=sig,
+            event="merge_group",
+            delivery_id="deliv-mg-route-1",
+            reject_merge_group=False,
+        )
+        self.assertFalse(routed.routing.admitted)
+        self.assertEqual(routed.routing.outcome_code, "merge_group_unsupported")
+
+        with self.assertRaises(GitHubMergeGroupUnsupportedError):
+            verifier.verify_event_route(
+                body=raw,
+                signature=sig,
+                event="merge_group",
+                delivery_id="deliv-mg-route-2",
+                reject_merge_group=True,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            pull_file = tmp_dir / "pull.json"
+            out_file = tmp_dir / "out.txt"
+            pull_file.write_text(
+                json.dumps(
+                    {
+                        "number": 42,
+                        "head": {"sha": PR_HEAD_SHA, "ref": "feat/safe-branch"},
+                        "base": {"sha": BASE_SHA_1, "ref": "main"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            # 3. Real hosting/github/trigger.py CLI refuses merge_group
+            with (
+                patch.dict(os.environ, {"GITHUB_OUTPUT": str(out_file)}, clear=False),
+                self.assertRaises(SystemExit) as exit_ctx,
+            ):
+                hosting_trigger.main(
+                    [
+                        "--event",
+                        "merge_group",
+                        "--pull-json",
+                        str(pull_file),
+                    ]
+                )
+            self.assertIn("unsupported event: merge_group", str(exit_ctx.exception))
+
+            # 4. Real action_run.run_action refuses merge_group before bootstrap/OIDC/checks
+            mg_file = tmp_dir / "mg-event.json"
+            mg_file.write_bytes(raw)
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GITHUB_EVENT_NAME": "merge_group",
+                        "GITHUB_EVENT_PATH": str(mg_file),
+                    },
+                    clear=False,
+                ),
+                self.assertRaises(GitHubMergeGroupUnsupportedError) as run_ctx,
+            ):
+                action_run.run_action(
+                    [
+                        "--policy-commit",
+                        BASE_SHA_1,
+                        "--run-directory",
+                        str(tmp_dir),
+                        "--",
+                        "--repository",
+                        "owner/repo",
+                        "--repository-id",
+                        "101",
+                        "--pull-request",
+                        "42",
+                        "--head-sha",
+                        QUEUE_SYNTHETIC_SHA,
+                        "--source-comment-id",
+                        "1",
+                        "--comment-body",
+                        "@reviewsensei verify",
+                        "--actor",
+                        "alice",
+                        "--association",
+                        "OWNER",
+                        "--github-session-ledger",
+                        "--allow-write",
+                    ],
+                    purpose="command",
+                )
+            self.assertEqual(run_ctx.exception.outcome_code, "merge_group_unsupported")
+
 
 if __name__ == "__main__":
     unittest.main()

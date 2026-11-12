@@ -7,14 +7,37 @@ import hmac
 import json
 import os
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+from review_sensei.api_work import ApiRunAccounting
+from review_sensei.session import SessionIdentity, SessionRecord
 
 from .errors import (
     GitHubMergeGroupUnsupportedError,
     GitHubWebhookError,
     GitHubWebhookSignatureError,
 )
+from .source_comment_lifecycle import (
+    SourceLifecycleClassification,
+    SourceRevisionObservation,
+    admit_event_comment_source,
+    build_source_comment_descriptor,
+    classify_source_comment_lifecycle,
+    execute_source_lifecycle_route,
+)
+
+if TYPE_CHECKING:
+    from .api_run_requests import ApiRunRequestTransport
+    from .event_routing_contract import (
+        AcceptedOperationRecord,
+        ConvergenceDecision,
+        EventRoutingDecision,
+        LivePullRequestTarget,
+        RetainedSnapshotState,
+    )
+    from .session_ledger import GitHubIssueCommentSessionLedger
 
 MAX_WEBHOOK_BODY_BYTES = 1024 * 1024
 SUPPORTED_WEBHOOK_EVENTS = frozenset(
@@ -23,6 +46,13 @@ SUPPORTED_WEBHOOK_EVENTS = frozenset(
         "installation_repositories",
     }
 )
+COMMENT_LIFECYCLE_WEBHOOK_EVENTS = frozenset(
+    {
+        "issue_comment",
+        "pull_request_review_comment",
+    }
+)
+COMMENT_LIFECYCLE_ACTIONS = frozenset({"created", "edited", "deleted"})
 REPOSITORY_SLUG_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 
@@ -112,6 +142,46 @@ class VerifiedDelivery:
                 raise GitHubWebhookError("GitHub webhook permissions were invalid")
 
 
+@dataclass(frozen=True)
+class VerifiedCommentLifecycleDelivery:
+    """Validated metadata and G27 lifecycle routing for a signed comment webhook."""
+
+    app_id: int
+    event: str
+    action: str
+    installation_id: int
+    delivery_id: str
+    digest: str
+    repository: str
+    repository_id: int
+    pull_request: int
+    comment_id: int
+    comment_kind: str
+    comment_body: str
+    comment_updated_at: str
+    source_descriptor: dict[str, Any]
+    body_changed: bool = False
+    duplicate_delivery_id: bool = False
+    lifecycle_classification: SourceLifecycleClassification | None = None
+    lifecycle_outcome: SessionRecord | ApiRunAccounting | None = None
+
+
+@dataclass(frozen=True)
+class VerifiedEventRouteDelivery:
+    """Validated signed webhook delivery with G01/G07/G13/G26/G28 routing and convergence."""
+
+    app_id: int
+    event: str
+    action: str
+    delivery_id: str
+    digest: str
+    repository: str | None
+    repository_id: int | None
+    duplicate_delivery_id: bool
+    routing: EventRoutingDecision
+    convergence: ConvergenceDecision | None = None
+
+
 class DeliveryLedger(Protocol):
     """Record and test webhook delivery deduplication."""
 
@@ -178,14 +248,14 @@ class WebhookVerifier:
             )
         self.max_body_bytes = max_body_bytes
 
-    def verify(
+    def _verify_signed_envelope(
         self,
         *,
         body: bytes,
         signature: str | None,
         event: str,
         delivery_id: str,
-    ) -> VerifiedDelivery:
+    ) -> None:
         if not isinstance(body, (bytes, bytearray)):
             raise GitHubWebhookError("GitHub webhook body was invalid")
         if len(body) > self.max_body_bytes:
@@ -201,6 +271,31 @@ class WebhookVerifier:
             raise GitHubWebhookError("GitHub webhook event must be non-empty")
         if not delivery_id or not delivery_id.strip():
             raise GitHubWebhookError("GitHub webhook delivery id must be non-empty")
+
+    @staticmethod
+    def _parse_json_object(body: bytes) -> dict[str, object]:
+        try:
+            payload = json.loads(bytes(body).decode("utf-8", errors="strict"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise GitHubWebhookError("GitHub webhook body was invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise GitHubWebhookError("GitHub webhook body must be a JSON object")
+        return payload
+
+    def verify(
+        self,
+        *,
+        body: bytes,
+        signature: str | None,
+        event: str,
+        delivery_id: str,
+    ) -> VerifiedDelivery:
+        self._verify_signed_envelope(
+            body=body,
+            signature=signature,
+            event=event,
+            delivery_id=delivery_id,
+        )
         if self.ledger.is_known(app_id=self.app_id, delivery_id=delivery_id):
             raise GitHubWebhookError("GitHub webhook delivery was already processed")
         if event not in SUPPORTED_WEBHOOK_EVENTS:
@@ -210,13 +305,366 @@ class WebhookVerifier:
                 )
             raise GitHubWebhookError("GitHub webhook event is not supported")
         self.ledger.record(app_id=self.app_id, delivery_id=delivery_id)
-        try:
-            payload = json.loads(bytes(body).decode("utf-8", errors="strict"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise GitHubWebhookError("GitHub webhook body was invalid JSON") from exc
-        if not isinstance(payload, dict):
-            raise GitHubWebhookError("GitHub webhook body must be a JSON object")
+        payload = self._parse_json_object(body)
         delivery = self._validate_payload(payload, event=event, delivery_id=delivery_id)
+        return delivery
+
+    def verify_comment_lifecycle(
+        self,
+        *,
+        body: bytes,
+        signature: str | None,
+        event: str,
+        delivery_id: str,
+        caller: ApiRunRequestTransport | None = None,
+        session_ledger: GitHubIssueCommentSessionLedger | None = None,
+        identity: SessionIdentity | None = None,
+        record: SessionRecord | None = None,
+        has_pending_receipt: bool = False,
+        execute_route: bool = False,
+    ) -> VerifiedCommentLifecycleDelivery:
+        """Verify a signed comment webhook and optionally classify/execute G27 routing."""
+
+        self._verify_signed_envelope(
+            body=body,
+            signature=signature,
+            event=event,
+            delivery_id=delivery_id,
+        )
+        normalized_event = event.strip()
+        if normalized_event == "merge_group":
+            raise GitHubMergeGroupUnsupportedError(
+                "GitHub merge_group webhook event is unsupported"
+            )
+        if normalized_event not in COMMENT_LIFECYCLE_WEBHOOK_EVENTS:
+            raise GitHubWebhookError(
+                "GitHub comment lifecycle webhook event is not supported"
+            )
+        has_admitted_action = False
+        if record is not None and record.api_run_accounting is not None:
+            has_admitted_action = (
+                ApiRunAccounting.from_document(record.api_run_accounting).action
+                is not None
+            )
+        duplicate_delivery_id = self.ledger.is_known(
+            app_id=self.app_id, delivery_id=delivery_id
+        )
+
+        payload = self._parse_json_object(body)
+        action = payload.get("action")
+        if (
+            not isinstance(action, str)
+            or action.strip() not in COMMENT_LIFECYCLE_ACTIONS
+        ):
+            raise GitHubWebhookError("GitHub comment webhook action is invalid")
+        normalized_action = action.strip()
+
+        installation = payload.get("installation")
+        if not isinstance(installation, Mapping):
+            raise GitHubWebhookError("GitHub webhook installation is missing")
+        installation_id = installation.get("id")
+        if (
+            isinstance(installation_id, bool)
+            or not isinstance(installation_id, int)
+            or installation_id <= 0
+        ):
+            raise GitHubWebhookError("GitHub webhook installation id is invalid")
+
+        repo_obj = payload.get("repository")
+        if not isinstance(repo_obj, Mapping):
+            raise GitHubWebhookError("GitHub webhook repository is missing")
+        repository_slug = repo_obj.get("full_name")
+        if not isinstance(
+            repository_slug, str
+        ) or not REPOSITORY_SLUG_PATTERN.fullmatch(repository_slug):
+            raise GitHubWebhookError("GitHub webhook repository must be a slug")
+        raw_repo_id = repo_obj.get("id")
+        if (
+            isinstance(raw_repo_id, bool)
+            or not isinstance(raw_repo_id, int)
+            or raw_repo_id <= 0
+        ):
+            raise GitHubWebhookError("GitHub webhook repository id is invalid")
+        repository_id = raw_repo_id
+
+        if normalized_event == "issue_comment":
+            issue_obj = payload.get("issue")
+            if (
+                not isinstance(issue_obj, Mapping)
+                or "pull_request" not in issue_obj
+                or isinstance(issue_obj.get("number"), bool)
+                or not isinstance(issue_obj.get("number"), int)
+                or int(issue_obj["number"]) <= 0
+            ):
+                raise GitHubWebhookError(
+                    "GitHub issue_comment webhook is not bound to a pull request"
+                )
+            pull_request = int(issue_obj["number"])
+            comment_kind = "issue_comment"
+        else:
+            pr_obj = payload.get("pull_request")
+            if (
+                not isinstance(pr_obj, Mapping)
+                or isinstance(pr_obj.get("number"), bool)
+                or not isinstance(pr_obj.get("number"), int)
+                or int(pr_obj["number"]) <= 0
+            ):
+                raise GitHubWebhookError(
+                    "GitHub review comment webhook pull_request is invalid"
+                )
+            pull_request = int(pr_obj["number"])
+            comment_kind = "review_comment"
+
+        comment_obj = payload.get("comment")
+        if (
+            not isinstance(comment_obj, Mapping)
+            or isinstance(comment_obj.get("id"), bool)
+            or not isinstance(comment_obj.get("id"), int)
+            or int(comment_obj["id"]) <= 0
+            or not isinstance(comment_obj.get("body"), str)
+            or not isinstance(comment_obj.get("updated_at"), str)
+        ):
+            raise GitHubWebhookError(
+                "GitHub comment webhook comment payload is invalid"
+            )
+        comment_id = int(comment_obj["id"])
+        comment_body = str(comment_obj["body"])
+        comment_updated_at = str(comment_obj["updated_at"])
+        source_descriptor = build_source_comment_descriptor(
+            kind=comment_kind,
+            comment_id=comment_id,
+            updated_at=comment_updated_at,
+            body=comment_body,
+        )
+        changes_obj = payload.get("changes")
+        body_changed = normalized_action == "edited" or (
+            isinstance(changes_obj, Mapping) and "body" in changes_obj
+        )
+        classification: SourceLifecycleClassification | None = None
+        outcome: SessionRecord | ApiRunAccounting | None = None
+        if caller is not None or session_ledger is not None or identity is not None:
+            if caller is None or session_ledger is None or identity is None:
+                raise GitHubWebhookError(
+                    "GitHub comment lifecycle routing requires caller, session_ledger, and identity"
+                )
+            if (
+                identity.repository != repository_slug
+                or identity.pull_request != pull_request
+                or identity.repository_id != repository_id
+            ):
+                raise GitHubWebhookError(
+                    "GitHub comment webhook scope conflicts with session identity"
+                )
+            if not has_admitted_action and (
+                normalized_action != "created" or body_changed
+            ):
+                if execute_route:
+                    admit_event_comment_source(
+                        payload,
+                        pull_request=pull_request,
+                        source_comment_id=comment_id,
+                        purpose="command",
+                        event_name=normalized_event,
+                        expected_body=comment_body,
+                        expected_updated_at=comment_updated_at,
+                    )
+                mut_state = (
+                    "source_deleted"
+                    if normalized_action == "deleted"
+                    else "source_edited"
+                )
+                disp_state = (
+                    "deleted_source"
+                    if normalized_action == "deleted"
+                    else "mutated_revision"
+                )
+                classification = SourceLifecycleClassification(
+                    identity=identity,
+                    phase="before_admission",
+                    original_source=dict(source_descriptor),
+                    observation=SourceRevisionObservation(
+                        comment_id=comment_id,
+                        kind=comment_kind,
+                        status=404 if normalized_action == "deleted" else 200,
+                        observed_updated_at=(
+                            None
+                            if normalized_action == "deleted"
+                            else comment_updated_at
+                        ),
+                        observed_body_sha256=(
+                            None
+                            if normalized_action == "deleted"
+                            else str(source_descriptor["body_sha256"])
+                        ),
+                        mutation_state=mut_state,
+                        delivery_disposition=disp_state,
+                    ),
+                    route="refuse_before_admission",
+                    g32_eligible=False,
+                    replay_permitted=False,
+                    prior_charges_preserved=True,
+                    guidance=(
+                        f"pre-admission source check refused ({mut_state}/{disp_state}): "
+                        "zero session mutation allowed; submit or dispatch a fresh event "
+                        "bound to the current live comment revision"
+                    ),
+                )
+                outcome = record
+            else:
+                event_delivery = (
+                    None if normalized_action == "deleted" else source_descriptor
+                )
+                if execute_route:
+                    classification, outcome = execute_source_lifecycle_route(
+                        caller=caller,
+                        ledger=session_ledger,
+                        identity=identity,
+                        record=record,
+                        candidate_source=source_descriptor,
+                        event_delivery=event_delivery,
+                        has_pending_receipt=has_pending_receipt,
+                    )
+                else:
+                    classification = classify_source_comment_lifecycle(
+                        caller=caller,
+                        ledger=session_ledger,
+                        identity=identity,
+                        record=record,
+                        candidate_source=source_descriptor,
+                        event_delivery=event_delivery,
+                        has_pending_receipt=has_pending_receipt,
+                    )
+                    outcome = record
+
+        digest = hashlib.sha256(
+            bytes(json.dumps(payload, sort_keys=True), "utf-8")
+        ).hexdigest()
+        delivery = VerifiedCommentLifecycleDelivery(
+            app_id=self.app_id,
+            event=normalized_event,
+            action=normalized_action,
+            installation_id=installation_id,
+            delivery_id=delivery_id,
+            digest=digest,
+            repository=repository_slug,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            comment_id=comment_id,
+            comment_kind=comment_kind,
+            comment_body=comment_body,
+            comment_updated_at=comment_updated_at,
+            source_descriptor=source_descriptor,
+            body_changed=body_changed,
+            duplicate_delivery_id=duplicate_delivery_id,
+            lifecycle_classification=classification,
+            lifecycle_outcome=outcome,
+        )
+        if not duplicate_delivery_id:
+            self.ledger.record(app_id=self.app_id, delivery_id=delivery_id)
+        return delivery
+
+    def verify_event_route(
+        self,
+        *,
+        body: bytes,
+        signature: str | None,
+        event: str,
+        delivery_id: str,
+        live_pull_request: Mapping[str, Any] | None = None,
+        retained_state: RetainedSnapshotState | None = None,
+        live_target: LivePullRequestTarget | None = None,
+        records: Sequence[AcceptedOperationRecord] = (),
+        was_queued_replaced: bool = False,
+        current_state_fingerprint: str | None = None,
+        max_no_progress_attempts: int = 2,
+        reject_merge_group: bool = False,
+    ) -> VerifiedEventRouteDelivery:
+        """Verify a signed GitHub webhook and evaluate G01/G07/G13/G26/G28 routing."""
+
+        from .event_routing_contract import (
+            evaluate_github_event,
+            reconcile_event_convergence,
+        )
+
+        self._verify_signed_envelope(
+            body=body,
+            signature=signature,
+            event=event,
+            delivery_id=delivery_id,
+        )
+        normalized_event = event.strip()
+        if reject_merge_group and normalized_event == "merge_group":
+            raise GitHubMergeGroupUnsupportedError(
+                "GitHub merge_group webhook event is unsupported"
+            )
+        payload = self._parse_json_object(body)
+        duplicate_delivery_id = self.ledger.is_known(
+            app_id=self.app_id,
+            delivery_id=delivery_id,
+        )
+        raw_action = payload.get("action")
+        action = (
+            raw_action.strip()
+            if isinstance(raw_action, str) and raw_action.strip()
+            else ("manual" if normalized_event == "workflow_dispatch" else "")
+        )
+        repository_slug: str | None = None
+        repository_id: int | None = None
+        repository_obj = payload.get("repository")
+        if isinstance(repository_obj, dict):
+            full_name = repository_obj.get("full_name")
+            if isinstance(full_name, str) and REPOSITORY_SLUG_PATTERN.fullmatch(
+                full_name
+            ):
+                repository_slug = full_name
+            rid = repository_obj.get("id")
+            if not isinstance(rid, bool) and isinstance(rid, int) and rid > 0:
+                repository_id = rid
+
+        effective_live_pr = (
+            live_target.to_pull_mapping()
+            if (live_pull_request is None and live_target is not None)
+            else live_pull_request
+        )
+        routing = evaluate_github_event(
+            normalized_event,
+            payload,
+            delivery_id=delivery_id,
+            live_pull_request=effective_live_pr,
+            retained_state=retained_state,
+        )
+        convergence: ConvergenceDecision | None = None
+        if live_target is not None:
+            convergence = reconcile_event_convergence(
+                normalized_event,
+                payload,
+                live_target=live_target,
+                records=records,
+                delivery_id=delivery_id,
+                was_queued_replaced=was_queued_replaced,
+                current_state_fingerprint=current_state_fingerprint,
+                max_no_progress_attempts=max_no_progress_attempts,
+            )
+        # Seeing a delivery is not proof that its route was admitted or completed.
+        # Only accepted-operation history may suppress work on redelivery; a
+        # caller can fail after receiving this routing decision and before admission.
+        digest = hashlib.sha256(
+            bytes(json.dumps(payload, sort_keys=True), "utf-8")
+        ).hexdigest()
+        delivery = VerifiedEventRouteDelivery(
+            app_id=self.app_id,
+            event=normalized_event,
+            action=action,
+            delivery_id=delivery_id,
+            digest=digest,
+            repository=repository_slug,
+            repository_id=repository_id,
+            duplicate_delivery_id=duplicate_delivery_id,
+            routing=routing,
+            convergence=convergence,
+        )
+        if not duplicate_delivery_id:
+            self.ledger.record(app_id=self.app_id, delivery_id=delivery_id)
         return delivery
 
     def _signature_for(self, body: bytes) -> str:

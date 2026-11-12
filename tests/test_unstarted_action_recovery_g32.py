@@ -24,6 +24,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlsplit
 from urllib.request import Request
 
@@ -40,6 +41,7 @@ from review_sensei_github.api_run_requests import (
     ApiRunRequestTransport,
     ApiRunSessionLedger,
 )
+from review_sensei_github.conversation import reply_marker
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.session_ledger import (
     GitHubIssueCommentSessionLedger,
@@ -161,8 +163,17 @@ class G32CommandEntryFixture(CommandEntryFixture):
     def __init__(self, directory: str) -> None:
         super().__init__(directory)
         self.past_run_attempts: dict[int, int] = {}
+        self.deleted_source_ids: set[int] = set()
 
     def external(self, request, timeout):
+        path = urlsplit(request.full_url).path
+        method = request.get_method()
+        if method == "GET" and path.startswith("/repos/owner/repo/issues/comments/"):
+            cid = int(path.rsplit("/", 1)[1])
+            if cid in self.deleted_source_ids:
+                self._meter(request)
+                self.source_reads += 1
+                return json_response({"message": "Not Found"}, status=404)
         response = super().external(request, timeout)
         path = urlsplit(request.full_url).path
         if "/actions/runs/" in path:
@@ -1261,6 +1272,1101 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
             self.assertEqual(activated.identity.run_id, 457)
             self.assertTrue(caller_457._reservation_started)
             self.assertIsNotNone(caller_457._producer)
+
+
+class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
+    def test_physical_business_mutation_within_old_count_is_not_admission_proof(self):
+        from review_sensei_github.unstarted_action_recovery import (
+            NoBusinessDispatchEvidence,
+            verify_no_business_dispatch_evidence,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            f, native, ledger, _, _, intent = (
+                UnstartedActionRecoveryG32Tests()._prepare(directory)
+            )
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert record is not None
+            before = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=record
+            )
+
+            def verify(evidence):
+                return verify_no_business_dispatch_evidence(
+                    caller=f.accounted,
+                    ledger=native,
+                    identity=IDENTITY,
+                    state=ApiRunAccounting.from_document(record.api_run_accounting),
+                    intent=intent,
+                    intent_sha256=before.intent_sha256,
+                    evidence=evidence,
+                )
+
+            with self.assertRaisesRegex(
+                ReviewInputError, "source/root/owner binding conflicts"
+            ):
+                NoBusinessDispatchEvidence.from_stranded_caller(
+                    f.accounted,
+                    identity=IDENTITY,
+                    record=record.evolve(generation=record.generation + 1),
+                )
+            # A real physical review POST, not an evidence boolean labelled business.
+            native.http.request(
+                "POST",
+                "/repos/owner/repo/pulls/7/reviews",
+                token=native.token,
+                body={
+                    "body": "business effect without a receipt marker",
+                    "event": "COMMENT",
+                    "commit_id": HEAD,
+                },
+            )
+            after = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=record
+            )
+            self.assertLessEqual(
+                sum(
+                    o["mutation"]
+                    for o in after.observed_requests
+                    if o["phase"] == "ordinary"
+                ),
+                2,
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError, "confirmed owned control-write receipt"
+            ):
+                verify(after)
+            with self.assertRaisesRegex(
+                ReviewInputError, "process-issued transport capture"
+            ):
+                verify(replace(before))
+            with self.assertRaisesRegex(
+                ReviewInputError, "stale after a later mutation"
+            ):
+                verify(before)
+            physical = f.accounted.observations[-1]
+            self.assertTrue(physical["mutation"])
+            physical["mutation"] = False
+            omitted = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=record
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ReviewInputError, "physical mutation inventory conflicts"
+                ):
+                    verify(omitted)
+            finally:
+                physical["mutation"] = True
+
+    def test_owned_native_marker_parser_refuses_ambiguous_metadata(self):
+        from review_sensei_github.unstarted_action_recovery import (
+            _native_artifact_matches,
+        )
+
+        for marker in (
+            '<!-- reviewsensei:operation:v1 {"run_id": 1, "run_id": 2} -->',
+            "<!-- reviewsensei:reply:v1 comment=1 comment=2 -->",
+            "<!-- reviewsensei:reply:v1 comment=1",
+            "<!-- reviewsensei:reply:v1 updated=abc -->",
+            "<!-- reviewsensei:reply:v1 comment=0 -->",
+        ):
+            with (
+                self.subTest(marker=marker),
+                self.assertRaisesRegex(ReviewInputError, "marker is malformed"),
+            ):
+                _native_artifact_matches(marker, source_id=1, run_id=1)
+        self.assertFalse(
+            _native_artifact_matches(
+                'explanation: {"source_comment_id": 1}', source_id=1, run_id=1
+            )
+        )
+
+    """Qualify ordinary caller integration and strict positive non-dispatch gate in action_run.py."""
+
+    def setUp(self) -> None:
+        from unittest.mock import patch
+
+        for target in ("socket.create_connection", "socket.socket.connect"):
+            guard = patch(target, side_effect=AssertionError("unexpected network"))
+            guard.start()
+            self.addCleanup(guard.stop)
+
+    @staticmethod
+    def _invoke_with_gate(
+        fixture: G32CommandEntryFixture,
+        body: str | None = None,
+        *,
+        unstarted_recovery: object = None,
+        event_override: dict[str, object] | None = None,
+        source_status: int = 200,
+    ) -> int:
+        import io
+        import os
+        from contextlib import ExitStack, redirect_stderr, redirect_stdout
+        from unittest.mock import patch
+
+        from review_sensei_github import action_run, review_run
+        from review_sensei_github.broker_client import BrokerClient
+        from test_review_run import fixture_process_environment
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        if body is not None or not fixture.command_active:
+            fixture.select_command(body or fixture.command_body)
+        event = {
+            "action": "created",
+            "issue": {"number": 7, "pull_request": {}},
+            "comment": copy.deepcopy(fixture.source),
+        }
+        if event_override is not None:
+            event = event_override
+        event_file = fixture.root / "command-event.json"
+        event_file.write_text(json.dumps(event))
+        original_bootstrap = action_run.bootstrap
+        original_external = fixture.external
+
+        def external_with_404(request, timeout):
+            path = urlsplit(request.full_url).path
+            method = request.get_method()
+            if (
+                source_status == 404
+                and method == "GET"
+                and path == f"/repos/owner/repo/issues/comments/{fixture.SOURCE_ID}"
+            ):
+                fixture._meter(request)
+                fixture.source_reads += 1
+                return json_response({"message": "Not Found"}, status=404)
+            return original_external(request, timeout)
+
+        def caller_factory(**kwargs):
+            caller = ApiRunRequestTransport(**kwargs)
+            fixture.accounted = caller
+            fixture.transports.append(caller)
+            return caller
+
+        def broker_factory(**kwargs):
+            return BrokerClient(
+                broker_url="https://broker.github.test/api/github/token", **kwargs
+            )
+
+        def http_factory(**kwargs):
+            http = GitHubHttp(api_url="https://api.github.test", **kwargs)
+            fixture.http = http
+            return http
+
+        def capture_run(*args, **kwargs):
+            run = original_bootstrap(*args, **kwargs)
+            fixture.selected = run
+            return run
+
+        environment = {
+            **fixture_process_environment(),
+            "GITHUB_RUN_ID": str(fixture.run_id),
+            "GITHUB_RUN_ATTEMPT": str(fixture.attempt),
+            "GITHUB_EVENT_NAME": "issue_comment",
+            "GITHUB_EVENT_PATH": str(event_file),
+            "REVIEW_SENSEI_WORKFLOW_REF": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+            "REVIEW_SENSEI_WORKFLOW_SHA": "a" * 40,
+            "GITHUB_ACTOR": "alice",
+            "GITHUB_TRIGGERING_ACTOR": "alice",
+            "GITHUB_TOKEN": "synthetic-workflow-read",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.github.test/token?fixture=1",
+            "REVIEWSENSEI_APP_ID": "0",
+        }
+        output, errors = io.StringIO(), io.StringIO()
+        prev_cwd = Path.cwd()
+        fixture.exception = None
+        try:
+            os.chdir(fixture.root)
+            with ExitStack() as stack:
+                for scope in (
+                    patch.dict(os.environ, environment, clear=True),
+                    patch.object(review_run, "physical_opener", external_with_404),
+                    patch.object(
+                        review_run, "ApiRunRequestTransport", side_effect=caller_factory
+                    ),
+                    patch.object(
+                        review_run, "BrokerClient", side_effect=broker_factory
+                    ),
+                    patch.object(review_run, "GitHubHttp", side_effect=http_factory),
+                    patch.object(action_run, "bootstrap", side_effect=capture_run),
+                    patch.object(
+                        EvidenceReadBudget,
+                        "__init__",
+                        side_effect=AssertionError("no replacement phase budget"),
+                    ),
+                    redirect_stdout(output),
+                    redirect_stderr(errors),
+                ):
+                    stack.enter_context(scope)
+                return action_run.run_action(
+                    [
+                        "--policy-commit",
+                        fixture.policy,
+                        "--run-directory",
+                        str(fixture.root),
+                        "--",
+                        "--repository",
+                        "owner/repo",
+                        "--repository-id",
+                        "123",
+                        "--pull-request",
+                        "7",
+                        "--head-sha",
+                        fixture.requested_head,
+                        "--source-comment-id",
+                        str(fixture.SOURCE_ID),
+                        "--comment-body",
+                        fixture.command_body,
+                        "--actor",
+                        "untrusted-hint",
+                        "--association",
+                        "NONE",
+                        "--config",
+                        str(fixture.root / ".reviewsensei.yml"),
+                        "--github-session-ledger",
+                        "--allow-write",
+                    ],
+                    purpose="command",
+                    unstarted_recovery=unstarted_recovery,  # type: ignore[arg-type]
+                )
+        except Exception as err:
+            fixture.exception = err
+            errors.write(str(err))
+            return 1
+        finally:
+            os.chdir(prev_cwd)
+            fixture.stdout, fixture.error = output.getvalue(), errors.getvalue()
+
+    def test_deletion_only_execution_started_false_only_and_negatives_stay_held(
+        self,
+    ) -> None:
+        from review_sensei_github.action_run import UnstartedCallerRecoveryGate
+        from review_sensei_github.unstarted_action_recovery import (
+            NoBusinessDispatchEvidence,
+            verify_no_business_dispatch_evidence,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = G32CommandEntryFixture(directory)
+            # Complete initial review so transaction & history exist.
+            self.assertEqual(f.invoke(), 0, f.error)
+            base_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert base_rec is not None and base_rec.transaction is not None
+
+            # Admit command 501, then delete comment 501 (404) before authority.fence()!
+            f.SOURCE_ID = 501
+            f.select_command("@reviewsensei review pause", new_run=True)
+            t1_event = {
+                "action": "created",
+                "issue": {"number": 7, "pull_request": {}},
+                "comment": copy.deepcopy(f.source),
+            }
+
+            def edit_before_first_fence(current: CommandEntryFixture) -> None:
+                if current.source_reads == 1:
+                    current.source["body"] = "edited away"
+                    current.source["updated_at"] = "2026-10-26T00:09:00Z"
+
+            f.before_source_read = edit_before_first_fence
+            self.assertNotEqual(f.invoke_command(event_override=t1_event), 0)
+            f.before_source_read = None
+
+            stranded_caller = f.accounted
+            stranded_run_id = f.run_id
+            stranded_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert stranded_rec is not None
+            stranded_state = ApiRunAccounting.from_document(
+                stranded_rec.api_run_accounting
+            )
+            assert stranded_state.action is not None
+            self.assertFalse(stranded_state.action["execution_started"])
+            self.assertIsNone(stranded_state.action["result"])
+            self.assertIsNone(stranded_state.action["outcome"])
+
+            valid_dispatch_ev = NoBusinessDispatchEvidence.from_stranded_caller(
+                stranded_caller,
+                identity=IDENTITY,
+                record=stranded_rec,
+            )
+
+            # 1. Comment deletion (404) + execution_started=false + null markers + ceased job ALONE
+            #    (unstarted_recovery=None) MUST stay strictly held on same-run attempt 2!
+            f.attempt = 2
+            self.assertNotEqual(
+                self._invoke_with_gate(
+                    f,
+                    event_override=t1_event,
+                    source_status=404,
+                    unstarted_recovery=None,
+                ),
+                0,
+            )
+            self.assertIn("hold fail-closed", f.error)
+
+            # 2. Missing NoBusinessDispatchEvidence (gate with None) refuses fail-closed!
+            gate_missing_ev = UnstartedCallerRecoveryGate(
+                target_run_id=stranded_run_id,
+                no_business_dispatch_evidence=None,
+                mode="same_run",
+                use_actions_evidence=True,
+            )
+            self.assertNotEqual(
+                self._invoke_with_gate(
+                    f,
+                    event_override=t1_event,
+                    source_status=404,
+                    unstarted_recovery=gate_missing_ev,
+                ),
+                0,
+            )
+            self.assertIn("requires explicit NoBusinessDispatchEvidence", f.error)
+
+            # 3. Empty observed_requests=() (null/absent telemetry) refuses fail-closed!
+            gate_empty_obs = UnstartedCallerRecoveryGate(
+                target_run_id=stranded_run_id,
+                no_business_dispatch_evidence=replace(
+                    valid_dispatch_ev, observed_requests=()
+                ),
+                mode="same_run",
+                use_actions_evidence=True,
+            )
+            f.past_jobs.pop(stranded_run_id, None)
+            after_a2_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert after_a2_rec is not None
+            # Test directly through verify_no_business_dispatch_evidence & gate:
+            assert f.selected is not None
+            for bad_ev, expected_msg in (
+                (
+                    replace(valid_dispatch_ev, observed_requests=()),
+                    "non-empty observed_requests",
+                ),
+                (
+                    replace(valid_dispatch_ev, provider_dispatches=1),
+                    "provider or accepted operation activity",
+                ),
+                (
+                    replace(valid_dispatch_ev, accepted_operation_present=True),
+                    "provider or accepted operation activity",
+                ),
+                (
+                    replace(
+                        valid_dispatch_ev,
+                        observed_requests=(
+                            *valid_dispatch_ev.observed_requests,
+                            {
+                                "phase": "ordinary",
+                                "lifecycle_phase": "admission",
+                                "request_id": "c-0-99",
+                                "outcome": "unknown",
+                                "mutation": True,
+                            },
+                        ),
+                    ),
+                    "uncertain or unconfirmed request outcome",
+                ),
+                (
+                    replace(
+                        valid_dispatch_ev,
+                        observed_requests=(
+                            *valid_dispatch_ev.observed_requests,
+                            {
+                                "phase": "ordinary",
+                                "lifecycle_phase": "admission",
+                                "request_id": "c-0-98",
+                                "outcome": "response",
+                                "mutation": True,
+                                "business_mutation": True,
+                            },
+                        ),
+                    ),
+                    "business mutation dispatch",
+                ),
+                (
+                    replace(
+                        valid_dispatch_ev,
+                        observed_requests=(
+                            *valid_dispatch_ev.observed_requests,
+                            {
+                                "phase": "ordinary",
+                                "lifecycle_phase": "publication",
+                                "request_id": "c-0-97",
+                                "outcome": "response",
+                                "mutation": False,
+                            },
+                        ),
+                    ),
+                    "post-admission or malformed request phase",
+                ),
+                (
+                    replace(
+                        valid_dispatch_ev,
+                        target_owner=ApiExecutionOwner(1, "hosted", 0),
+                    ),
+                    "owner, run, or intent binding conflicts",
+                ),
+                (
+                    replace(valid_dispatch_ev, target_run_id=999999),
+                    "owner, run, or intent binding conflicts",
+                ),
+            ):
+                with (
+                    self.subTest(expected=expected_msg),
+                    self.assertRaisesRegex(ReviewInputError, expected_msg),
+                ):
+                    verify_no_business_dispatch_evidence(
+                        caller=f.selected.caller,
+                        ledger=f.selected.ledger,
+                        identity=IDENTITY,
+                        state=ApiRunAccounting.from_document(
+                            after_a2_rec.api_run_accounting
+                        ),
+                        intent=stranded_state.action["intent"],
+                        intent_sha256=valid_dispatch_ev.intent_sha256,
+                        evidence=bad_ev,
+                    )
+            self.assertIsNotNone(gate_empty_obs)
+
+            # 4. Spoofed human comment with command-receipt HTML marker does NOT block,
+            #    whereas an App-owned Bot receipt/operation comment DOES block!
+            spoof_marker = f"<!-- reviewsensei:command-receipt:v1 source={f.SOURCE_ID} digest={'a' * 64} -->"
+            f.extra_comments[88801] = {
+                "id": 88801,
+                "body": "spoof " + spoof_marker,
+                "user": {"id": 42, "login": "mallory", "type": "User"},
+            }
+            # A different owned source with this numeric prefix is not this action.
+            f.extra_comments[88803] = {
+                "id": 88803,
+                "body": f"<!-- reviewsensei:reply:v1 source={f.SOURCE_ID}0 -->",
+                "user": {"id": f.selected.ledger._evidence_author_id, "type": "Bot"},
+            }
+            proof_digest = verify_no_business_dispatch_evidence(
+                caller=f.selected.caller,
+                ledger=f.selected.ledger,
+                identity=IDENTITY,
+                state=ApiRunAccounting.from_document(after_a2_rec.api_run_accounting),
+                intent=stranded_state.action["intent"],
+                intent_sha256=valid_dispatch_ev.intent_sha256,
+                evidence=valid_dispatch_ev,
+            )
+            self.assertEqual(len(proof_digest), 64)
+
+            with patch.object(f.selected.ledger, "_evidence_author_id", None):
+                with self.assertRaisesRegex(ReviewInputError, "app author identity"):
+                    verify_no_business_dispatch_evidence(
+                        caller=f.selected.caller,
+                        ledger=f.selected.ledger,
+                        identity=IDENTITY,
+                        state=ApiRunAccounting.from_document(
+                            after_a2_rec.api_run_accounting
+                        ),
+                        intent=stranded_state.action["intent"],
+                        intent_sha256=valid_dispatch_ev.intent_sha256,
+                        evidence=valid_dispatch_ev,
+                    )
+
+            bot_author_id = f.selected.ledger._evidence_author_id
+            f.extra_comments[88802] = {
+                "id": 88802,
+                "body": f"<!-- reviewsensei:command-receipt:v1 digest={'a' * 64} source={f.SOURCE_ID}--> ",
+                "user": {
+                    "id": bot_author_id,
+                    "login": "reviewsensei[bot]",
+                    "type": "Bot",
+                },
+            }
+            with self.assertRaisesRegex(
+                ReviewInputError,
+                "live GitHub native effect or accepted operation artifact exists",
+            ):
+                verify_no_business_dispatch_evidence(
+                    caller=f.selected.caller,
+                    ledger=f.selected.ledger,
+                    identity=IDENTITY,
+                    state=ApiRunAccounting.from_document(
+                        after_a2_rec.api_run_accounting
+                    ),
+                    intent=stranded_state.action["intent"],
+                    intent_sha256=valid_dispatch_ev.intent_sha256,
+                    evidence=valid_dispatch_ev,
+                )
+            f.extra_comments.clear()
+
+            # 5. Cross-run without gate on deleted comment + completed job stays strictly held!
+            f.past_jobs[stranded_run_id] = "command"
+            f.past_run_attempts[stranded_run_id] = 2
+            f.attempt = 1
+            f.SOURCE_ID = 502
+            f.select_command("@reviewsensei review status", new_run=True)
+            self.assertNotEqual(self._invoke_with_gate(f, unstarted_recovery=None), 0)
+            self.assertIn("previous caller run is not terminal", f.error)
+
+            # Verify reservation/transaction/charges/history remained intact across all negatives!
+            held_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert held_rec is not None and held_rec.transaction is not None
+            self.assertEqual(
+                held_rec.transaction.transaction_id,
+                base_rec.transaction.transaction_id,
+            )
+            held_state = ApiRunAccounting.from_document(held_rec.api_run_accounting)
+            assert held_state.action is not None
+            self.assertEqual(held_state.action["phase"], "pending")
+            self.assertFalse(held_state.action["execution_started"])
+
+    def test_started_action_refuses_ordinary_caller_recovery_gate_fail_closed(
+        self,
+    ) -> None:
+        from review_sensei_github.action_run import UnstartedCallerRecoveryGate
+        from review_sensei_github.unstarted_action_recovery import (
+            NoBusinessDispatchEvidence,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = G32CommandEntryFixture(directory)
+            f.SOURCE_ID = 550
+            f.select_command("@reviewsensei review pause")
+            f.action_fault = "business-absent"
+            self.assertNotEqual(f.invoke_command(), 0)
+
+            started_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert started_rec is not None
+            started_state = ApiRunAccounting.from_document(
+                started_rec.api_run_accounting
+            )
+            assert started_state.action is not None
+            self.assertTrue(started_state.action["execution_started"])
+            before_blocks = copy.deepcopy(started_state.blocks)
+
+            # Synthetic NoBusinessDispatchEvidence cannot force G32 recovery on started work!
+            intent_sha = hashlib.sha256(
+                json.dumps(
+                    started_state.action["intent"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            synth_ev = NoBusinessDispatchEvidence(
+                identity=IDENTITY,
+                target_run_id=f.run_id,
+                target_owner=ApiExecutionOwner(1, "command", 0),
+                intent_sha256=intent_sha,
+                observed_requests=(
+                    {
+                        "phase": "startup",
+                        "lifecycle_phase": "startup",
+                        "request_id": "s-0",
+                        "outcome": "response",
+                        "mutation": False,
+                    },
+                ),
+            )
+            f.deleted_source_ids.add(550)
+            f.past_jobs[f.run_id] = "command"
+            f.past_run_attempts[f.run_id] = 1
+            stranded_id = f.run_id
+            f.SOURCE_ID = 551
+            f.select_command("@reviewsensei review status", new_run=True)
+            gate = UnstartedCallerRecoveryGate(
+                target_run_id=stranded_id,
+                no_business_dispatch_evidence=synth_ev,
+                mode="cross_run",
+                use_actions_evidence=True,
+            )
+            self.assertNotEqual(self._invoke_with_gate(f, unstarted_recovery=gate), 0)
+            self.assertIn("started or uncertain caller work", f.error)
+            after_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert after_rec is not None
+            after_state = ApiRunAccounting.from_document(after_rec.api_run_accounting)
+            self.assertEqual(after_state.blocks, before_blocks)
+            self.assertTrue(after_state.action["execution_started"])  # type: ignore[index]
+
+    def test_ordinary_caller_same_run_and_cross_run_recovery_settle_once_with_positive_proof(
+        self,
+    ) -> None:
+        from review_sensei_github.action_run import UnstartedCallerRecoveryGate
+        from review_sensei_github.unstarted_action_recovery import (
+            NoBusinessDispatchEvidence,
+        )
+
+        # 1. Same-run (attempt == 2) recovery via action_run.run_action(..., unstarted_recovery=gate)
+        with tempfile.TemporaryDirectory() as d_same:
+            f = G32CommandEntryFixture(d_same)
+            self.assertEqual(f.invoke(), 0, f.error)
+            f.SOURCE_ID = 601
+            f.select_command("@reviewsensei review pause", new_run=True)
+            t1_ev = {
+                "action": "created",
+                "issue": {"number": 7, "pull_request": {}},
+                "comment": copy.deepcopy(f.source),
+            }
+
+            def mutate_on_fence(current: CommandEntryFixture) -> None:
+                if current.source_reads == 1:
+                    current.source["body"] = "edited"
+                    current.source["updated_at"] = "2026-10-26T00:05:00Z"
+
+            f.before_source_read = mutate_on_fence
+            self.assertNotEqual(f.invoke_command(event_override=t1_ev), 0)
+            f.before_source_read = None
+
+            stranded_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert stranded_rec is not None
+            dispatch_ev = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=stranded_rec
+            )
+            f.attempt = 2
+            same_gate = UnstartedCallerRecoveryGate(
+                target_run_id=f.run_id,
+                no_business_dispatch_evidence=dispatch_ev,
+                mode="same_run",
+                use_actions_evidence=True,
+            )
+            self.assertEqual(
+                self._invoke_with_gate(
+                    f,
+                    event_override=t1_ev,
+                    source_status=404,
+                    unstarted_recovery=same_gate,
+                ),
+                0,
+                f.error,
+            )
+            settled_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert settled_rec is not None
+            settled_state = ApiRunAccounting.from_document(
+                settled_rec.api_run_accounting
+            )
+            assert settled_state.action is not None
+            self.assertEqual(settled_state.action["phase"], "terminal")
+            self.assertEqual(
+                settled_state.action["outcome"],
+                {"kind": "canceled_unstarted", "reason": "source_deleted"},
+            )
+            self.assertFalse(settled_rec.operator_paused)
+
+        # 2. Cross-run (attempt == 1 of successor command run) under BOTH Actions evidence
+        #    AND canonical epoch-2 fence settles predecessor AND executes new command!
+        for fence_kind in ("actions", "canonical"):
+            with (
+                self.subTest(fence_kind=fence_kind),
+                tempfile.TemporaryDirectory() as d_cross,
+            ):
+                fc = G32CommandEntryFixture(d_cross)
+                self.assertEqual(fc.invoke(), 0, fc.error)
+                initial_tx = parse_session_comment(
+                    fc.comment["body"], identity=IDENTITY
+                ).transaction  # type: ignore[union-attr]
+                assert initial_tx is not None
+
+                fc.SOURCE_ID = 701
+                fc.select_command("@reviewsensei review pause", new_run=True)
+
+                def delete_on_fence(current: CommandEntryFixture) -> None:
+                    if current.source_reads == 1:
+                        current.source["body"] = "edited before delete"
+                        current.source["updated_at"] = "2026-10-26T00:05:00Z"
+
+                fc.before_source_read = delete_on_fence
+                self.assertNotEqual(fc.invoke_command(), 0)
+                fc.before_source_read = None
+
+                stranded_id = fc.run_id
+                stranded_rec = parse_session_comment(
+                    fc.comment["body"], identity=IDENTITY
+                )
+                assert stranded_rec is not None
+                dispatch_ev = NoBusinessDispatchEvidence.from_stranded_caller(
+                    fc.accounted, identity=IDENTITY, record=stranded_rec
+                )
+
+                # Make old comment 701 return 404 when observed during cross-run rollover!
+                orig_ext = fc.external
+
+                def ext_701_deleted(req, timeout, *, orig=orig_ext):
+                    p = urlsplit(req.full_url).path
+                    if req.get_method() == "GET" and p.endswith("/issues/comments/701"):
+                        fc._meter(req)
+                        return json_response({"message": "Not Found"}, status=404)
+                    return orig(req, timeout)
+
+                fc.external = ext_701_deleted  # type: ignore[method-assign]
+                fc.past_jobs[stranded_id] = "command"
+                fc.past_run_attempts[stranded_id] = 1
+                fc.SOURCE_ID = 702
+                fc.select_command("@reviewsensei review pause", new_run=True)
+
+                coord, tok2 = (
+                    _make_canonical_coordinator(Path(d_cross) / "coord", epoch=2)
+                    if fence_kind == "canonical"
+                    else (None, None)
+                )
+                cross_gate = UnstartedCallerRecoveryGate(
+                    target_run_id=stranded_id,
+                    no_business_dispatch_evidence=dispatch_ev,
+                    mode="cross_run",
+                    use_actions_evidence=(fence_kind == "actions"),
+                    canonical_coordinator=coord,
+                    canonical_token=tok2,  # type: ignore[arg-type]
+                )
+                self.assertEqual(
+                    self._invoke_with_gate(fc, unstarted_recovery=cross_gate),
+                    0,
+                    fc.error,
+                )
+                final_rec = parse_session_comment(fc.comment["body"], identity=IDENTITY)
+                assert final_rec is not None and final_rec.transaction is not None
+                self.assertTrue(final_rec.operator_paused)
+                self.assertEqual(
+                    final_rec.transaction.transaction_id, initial_tx.transaction_id
+                )
+                final_state = ApiRunAccounting.from_document(
+                    final_rec.api_run_accounting
+                )
+                assert final_state.action is not None
+                self.assertEqual(final_state.action["phase"], "terminal")
+                self.assertEqual(
+                    final_state.action["outcome"],
+                    {"kind": "applied", "reason": None},
+                )
+                assert fc.selected is not None
+                archived = read_previous_run(
+                    fc.selected.ledger, IDENTITY, final_state.previous_record
+                )
+                archived_state = ApiRunAccounting.from_document(
+                    archived.api_run_accounting
+                )
+                self.assertEqual(archived_state.identity.run_id, stranded_id)
+                self.assertEqual(
+                    archived_state.action["outcome"],  # type: ignore[index]
+                    {"kind": "canceled_unstarted", "reason": "source_deleted"},
+                )
+                self.assertEqual(controlled_restart.registrations(), [])
+
+    def test_gate_validation_rollover_guard_and_review_comment_or_pr_review_effect_fences(
+        self,
+    ) -> None:
+        from review_sensei_github.action_run import (
+            UnstartedCallerRecoveryGate,
+            _cross_run_unstarted_rollover_guard,
+            reconcile_action_source_lifecycle,
+        )
+        from review_sensei_github.unstarted_action_recovery import (
+            NoBusinessDispatchEvidence,
+            verify_no_business_dispatch_evidence,
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            f = G32CommandEntryFixture(d)
+            self.assertEqual(f.invoke(), 0, f.error)
+            f.SOURCE_ID = 801
+            f.select_command("@reviewsensei review pause", new_run=True)
+
+            def edit_once(current: CommandEntryFixture) -> None:
+                if current.source_reads == 1:
+                    current.source["body"] = "edited"
+                    current.source["updated_at"] = "2026-10-26T00:05:00Z"
+
+            f.before_source_read = edit_once
+            self.assertNotEqual(f.invoke_command(), 0)
+            f.before_source_read = None
+            stranded_rec = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert stranded_rec is not None
+            ev = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=stranded_rec
+            )
+
+            # 1. UnstartedCallerRecoveryGate.validate_preconditions negative branches
+            for bad_gate, msg in (
+                (
+                    UnstartedCallerRecoveryGate(
+                        target_run_id=0,
+                        no_business_dispatch_evidence=ev,
+                        use_actions_evidence=True,
+                    ),
+                    "target_run_id must be positive",
+                ),
+                (
+                    UnstartedCallerRecoveryGate(
+                        target_run_id=f.run_id,
+                        no_business_dispatch_evidence=ev,
+                        mode="invalid",
+                        use_actions_evidence=True,
+                    ),
+                    "mode is unsupported",
+                ),
+                (
+                    UnstartedCallerRecoveryGate(
+                        target_run_id=f.run_id + 99,
+                        no_business_dispatch_evidence=ev,
+                        use_actions_evidence=True,
+                    ),
+                    "conflicts with dispatch evidence",
+                ),
+                (
+                    UnstartedCallerRecoveryGate(
+                        target_run_id=f.run_id,
+                        no_business_dispatch_evidence=ev,
+                        use_actions_evidence=False,
+                    ),
+                    "requires owner cessation or canonical fence proof",
+                ),
+            ):
+                with self.assertRaisesRegex(ReviewInputError, msg):
+                    bad_gate.validate_preconditions()
+
+            # 2. reconcile_action_source_lifecycle negative branches
+            assert f.selected is not None
+            with self.assertRaisesRegex(ReviewInputError, "same_run recovery gate"):
+                reconcile_action_source_lifecycle(
+                    f.selected,
+                    unstarted_recovery=UnstartedCallerRecoveryGate(
+                        target_run_id=f.run_id,
+                        no_business_dispatch_evidence=ev,
+                        mode="cross_run",
+                        use_actions_evidence=True,
+                    ),
+                )
+            mismatch_ev = replace(ev, target_run_id=f.run_id + 1)
+            with self.assertRaisesRegex(ReviewInputError, "conflicts with active run"):
+                reconcile_action_source_lifecycle(
+                    f.selected,
+                    unstarted_recovery=UnstartedCallerRecoveryGate(
+                        target_run_id=f.run_id + 1,
+                        no_business_dispatch_evidence=mismatch_ev,
+                        mode="same_run",
+                        use_actions_evidence=True,
+                    ),
+                )
+            no_tok_run = replace(f.selected, actions_token="")
+            with self.assertRaisesRegex(
+                ReviewInputError, "authenticated actions_token"
+            ):
+                reconcile_action_source_lifecycle(
+                    no_tok_run,
+                    unstarted_recovery=UnstartedCallerRecoveryGate(
+                        target_run_id=f.run_id,
+                        no_business_dispatch_evidence=ev,
+                        mode="same_run",
+                        use_actions_evidence=True,
+                    ),
+                )
+            # Unchanged source on same-run gate refuses because route != g32_unstarted_cancellation
+            f.source["body"] = "@reviewsensei review pause"
+            f.source["updated_at"] = f.SOURCE_STAMP
+            with self.assertRaisesRegex(
+                ReviewInputError, "requires an unstarted mutated source action"
+            ):
+                reconcile_action_source_lifecycle(
+                    f.selected,
+                    unstarted_recovery=UnstartedCallerRecoveryGate(
+                        target_run_id=f.run_id,
+                        no_business_dispatch_evidence=ev,
+                        mode="same_run",
+                        use_actions_evidence=True,
+                    ),
+                )
+
+            # 3. _cross_run_unstarted_rollover_guard unused gate, missing predecessor,
+            #    run_id mismatch, and missing actions_token branches
+            cross_gate = UnstartedCallerRecoveryGate(
+                target_run_id=f.run_id,
+                no_business_dispatch_evidence=ev,
+                mode="cross_run",
+                use_actions_evidence=True,
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError, "did not settle a stranded predecessor"
+            ):
+                with _cross_run_unstarted_rollover_guard(cross_gate):
+                    pass
+
+            with self.assertRaisesRegex(
+                ReviewInputError, "requires a predecessor accounting record"
+            ):
+                with _cross_run_unstarted_rollover_guard(cross_gate) as rollover:
+                    assert rollover is not None
+                    rollover(
+                        f.accounted,
+                        f.selected.ledger,
+                        IDENTITY,
+                        None,  # type: ignore[arg-type]
+                        None,  # type: ignore[arg-type]
+                        None,
+                        lambda: None,
+                    )
+
+            # An overlapping ordinary request must not inherit the recovery gate,
+            # and same-thread nested work must retain the ordinary transport too.
+            from concurrent.futures import ThreadPoolExecutor
+            from threading import Barrier
+
+            original_rollover = ApiRunRequestTransport.rollover_and_activate
+            rendezvous = Barrier(2)
+
+            def ordinary_request():
+                rendezvous.wait(timeout=5)
+                with _cross_run_unstarted_rollover_guard(None) as ordinary:
+                    return ordinary, ApiRunRequestTransport.rollover_and_activate
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                ordinary_result = executor.submit(ordinary_request)
+                with self.assertRaisesRegex(
+                    ReviewInputError, "requires a predecessor accounting record"
+                ):
+                    with _cross_run_unstarted_rollover_guard(cross_gate) as scoped:
+                        assert scoped is not None
+                        rendezvous.wait(timeout=5)
+                        dependency, transport_method = ordinary_result.result(timeout=5)
+                        self.assertIsNone(dependency)
+                        self.assertIs(transport_method, original_rollover)
+                        self.assertIs(
+                            ApiRunRequestTransport.rollover_and_activate,
+                            original_rollover,
+                        )
+                        scoped(
+                            f.accounted,
+                            f.selected.ledger,
+                            IDENTITY,
+                            None,
+                            None,
+                            None,
+                            lambda: None,
+                        )
+            self.assertIs(
+                ApiRunRequestTransport.rollover_and_activate, original_rollover
+            )
+
+            wrong_cross_gate = UnstartedCallerRecoveryGate(
+                target_run_id=f.run_id + 1,
+                no_business_dispatch_evidence=mismatch_ev,
+                mode="cross_run",
+                use_actions_evidence=True,
+            )
+            with self.assertRaisesRegex(ReviewInputError, "conflicts with predecessor"):
+                with _cross_run_unstarted_rollover_guard(wrong_cross_gate) as rollover:
+                    assert rollover is not None
+                    rollover(
+                        f.accounted,
+                        f.selected.ledger,
+                        IDENTITY,
+                        None,  # type: ignore[arg-type]
+                        None,  # type: ignore[arg-type]
+                        stranded_rec,
+                        lambda: None,
+                    )
+
+            with self.assertRaisesRegex(
+                ReviewInputError, "requires authenticated actions_token"
+            ):
+                with _cross_run_unstarted_rollover_guard(cross_gate) as rollover:
+                    assert rollover is not None
+                    rollover(
+                        f.accounted,
+                        object(),  # type: ignore[arg-type]
+                        IDENTITY,
+                        None,  # type: ignore[arg-type]
+                        None,  # type: ignore[arg-type]
+                        stranded_rec,
+                        lambda: None,
+                    )
+
+            # 4. PR review disposition marker for command_id blocks verify_no_business_dispatch_evidence!
+            stranded_state = ApiRunAccounting.from_document(
+                stranded_rec.api_run_accounting
+            )
+            assert stranded_state.action is not None
+            bot_id = f.selected.ledger._evidence_author_id
+            f.reviews.append(
+                {
+                    "id": 9991,
+                    "commit_id": HEAD,
+                    "state": "COMMENTED",
+                    "body": f'<!-- reviewsensei:disposition {{"command_id":\n "{f.SOURCE_ID}"}} -->',
+                    "user": {"id": bot_id, "login": "reviewsensei[bot]", "type": "Bot"},
+                }
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError,
+                "live GitHub native effect or accepted operation artifact exists",
+            ):
+                verify_no_business_dispatch_evidence(
+                    caller=f.selected.caller,
+                    ledger=f.selected.ledger,
+                    identity=IDENTITY,
+                    state=stranded_state,
+                    intent=stranded_state.action["intent"],
+                    intent_sha256=ev.intent_sha256,
+                    evidence=ev,
+                )
+            f.reviews.pop()
+
+        # 5. review_comment reply native effect on /pulls/7/comments blocks verify_no_business_dispatch_evidence
+        #    AND canonical fence rejects identity with repository_id=None!
+        with tempfile.TemporaryDirectory() as d_rc:
+            helper = UnstartedActionRecoveryG32Tests()
+            f_rc, native_rc, ledger_rc, _, _, intent_rc = helper._prepare(
+                d_rc, purpose="reply", kind="review_comment"
+            )
+            rec_rc = parse_session_comment(f_rc.comment["body"], identity=IDENTITY)
+            assert rec_rc is not None
+            ev_rc = NoBusinessDispatchEvidence.from_stranded_caller(
+                f_rc.accounted, identity=IDENTITY, record=rec_rc
+            )
+            state_rc = ApiRunAccounting.from_document(rec_rc.api_run_accounting)
+            f_rc.inline.append(
+                {
+                    "id": 4444,
+                    "body": reply_marker(
+                        source_comment_id=SOURCE_ID,
+                        source_updated_digest="a" * 64,
+                        pull_request=7,
+                        head_sha=HEAD,
+                    )
+                    + " reply text",
+                    "user": {
+                        "id": native_rc._evidence_author_id,
+                        "login": "reviewsensei[bot]",
+                        "type": "Bot",
+                    },
+                }
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError,
+                "live GitHub native effect or accepted operation artifact exists",
+            ):
+                verify_no_business_dispatch_evidence(
+                    caller=f_rc.accounted,
+                    ledger=ledger_rc,
+                    identity=IDENTITY,
+                    state=state_rc,
+                    intent=intent_rc,
+                    intent_sha256=ev_rc.intent_sha256,
+                    evidence=ev_rc,
+                )
+
+            from review_sensei.session import SessionIdentity
+
+            coord, tok = _make_canonical_coordinator(Path(d_rc) / "coord", epoch=1)
+            none_repo_identity = SessionIdentity("owner/repo", 7, repository_id=None)
+            with self.assertRaisesRegex(
+                ReviewInputError, "positive integer repository_id"
+            ):
+                from review_sensei_github.unstarted_action_recovery import (
+                    _authenticate_authority_proof,
+                )
+
+                _authenticate_authority_proof(
+                    caller=f_rc.accounted,
+                    identity=none_repo_identity,
+                    state=state_rc,
+                    intent=intent_rc,
+                    mode="same_run",
+                    actions_evidence=None,
+                    canonical_coordinator=coord,
+                    canonical_token=tok,  # type: ignore[arg-type]
+                )
 
 
 if __name__ == "__main__":

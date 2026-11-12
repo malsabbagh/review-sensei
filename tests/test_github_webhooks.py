@@ -101,6 +101,40 @@ class GitHubWebhookTests(unittest.TestCase):
             **kwargs,
         )
 
+    def test_comment_routing_failure_does_not_consume_delivery(self):
+        verifier = self.make_verifier()
+        body = json.dumps(
+            {
+                "action": "created",
+                "installation": {"id": 7},
+                "repository": {"id": 11, "full_name": "owner/repo"},
+                "issue": {"number": 2, "pull_request": {}},
+                "comment": {
+                    "id": 9,
+                    "body": "hello",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                },
+            }
+        ).encode()
+        with self.assertRaisesRegex(GitHubWebhookError, "requires caller"):
+            verifier.verify_comment_lifecycle(
+                body=body,
+                signature=signature(body),
+                event="issue_comment",
+                delivery_id="comment-retry",
+                caller=object(),
+            )
+        self.assertFalse(
+            verifier.ledger.is_known(app_id=123, delivery_id="comment-retry")
+        )
+        retried = verifier.verify_comment_lifecycle(
+            body=body,
+            signature=signature(body),
+            event="issue_comment",
+            delivery_id="comment-retry",
+        )
+        self.assertFalse(retried.duplicate_delivery_id)
+
     def test_accepts_valid_signature_and_returns_delivery_metadata(self):
         body = installation_created_body()
         delivery = self.make_verifier().verify(

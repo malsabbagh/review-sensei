@@ -642,6 +642,187 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
                 finite_api_reads_charged=-1,
             )
 
+    def test_ordinary_caller_verify_command_performs_native_effects_with_zero_inference(
+        self,
+    ) -> None:
+        import hashlib
+        import hmac
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from review_sensei_github.event_routing_contract import (
+            map_installed_caller_subscription,
+        )
+        from review_sensei_github.publication import parse_finding_index
+        from review_sensei_github.webhooks import WebhookVerifier
+        from test_action_run import CommandEntryFixture
+
+        from review_sensei.hosting.github import trigger as hosting_trigger
+
+        repo_root = Path(__file__).resolve().parents[1]
+        checked_in = (
+            repo_root / ".github/workflows/review-sensei-review.yml"
+        ).read_text(encoding="utf-8")
+
+        class _Secret:
+            def load_webhook_secret(self) -> bytes:
+                return b"g26-secret"
+
+        verifier = WebhookVerifier(app_id=91, secret_source=_Secret())
+
+        with tempfile.TemporaryDirectory() as directory:
+            for target in ("socket.create_connection", "socket.socket.connect"):
+                guard = patch(target, side_effect=AssertionError("unexpected network"))
+                guard.start()
+                self.addCleanup(guard.stop)
+
+            f = CommandEntryFixture(directory)
+            # 1. Initial review publishes 1 open finding thread; 1 provider call.
+            self.assertEqual(f.invoke(human=True), 0, f.error)
+            self.assertEqual(f.provider_calls, 1)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+
+            index = parse_finding_index(
+                f.reviews[-1]["body"],
+                repository_id=123,
+                pull_request=7,
+                head_sha=f.requested_head,
+            )
+            assert index is not None
+            finding_ref = "RS-" + index.entries[0].instance[:6].upper()
+
+            # 2. Native Resolve/Unresolve UI events are unsubscribed no-ops on trigger.py & webhooks.py
+            pull_file = Path(directory) / "pull.json"
+            out_file = Path(directory) / "out.txt"
+            pull_json = {
+                "number": 7,
+                "state": "open",
+                "draft": False,
+                "head": {"sha": f.requested_head, "ref": "feat/g26"},
+                "base": {"sha": f.live_base, "ref": "main"},
+            }
+            pull_file.write_text(json.dumps(pull_json), encoding="utf-8")
+
+            with (
+                patch.dict(os.environ, {"GITHUB_OUTPUT": str(out_file)}, clear=False),
+                self.assertRaises(SystemExit),
+            ):
+                hosting_trigger.main(
+                    [
+                        "--event",
+                        "pull_request_review_thread",
+                        "--pull-json",
+                        str(pull_file),
+                    ]
+                )
+
+            for idx, act in enumerate(("resolved", "resolved", "unresolved"), start=1):
+                raw_ev = json.dumps(
+                    {
+                        "action": act,
+                        "pull_request": {"number": 7},
+                        "thread": {"node_id": "thread-0"},
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                sig = (
+                    "sha256="
+                    + hmac.new(b"g26-secret", raw_ev, hashlib.sha256).hexdigest()
+                )
+                vr = verifier.verify_event_route(
+                    body=raw_ev,
+                    signature=sig,
+                    event="pull_request_review_thread",
+                    delivery_id=f"deliv-thread-{idx}",
+                )
+                self.assertFalse(vr.routing.admitted)
+                self.assertFalse(vr.routing.requires_model_inference)
+
+            # 3. Verify installed caller subscription maps `@reviewsensei verify` to
+            #    action_run(purpose='command') with performs_native_effects=True & requires_model_inference=False!
+            verify_payload = {
+                "action": "created",
+                "issue": {
+                    "number": 7,
+                    "pull_request": {
+                        "url": "https://api.github.com/repos/owner/repo/pulls/7"
+                    },
+                },
+                "comment": {
+                    "id": 9101,
+                    "body": "@reviewsensei verify",
+                    "updated_at": "2026-11-11T00:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "alice", "type": "User"},
+                },
+            }
+            mapped = map_installed_caller_subscription(
+                checked_in,
+                event_name="issue_comment",
+                payload=verify_payload,
+                live_pull_request=pull_json,
+            )
+            self.assertTrue(mapped.caller_job_admitted)
+            self.assertEqual(
+                mapped.reusable_workflow_entrypoint,
+                "action_run.run_action(purpose='command')",
+            )
+            self.assertTrue(mapped.performs_native_effects)
+            self.assertFalse(mapped.requires_model_inference)
+
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": str(out_file)}, clear=False):
+                out_file.write_text("", encoding="utf-8")
+                self.assertEqual(
+                    hosting_trigger.main(
+                        [
+                            "--event",
+                            "issue_comment",
+                            "--comment-body",
+                            "@reviewsensei verify",
+                            "--pull-json",
+                            str(pull_file),
+                        ]
+                    ),
+                    0,
+                )
+            self.assertIn("operation=command", out_file.read_text(encoding="utf-8"))
+
+            # 4. Human clicks native Resolve WITHOUT disposition; `@reviewsensei verify` keeps
+            #    approval withheld and charges 0 model inference!
+            f.resolved_threads.add("thread-0")
+            f.SOURCE_ID += 1
+            f.select_command("@reviewsensei verify", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error)
+            self.assertEqual(f.provider_calls, 1)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+            self.assertEqual(f.check_runs[-1]["conclusion"], "action_required")
+
+            # 5. Legitimate override resolves obligation, then human clicks native Unresolve;
+            #    `@reviewsensei verify` performs real native GraphQL ResolveReviewThread + check
+            #    effects with 0 model inference!
+            f.SOURCE_ID += 1
+            f.select_command(
+                f"@reviewsensei override {finding_ref} acceptable risk",
+                new_run=True,
+            )
+            self.assertEqual(f.invoke_command(), 0, f.error)
+            self.assertEqual(f.provider_calls, 1)
+            self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
+
+            # Simulate human manually unresolving the decided thread in GitHub UI
+            f.resolved_threads.clear()
+            f.SOURCE_ID += 1
+            f.select_command("@reviewsensei verify", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, f.error)
+            self.assertEqual(f.provider_calls, 1)  # ZERO new inference!
+            self.assertEqual(
+                len(f.resolved_threads), 1
+            )  # Native GraphQL effect performed!
+            self.assertEqual(f.check_runs[-1]["conclusion"], "success")
+
 
 if __name__ == "__main__":
     unittest.main()

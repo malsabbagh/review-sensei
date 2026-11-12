@@ -22,9 +22,14 @@ ReviewSensei intentionally subscribes caller workflows only to:
 
 Caller workflows retain read-only repository permissions (`contents: read`,
 `pull-requests: read`, `issues: read`, `id-token: write`) and run zero
-background polling loops. Every non-subscribed GitHub transition is governed by
-a read-time guard on the next admitted operation and a bounded operator recovery
-command.
+background polling loops. `map_installed_caller_subscription` binds each
+approved trigger in `.github/workflows/review-sensei-review.yml` through
+`hosting/github/trigger.py` and `WebhookVerifier.verify_event_route` to its
+exact reusable-workflow runtime entry (`review_run.run_review`,
+`action_run.run_action(purpose='command')`, or
+`action_run.run_action(purpose='reply')`). Every non-subscribed GitHub
+transition is governed by a read-time guard on the next admitted operation and
+a bounded operator recovery command.
 
 ### Complete event and recovery command decision table
 
@@ -54,8 +59,16 @@ identity (`(source_kind, source_comment_id, source_updated_at,
 source_body_sha256)`):
 
 1. `rescan_or_remaining_review` (`@reviewsensei rescan`, `@reviewsensei review remaining`) — bounded review analysis window on the live PR snapshot.
-2. `maintainer_command` (`@reviewsensei verify`, `@reviewsensei review status`, `@reviewsensei override`, `@reviewsensei accept-risk`, `@reviewsensei review continue`, etc.) — deterministic command execution with zero model inference.
+2. `maintainer_command` (`@reviewsensei verify`, `@reviewsensei review status`, `@reviewsensei override`, `@reviewsensei accept-risk`, `@reviewsensei review continue`, etc.) — deterministic command execution with zero model inference (note that commands such as `@reviewsensei verify` still perform bounded native GitHub API/GraphQL effects under authenticated write authority).
 3. `mention_reply` — bounded conversational reply bound to prepared base/head context (`G33`).
+
+Ordinary comment and action callers (`webhooks.py`, `comment_intent.py`,
+`action_run.py`) enforce source-comment edit/delete lifecycle fences (`G27`)
+via `admit_event_comment_source`, `verify_live_comment_source`, and
+`reconcile_action_source_lifecycle`. Unstarted actions stranded after source
+mutation (`G32`) hold fail-closed by default and settle only when both
+positive `NoBusinessDispatchEvidence` and qualified cessation or canonical
+epoch fencing are verified (`UnstartedCallerRecoveryGate`).
 
 ## Missed, delayed, out-of-order, and queued-replaced convergence (`G13`)
 
@@ -63,8 +76,15 @@ GitHub webhooks do not provide durable FIFO ordering, and the per-PR Actions
 concurrency group (`reviewsensei-provider-review-<owner>/<repo>-<pr>`,
 `cancel-in-progress: false`) holds at most one active run and one pending run.
 
-ReviewSensei converges onto authenticated current PR state (`LivePullRequestTarget`)
-rather than arrival order:
+The bounded G13 reconciliation model evaluates authenticated current PR state
+(`LivePullRequestTarget`) rather than arrival order. The outcomes below are
+qualified for that model with supplied history, not as an end-to-end ordinary
+runner guarantee. Ordinary review/command/reply runners do not yet durably produce
+the accepted-operation and semantic-progress history or consume the model's
+finite-stop verdict. G13 durable history and finite-stop integration remain open;
+read-time source/session fences and original accounting still apply.
+
+Model outcomes:
 
 - **Duplicate delivery:** Re-delivering an already completed comment source key
   or an unchanged `(base_sha, head_sha)` review snapshot reuses the retained
@@ -91,6 +111,17 @@ rather than arrival order:
   classified explicitly (`queued_command_replaced`, `queued_reply_replaced`, or
   `queued_review_superseded`) with the exact recovery command (for example,
   re-issuing the displaced `@reviewsensei verify` command or `workflow_dispatch`).
+- **Model ownership and finite no-progress stop rule:** Every
+  reconciliation verdict assigns an explicit owner from `RECONCILIATION_OWNERS`
+  (`caller_workflow_preflight`, `hosted_review_admission`,
+  `hosted_command_executor`, `hosted_reply_executor`, or
+  `operator_manual_recovery`). Repeated reconciliation attempts on an identical
+  `(base_sha, head_sha, state_fingerprint, open_finding_ids)` tuple that make
+  no progress halt deterministically at `MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS`
+  (`2`) with `finite_no_progress_stop` (`stopped_no_progress`) in the model,
+  without background reconcilers or paid retries; the model resets the count
+  when PR state or progress advances. This is not a durable ordinary-runner
+  stop guarantee.
 
 ## Merge queue (`merge_group`) unsupported boundary (`G07`)
 
@@ -98,11 +129,12 @@ GitHub Merge Queue (`merge_group` events `checks_requested` and `destroyed`, and
 temporary `gh-readonly-queue/*` branches) is **explicitly unsupported**:
 
 - Caller workflows omit `merge_group`.
-- `WebhookVerifier.verify` rejects `X-GitHub-Event: merge_group` immediately
-  with `GitHubMergeGroupUnsupportedError` (`merge_group_unsupported`) before
-  recording delivery IDs or parsing payload JSON, and `reject_merge_group_event`
-  guarantees zero token acquisition, zero provider calls, zero ledger writes,
-  and zero check publications.
+- `WebhookVerifier.verify` (and `action_run.event_source` /
+  `WebhookVerifier.verify_event_route(..., reject_merge_group=True)`) rejects
+  `merge_group` immediately with `GitHubMergeGroupUnsupportedError`
+  (`merge_group_unsupported`) before OIDC/token acquisition, provider calls,
+  ledger writes, or check publications, and `hosting/github/trigger.py` exits
+  nonzero on `merge_group`.
 - `verify_snapshot_certification` binds every `ReviewCertificationReceipt`
   strictly to one pull request's exact `(repository_id, pull_request_number,
   reviewed_base_sha, reviewed_head_sha)`. An ordinary PR-head approval or
@@ -155,10 +187,22 @@ exclusively by GitHub branch protection:
 - Human `changes_requested` or `dismissed` reviews never block ReviewSensei's
   own recovery operations (`@reviewsensei verify`, `@reviewsensei rescan`,
   `@reviewsensei review remaining`, `workflow_dispatch`).
-- Maintainer command admission checks the actor's live `author_association`
-  (`OWNER`, `MEMBER`, `COLLABORATOR`); if a former reviewer loses repository
-  privileges, subsequent `@reviewsensei` commands fail closed with
-  `association_unauthorized` while preserving prior ledger history.
+- Maintainer command admission validates both the actor's `author_association`
+  (`OWNER`, `MEMBER`, `COLLABORATOR`, rejecting unprivileged comment authors via
+  `unprivileged_comment_author_ignored`) and live repository collaborator
+  permission (`lookup_collaborator_permission` in `admin`, `maintain`, `write`);
+  if a former reviewer loses repository write privileges, subsequent
+  `@reviewsensei` override commands apply zero dispositions or approvals
+  (`explicit_noop`, `reason="no_change"`) while preserving prior ledger history.
+
+### Source of write authority
+
+The caller workflow's read-only `GITHUB_TOKEN` permissions are unchanged. Native
+command writes use the hosted App installation capability obtained through the
+OIDC-authenticated broker and its session grant, not broader workflow token
+permissions. See [the architecture](architecture.md) and the
+[approval recovery procedure](approval-recovery.md). Routing or convergence
+classification alone cannot issue that capability or bypass live permission checks.
 
 ## Operator recovery quick reference
 

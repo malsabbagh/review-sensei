@@ -3,16 +3,31 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
+import os
+import tempfile
 import unittest
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from review_sensei_github.event_routing_contract import (
+    MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS,
+    RECONCILIATION_OWNERS,
     AcceptedOperationRecord,
+    ConvergenceDecision,
     LivePullRequestTarget,
     QueuedRunCandidate,
+    inspect_caller_subscription_contract,
     reconcile_event_convergence,
+    resolve_reconciliation_owner,
     simulate_actions_concurrency_queue,
 )
+from review_sensei_github.webhooks import WebhookVerifier
+
+from review_sensei.hosting.github import trigger as hosting_trigger
 
 BASE_SHA_1 = "1" * 40
 BASE_SHA_2 = "2" * 40
@@ -617,6 +632,754 @@ class EventConvergenceG13Tests(unittest.TestCase):
                 repository="owner/repo",
                 pull_request_number=42,
                 events=(("unknown_step", None),),
+            )
+
+    def test_finite_no_progress_stop_rule_and_reconciliation_ownership(self) -> None:
+        live_h2 = _live_target(head_sha=HEAD_SHA_2)
+
+        no_prog_1 = AcceptedOperationRecord(
+            operation_id="op-noprog-1",
+            operation_kind="command",
+            target_base_sha=BASE_SHA_1,
+            target_head_sha=HEAD_SHA_2,
+            lifecycle_phase="completed",
+            open_finding_ids=("rs-open-1",),
+            state_fingerprint="fp-v1",
+            made_progress=False,
+        )
+        # After 1 unchanged non-progressing attempt, reconciliation is still permitted once more.
+        after_one = reconcile_event_convergence(
+            "issue_comment",
+            _issue_comment_payload("@reviewsensei review status", comment_id=9001),
+            live_target=live_h2,
+            records=(no_prog_1,),
+            current_state_fingerprint="fp-v1",
+        )
+        self.assertEqual(after_one.unchanged_attempts, 1)
+        self.assertFalse(after_one.stopped_no_progress)
+        self.assertEqual(after_one.reconciliation_owner, "hosted_command_executor")
+        self.assertEqual(after_one.status, "schedule_command_reconciliation")
+
+        no_prog_2 = AcceptedOperationRecord(
+            operation_id="op-noprog-2",
+            operation_kind="command",
+            target_base_sha=BASE_SHA_1,
+            target_head_sha=HEAD_SHA_2,
+            lifecycle_phase="completed",
+            open_finding_ids=("rs-open-1",),
+            state_fingerprint="fp-v1",
+            made_progress=False,
+        )
+        self.assertEqual(MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS, 2)
+
+        # Completed retained review reuse is not a newly scheduled attempt.
+        retained_records = tuple(
+            replace(record, operation_kind="review")
+            for record in (no_prog_1, no_prog_2)
+        )
+        reused = reconcile_event_convergence(
+            "workflow_dispatch",
+            {"inputs": {"pull_request_number": 42}},
+            live_target=live_h2,
+            records=retained_records,
+            current_state_fingerprint="fp-v1",
+        )
+        self.assertEqual(reused.status, "converged_reused")
+        self.assertFalse(reused.stopped_no_progress)
+        self.assertEqual(reused.recovery_command, reused.routing.recovery_command)
+        self.assertFalse(reused.schedules_new_inference)
+        self.assertFalse(reused.schedules_native_reconciliation)
+
+        # At >= MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS on unchanged state, all admitted
+        # reconciliation routes halt deterministically without paid retries or background loops.
+        for label, ev_name, payload in (
+            (
+                "command_status",
+                "issue_comment",
+                _issue_comment_payload("@reviewsensei review status", comment_id=9002),
+            ),
+            (
+                "rescan_comment",
+                "issue_comment",
+                _issue_comment_payload("@reviewsensei rescan", comment_id=9003),
+            ),
+            (
+                "manual_dispatch",
+                "workflow_dispatch",
+                {"inputs": {"pull_request_number": 42}},
+            ),
+            (
+                "reply_mention",
+                "issue_comment",
+                _issue_comment_payload("@reviewsensei explain this", comment_id=9004),
+            ),
+        ):
+            with self.subTest(route=label):
+                stopped = reconcile_event_convergence(
+                    ev_name,
+                    payload,
+                    live_target=live_h2,
+                    records=(no_prog_1, no_prog_2),
+                    current_state_fingerprint="fp-v1",
+                )
+                self.assertEqual(stopped.status, "stopped_no_progress")
+                self.assertEqual(stopped.outcome_code, "finite_no_progress_stop")
+                self.assertTrue(stopped.stopped_no_progress)
+                self.assertEqual(stopped.unchanged_attempts, 2)
+                self.assertFalse(stopped.schedules_new_inference)
+                self.assertFalse(stopped.schedules_native_reconciliation)
+                self.assertEqual(stopped.reused_operation_id, "op-noprog-2")
+                self.assertIsNone(stopped.recovery_command)
+                self.assertEqual(
+                    stopped.reconciliation_owner, "operator_manual_recovery"
+                )
+                self.assertIn(stopped.reconciliation_owner, RECONCILIATION_OWNERS)
+
+        # Unsupported / non-admitted events remain owned by caller_workflow_preflight.
+        unsubscribed = reconcile_event_convergence(
+            "merge_group",
+            {"action": "checks_requested"},
+            live_target=live_h2,
+            records=(no_prog_1, no_prog_2),
+            current_state_fingerprint="fp-v1",
+        )
+        self.assertEqual(unsubscribed.status, "not_admitted")
+        self.assertFalse(unsubscribed.stopped_no_progress)
+        self.assertEqual(unsubscribed.reconciliation_owner, "caller_workflow_preflight")
+
+        # Advancing state_fingerprint OR head_sha OR recording made_progress=True resets counter!
+        advanced_fp = reconcile_event_convergence(
+            "workflow_dispatch",
+            {"inputs": {"pull_request_number": 42}},
+            live_target=live_h2,
+            records=(no_prog_1, no_prog_2),
+            current_state_fingerprint="fp-v2",
+        )
+        self.assertEqual(advanced_fp.unchanged_attempts, 0)
+        self.assertFalse(advanced_fp.stopped_no_progress)
+        self.assertEqual(advanced_fp.status, "schedule_current_target_review")
+        self.assertEqual(advanced_fp.reconciliation_owner, "hosted_review_admission")
+
+        advanced_head = reconcile_event_convergence(
+            "pull_request",
+            _pr_sync_payload(head_sha=HEAD_SHA_3),
+            live_target=_live_target(head_sha=HEAD_SHA_3),
+            records=(no_prog_1, no_prog_2),
+            current_state_fingerprint="fp-v1",
+        )
+        self.assertEqual(advanced_head.unchanged_attempts, 0)
+        self.assertFalse(advanced_head.stopped_no_progress)
+        self.assertEqual(advanced_head.status, "schedule_current_target_review")
+
+        progressed_rec = AcceptedOperationRecord(
+            operation_id="op-prog-3",
+            operation_kind="review",
+            target_base_sha=BASE_SHA_1,
+            target_head_sha=HEAD_SHA_2,
+            lifecycle_phase="completed",
+            open_finding_ids=(),
+            state_fingerprint="fp-v1",
+            made_progress=True,
+        )
+        after_progress = reconcile_event_convergence(
+            "issue_comment",
+            _issue_comment_payload("@reviewsensei verify", comment_id=9005),
+            live_target=live_h2,
+            records=(no_prog_1, no_prog_2, progressed_rec),
+            current_state_fingerprint="fp-v1",
+        )
+        self.assertEqual(after_progress.unchanged_attempts, 0)
+        self.assertFalse(after_progress.stopped_no_progress)
+        self.assertEqual(after_progress.status, "schedule_command_reconciliation")
+        self.assertEqual(after_progress.reconciliation_owner, "hosted_command_executor")
+
+        # Validation guards on new G13 fields
+        with self.assertRaises(ValueError):
+            AcceptedOperationRecord(
+                operation_id="bad-bool",
+                operation_kind="review",
+                target_base_sha=BASE_SHA_1,
+                target_head_sha=HEAD_SHA_2,
+                lifecycle_phase="completed",
+                made_progress=1,  # type: ignore[arg-type]
+            )
+        with self.assertRaises(ValueError):
+            AcceptedOperationRecord(
+                operation_id="bad-fp",
+                operation_kind="review",
+                target_base_sha=BASE_SHA_1,
+                target_head_sha=HEAD_SHA_2,
+                lifecycle_phase="completed",
+                state_fingerprint="   ",
+            )
+        with self.assertRaises(ValueError):
+            reconcile_event_convergence(
+                "workflow_dispatch",
+                {"inputs": {"pull_request_number": 42}},
+                live_target=live_h2,
+                max_no_progress_attempts=0,
+            )
+        with self.assertRaises(ValueError):
+            reconcile_event_convergence(
+                "workflow_dispatch",
+                {"inputs": {"pull_request_number": 42}},
+                live_target=live_h2,
+                current_state_fingerprint="",
+            )
+        with self.assertRaises(ValueError):
+            ConvergenceDecision(
+                status="converged_reused",
+                outcome_code="ok",
+                target_base_sha=BASE_SHA_1,
+                target_head_sha=HEAD_SHA_2,
+                routing=after_progress.routing,
+                schedules_new_inference=False,
+                schedules_native_reconciliation=False,
+                reused_operation_id=None,
+                preserved_open_finding_ids=(),
+                recovery_command=None,
+                reconciliation_owner="unknown_owner",
+            )
+        self.assertEqual(
+            resolve_reconciliation_owner(
+                after_progress.routing, status="schedule_command_reconciliation"
+            ),
+            "hosted_command_executor",
+        )
+
+
+class _StaticSecret:
+    def __init__(self, secret: bytes = b"g13-webhook-secret") -> None:
+        self._secret = secret
+
+    def load_webhook_secret(self) -> bytes:
+        return self._secret
+
+
+class SubscribedCallerToHandlerJourneyG13Tests(unittest.TestCase):
+    """Qualify checked-in subscriptions and actual trigger/webhook/action functions.
+
+    This does not execute the GitHub Actions service or qualify deployed inputs.
+    """
+
+    def setUp(self) -> None:
+        for target in ("socket.create_connection", "socket.socket.connect"):
+            guard = patch(target, side_effect=AssertionError("unexpected network"))
+            guard.start()
+            self.addCleanup(guard.stop)
+
+    def test_failed_convergence_does_not_consume_delivery(self):
+        verifier = WebhookVerifier(app_id=123, secret_source=_StaticSecret())
+        body, signature = self._sign(_pr_sync_payload(head_sha=HEAD_SHA_2))
+        arguments = dict(
+            body=body,
+            signature=signature,
+            event="pull_request",
+            delivery_id="failed-convergence",
+            live_target=_live_target(),
+        )
+        with patch(
+            "review_sensei_github.event_routing_contract.reconcile_event_convergence",
+            side_effect=RuntimeError("synthetic route failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "synthetic route failure"):
+                verifier.verify_event_route(**arguments)
+        self.assertFalse(
+            verifier.ledger.is_known(app_id=123, delivery_id="failed-convergence")
+        )
+        retried = verifier.verify_event_route(**arguments)
+        self.assertFalse(retried.duplicate_delivery_id)
+        self.assertTrue(retried.convergence.schedules_new_inference)
+
+    @staticmethod
+    def _sign(
+        payload: dict[str, Any], secret: bytes = b"g13-webhook-secret"
+    ) -> tuple[bytes, str]:
+        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        sig = "sha256=" + hmac.new(secret, raw, hashlib.sha256).hexdigest()
+        return raw, sig
+
+    @staticmethod
+    def _run_trigger_cli(
+        directory: Path,
+        *,
+        event_name: str,
+        pull: dict[str, Any],
+        comment_body: str = "",
+    ) -> dict[str, str]:
+        pull_path = directory / f"pull-{event_name}.json"
+        out_path = directory / f"output-{event_name}.txt"
+        pull_path.write_text(json.dumps(pull), encoding="utf-8")
+        out_path.write_text("", encoding="utf-8")
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": str(out_path)}, clear=False):
+            rc = hosting_trigger.main(
+                [
+                    "--event",
+                    event_name,
+                    "--comment-body",
+                    comment_body,
+                    "--pull-json",
+                    str(pull_path),
+                ]
+            )
+        assert rc == 0
+        parsed: dict[str, str] = {}
+        for line in out_path.read_text(encoding="utf-8").splitlines():
+            key, val = line.split("=", 1)
+            parsed[key] = val
+        return parsed
+
+    def test_installed_workflow_and_trigger_to_webhook_journeys_across_delivery_anomalies(
+        self,
+    ) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        workflow_yaml = (
+            repo_root / ".github" / "workflows" / "review-sensei-review.yml"
+        ).read_text(encoding="utf-8")
+        report = inspect_caller_subscription_contract(workflow_yaml)
+        self.assertTrue(report.matches_approved_boundary)
+
+        verifier = WebhookVerifier(app_id=77, secret_source=_StaticSecret())
+        live_h2 = _live_target(head_sha=HEAD_SHA_2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+
+            # 1. Reordered + duplicate webhook delivery through trigger.py -> WebhookVerifier.verify_event_route
+            h2_payload = {
+                **_pr_sync_payload(head_sha=HEAD_SHA_2),
+                "repository": {"id": 101, "full_name": "owner/repo"},
+            }
+            h2_cli = self._run_trigger_cli(
+                tmp_dir,
+                event_name="pull_request",
+                pull=h2_payload["pull_request"],
+            )
+            self.assertEqual(h2_cli["operation"], "review")
+            self.assertEqual(h2_cli["head_sha"], HEAD_SHA_2)
+
+            raw_h2, sig_h2 = self._sign(h2_payload)
+            first_h2 = verifier.verify_event_route(
+                body=raw_h2,
+                signature=sig_h2,
+                event="pull_request",
+                delivery_id="deliv-h2-live",
+                live_target=live_h2,
+            )
+            self.assertFalse(first_h2.duplicate_delivery_id)
+            assert first_h2.convergence is not None
+            self.assertTrue(first_h2.convergence.schedules_new_inference)
+            self.assertEqual(
+                first_h2.convergence.reconciliation_owner, "hosted_review_admission"
+            )
+
+            # Model a caller interruption after receipt but before admission: no
+            # accepted history exists, so redelivery must reconsider admission.
+            dup_h2 = verifier.verify_event_route(
+                body=raw_h2,
+                signature=sig_h2,
+                event="pull_request",
+                delivery_id="deliv-h2-live",
+                live_target=live_h2,
+            )
+            self.assertTrue(dup_h2.duplicate_delivery_id)
+            assert dup_h2.convergence is not None
+            self.assertTrue(dup_h2.convergence.schedules_new_inference)
+            self.assertEqual(dup_h2.convergence, first_h2.convergence)
+
+            uncertain_redelivery = verifier.verify_event_route(
+                body=raw_h2,
+                signature=sig_h2,
+                event="pull_request",
+                delivery_id="deliv-h2-live",
+                live_target=live_h2,
+                records=(
+                    AcceptedOperationRecord(
+                        operation_id="op-h2-uncertain",
+                        operation_kind="review",
+                        target_base_sha=BASE_SHA_1,
+                        target_head_sha=HEAD_SHA_2,
+                        lifecycle_phase="uncertain_dispatch",
+                    ),
+                ),
+            )
+            self.assertTrue(uncertain_redelivery.duplicate_delivery_id)
+            self.assertEqual(
+                uncertain_redelivery.convergence.status, "held_uncertain_operation"
+            )
+            self.assertFalse(uncertain_redelivery.convergence.schedules_new_inference)
+
+            # Delayed out-of-order synchronize(H1) arriving when live PR is already at H2
+            h1_payload = {
+                **_pr_sync_payload(head_sha=HEAD_SHA_1),
+                "repository": {"id": 101, "full_name": "owner/repo"},
+            }
+            raw_h1, sig_h1 = self._sign(h1_payload)
+            late_h1 = verifier.verify_event_route(
+                body=raw_h1,
+                signature=sig_h1,
+                event="pull_request",
+                delivery_id="deliv-h1-delayed",
+                live_target=live_h2,
+            )
+            assert late_h1.convergence is not None
+            self.assertEqual(late_h1.convergence.status, "ignored_stale_event")
+            self.assertFalse(late_h1.convergence.schedules_new_inference)
+
+            # 2. Dropped synchronize(H3) recovered via workflow_dispatch and @reviewsensei rescan
+            live_h3 = _live_target(head_sha=HEAD_SHA_3)
+            completed_h2 = AcceptedOperationRecord(
+                operation_id="op-h2-done",
+                operation_kind="review",
+                target_base_sha=BASE_SHA_1,
+                target_head_sha=HEAD_SHA_2,
+                lifecycle_phase="completed",
+                open_finding_ids=("rs-carry-h2",),
+            )
+            accepted_redelivery = verifier.verify_event_route(
+                body=raw_h2,
+                signature=sig_h2,
+                event="pull_request",
+                delivery_id="deliv-h2-live",
+                live_target=live_h2,
+                records=(completed_h2,),
+            )
+            self.assertTrue(accepted_redelivery.duplicate_delivery_id)
+            self.assertFalse(accepted_redelivery.convergence.schedules_new_inference)
+            self.assertEqual(
+                accepted_redelivery.convergence.reused_operation_id, "op-h2-done"
+            )
+
+            dispatch_cli = self._run_trigger_cli(
+                tmp_dir,
+                event_name="workflow_dispatch",
+                pull=live_h3.to_pull_mapping(),
+            )
+            self.assertEqual(dispatch_cli["operation"], "review")
+            self.assertEqual(dispatch_cli["head_sha"], HEAD_SHA_3)
+
+            raw_disp, sig_disp = self._sign(
+                {
+                    "inputs": {"pull_request_number": 42},
+                    "repository": {"id": 101, "full_name": "owner/repo"},
+                }
+            )
+            disp_route = verifier.verify_event_route(
+                body=raw_disp,
+                signature=sig_disp,
+                event="workflow_dispatch",
+                delivery_id="deliv-manual-h3",
+                live_target=live_h3,
+                records=(completed_h2,),
+            )
+            assert disp_route.convergence is not None
+            self.assertEqual(
+                disp_route.convergence.status, "schedule_current_target_review"
+            )
+            self.assertEqual(
+                disp_route.convergence.outcome_code, "missed_or_advanced_head_converged"
+            )
+            self.assertEqual(
+                disp_route.convergence.preserved_open_finding_ids, ("rs-carry-h2",)
+            )
+
+            # 3. Queued-replaced command run through trigger.py -> WebhookVerifier -> action_run.py
+            verify_cli = self._run_trigger_cli(
+                tmp_dir,
+                event_name="issue_comment",
+                pull=live_h3.to_pull_mapping(),
+                comment_body="@reviewsensei review status",
+            )
+            self.assertEqual(verify_cli["operation"], "command")
+
+            raw_cmd, sig_cmd = self._sign(
+                {
+                    **_issue_comment_payload(
+                        "@reviewsensei review status", comment_id=777
+                    ),
+                    "repository": {"id": 101, "full_name": "owner/repo"},
+                }
+            )
+            replaced_route = verifier.verify_event_route(
+                body=raw_cmd,
+                signature=sig_cmd,
+                event="issue_comment",
+                delivery_id="deliv-cmd-replaced",
+                live_target=live_h3,
+                was_queued_replaced=True,
+            )
+            assert replaced_route.convergence is not None
+            self.assertEqual(replaced_route.convergence.status, "held_queued_replaced")
+            self.assertEqual(
+                replaced_route.convergence.reconciliation_owner,
+                "operator_manual_recovery",
+            )
+
+    def test_action_run_enforces_finite_stop_and_queued_replacement_before_execution(
+        self,
+    ) -> None:
+        import io
+        from contextlib import ExitStack, redirect_stderr, redirect_stdout
+
+        from review_sensei_github import action_run, review_run
+        from review_sensei_github.api_run_requests import ApiRunRequestTransport
+        from review_sensei_github.broker_client import BrokerClient
+        from review_sensei_github.http import GitHubHttp
+        from test_action_run import CommandEntryFixture
+        from test_review_run import fixture_process_environment
+
+        def _invoke_action(
+            fix: CommandEntryFixture,
+            *,
+            convergence_records: tuple[AcceptedOperationRecord, ...] = (),
+            current_state_fingerprint: str | None = None,
+            was_queued_replaced: bool = False,
+        ) -> tuple[int, str]:
+            fix.select_command("@reviewsensei review status")
+            ev_path = fix.root / "g13-event.json"
+            ev_path.write_text(
+                json.dumps(
+                    {
+                        "action": "created",
+                        "issue": {"number": 7, "pull_request": {}},
+                        "comment": dict(fix.source),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = {
+                **fixture_process_environment(),
+                "GITHUB_RUN_ID": str(fix.run_id),
+                "GITHUB_RUN_ATTEMPT": str(fix.attempt),
+                "GITHUB_EVENT_NAME": "issue_comment",
+                "GITHUB_EVENT_PATH": str(ev_path),
+                "REVIEW_SENSEI_WORKFLOW_REF": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+                "REVIEW_SENSEI_WORKFLOW_SHA": "a" * 40,
+                "GITHUB_ACTOR": "alice",
+                "GITHUB_TRIGGERING_ACTOR": "alice",
+                "GITHUB_TOKEN": "synthetic-workflow-read",
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.github.test/token?fixture=1",
+                "REVIEWSENSEI_APP_ID": "0",
+            }
+
+            def _caller_factory(**kw: Any) -> ApiRunRequestTransport:
+                caller = ApiRunRequestTransport(**kw)
+                fix.accounted = caller
+                fix.transports.append(caller)
+                return caller
+
+            out, err = io.StringIO(), io.StringIO()
+            prev = Path.cwd()
+            try:
+                os.chdir(fix.root)
+                with ExitStack() as stack:
+                    for ctx in (
+                        patch.dict(os.environ, env, clear=True),
+                        patch.object(review_run, "physical_opener", fix.external),
+                        patch.object(
+                            review_run,
+                            "ApiRunRequestTransport",
+                            side_effect=_caller_factory,
+                        ),
+                        patch.object(
+                            review_run,
+                            "BrokerClient",
+                            side_effect=lambda **kw: BrokerClient(
+                                broker_url="https://broker.github.test/api/github/token",
+                                **kw,
+                            ),
+                        ),
+                        patch.object(
+                            review_run,
+                            "GitHubHttp",
+                            side_effect=lambda **kw: GitHubHttp(
+                                api_url="https://api.github.test", **kw
+                            ),
+                        ),
+                        redirect_stdout(out),
+                        redirect_stderr(err),
+                    ):
+                        stack.enter_context(ctx)
+                    rc = action_run.run_action(
+                        [
+                            "--policy-commit",
+                            fix.policy,
+                            "--run-directory",
+                            str(fix.root),
+                            "--",
+                            "--repository",
+                            "owner/repo",
+                            "--repository-id",
+                            "123",
+                            "--pull-request",
+                            "7",
+                            "--head-sha",
+                            fix.requested_head,
+                            "--source-comment-id",
+                            str(fix.SOURCE_ID),
+                            "--comment-body",
+                            fix.command_body,
+                            "--actor",
+                            "alice",
+                            "--association",
+                            "OWNER",
+                            "--config",
+                            str(fix.root / ".reviewsensei.yml"),
+                            "--github-session-ledger",
+                            "--allow-write",
+                        ],
+                        purpose="command",
+                        convergence_records=convergence_records,
+                        current_state_fingerprint=current_state_fingerprint,
+                        was_queued_replaced=was_queued_replaced,
+                    )
+                    return rc, out.getvalue()
+            except Exception as exc:
+                return 1, str(exc)
+            finally:
+                os.chdir(prev)
+
+        # 1. Queued-replaced action run halts before business execution
+        with tempfile.TemporaryDirectory() as d1:
+            f1 = CommandEntryFixture(d1)
+            rc1, msg1 = _invoke_action(f1, was_queued_replaced=True)
+            self.assertNotEqual(rc1, 0)
+            self.assertIn("queued command run was replaced before execution", msg1)
+            self.assertEqual(f1.business_writes, 0)
+
+        # 2. Finite no-progress stop rule halts action_run after 2 unchanged attempts
+        with tempfile.TemporaryDirectory() as d2:
+            f2 = CommandEntryFixture(d2)
+            base_sha = f2.live_base
+            head_sha = f2.requested_head
+            np_records = (
+                AcceptedOperationRecord(
+                    operation_id="op-np-1",
+                    operation_kind="command",
+                    target_base_sha=base_sha,
+                    target_head_sha=head_sha,
+                    lifecycle_phase="completed",
+                    state_fingerprint="same-fp",
+                    made_progress=False,
+                ),
+                AcceptedOperationRecord(
+                    operation_id="op-np-2",
+                    operation_kind="command",
+                    target_base_sha=base_sha,
+                    target_head_sha=head_sha,
+                    lifecycle_phase="completed",
+                    state_fingerprint="same-fp",
+                    made_progress=False,
+                ),
+            )
+            rc2, msg2 = _invoke_action(
+                f2,
+                convergence_records=np_records,
+                current_state_fingerprint="same-fp",
+            )
+            self.assertNotEqual(rc2, 0)
+            self.assertIn("halted by finite no-progress stop rule", msg2)
+            self.assertEqual(f2.business_writes, 0)
+
+        # 3. Advancing state fingerprint resets the stop rule and executes cleanly!
+        with tempfile.TemporaryDirectory() as d3:
+            f3 = CommandEntryFixture(d3)
+            np_records_3 = (
+                AcceptedOperationRecord(
+                    operation_id="op-np-1",
+                    operation_kind="command",
+                    target_base_sha=f3.live_base,
+                    target_head_sha=f3.requested_head,
+                    lifecycle_phase="completed",
+                    state_fingerprint="same-fp",
+                    made_progress=False,
+                ),
+                AcceptedOperationRecord(
+                    operation_id="op-np-2",
+                    operation_kind="command",
+                    target_base_sha=f3.live_base,
+                    target_head_sha=f3.requested_head,
+                    lifecycle_phase="completed",
+                    state_fingerprint="same-fp",
+                    made_progress=False,
+                ),
+            )
+            rc3, out3 = _invoke_action(
+                f3,
+                convergence_records=np_records_3,
+                current_state_fingerprint="advanced-fp",
+            )
+            self.assertEqual(rc3, 0, out3)
+
+        # 4. Direct evaluate_action_convergence_progress checks: review_comment source,
+        #    held_uncertain_operation refusal, repository_id=None refusal, and
+        #    WebhookVerifier.verify_event_route(..., reject_merge_group=True)
+        with tempfile.TemporaryDirectory() as d4:
+            f4 = CommandEntryFixture(d4)
+            self.assertEqual(
+                f4.invoke_command("@reviewsensei review status"), 0, f4.error
+            )
+            assert f4.selected is not None
+            rc_dec = action_run.evaluate_action_convergence_progress(
+                f4.selected,
+                purpose="reply",
+                source={
+                    "kind": "review_comment",
+                    "id": 991,
+                    "updated_at": "2026-10-26T00:00:00Z",
+                },
+                comment_body="@reviewsensei explain this",
+            )
+            self.assertEqual(rc_dec.reconciliation_owner, "hosted_reply_executor")
+
+            uncertain_rec = AcceptedOperationRecord(
+                operation_id="op-uncertain",
+                operation_kind="command",
+                target_base_sha=f4.live_base,
+                target_head_sha=f4.requested_head,
+                lifecycle_phase="uncertain_dispatch",
+            )
+            with self.assertRaisesRegex(
+                action_run.ReviewInputError, "uncertain prior dispatch"
+            ):
+                action_run.evaluate_action_convergence_progress(
+                    f4.selected,
+                    purpose="command",
+                    source=f4._source_scope(),
+                    comment_body="@reviewsensei review status",
+                    records=(uncertain_rec,),
+                )
+
+            from dataclasses import replace as dc_replace
+
+            from review_sensei.session import SessionIdentity
+
+            no_repo_run = dc_replace(
+                f4.selected,
+                identity=SessionIdentity("owner/repo", 7, repository_id=None),
+            )
+            with self.assertRaisesRegex(
+                action_run.ReviewInputError, "positive integer repository_id"
+            ):
+                action_run.evaluate_action_convergence_progress(
+                    no_repo_run,
+                    purpose="command",
+                    source=f4._source_scope(),
+                    comment_body="@reviewsensei review status",
+                )
+
+        from review_sensei_github.errors import GitHubMergeGroupUnsupportedError
+
+        verifier_mg = WebhookVerifier(app_id=77, secret_source=_StaticSecret())
+        mg_raw, mg_sig = self._sign({"action": "checks_requested"})
+        with self.assertRaises(GitHubMergeGroupUnsupportedError):
+            verifier_mg.verify_event_route(
+                body=mg_raw,
+                signature=mg_sig,
+                event="merge_group",
+                delivery_id="deliv-mg-reject",
+                reject_merge_group=True,
             )
 
 

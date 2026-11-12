@@ -53,7 +53,10 @@ from review_sensei.writer_containment import (
 from .api_run_history import read_action_result
 from .api_run_owner import ApiRunActionsEvidence
 from .api_run_requests import json_copy
-from .unstarted_action_recovery import authenticate_unstarted_cancellation
+from .unstarted_action_recovery import (
+    NoBusinessDispatchEvidence,
+    authenticate_unstarted_cancellation,
+)
 
 if TYPE_CHECKING:
     from .api_run_requests import ApiRunRequestTransport
@@ -164,20 +167,110 @@ def _validate_source_descriptor(
     }
 
 
-def observe_live_source_revision(
+def build_source_comment_descriptor(
     *,
-    caller: ApiRunRequestTransport,
-    ledger: GitHubIssueCommentSessionLedger,
-    identity: SessionIdentity,
+    kind: str,
+    comment_id: int,
+    updated_at: str,
+    body: str,
+) -> dict[str, Any]:
+    """Build and validate a canonical ``(kind, id, updated_at, body_sha256)`` descriptor."""
+
+    if not isinstance(body, str):
+        raise ReviewInputError("source comment body must be a string")
+    return _validate_source_descriptor(
+        {
+            "kind": kind,
+            "id": comment_id,
+            "updated_at": updated_at,
+            "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        },
+        label="source comment",
+    )
+
+
+def admit_event_comment_source(
+    event_payload: object,
+    *,
+    pull_request: int,
+    source_comment_id: int,
+    purpose: str,
+    event_name: str,
+    expected_body: str | None = None,
+    expected_updated_at: str | None = None,
+) -> dict[str, Any]:
+    """Validate an incoming runner/webhook comment event before action admission."""
+
+    if event_name not in {"issue_comment", "pull_request_review_comment"}:
+        raise ReviewInputError("unsupported source comment event")
+    if not isinstance(event_payload, Mapping):
+        raise ReviewInputError("action source does not match the original event")
+    raw_action = event_payload.get("action")
+    if raw_action is not None:
+        if not isinstance(raw_action, str) or not raw_action.strip():
+            raise ReviewInputError("action source event action is invalid")
+        normalized_action = raw_action.strip()
+        if normalized_action == "deleted":
+            raise ReviewInputError(
+                "pre-admission source check refused (source_deleted/deleted_source): "
+                "deleted comment event cannot admit an action"
+            )
+        if normalized_action == "edited":
+            raise ReviewInputError(
+                "pre-admission source check refused (source_edited/mutated_revision): "
+                "edited comment event cannot admit or replay an action"
+            )
+        if normalized_action != "created":
+            raise ReviewInputError(
+                f"pre-admission source check refused: unsupported comment action {normalized_action!r}"
+            )
+    if isinstance(event_payload.get("changes"), Mapping) and (
+        "body" in event_payload["changes"]
+    ):
+        raise ReviewInputError(
+            "pre-admission source check refused (source_edited/mutated_revision): "
+            "comment mutation payload cannot admit an action"
+        )
+    comment = event_payload.get("comment")
+    pull = event_payload.get("issue") or event_payload.get("pull_request")
+    if (
+        not isinstance(comment, Mapping)
+        or not isinstance(pull, Mapping)
+        or pull.get("number") != pull_request
+        or comment.get("id") != source_comment_id
+        or not isinstance(comment.get("body"), str)
+        or not isinstance(comment.get("updated_at"), str)
+    ):
+        raise ReviewInputError("action source does not match the original event")
+    if purpose == "command" and comment["body"] != expected_body:
+        raise ReviewInputError("command body differs from the original source")
+    if purpose == "reply" and comment["updated_at"] != expected_updated_at:
+        raise ReviewInputError("reply source version differs from the original event")
+    kind = (
+        "review_comment"
+        if event_name == "pull_request_review_comment"
+        else "issue_comment"
+    )
+    return build_source_comment_descriptor(
+        kind=kind,
+        comment_id=comment["id"],
+        updated_at=comment["updated_at"],
+        body=comment["body"],
+    )
+
+
+def compare_source_comment_revisions(
     original_source: Mapping[str, Any],
-    phase: str,
+    observed_payload: Mapping[str, Any] | None = None,
+    *,
+    deleted: bool = False,
+    phase: str = "before_admission",
     event_delivery: Mapping[str, Any] | None = None,
 ) -> SourceRevisionObservation:
-    """Meter one live comment GET and classify mutation and delivery freshness."""
+    """Compare a bound source descriptor against a live or delivered comment revision."""
 
     if phase not in LIFECYCLE_PHASES:
         raise ReviewInputError("source lifecycle phase is unsupported")
-    caller.observe_action_transport_state(ledger, identity)
     bound = _validate_source_descriptor(original_source, label="original source")
     delivered = (
         None
@@ -188,15 +281,7 @@ def observe_live_source_revision(
         delivered["kind"] != bound["kind"] or delivered["id"] != bound["id"]
     ):
         raise ReviewInputError("event delivery comment identity conflicts with source")
-
-    suffix = (
-        "/issues/comments/" if bound["kind"] == "issue_comment" else "/pulls/comments/"
-    ) + str(bound["id"])
-    path = ledger.http.repository_path(identity.repository, suffix)
-    with caller.read_operation("source-comment-lifecycle-fence"):
-        status, payload = ledger.http.request("GET", path, token=ledger.token)
-
-    if status == 404:
+    if deleted:
         return SourceRevisionObservation(
             comment_id=bound["id"],
             kind=bound["kind"],
@@ -206,22 +291,27 @@ def observe_live_source_revision(
             mutation_state="source_deleted",
             delivery_disposition="deleted_source",
         )
-    if status != 200:
-        raise ReviewInputError(
-            f"live source lifecycle observation failed with HTTP {status}"
-        )
     if (
-        not isinstance(payload, dict)
-        or type(payload.get("id")) is not int
-        or payload["id"] != bound["id"]
-        or not isinstance(payload.get("updated_at"), str)
-        or _ISO_STAMP_RE.fullmatch(payload["updated_at"]) is None
-        or not isinstance(payload.get("body"), str)
+        not isinstance(observed_payload, Mapping)
+        or type(observed_payload.get("id")) is not int
+        or observed_payload["id"] != bound["id"]
+        or not isinstance(observed_payload.get("updated_at"), str)
+        or _ISO_STAMP_RE.fullmatch(observed_payload["updated_at"]) is None
     ):
         raise ReviewInputError("live source lifecycle payload is malformed")
 
-    observed_updated_at = payload["updated_at"]
-    observed_body_sha256 = hashlib.sha256(payload["body"].encode("utf-8")).hexdigest()
+    observed_updated_at = observed_payload["updated_at"]
+    if isinstance(observed_payload.get("body"), str):
+        observed_body_sha256 = hashlib.sha256(
+            observed_payload["body"].encode("utf-8")
+        ).hexdigest()
+    elif (
+        isinstance(observed_payload.get("body_sha256"), str)
+        and _SHA256_RE.fullmatch(observed_payload["body_sha256"]) is not None
+    ):
+        observed_body_sha256 = observed_payload["body_sha256"]
+    else:
+        raise ReviewInputError("live source lifecycle payload is malformed")
 
     if (
         observed_updated_at == bound["updated_at"]
@@ -275,6 +365,56 @@ def observe_live_source_revision(
         observed_body_sha256=observed_body_sha256,
         mutation_state=mutation_state,
         delivery_disposition=disposition,
+    )
+
+
+def observe_live_source_revision(
+    *,
+    caller: ApiRunRequestTransport,
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    original_source: Mapping[str, Any],
+    phase: str,
+    event_delivery: Mapping[str, Any] | None = None,
+) -> SourceRevisionObservation:
+    """Meter one live comment GET and classify mutation and delivery freshness."""
+
+    if phase not in LIFECYCLE_PHASES:
+        raise ReviewInputError("source lifecycle phase is unsupported")
+    caller.observe_action_transport_state(ledger, identity)
+    bound = _validate_source_descriptor(original_source, label="original source")
+    if event_delivery is not None:
+        delivered = _validate_source_descriptor(event_delivery, label="event delivery")
+        if delivered["kind"] != bound["kind"] or delivered["id"] != bound["id"]:
+            raise ReviewInputError(
+                "event delivery comment identity conflicts with source"
+            )
+
+    suffix = (
+        "/issues/comments/" if bound["kind"] == "issue_comment" else "/pulls/comments/"
+    ) + str(bound["id"])
+    path = ledger.http.repository_path(identity.repository, suffix)
+    with caller.read_operation("source-comment-lifecycle-fence"):
+        status, payload = ledger.http.request("GET", path, token=ledger.token)
+
+    if status == 404:
+        return compare_source_comment_revisions(
+            bound,
+            deleted=True,
+            phase=phase,
+            event_delivery=event_delivery,
+        )
+    if status != 200:
+        raise ReviewInputError(
+            f"live source lifecycle observation failed with HTTP {status}"
+        )
+    if not isinstance(payload, dict) or not isinstance(payload.get("body"), str):
+        raise ReviewInputError("live source lifecycle payload is malformed")
+    return compare_source_comment_revisions(
+        bound,
+        payload,
+        phase=phase,
+        event_delivery=event_delivery,
     )
 
 
@@ -546,7 +686,8 @@ def classify_source_comment_lifecycle(
             prior_charges_preserved=True,
             guidance=(
                 f"action has started or uncertain caller work ({mut}/{disp}); G32 "
-                "unstarted cancellation is forbidden; hold fail-closed with prior "
+                "unstarted cancellation is forbidden; pending work requires exact result recovery; "
+                "hold fail-closed with prior "
                 "charges preserved until authentic effect readback or terminal closure"
             ),
         )
@@ -597,6 +738,8 @@ def execute_source_lifecycle_route(
     actions_evidence: ApiRunActionsEvidence | None = None,
     canonical_coordinator: ContainedForwardingCoordinator | None = None,
     canonical_token: IssuedWriterToken | None = None,
+    no_business_dispatch_evidence: NoBusinessDispatchEvidence | None = None,
+    require_positive_dispatch_proof: bool = False,
     rollover_configuration: FrozenApiConfiguration | None = None,
     rollover_owner: ApiExecutionOwner | None = None,
 ) -> tuple[SourceLifecycleClassification, SessionRecord | ApiRunAccounting | None]:
@@ -647,6 +790,8 @@ def execute_source_lifecycle_route(
                 actions_evidence=actions_evidence,
                 canonical_coordinator=canonical_coordinator,
                 canonical_token=canonical_token,
+                no_business_dispatch_evidence=no_business_dispatch_evidence,
+                require_positive_dispatch_proof=require_positive_dispatch_proof,
                 mode="same_run",
             )
             _require_still_unstarted_before_g32(
@@ -682,6 +827,8 @@ def execute_source_lifecycle_route(
                     actions_evidence=actions_evidence,
                     canonical_coordinator=canonical_coordinator,
                     canonical_token=canonical_token,
+                    no_business_dispatch_evidence=no_business_dispatch_evidence,
+                    require_positive_dispatch_proof=require_positive_dispatch_proof,
                     mode="cross_run",
                 )
 

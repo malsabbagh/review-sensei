@@ -2130,6 +2130,208 @@ def evaluate_github_event(
     )
 
 
+@dataclass(frozen=True)
+class InstalledCallerSubscriptionRoute:
+    """Static route descriptor mapping an installed caller trigger to runtime entry."""
+
+    route_id: str
+    event_name: str
+    subscribed_actions: tuple[str, ...]
+    operation: str
+    trigger_resolver_route: str
+    reusable_workflow_entrypoint: str
+    reconciliation_owner: str
+    performs_native_effects: bool
+    requires_model_inference: bool
+
+
+INSTALLED_CALLER_SUBSCRIPTION_ROUTES: tuple[InstalledCallerSubscriptionRoute, ...] = (
+    InstalledCallerSubscriptionRoute(
+        route_id="caller.pull_request.review",
+        event_name="pull_request",
+        subscribed_actions=("opened", "reopened", "synchronize", "ready_for_review"),
+        operation="review",
+        trigger_resolver_route="pull_request_json_to_trigger_py",
+        reusable_workflow_entrypoint="review_run.run_review",
+        reconciliation_owner="hosted_review_admission",
+        performs_native_effects=True,
+        requires_model_inference=True,
+    ),
+    InstalledCallerSubscriptionRoute(
+        route_id="caller.workflow_dispatch.review",
+        event_name="workflow_dispatch",
+        subscribed_actions=("manual",),
+        operation="review",
+        trigger_resolver_route="workflow_dispatch_routing_only",
+        reusable_workflow_entrypoint="review_run.run_review",
+        reconciliation_owner="hosted_review_admission",
+        performs_native_effects=True,
+        requires_model_inference=True,
+    ),
+    InstalledCallerSubscriptionRoute(
+        route_id="caller.issue_comment.review",
+        event_name="issue_comment",
+        subscribed_actions=("created",),
+        operation="review",
+        trigger_resolver_route="issue_comment_fast_review_intent",
+        reusable_workflow_entrypoint="review_run.run_review",
+        reconciliation_owner="hosted_review_admission",
+        performs_native_effects=True,
+        requires_model_inference=True,
+    ),
+    InstalledCallerSubscriptionRoute(
+        route_id="caller.issue_comment.command",
+        event_name="issue_comment",
+        subscribed_actions=("created",),
+        operation="command",
+        trigger_resolver_route="trigger_py_resolver",
+        reusable_workflow_entrypoint="action_run.run_action(purpose='command')",
+        reconciliation_owner="hosted_command_executor",
+        performs_native_effects=True,
+        requires_model_inference=False,
+    ),
+    InstalledCallerSubscriptionRoute(
+        route_id="caller.issue_comment.reply",
+        event_name="issue_comment",
+        subscribed_actions=("created",),
+        operation="reply",
+        trigger_resolver_route="trigger_py_resolver",
+        reusable_workflow_entrypoint="action_run.run_action(purpose='reply')",
+        reconciliation_owner="hosted_reply_executor",
+        performs_native_effects=True,
+        requires_model_inference=True,
+    ),
+    InstalledCallerSubscriptionRoute(
+        route_id="caller.pull_request_review_comment.reply",
+        event_name="pull_request_review_comment",
+        subscribed_actions=("created",),
+        operation="reply",
+        trigger_resolver_route="trigger_py_resolver",
+        reusable_workflow_entrypoint="action_run.run_action(purpose='reply')",
+        reconciliation_owner="hosted_reply_executor",
+        performs_native_effects=True,
+        requires_model_inference=True,
+    ),
+)
+
+_INSTALLED_ROUTE_BY_KEY: Mapping[tuple[str, str], InstalledCallerSubscriptionRoute] = {
+    (route.event_name, route.operation): route
+    for route in INSTALLED_CALLER_SUBSCRIPTION_ROUTES
+}
+
+
+@dataclass(frozen=True)
+class InstalledCallerSubscriptionMapping:
+    """End-to-end mapping from installed caller YAML + event to runtime admission."""
+
+    subscription_report: CallerSubscriptionReport
+    routing: EventRoutingDecision
+    caller_job_admitted: bool
+    matched_route: InstalledCallerSubscriptionRoute | None
+    trigger_resolver_route: str
+    reusable_workflow_entrypoint: str | None
+    reconciliation_owner: str
+    performs_native_effects: bool
+    requires_model_inference: bool
+
+
+def map_installed_caller_subscription(
+    workflow_text: str,
+    *,
+    event_name: str,
+    payload: Mapping[str, Any] | bytes | bytearray | str | object,
+    delivery_id: str | None = None,
+    live_pull_request: Mapping[str, Any] | None = None,
+    retained_state: RetainedSnapshotState | None = None,
+) -> InstalledCallerSubscriptionMapping:
+    """Map an event against an installed caller workflow YAML to its admission route."""
+
+    report = inspect_caller_subscription_contract(workflow_text)
+    if not report.matches_approved_boundary:
+        raise ValueError(
+            f"caller workflow violates approved subscription boundary: {report.unapproved_triggers!r}"
+        )
+    routing = evaluate_github_event(
+        event_name,
+        payload,
+        delivery_id=delivery_id,
+        live_pull_request=live_pull_request,
+        retained_state=retained_state,
+    )
+    if not routing.caller_subscribed:
+        return InstalledCallerSubscriptionMapping(
+            subscription_report=report,
+            routing=routing,
+            caller_job_admitted=False,
+            matched_route=None,
+            trigger_resolver_route="skipped_unsubscribed_event",
+            reusable_workflow_entrypoint=None,
+            reconciliation_owner="caller_workflow_preflight",
+            performs_native_effects=False,
+            requires_model_inference=False,
+        )
+
+    parsed = _coerce_payload_mapping(payload) or {}
+    caller_job_admitted = True
+    if routing.event_name in {"issue_comment", "pull_request_review_comment"}:
+        comment = _as_mapping(parsed.get("comment"))
+        raw_body = _opt_str(comment.get("body")) or ""
+        has_raw_handle = "@reviewsensei" in raw_body or "@sensei" in raw_body
+        issue = _as_mapping(parsed.get("issue"))
+        is_pr_issue = (
+            True
+            if routing.event_name == "pull_request_review_comment"
+            else bool(issue.get("pull_request"))
+        )
+        caller_job_admitted = (
+            routing.action == "created"
+            and is_pr_issue
+            and has_raw_handle
+            and routing.source_identity.actor_type != "Bot"
+            and routing.source_identity.actor_type is not None
+            and routing.source_identity.author_association
+            in ALLOWED_COMMENT_ASSOCIATIONS
+        )
+
+    if not caller_job_admitted or not routing.admitted or routing.operation is None:
+        return InstalledCallerSubscriptionMapping(
+            subscription_report=report,
+            routing=routing,
+            caller_job_admitted=caller_job_admitted,
+            matched_route=None,
+            trigger_resolver_route=(
+                "skipped_at_caller_guard"
+                if not caller_job_admitted
+                else "rejected_or_reused_at_runtime_admission"
+            ),
+            reusable_workflow_entrypoint=None,
+            reconciliation_owner=(
+                "caller_workflow_preflight"
+                if not caller_job_admitted
+                else (
+                    "hosted_review_admission"
+                    if routing.reused_retained_snapshot
+                    else "caller_workflow_preflight"
+                )
+            ),
+            performs_native_effects=False,
+            requires_model_inference=False,
+        )
+
+    matched = _INSTALLED_ROUTE_BY_KEY[(routing.event_name, routing.operation)]
+    return InstalledCallerSubscriptionMapping(
+        subscription_report=report,
+        routing=routing,
+        caller_job_admitted=True,
+        matched_route=matched,
+        trigger_resolver_route=matched.trigger_resolver_route,
+        reusable_workflow_entrypoint=matched.reusable_workflow_entrypoint,
+        reconciliation_owner=matched.reconciliation_owner,
+        performs_native_effects=matched.performs_native_effects,
+        requires_model_inference=routing.requires_model_inference,
+    )
+
+
 OPERATION_LIFECYCLE_PHASES: frozenset[str] = frozenset(
     {
         "intent_accepted_unstarted",
@@ -2140,6 +2342,18 @@ OPERATION_LIFECYCLE_PHASES: frozenset[str] = frozenset(
         "queued_replaced_before_admission",
     }
 )
+
+RECONCILIATION_OWNERS: frozenset[str] = frozenset(
+    {
+        "caller_workflow_preflight",
+        "hosted_review_admission",
+        "hosted_command_executor",
+        "hosted_reply_executor",
+        "operator_manual_recovery",
+    }
+)
+
+MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS: int = 2
 
 
 @dataclass(frozen=True)
@@ -2198,6 +2412,8 @@ class AcceptedOperationRecord:
     source_dedup_key: str | None = None
     command_text: str | None = None
     open_finding_ids: tuple[str, ...] = ()
+    state_fingerprint: str | None = None
+    made_progress: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.operation_id, str) or not self.operation_id.strip():
@@ -2214,6 +2430,13 @@ class AcceptedOperationRecord:
             self.target_head_sha
         ):
             raise ValueError("target_head_sha must be a 40-hex SHA")
+        if type(self.made_progress) is not bool:
+            raise ValueError("made_progress must be an exact boolean")
+        if self.state_fingerprint is not None and (
+            not isinstance(self.state_fingerprint, str)
+            or not self.state_fingerprint.strip()
+        ):
+            raise ValueError("state_fingerprint must be a non-empty string when set")
 
 
 @dataclass(frozen=True)
@@ -2358,6 +2581,93 @@ class ConvergenceDecision:
     reused_operation_id: str | None
     preserved_open_finding_ids: tuple[str, ...]
     recovery_command: str | None
+    reconciliation_owner: str = "hosted_review_admission"
+    stopped_no_progress: bool = False
+    unchanged_attempts: int = 0
+
+    def __post_init__(self) -> None:
+        if self.reconciliation_owner not in RECONCILIATION_OWNERS:
+            raise ValueError(
+                f"unsupported reconciliation_owner: {self.reconciliation_owner!r}"
+            )
+        if type(self.stopped_no_progress) is not bool:
+            raise ValueError("stopped_no_progress must be an exact boolean")
+        if (
+            isinstance(self.unchanged_attempts, bool)
+            or not isinstance(self.unchanged_attempts, int)
+            or self.unchanged_attempts < 0
+        ):
+            raise ValueError("unchanged_attempts must be a non-negative integer")
+
+
+def resolve_reconciliation_owner(
+    routing: EventRoutingDecision,
+    *,
+    status: str,
+) -> str:
+    """Map an evaluated routing + convergence verdict to its bounded owner."""
+
+    if status in {
+        "stopped_no_progress",
+        "held_queued_replaced",
+        "held_uncertain_operation",
+        "held_unreviewed_live_head",
+        "held_intent_superseded",
+    }:
+        return "operator_manual_recovery"
+    if status == "not_admitted":
+        return "caller_workflow_preflight"
+    if routing.operation == "command":
+        return "hosted_command_executor"
+    if routing.operation == "reply":
+        return "hosted_reply_executor"
+    return "hosted_review_admission"
+
+
+def _count_trailing_no_progress_attempts(
+    records: Sequence[AcceptedOperationRecord],
+    *,
+    live_target: LivePullRequestTarget,
+    current_state_fingerprint: str | None = None,
+) -> tuple[int, AcceptedOperationRecord | None]:
+    """Count consecutive trailing unchanged non-progressing attempts on ``live_target``.
+
+    Progress resets immediately whenever ``(base_sha, head_sha)``,
+    ``state_fingerprint``, or ``open_finding_ids`` advances, or when an
+    operation records ``made_progress=True``.
+    """
+
+    count = 0
+    anchor_tuple: tuple[str, str, str | None, tuple[str, ...]] | None = None
+    latest_record: AcceptedOperationRecord | None = None
+    for record in reversed(records):
+        if (
+            record.target_base_sha != live_target.base_sha
+            or record.target_head_sha != live_target.head_sha
+        ):
+            break
+        if (
+            current_state_fingerprint is not None
+            and record.state_fingerprint != current_state_fingerprint
+        ):
+            break
+        if record.made_progress:
+            break
+        current_tuple = (
+            record.target_base_sha,
+            record.target_head_sha,
+            record.state_fingerprint,
+            record.open_finding_ids,
+        )
+        if anchor_tuple is None:
+            anchor_tuple = current_tuple
+            latest_record = record
+            count = 1
+        elif current_tuple == anchor_tuple:
+            count += 1
+        else:
+            break
+    return count, latest_record
 
 
 def _collect_open_findings(
@@ -2393,6 +2703,8 @@ def reconcile_event_convergence(
     records: Sequence[AcceptedOperationRecord] = (),
     delivery_id: str | None = None,
     was_queued_replaced: bool = False,
+    current_state_fingerprint: str | None = None,
+    max_no_progress_attempts: int = MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS,
 ) -> ConvergenceDecision:
     """Converge an event or manual recovery action onto ``live_target``.
 
@@ -2401,10 +2713,32 @@ def reconcile_event_convergence(
     - Inspects existing accepted intents, retained results, and uncertain
       dispatches BEFORE scheduling any new model inference.
     - Reuses compatible retained work with zero duplicate inference.
+    - Enforces current-state reconciliation ownership and a finite stop rule on
+      repeated unchanged no-progress attempts without launching background
+      reconcilers or paid retries.
     - Surfaces explicit held/superseded diagnostics and bounded recovery commands
       when queued runs were replaced in GitHub Actions concurrency.
     """
 
+    if (
+        isinstance(max_no_progress_attempts, bool)
+        or not isinstance(max_no_progress_attempts, int)
+        or max_no_progress_attempts < 1
+    ):
+        raise ValueError("max_no_progress_attempts must be a positive integer")
+    if current_state_fingerprint is not None and (
+        not isinstance(current_state_fingerprint, str)
+        or not current_state_fingerprint.strip()
+    ):
+        raise ValueError(
+            "current_state_fingerprint must be a non-empty string when set"
+        )
+
+    unchanged_attempts, no_progress_record = _count_trailing_no_progress_attempts(
+        records,
+        live_target=live_target,
+        current_state_fingerprint=current_state_fingerprint,
+    )
     preserved = _collect_open_findings(records)
     live_mapping = live_target.to_pull_mapping()
 
@@ -2417,13 +2751,13 @@ def reconcile_event_convergence(
         if record.source_dedup_key and record.lifecycle_phase == "completed":
             accepted_keys.add(record.source_dedup_key)
         if record.lifecycle_phase == "completed":
-            latest_completed = record
-            if (
-                record.operation_kind == "review"
-                and record.target_base_sha == live_target.base_sha
-                and record.target_head_sha == live_target.head_sha
-            ):
-                completed_for_live = record
+            if record.operation_kind == "review":
+                latest_completed = record
+                if (
+                    record.target_base_sha == live_target.base_sha
+                    and record.target_head_sha == live_target.head_sha
+                ):
+                    completed_for_live = record
         elif (
             record.lifecycle_phase == "result_retained_publication_pending"
             and record.operation_kind == "review"
@@ -2494,6 +2828,10 @@ def reconcile_event_convergence(
             reused_operation_id=None,
             preserved_open_finding_ids=preserved,
             recovery_command=recovery,
+            reconciliation_owner=resolve_reconciliation_owner(
+                routing, status="held_queued_replaced"
+            ),
+            unchanged_attempts=unchanged_attempts,
         )
 
     for record in records:
@@ -2509,6 +2847,10 @@ def reconcile_event_convergence(
                 reused_operation_id=record.operation_id,
                 preserved_open_finding_ids=preserved,
                 recovery_command="@reviewsensei review status",
+                reconciliation_owner=resolve_reconciliation_owner(
+                    routing, status="held_uncertain_operation"
+                ),
+                unchanged_attempts=unchanged_attempts,
             )
 
     if event_name.strip() == "pull_request" and parsed is not None:
@@ -2543,74 +2885,11 @@ def reconcile_event_convergence(
                 recovery_command=(
                     None if completed_for_live is not None else "workflow_dispatch"
                 ),
+                reconciliation_owner=resolve_reconciliation_owner(
+                    routing, status="ignored_stale_event"
+                ),
+                unchanged_attempts=unchanged_attempts,
             )
-
-    incoming_key = routing.source_identity.source_dedup_key
-    if incoming_key is not None:
-        for record in records:
-            if record.source_dedup_key != incoming_key:
-                continue
-            if record.lifecycle_phase == "completed":
-                return ConvergenceDecision(
-                    status="converged_reused",
-                    outcome_code="duplicate_delivery_reused",
-                    target_base_sha=live_target.base_sha,
-                    target_head_sha=live_target.head_sha,
-                    routing=routing,
-                    schedules_new_inference=False,
-                    schedules_native_reconciliation=False,
-                    reused_operation_id=record.operation_id,
-                    preserved_open_finding_ids=preserved,
-                    recovery_command=None,
-                )
-            if record.lifecycle_phase == "result_retained_publication_pending":
-                return ConvergenceDecision(
-                    status="reconcile_retained_publication",
-                    outcome_code="retained_result_reused_without_inference",
-                    target_base_sha=live_target.base_sha,
-                    target_head_sha=live_target.head_sha,
-                    routing=routing,
-                    schedules_new_inference=False,
-                    schedules_native_reconciliation=True,
-                    reused_operation_id=record.operation_id,
-                    preserved_open_finding_ids=preserved,
-                    recovery_command=None,
-                )
-            if record.lifecycle_phase == "intent_accepted_unstarted":
-                if (
-                    record.target_base_sha == live_target.base_sha
-                    and record.target_head_sha == live_target.head_sha
-                ):
-                    needs_inf = record.operation_kind in {"review", "reply"}
-                    return ConvergenceDecision(
-                        status="resume_accepted_intent",
-                        outcome_code="unstarted_accepted_intent_resumed",
-                        target_base_sha=live_target.base_sha,
-                        target_head_sha=live_target.head_sha,
-                        routing=routing,
-                        schedules_new_inference=needs_inf,
-                        schedules_native_reconciliation=not needs_inf,
-                        reused_operation_id=record.operation_id,
-                        preserved_open_finding_ids=preserved,
-                        recovery_command=None,
-                    )
-                return ConvergenceDecision(
-                    status="held_intent_superseded",
-                    outcome_code="accepted_intent_head_drifted",
-                    target_base_sha=live_target.base_sha,
-                    target_head_sha=live_target.head_sha,
-                    routing=routing,
-                    schedules_new_inference=False,
-                    schedules_native_reconciliation=False,
-                    reused_operation_id=record.operation_id,
-                    preserved_open_finding_ids=preserved,
-                    recovery_command=(
-                        record.command_text.strip()
-                        if isinstance(record.command_text, str)
-                        and record.command_text.strip()
-                        else "workflow_dispatch"
-                    ),
-                )
 
     for record in records:
         if (
@@ -2629,7 +2908,119 @@ def reconcile_event_convergence(
                 reused_operation_id=record.operation_id,
                 preserved_open_finding_ids=preserved,
                 recovery_command="@reviewsensei review status",
+                reconciliation_owner=resolve_reconciliation_owner(
+                    routing, status="held_active_writer"
+                ),
+                unchanged_attempts=unchanged_attempts,
             )
+
+    if unchanged_attempts >= max_no_progress_attempts and (
+        routing.admitted and not routing.reused_retained_snapshot
+    ):
+        return ConvergenceDecision(
+            status="stopped_no_progress",
+            outcome_code="finite_no_progress_stop",
+            target_base_sha=live_target.base_sha,
+            target_head_sha=live_target.head_sha,
+            routing=routing,
+            schedules_new_inference=False,
+            schedules_native_reconciliation=False,
+            reused_operation_id=(
+                no_progress_record.operation_id
+                if no_progress_record is not None
+                else None
+            ),
+            preserved_open_finding_ids=preserved,
+            recovery_command=None,
+            reconciliation_owner=resolve_reconciliation_owner(
+                routing, status="stopped_no_progress"
+            ),
+            stopped_no_progress=True,
+            unchanged_attempts=unchanged_attempts,
+        )
+
+    incoming_key = routing.source_identity.source_dedup_key
+    if incoming_key is not None:
+        for record in records:
+            if record.source_dedup_key != incoming_key:
+                continue
+            if record.lifecycle_phase == "completed":
+                return ConvergenceDecision(
+                    status="converged_reused",
+                    outcome_code="duplicate_delivery_reused",
+                    target_base_sha=live_target.base_sha,
+                    target_head_sha=live_target.head_sha,
+                    routing=routing,
+                    schedules_new_inference=False,
+                    schedules_native_reconciliation=False,
+                    reused_operation_id=record.operation_id,
+                    preserved_open_finding_ids=preserved,
+                    recovery_command=None,
+                    reconciliation_owner=resolve_reconciliation_owner(
+                        routing, status="converged_reused"
+                    ),
+                    unchanged_attempts=unchanged_attempts,
+                )
+            if record.lifecycle_phase == "result_retained_publication_pending":
+                return ConvergenceDecision(
+                    status="reconcile_retained_publication",
+                    outcome_code="retained_result_reused_without_inference",
+                    target_base_sha=live_target.base_sha,
+                    target_head_sha=live_target.head_sha,
+                    routing=routing,
+                    schedules_new_inference=False,
+                    schedules_native_reconciliation=True,
+                    reused_operation_id=record.operation_id,
+                    preserved_open_finding_ids=preserved,
+                    recovery_command=None,
+                    reconciliation_owner=resolve_reconciliation_owner(
+                        routing, status="reconcile_retained_publication"
+                    ),
+                    unchanged_attempts=unchanged_attempts,
+                )
+            if record.lifecycle_phase == "intent_accepted_unstarted":
+                if (
+                    record.target_base_sha == live_target.base_sha
+                    and record.target_head_sha == live_target.head_sha
+                ):
+                    needs_inf = record.operation_kind in {"review", "reply"}
+                    return ConvergenceDecision(
+                        status="resume_accepted_intent",
+                        outcome_code="unstarted_accepted_intent_resumed",
+                        target_base_sha=live_target.base_sha,
+                        target_head_sha=live_target.head_sha,
+                        routing=routing,
+                        schedules_new_inference=needs_inf,
+                        schedules_native_reconciliation=not needs_inf,
+                        reused_operation_id=record.operation_id,
+                        preserved_open_finding_ids=preserved,
+                        recovery_command=None,
+                        reconciliation_owner=resolve_reconciliation_owner(
+                            routing, status="resume_accepted_intent"
+                        ),
+                        unchanged_attempts=unchanged_attempts,
+                    )
+                return ConvergenceDecision(
+                    status="held_intent_superseded",
+                    outcome_code="accepted_intent_head_drifted",
+                    target_base_sha=live_target.base_sha,
+                    target_head_sha=live_target.head_sha,
+                    routing=routing,
+                    schedules_new_inference=False,
+                    schedules_native_reconciliation=False,
+                    reused_operation_id=record.operation_id,
+                    preserved_open_finding_ids=preserved,
+                    recovery_command=(
+                        record.command_text.strip()
+                        if isinstance(record.command_text, str)
+                        and record.command_text.strip()
+                        else "workflow_dispatch"
+                    ),
+                    reconciliation_owner=resolve_reconciliation_owner(
+                        routing, status="held_intent_superseded"
+                    ),
+                    unchanged_attempts=unchanged_attempts,
+                )
 
     if retained_pending_for_live is not None and (
         routing.admitted or routing.reused_retained_snapshot
@@ -2645,6 +3036,10 @@ def reconcile_event_convergence(
             reused_operation_id=retained_pending_for_live.operation_id,
             preserved_open_finding_ids=preserved,
             recovery_command=None,
+            reconciliation_owner=resolve_reconciliation_owner(
+                routing, status="reconcile_retained_publication"
+            ),
+            unchanged_attempts=unchanged_attempts,
         )
 
     if routing.reused_retained_snapshot:
@@ -2663,6 +3058,10 @@ def reconcile_event_convergence(
             ),
             preserved_open_finding_ids=preserved,
             recovery_command=routing.recovery_command,
+            reconciliation_owner=resolve_reconciliation_owner(
+                routing, status="converged_reused"
+            ),
+            unchanged_attempts=unchanged_attempts,
         )
 
     if routing.admitted and routing.operation == "command":
@@ -2680,6 +3079,10 @@ def reconcile_event_convergence(
                 reused_operation_id=None,
                 preserved_open_finding_ids=preserved,
                 recovery_command="workflow_dispatch",
+                reconciliation_owner=resolve_reconciliation_owner(
+                    routing, status="held_unreviewed_live_head"
+                ),
+                unchanged_attempts=unchanged_attempts,
             )
         return ConvergenceDecision(
             status="schedule_command_reconciliation",
@@ -2696,6 +3099,10 @@ def reconcile_event_convergence(
             ),
             preserved_open_finding_ids=preserved,
             recovery_command=None,
+            reconciliation_owner=resolve_reconciliation_owner(
+                routing, status="schedule_command_reconciliation"
+            ),
+            unchanged_attempts=unchanged_attempts,
         )
 
     if routing.admitted and routing.operation == "review":
@@ -2718,6 +3125,10 @@ def reconcile_event_convergence(
             reused_operation_id=None,
             preserved_open_finding_ids=preserved,
             recovery_command=None,
+            reconciliation_owner=resolve_reconciliation_owner(
+                routing, status="schedule_current_target_review"
+            ),
+            unchanged_attempts=unchanged_attempts,
         )
 
     if routing.admitted and routing.operation == "reply":
@@ -2732,6 +3143,10 @@ def reconcile_event_convergence(
             reused_operation_id=None,
             preserved_open_finding_ids=preserved,
             recovery_command=None,
+            reconciliation_owner=resolve_reconciliation_owner(
+                routing, status="schedule_reply"
+            ),
+            unchanged_attempts=unchanged_attempts,
         )
 
     return ConvergenceDecision(
@@ -2745,6 +3160,10 @@ def reconcile_event_convergence(
         reused_operation_id=None,
         preserved_open_finding_ids=preserved,
         recovery_command=routing.recovery_command,
+        reconciliation_owner=resolve_reconciliation_owner(
+            routing, status="not_admitted"
+        ),
+        unchanged_attempts=unchanged_attempts,
     )
 
 
@@ -3503,8 +3922,12 @@ __all__ = [
     "EventDecisionRule",
     "EventRoutingDecision",
     "HumanReviewIndependenceOutcome",
+    "INSTALLED_CALLER_SUBSCRIPTION_ROUTES",
+    "InstalledCallerSubscriptionMapping",
+    "InstalledCallerSubscriptionRoute",
     "LivePullRequestTarget",
     "MAX_EVENT_PAYLOAD_BYTES",
+    "MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS",
     "MERGE_QUEUE_REF_PREFIXES",
     "ManualThreadConvergenceOutcome",
     "ManualThreadFindingState",
@@ -3512,6 +3935,7 @@ __all__ = [
     "MergeQueueEvictionOutcome",
     "OPERATION_LIFECYCLE_PHASES",
     "QueuedRunCandidate",
+    "RECONCILIATION_OWNERS",
     "RECOVERY_COMMANDS_UNBLOCKED_BY_HUMAN_REVIEW",
     "REQUIRED_EVENT_FAMILIES",
     "ReplacedQueueNotice",
@@ -3524,10 +3948,12 @@ __all__ = [
     "evaluate_human_pr_review_independence",
     "inspect_caller_subscription_contract",
     "is_merge_queue_ref",
+    "map_installed_caller_subscription",
     "reconcile_event_convergence",
     "reconcile_manual_thread_convergence",
     "reconcile_merge_queue_eviction",
     "reject_merge_group_event",
+    "resolve_reconciliation_owner",
     "simulate_actions_concurrency_queue",
     "verify_snapshot_certification",
 ]

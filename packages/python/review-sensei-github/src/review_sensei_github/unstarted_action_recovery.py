@@ -22,10 +22,11 @@ Every transition requires:
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import weakref
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from review_sensei.api_work import (
@@ -83,6 +84,86 @@ CROSS_RUN_AUTHORITY_MODES: Final[frozenset[str]] = frozenset(
 )
 
 _ISSUED_WITNESSES: weakref.WeakSet[UnstartedCancellationWitness] = weakref.WeakSet()
+# Process-local capture provenance, never a persisted/cross-process recovery grant.
+_ISSUED_DISPATCH_EVIDENCE: dict[int, tuple[Any, ...]] = {}
+
+
+@dataclass(frozen=True)
+class NoBusinessDispatchEvidence:
+    """Explicit positive proof that a stranded unstarted owner dispatched zero business effects.
+
+    Comment deletion, ``execution_started == False``, null result/outcome markers,
+    and cancelled/completed Actions jobs are necessary preconditions but are NEVER
+    sufficient settlement authority by themselves on ordinary caller routes.
+    """
+
+    identity: SessionIdentity
+    target_run_id: int
+    target_owner: ApiExecutionOwner
+    intent_sha256: str
+    observed_requests: tuple[Mapping[str, Any], ...]
+    provider_dispatches: int = 0
+    accepted_operation_present: bool = False
+    native_effects_checked: bool = True
+
+    @classmethod
+    def from_stranded_caller(
+        cls,
+        caller: ApiRunRequestTransport,
+        *,
+        identity: SessionIdentity,
+        record: SessionRecord,
+        provider_dispatches: int = 0,
+    ) -> NoBusinessDispatchEvidence:
+        """Capture non-dispatch evidence from an authenticated stranded caller transport."""
+
+        _, intent, intent_sha256 = _validate_unstarted_record(
+            identity=identity,
+            record=record,
+            expected_intent=None,
+        )
+        if caller.run.run_id != int(intent["run_id"]):
+            raise ReviewInputError(
+                "stranded caller transport run_id conflicts with action intent"
+            )
+        if (
+            caller._root != record.record_sha256
+            or caller.accounting.identity.repository_id != identity.repository_id
+            or caller.accounting.action is None
+            or caller.accounting.action["intent"] != intent
+        ):
+            raise ReviewInputError(
+                "stranded transport source/root/owner binding conflicts"
+            )
+        accepted_present = bool(
+            caller._operation_entry_started
+            or caller._provider_effect_unresolved
+            or caller._action_effect_boundary is not None
+            or caller._action_result_proof is not None
+        )
+        captured = cls(
+            identity=identity,
+            target_run_id=caller.run.run_id,
+            target_owner=ApiExecutionOwner(**intent["owner"]),
+            intent_sha256=intent_sha256,
+            observed_requests=tuple(
+                cast(Mapping[str, Any], json_copy(obs)) for obs in caller.observations
+            ),
+            provider_dispatches=provider_dispatches,
+            accepted_operation_present=accepted_present,
+            native_effects_checked=True,
+        )
+        key = id(captured)
+        _ISSUED_DISPATCH_EVIDENCE[key] = (
+            weakref.ref(
+                captured, lambda _ref: _ISSUED_DISPATCH_EVIDENCE.pop(key, None)
+            ),
+            _sha256_json(asdict(captured)),
+            dict(caller._confirmed_control_writes),
+            caller,
+            frozenset(caller._physical_mutation_ids),
+        )
+        return captured
 
 
 @dataclass(frozen=True, eq=False)
@@ -299,11 +380,15 @@ def _authenticate_authority_proof(
             canonical_coordinator, ContainedForwardingCoordinator
         ) or not isinstance(canonical_token, IssuedWriterToken):
             raise ReviewInputError("canonical writer fence proof is incomplete")
+        if type(identity.repository_id) is not int or identity.repository_id <= 0:
+            raise ReviewInputError(
+                "canonical writer fence requires a positive integer repository_id"
+            )
         try:
             access = canonical_coordinator.authenticate(canonical_token)
             active_epoch = canonical_coordinator.active_epoch(
                 base_store_id=canonical_token.base_store_id,
-                repository_id=identity.repository_id or 0,
+                repository_id=identity.repository_id,
                 pull_request=identity.pull_request,
             )
             snapshot = canonical_coordinator.candidate.snapshot(canonical_token)
@@ -341,6 +426,288 @@ def _authenticate_authority_proof(
     return selected_mode, _sha256_json(proof_payload)
 
 
+def _owned_bot_artifact_body(
+    item: object,
+    *,
+    app_author_id: object,
+) -> str | None:
+    if not isinstance(item, Mapping):
+        return None
+    user_obj = item.get("user")
+    if not isinstance(user_obj, Mapping) or user_obj.get("type") != "Bot":
+        return None
+    if type(app_author_id) is not int or app_author_id <= 0:
+        raise ReviewInputError(
+            "native effect fence requires authenticated app author identity"
+        )
+    if user_obj.get("id") != app_author_id:
+        return None
+    body = item.get("body")
+    return body if isinstance(body, str) else None
+
+
+def _native_artifact_matches(body: str, *, source_id: int, run_id: int) -> bool:
+    """Inspect owned, structured markers, never quoted JSON or numeric prefixes.
+
+    Malformed recognized metadata cannot establish absence of an effect.
+    Both legacy source= and the production reply comment= binding are accepted.
+    """
+    pattern = r"<!--\s*reviewsensei:(command-receipt:v\d+|reply:v\d+|operation:[^\s]+|disposition)\s+([\s\S]*?)-->"
+    markers = list(re.finditer(pattern, body))
+    recognized = list(
+        re.finditer(
+            r"<!--\s*reviewsensei:(?:command-receipt:|reply:|operation:|disposition\b)",
+            body,
+        )
+    )
+    if len(markers) != len(recognized):
+        raise ReviewInputError("owned native artifact marker is malformed")
+
+    def unique_fields(pairs):
+        fields = {}
+        for key, value in pairs:
+            if key in fields:
+                raise ValueError("duplicate marker field")
+            fields[key] = value
+        return fields
+
+    for match in markers:
+        family, payload = match.groups()
+        try:
+            if payload.lstrip().startswith("{"):
+                fields = json.loads(payload, object_pairs_hook=unique_fields)
+                if not isinstance(fields, dict):
+                    raise ValueError("marker must be an object")
+            else:
+                fields = {}
+                for token in payload.split():
+                    key, value = token.split("=", 1)
+                    if not key or not value or key in fields:
+                        raise ValueError("invalid marker field")
+                    fields[key] = value
+            keys = {"source", "source_comment_id", "command_id"}
+            if family.startswith("reply:"):
+                keys.add("comment")
+            keys |= {"run_id"} if family.startswith("operation:") else set()
+            if not keys.intersection(fields):
+                raise ValueError("marker source identity is unavailable")
+            for key in keys:
+                if key not in fields:
+                    continue
+                value = fields[key]
+                if type(value) is int:
+                    identifier = value
+                elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+                    identifier = int(value)
+                else:
+                    raise ValueError("invalid marker identifier")
+                if identifier <= 0:
+                    raise ValueError("invalid marker identifier")
+                if identifier == (run_id if key == "run_id" else source_id):
+                    return True
+        except (ValueError, TypeError) as exc:
+            raise ReviewInputError("owned native artifact marker is malformed") from exc
+    return False
+
+
+def verify_no_business_dispatch_evidence(
+    *,
+    caller: ApiRunRequestTransport,
+    ledger: GitHubIssueCommentSessionLedger,
+    identity: SessionIdentity,
+    state: ApiRunAccounting,
+    intent: Mapping[str, Any],
+    intent_sha256: str,
+    evidence: NoBusinessDispatchEvidence | None,
+) -> str:
+    """Verify positive non-dispatch evidence and live absence of published native effects."""
+
+    if not isinstance(evidence, NoBusinessDispatchEvidence):
+        raise ReviewInputError(
+            "ordinary unstarted action recovery requires explicit NoBusinessDispatchEvidence; "
+            "comment deletion, execution_started=false, null markers, and cancelled jobs alone "
+            "are insufficient authority"
+        )
+    original_owner = ApiExecutionOwner(**intent["owner"])
+    if (
+        evidence.identity != identity
+        or type(evidence.target_run_id) is not int
+        or evidence.target_run_id != state.identity.run_id
+        or not isinstance(evidence.target_owner, ApiExecutionOwner)
+        or evidence.target_owner not in {original_owner, state.owner}
+        or evidence.target_owner.job != original_owner.job
+        or evidence.intent_sha256 != intent_sha256
+    ):
+        raise ReviewInputError(
+            "no-business-dispatch evidence owner, run, or intent binding conflicts"
+        )
+    if (
+        type(evidence.provider_dispatches) is not int
+        or evidence.provider_dispatches != 0
+        or type(evidence.accepted_operation_present) is not bool
+        or evidence.accepted_operation_present
+        or type(evidence.native_effects_checked) is not bool
+        or not evidence.native_effects_checked
+    ):
+        raise ReviewInputError(
+            "no-business-dispatch evidence reports provider or accepted operation activity"
+        )
+    if (
+        not isinstance(evidence.observed_requests, tuple)
+        or len(evidence.observed_requests) == 0
+    ):
+        raise ReviewInputError(
+            "no-business-dispatch evidence requires non-empty observed_requests; "
+            "null or empty telemetry cannot prove non-dispatch"
+        )
+
+    ordinary_mutations = 0
+    normalized_observations: list[dict[str, Any]] = []
+    for item in evidence.observed_requests:
+        if not isinstance(item, Mapping):
+            raise ReviewInputError(
+                "no-business-dispatch request observation is invalid"
+            )
+        phase = item.get("phase")
+        lifecycle_phase = item.get("lifecycle_phase")
+        outcome = item.get("outcome")
+        mutation = item.get("mutation")
+        uncertain_effect = bool(item.get("uncertain_effect", False))
+        business_mutation = bool(item.get("business_mutation", False))
+        if (
+            phase not in {"startup", "ordinary"}
+            or lifecycle_phase not in {"startup", "admission"}
+            or type(mutation) is not bool
+            or not isinstance(item.get("request_id"), str)
+            or not str(item["request_id"]).strip()
+        ):
+            raise ReviewInputError(
+                "no-business-dispatch evidence contains post-admission or malformed request phase"
+            )
+        if outcome != "response" or uncertain_effect:
+            raise ReviewInputError(
+                "no-business-dispatch evidence contains uncertain or unconfirmed request outcome"
+            )
+        if business_mutation:
+            raise ReviewInputError(
+                "no-business-dispatch evidence contains a business mutation dispatch"
+            )
+        if phase == "ordinary" and mutation:
+            ordinary_mutations += 1
+        normalized_observations.append(cast(dict[str, Any], json_copy(dict(item))))
+
+    if ordinary_mutations > 2:
+        raise ReviewInputError(
+            "no-business-dispatch evidence exceeds pre-effect admission mutation count"
+        )
+
+    capture_digest = _sha256_json(asdict(evidence))
+    issued = _ISSUED_DISPATCH_EVIDENCE.get(id(evidence))
+    if issued is None or issued[0]() is not evidence or issued[1] != capture_digest:
+        raise ReviewInputError(
+            "no-business-dispatch evidence requires an unchanged process-issued transport capture; "
+            "hold for exact result recovery"
+        )
+    assert isinstance(evidence, NoBusinessDispatchEvidence)
+    if issued[3]._physical_mutation_ids != issued[4]:
+        raise ReviewInputError(
+            "no-business-dispatch evidence is stale after a later mutation; hold for exact result recovery"
+        )
+    observed_mutations = [
+        str(item["request_id"]) for item in normalized_observations if item["mutation"]
+    ]
+    if (
+        len(observed_mutations) != len(set(observed_mutations))
+        or set(observed_mutations) != issued[4]
+    ):
+        raise ReviewInputError(
+            "no-business-dispatch physical mutation inventory conflicts; hold for exact result recovery"
+        )
+    receipts = issued[2]
+    for observation in normalized_observations:
+        if observation["mutation"] and str(observation["request_id"]) not in receipts:
+            raise ReviewInputError(
+                "no-business-dispatch mutation lacks confirmed owned control-write receipt; "
+                "hold for exact result recovery"
+            )
+
+    source_id = int(intent["source"]["id"])
+    app_author_id = getattr(ledger, "_evidence_author_id", None)
+    if type(app_author_id) is not int or app_author_id <= 0:
+        raise ReviewInputError(
+            "native effect fence requires authenticated app author identity"
+        )
+    comments_path = ledger.http.repository_path(
+        identity.repository, f"/issues/{identity.pull_request}/comments"
+    )
+    with caller.read_operation("unstarted-action-native-effect-fence"):
+        issue_comments = ledger.http.paginate(path=comments_path, token=ledger.token)
+    for comment in issue_comments:
+        body = _owned_bot_artifact_body(comment, app_author_id=app_author_id)
+        if body is None:
+            continue
+        if _native_artifact_matches(
+            body, source_id=source_id, run_id=state.identity.run_id
+        ):
+            raise ReviewInputError(
+                "live GitHub native effect or accepted operation artifact exists for action; "
+                "cannot cancel as unstarted"
+            )
+
+    if intent["source"]["kind"] == "review_comment":
+        review_comments_path = ledger.http.repository_path(
+            identity.repository, f"/pulls/{identity.pull_request}/comments"
+        )
+        with caller.read_operation("unstarted-action-native-effect-fence"):
+            review_comments = ledger.http.paginate(
+                path=review_comments_path, token=ledger.token
+            )
+        for item in review_comments:
+            body = _owned_bot_artifact_body(item, app_author_id=app_author_id)
+            if body is None:
+                continue
+            if _native_artifact_matches(
+                body, source_id=source_id, run_id=state.identity.run_id
+            ):
+                raise ReviewInputError(
+                    "live GitHub native effect or accepted operation artifact exists for action; "
+                    "cannot cancel as unstarted"
+                )
+
+    if intent["purpose"] == "command":
+        reviews_path = ledger.http.repository_path(
+            identity.repository, f"/pulls/{identity.pull_request}/reviews"
+        )
+        with caller.read_operation("unstarted-action-native-effect-fence"):
+            pr_reviews = ledger.http.paginate(path=reviews_path, token=ledger.token)
+        for review_item in pr_reviews:
+            body = _owned_bot_artifact_body(review_item, app_author_id=app_author_id)
+            if body is None:
+                continue
+            if _native_artifact_matches(
+                body, source_id=source_id, run_id=state.identity.run_id
+            ):
+                raise ReviewInputError(
+                    "live GitHub native effect or accepted operation artifact exists for action; "
+                    "cannot cancel as unstarted"
+                )
+
+    return _sha256_json(
+        {
+            "target_run_id": evidence.target_run_id,
+            "target_owner": {
+                "run_attempt": evidence.target_owner.run_attempt,
+                "job": evidence.target_owner.job,
+                "generation": evidence.target_owner.generation,
+            },
+            "intent_sha256": evidence.intent_sha256,
+            "observation_count": len(normalized_observations),
+            "ordinary_mutations": ordinary_mutations,
+            "observations_sha256": _sha256_json(normalized_observations),
+        }
+    )
+
+
 def authenticate_unstarted_cancellation(
     *,
     caller: ApiRunRequestTransport,
@@ -350,6 +717,8 @@ def authenticate_unstarted_cancellation(
     actions_evidence: ApiRunActionsEvidence | None = None,
     canonical_coordinator: ContainedForwardingCoordinator | None = None,
     canonical_token: IssuedWriterToken | None = None,
+    no_business_dispatch_evidence: NoBusinessDispatchEvidence | None = None,
+    require_positive_dispatch_proof: bool = False,
     expected_intent: Mapping[str, Any] | None = None,
     mode: str = "same_run",
 ) -> UnstartedCancellationWitness:
@@ -389,6 +758,18 @@ def authenticate_unstarted_cancellation(
     else:
         raise ReviewInputError("unstarted cancellation mode is unsupported")
 
+    dispatch_proof_sha256: str | None = None
+    if require_positive_dispatch_proof or no_business_dispatch_evidence is not None:
+        dispatch_proof_sha256 = verify_no_business_dispatch_evidence(
+            caller=caller,
+            ledger=ledger,
+            identity=identity,
+            state=state,
+            intent=intent,
+            intent_sha256=intent_sha256,
+            evidence=no_business_dispatch_evidence,
+        )
+
     authority_mode, authority_proof_sha256 = _authenticate_authority_proof(
         caller=caller,
         identity=identity,
@@ -399,6 +780,13 @@ def authenticate_unstarted_cancellation(
         canonical_coordinator=canonical_coordinator,
         canonical_token=canonical_token,
     )
+    if dispatch_proof_sha256 is not None:
+        authority_proof_sha256 = _sha256_json(
+            {
+                "authority_proof_sha256": authority_proof_sha256,
+                "no_business_dispatch_proof_sha256": dispatch_proof_sha256,
+            }
+        )
     reason, live_observation = _observe_mutated_source(
         caller=caller,
         ledger=ledger,

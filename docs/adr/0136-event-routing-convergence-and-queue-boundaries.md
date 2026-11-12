@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-11-11
 - Decision owner/reviewers: ReviewSensei maintainers; independent source review
-- Linked GitHub Issue: pending; user-directed lifecycle gap qualification (G01, G07, G13, G26, G28)
+- Linked GitHub Issue: pending; user-directed lifecycle gap qualification (G01, G07, G13, G26, G27, G28, G32)
 - Linked PR: pending; independent prospective contract
 
 ## Context
@@ -34,36 +34,48 @@ Introduce `review_sensei_github.event_routing_contract` and typed webhook refusa
 (`GitHubMergeGroupUnsupportedError`) to codify five coupled boundaries while
 keeping the existing caller workflow subscriptions unchanged:
 
-1. **Exhaustive event decision table (`G01`):** Separate caller workflow
-   subscriptions (`CALLER_SUBSCRIBED_EVENTS`) from runtime admission guards
-   (`EVENT_DECISION_TABLE`) across all 13 event families. Routing-only preflight
-   never authenticates live title, head, or draft state (`G22`), and exact
-   boolean `draft` validation (`G24`) gates admission. Every unsubscribed or
-   rejected transition maps to a deterministic read-time guard and an explicit
-   bounded operator recovery command while preserving prior open finding
-   obligations and immutable source-event identity.
-2. **Current-state convergence and queue replacement (`G13`):** Reconcile
-   admitted events and manual recovery actions against the authenticated live
-   pull-request `(base_sha, head_sha)` target (`LivePullRequestTarget`) rather
-   than assuming durable FIFO webhook delivery. Inspect accepted intents,
-   retained results, and uncertain dispatches before scheduling work so
-   duplicate or delayed deliveries reuse retained results with zero fresh model
-   inference and out-of-order stale heads are ignored. When per-PR Actions
-   concurrency displaces a pending run, emit an explicit `ReplacedQueueNotice`
-   naming the superseded run and exact recovery command instead of silently
-   dropping accepted intent.
+1. **Exhaustive event decision table and installed caller mapping (`G01`, `G27`,
+   `G32`):** Separate caller workflow subscriptions (`CALLER_SUBSCRIBED_EVENTS`)
+   from runtime admission guards (`EVENT_DECISION_TABLE`) across all 13 event
+   families and bind `.github/workflows/review-sensei-review.yml` through
+   `hosting/github/trigger.py`, `webhooks.py`, `comment_intent.py`, and
+   `action_run.py` via `map_installed_caller_subscription`. Routing-only
+   preflight never authenticates live title, head, or draft state (`G22`), and
+   exact boolean `draft` validation (`G24`) gates admission. Ordinary comment
+   admission enforces immutable source-comment revision fences (`G27`), while
+   stranded unstarted actions after source mutation (`G32`) require both
+   verified `NoBusinessDispatchEvidence` and qualified cessation/canonical
+   fencing (`UnstartedCallerRecoveryGate`). A request count is not non-dispatch
+   authority: the process-issued capture must cover the transport's complete
+   physical mutation inventory. Each mutation needs a confirmed owned root
+   activation/admission or predecessor-archive receipt, or an exact configured
+   broker authentication endpoint classification. Root receipts follow native
+   readback and bind the outgoing root; unrelated business mutations, copied or
+   changed captures, later mutations, missing receipts and unknown outcomes hold
+   for exact result recovery. This process-local proof is not serialized historical
+   cessation authority and creates no replacement allowance.
+2. **Current-state convergence, ownership, and finite stop rule (`G13`):**
+   Reconcile admitted events and manual recovery actions against the
+   authenticated live pull-request `(base_sha, head_sha)` target
+   (`LivePullRequestTarget`) rather than assuming durable FIFO webhook delivery.
+   Assign explicit ownership (`RECONCILIATION_OWNERS`) and enforce a finite
+   no-progress stop (`MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS = 2`,
+   `finite_no_progress_stop`) on repeated unchanged non-progressing attempts
+   without background reconcilers or paid retries, resetting when state
+   advances. When per-PR Actions concurrency displaces a pending run, emit an
+   explicit `ReplacedQueueNotice` naming the superseded run and exact recovery
+   command instead of silently dropping accepted intent.
 3. **Explicit `merge_group` unsupported boundary and snapshot certification
    (`G07`):** Reject `merge_group` (`checks_requested`, `destroyed`) events
-   deterministically with `merge_group_unsupported`
-   (`GitHubMergeGroupUnsupportedError` in `WebhookVerifier.verify` before
-   delivery-ledger recording or payload JSON parsing, and zero token/provider/
-   ledger/check side effects in `reject_merge_group_event`). Bind
-   `ReviewCertificationReceipt` verification strictly to one pull request's
-   exact `(repository_id, pull_request_number, reviewed_base_sha,
-   reviewed_head_sha)` so an ordinary PR-head approval or `ReviewSensei` check
-   receipt can never certify a `gh-readonly-queue/*` ref, synthetic queue SHA,
-   advanced queue base, or multi-PR merge group. Removing a PR from a merge
-   queue leaves its underlying PR-head receipt and obligations intact.
+   deterministically with `merge_group_unsupported` across `trigger.py`,
+   `WebhookVerifier`, and `action_run.event_source` with zero token/provider/
+   ledger/check side effects. Bind `ReviewCertificationReceipt` verification
+   strictly to one pull request's exact `(repository_id, pull_request_number,
+   reviewed_base_sha, reviewed_head_sha)` so an ordinary PR-head approval or
+   `ReviewSensei` check receipt can never certify a `gh-readonly-queue/*` ref,
+   synthetic queue SHA, advanced queue base, or multi-PR merge group. Removing a
+   PR from a merge queue leaves its underlying PR-head receipt and obligations
+   intact.
 4. **Bounded `verify` convergence over manual thread toggles (`G26`):** Keep
    native GitHub `pull_request_review_thread` `resolved`/`unresolved` UI toggles
    unsubscribed and separate from durable finding obligations. Clicking "Resolve
@@ -82,9 +94,11 @@ keeping the existing caller workflow subscriptions unchanged:
    (enforced by strict `app_slug` authorship), never substitute for incomplete
    coverage or unlock stale snapshots, and never block `@reviewsensei verify`,
    `@reviewsensei rescan`, `@reviewsensei review remaining`, or
-   `workflow_dispatch`. Subsequent maintainer commands validate the actor's
-   current repository association so revoked privileges fail closed at
-   admission.
+   `workflow_dispatch`. Subsequent maintainer commands validate both the
+   actor's `author_association` (`OWNER`, `MEMBER`, `COLLABORATOR`) at
+   routing/webhook admission and live collaborator permission
+   (`lookup_collaborator_permission`) inside `action_run.execute_command` so
+   revoked privileges cannot apply overrides or manufacture native approvals.
 
 ## Scope
 
@@ -96,6 +110,27 @@ caller workflow YAML files, core review-engine modules, ledger wire formats,
 and provider/API budgets remain unchanged. No automatic polling, background
 reconciler, live branch-protection change, or historical ledger settlement is
 introduced.
+
+### Delivery receipts are not completed operations
+
+The comment and event-routing verifier records a delivery observation only after
+validation and route construction succeed. A failure while classifying or
+executing the lifecycle leaves the delivery eligible for bounded reinspection;
+any native-effect uncertainty remains owned by the authenticated session and
+caller accounting, not by the delivery observation cache. The existing default
+`InMemoryDeliveryLedger` is verifier-process-local, bounded to 10,000 entries
+with oldest-entry eviction, and lost on restart. Alternate `DeliveryLedger`
+adapters do not make receipt observation into completed-operation authority.
+
+A duplicate delivery flag alone cannot declare convergence or suppress admission:
+a caller can fail after receiving a route and before accepting the operation.
+Redelivery therefore re-evaluates current source/session state and accepted
+operation history. Completed matching work is reused, pending/uncertain work
+holds, and unadmitted work may reach the existing admission gate. Route selection
+never itself dispatches inference or establishes terminal native completion.
+This correction does not introduce durable webhook processing storage, relax
+original budgets, or replace the G02/G08 writer fence and G13 durable-history
+integration requirements. Legacy installation/setup verification is unchanged.
 
 ## Consequences
 
