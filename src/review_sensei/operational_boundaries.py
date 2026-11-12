@@ -12,7 +12,20 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from .api_work import ApiRunAccounting, FrozenApiConfiguration
+from .api_work import (
+    DEFAULT_API_REQUEST_LIMIT,
+    MAX_API_REQUEST_LIMIT,
+    ApiRunAccounting,
+    FrozenApiConfiguration,
+)
+from .budgets import (
+    COMPLETE_TEXT_CONTRACT,
+    LEGACY_ASSESSMENT_PROMPT_BYTES,
+    MAX_TOTAL_OUTPUT_BYTES,
+    MAX_TOTAL_PROMPT_BYTES,
+    ProviderCapabilities,
+    ReviewWorkBudgets,
+)
 from .concurrency import ReviewConcurrencyPlan
 from .context import PromptContextOverflow
 from .coverage import COVERAGE_OUTCOMES, COVERAGE_REASONS, CoverageManifest
@@ -21,6 +34,11 @@ from .disposition import incomplete_coverage_from_result
 from .document_context import DocumentSelectionReport
 from .errors import ReviewInputError
 from .models import ConversationContext, ReviewRequest, ReviewResult
+from .outcomes import (
+    DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS,
+    RESOURCE_BUDGET_MAX_PROVIDER_CALLS_CEILING,
+    ResourceBudget,
+)
 from .planning import LargeChangePlan, ReviewWorkPlan
 from .session import SessionRecord
 from .validation import (
@@ -800,6 +818,125 @@ def classify_work_plan_unprocessed(
             )
 
     return tuple(classified)
+
+
+@dataclass(frozen=True)
+class IndivisibleBoundaryContract:
+    """Verified G09 byte, token, or provider-call ceiling for indivisible work."""
+
+    boundary_id: str
+    ceiling_value: int
+    unit: str
+    truncates_silently: bool
+    raises_limit: bool
+    source_symbol: str
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.boundary_id, 128, label="boundary_id", allow_empty=False
+        )
+        _positive_int(self.ceiling_value, label="ceiling_value")
+        if self.unit not in {"utf8_bytes", "tokens", "provider_calls"}:
+            raise ReviewInputError("indivisible boundary unit is unsupported")
+        if not isinstance(self.truncates_silently, bool) or not isinstance(
+            self.raises_limit, bool
+        ):
+            raise ReviewInputError("indivisible boundary flags must be booleans")
+        if self.truncates_silently or self.raises_limit:
+            raise ReviewInputError(
+                "indivisible boundaries must never truncate silently or raise limits"
+            )
+        validate_bounded_text(
+            self.source_symbol, 256, label="source_symbol", allow_empty=False
+        )
+
+
+def inspect_indivisible_boundary_contracts() -> tuple[IndivisibleBoundaryContract, ...]:
+    """Verify source-level G09 byte, token-window, and call ceilings at runtime."""
+
+    limits = ReviewLimits()
+    work_budgets = ReviewWorkBudgets(mode="unified")
+    resource = ResourceBudget.create()
+    if (
+        limits.max_diff_bytes != 1_048_576
+        or limits.max_prompt_bytes != 4_194_304
+        or LEGACY_ASSESSMENT_PROMPT_BYTES != 49_152
+        or work_budgets.batch_diff_bytes != 131_072
+        or work_budgets.batch_prompt_bytes != 262_144
+        or MAX_TOTAL_PROMPT_BYTES != 2_097_152
+        or MAX_TOTAL_OUTPUT_BYTES != 1_048_576
+        or resource.max_provider_calls != DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS
+        or DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS != 8
+    ):
+        raise ReviewInputError("G09 source ceilings drifted from approved bounds")
+
+    # Verify ProviderCapabilities.fits exact reserve math at limit-1, exact, limit+1:
+    cap = ProviderCapabilities(
+        context_tokens=4096,
+        max_output_tokens=512,
+        qualified=True,
+        framing_tokens=256,
+        provider_name="fixture",
+        model="fixture-model",
+        endpoint="https://fixture.example/api",
+        completion_contract=COMPLETE_TEXT_CONTRACT,
+    )
+    exact_token_input = 4096 - 256 - 512 - max(512, (4096 + 19) // 20)
+    if (
+        not cap.fits("a" * (exact_token_input - 1))
+        or not cap.fits("a" * exact_token_input)
+        or cap.fits("a" * (exact_token_input + 1))
+    ):
+        raise ReviewInputError(
+            "ProviderCapabilities.fits failed exact token-window boundary invariant"
+        )
+
+    return (
+        IndivisibleBoundaryContract(
+            boundary_id="per_request_diff_bytes",
+            ceiling_value=limits.max_diff_bytes,
+            unit="utf8_bytes",
+            truncates_silently=False,
+            raises_limit=False,
+            source_symbol="review_sensei.validation.ReviewLimits.max_diff_bytes:1048576",
+        ),
+        IndivisibleBoundaryContract(
+            boundary_id="legacy_unqualified_prompt_bytes",
+            ceiling_value=LEGACY_ASSESSMENT_PROMPT_BYTES,
+            unit="utf8_bytes",
+            truncates_silently=False,
+            raises_limit=False,
+            source_symbol="review_sensei.budgets.LEGACY_ASSESSMENT_PROMPT_BYTES:49152",
+        ),
+        IndivisibleBoundaryContract(
+            boundary_id="unified_batch_prompt_bytes",
+            ceiling_value=work_budgets.batch_prompt_bytes,
+            unit="utf8_bytes",
+            truncates_silently=False,
+            raises_limit=False,
+            source_symbol="review_sensei.budgets.ReviewWorkBudgets.batch_prompt_bytes:262144",
+        ),
+        IndivisibleBoundaryContract(
+            boundary_id="qualified_token_window_input_ceiling",
+            ceiling_value=4_194_304,
+            unit="tokens",
+            truncates_silently=False,
+            raises_limit=False,
+            source_symbol="review_sensei.budgets.ProviderCapabilities.fits:context_tokens",
+        ),
+        IndivisibleBoundaryContract(
+            boundary_id="per_run_provider_calls",
+            ceiling_value=DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS,
+            unit="provider_calls",
+            truncates_silently=False,
+            raises_limit=False,
+            source_symbol=(
+                "review_sensei.outcomes.DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS:"
+                f"{DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS}"
+                f"..{RESOURCE_BUDGET_MAX_PROVIDER_CALLS_CEILING}"
+            ),
+        ),
+    )
 
 
 TITLE_LIFECYCLE_PHASES = frozenset(
@@ -2204,6 +2341,109 @@ def classify_quota_throttle_recovery(
     )
 
 
+@dataclass(frozen=True)
+class ResourceOwnerBoundary:
+    """Verified G25 resource-owner contract across PR, repository, and manual paths."""
+
+    boundary_id: str
+    owner_scope: str
+    default_limit: int | None
+    hard_ceiling: int | None
+    invents_new_service: bool
+    expands_allowance: bool
+    source_symbol: str
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.boundary_id, 128, label="boundary_id", allow_empty=False
+        )
+        if self.owner_scope not in {
+            "single_pull_request",
+            "single_caller_run_with_reserved_successor",
+            "single_hosted_operation",
+            "github_installation_or_repository_token",
+            "operator_provider_account_or_local_host",
+        }:
+            raise ReviewInputError("resource owner_scope is unsupported")
+        if self.default_limit is not None:
+            _positive_int(self.default_limit, label="default_limit")
+        if self.hard_ceiling is not None:
+            _positive_int(self.hard_ceiling, label="hard_ceiling")
+        if (
+            self.default_limit is not None
+            and self.hard_ceiling is not None
+            and self.default_limit > self.hard_ceiling
+        ):
+            raise ReviewInputError("default_limit cannot exceed hard_ceiling")
+        if not isinstance(self.invents_new_service, bool) or not isinstance(
+            self.expands_allowance, bool
+        ):
+            raise ReviewInputError("resource owner flags must be booleans")
+        if self.invents_new_service or self.expands_allowance:
+            raise ReviewInputError(
+                "G25 resource-owner boundaries must never invent services or expand allowances"
+            )
+        validate_bounded_text(
+            self.source_symbol, 256, label="source_symbol", allow_empty=False
+        )
+
+
+def inspect_resource_owner_boundaries() -> tuple[ResourceOwnerBoundary, ...]:
+    """Return the read-only G25 resource-owner inventory verified against constants."""
+
+    if DEFAULT_API_REQUEST_LIMIT != 512 or MAX_API_REQUEST_LIMIT != (1 << 53) - 1:
+        raise ReviewInputError(
+            "caller API request limit constants drifted from approved bounds"
+        )
+    return (
+        ResourceOwnerBoundary(
+            boundary_id="per_pr_workflow_group",
+            owner_scope="single_pull_request",
+            default_limit=1,
+            hard_ceiling=1,
+            invents_new_service=False,
+            expands_allowance=False,
+            source_symbol=".github/workflows/review-sensei-run.yml:concurrency",
+        ),
+        ResourceOwnerBoundary(
+            boundary_id="per_run_caller_http_allowance",
+            owner_scope="single_caller_run_with_reserved_successor",
+            default_limit=DEFAULT_API_REQUEST_LIMIT,
+            hard_ceiling=MAX_API_REQUEST_LIMIT,
+            invents_new_service=False,
+            expands_allowance=False,
+            source_symbol="review_sensei.api_work.DEFAULT_API_REQUEST_LIMIT:512",
+        ),
+        ResourceOwnerBoundary(
+            boundary_id="per_operation_broker_control_budget",
+            owner_scope="single_hosted_operation",
+            default_limit=262_144,
+            hard_ceiling=262_144,
+            invents_new_service=False,
+            expands_allowance=False,
+            source_symbol="review_sensei_github.broker_client.MAX_BROKER_BODY_BYTES:262144",
+        ),
+        ResourceOwnerBoundary(
+            boundary_id="github_installation_rate_limit",
+            owner_scope="github_installation_or_repository_token",
+            default_limit=None,
+            hard_ceiling=None,
+            invents_new_service=False,
+            expands_allowance=False,
+            source_symbol="review_sensei_github.http.GitHubHttp",
+        ),
+        ResourceOwnerBoundary(
+            boundary_id="provider_account_or_local_endpoint",
+            owner_scope="operator_provider_account_or_local_host",
+            default_limit=DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS,
+            hard_ceiling=RESOURCE_BUDGET_MAX_PROVIDER_CALLS_CEILING,
+            invents_new_service=False,
+            expands_allowance=False,
+            source_symbol="review_sensei.outcomes.ResourceBudget.max_provider_calls:8",
+        ),
+    )
+
+
 __all__ = [
     "CONVERSATION_CONTEXT_MAX_TITLE_BYTES",
     "CONVERSATION_PUBLISHER_TITLE_CAP_BYTES",
@@ -2223,11 +2463,13 @@ __all__ = [
     "TITLE_LIFECYCLE_PHASES",
     "WORKFLOW_PROVIDER_GROUP_PREFIX",
     "CrossPrConcurrencyComparison",
+    "IndivisibleBoundaryContract",
     "IndivisibleWorkReport",
     "IndivisibleWorkUnit",
     "PolicyDriftClassification",
     "PolicyFundingPreservationProof",
     "QuotaThrottleRecoveryPlan",
+    "ResourceOwnerBoundary",
     "TitleAttributionRecord",
     "TitleByteLimitEvaluation",
     "TitleConstantContract",
@@ -2239,6 +2481,8 @@ __all__ = [
     "classify_work_plan_unprocessed",
     "evaluate_title_byte_limit",
     "evaluate_title_freshness",
+    "inspect_indivisible_boundary_contracts",
+    "inspect_resource_owner_boundaries",
     "inspect_title_constant_contracts",
     "plan_cross_pr_concurrency",
     "verify_policy_drift_funding_preservation",

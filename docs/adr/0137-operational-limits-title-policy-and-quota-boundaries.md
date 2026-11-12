@@ -48,7 +48,13 @@ recovery path.
    Keep explicit partial/refusal behavior for single oversized hunks, oversized
    hunkless files, and mandatory prompt overflows (`PromptContextOverflow`). Never
    truncate mandatory diff or prompt context and never expand configured token/byte
-   budgets automatically. Classify every unprocessed unit in
+   budgets automatically (`inspect_indivisible_boundary_contracts` verifies
+   `ReviewLimits.max_diff_bytes = 1,048,576`, `LEGACY_ASSESSMENT_PROMPT_BYTES = 49,152`,
+   `ReviewWorkBudgets.batch_prompt_bytes = 262,144`, `ProviderCapabilities.fits`
+   exact token-window reserve math up to `4,194,304` `context_tokens`, and
+   `DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS = 8`, keeping `review_status == "partial"`
+   and `fully_reviewed == False` distinct from completion across core CLI and hosted
+   `review-run`). Classify every unprocessed unit in
    `operational_boundaries` with exact path, hunk coordinates, observed byte count,
    configured limit, and permitted recovery routes:
    - `@reviewsensei accept-coverage-uncertainty --reason "<justification>"` for
@@ -66,7 +72,9 @@ recovery path.
 
 2. **Dual-role pull request title freshness contract (`G19`):**
    - At fresh admission, bind the live authenticated pull request title into the
-     invocation snapshot.
+     invocation snapshot across core (`ReviewRequest`, `ConversationContext`,
+     `review_sensei.cli.main`) and hosted (`review-run`, `command-run`, `reply-run`)
+     entry points.
    - During in-flight inference and publication, complete truthfully against the
      bound snapshot title and never claim that an earlier review evaluated a title
      edited after admission.
@@ -81,48 +89,67 @@ recovery path.
      `ReviewRequest`, where `validate_bounded_text` preserves UTF-8 codepoints
      verbatim without whitespace collapsing, case folding, or Unicode NFC/NFKC
      normalization, and hosted bootstrap omits empty `""` as `None`); refuse
-     mixed-title continuation fail-closed and recover deterministically via explicit
-     `@reviewsensei rescan` against the updated title.
+     mixed-title continuation fail-closed (`continuation scope does not match` in
+     core `ReviewService`; `no reusable partial scope` at hosted `review-run`) and
+     recover deterministically via explicit `@reviewsensei rescan` against the
+     updated title.
 
 3. **Intentional two-tier UTF-8 title byte boundary (`G20`):**
-   Preserve and qualify the three entry surfaces using exact UTF-8 byte lengths
-   (`len(title.encode("utf-8"))`, never character counts or silent truncation):
+   Preserve and qualify the entry surfaces using exact UTF-8 byte lengths
+   (`len(title.encode("utf-8"))`, never character counts or silent truncation,
+   verified at runtime by `inspect_title_constant_contracts`):
    - `routing_preflight`: unvalidated routing metadata; claims zero title validation
      credit;
    - `hosted_bootstrap` (`review`, `command`, and `reply`): `256` UTF-8 bytes
-     enforced before session enrollment, comment mutation, or provider spend;
-   - `direct_core` (local CLI and library `ReviewLimits.max_title_bytes`): `4,096`
-     UTF-8 bytes.
+     (`HOSTED_BOOTSTRAP_MAX_TITLE_BYTES`) enforced before session enrollment, comment
+     mutation, or provider spend;
+   - `direct_core` (local CLI and library `ReviewLimits.max_title_bytes` and
+     `ConversationContext.pull_request_title`): `4,096` UTF-8 bytes
+     (`DIRECT_CORE_MAX_TITLE_BYTES` / `CONVERSATION_CONTEXT_MAX_TITLE_BYTES`);
+   - downstream `ConversationPublisher` reply prompt cap (`2,048` UTF-8 bytes,
+     `CONVERSATION_PUBLISHER_TITLE_CAP_BYTES`): appends an explicit `\n[truncated]`
+     marker on a valid UTF-8 codepoint boundary only if a title mutates mid-run after
+     the `256`-byte hosted admission gate.
    Shortening a pull request title to `<= 256` UTF-8 bytes restores hosted review,
    command, and reply execution immediately on the next trigger with intact session
    state.
 
 4. **Strict default-branch policy commit identity before admission (`G21`):**
    Retain fail-closed commit-identity comparison between frozen policy commit `P` and
-   live default-branch commit `P_live` before session enrollment, even when
-   `.reviewsensei.yml` bytes are unchanged (`unrelated_default_branch_advance` vs
-   `policy_content_changed` vs `malformed_policy_ref`). Keep `P` strictly distinct
-   from reviewed `base_sha` `B` and `head_sha` `H` so ordinary PR base lag (`B != P`
-   or `B != B_live` while `P == P_live`) remains admitted. Refusal mutates zero
-   ledger state, spends zero provider budget, preserves prior settled/pending session
-   records, never rebinds prior accounting to `P_live`, and recovers cleanly on the
-   next run pinned to `P_live` (for manual `workflow_dispatch`, operators must select
-   the default branch's current ref/commit `P_live` rather than re-dispatching a stale
+   live default-branch commit `P_live` before session enrollment across `review-run`,
+   `command-run`, and `reply-run` (plus `action_reply._configuration` mid-run policy
+   digest verification and core `RepositoryContextStore` / `load_configuration`
+   context-digest binding), even when `.reviewsensei.yml` bytes are unchanged
+   (`unrelated_default_branch_advance` vs `policy_content_changed` vs
+   `malformed_policy_ref`). Keep `P` strictly distinct from reviewed `base_sha` `B`
+   and `head_sha` `H` so ordinary PR base lag (`B != P` or `B != B_live` while
+   `P == P_live`) remains admitted. Refusal mutates zero ledger state, spends zero
+   provider budget, preserves prior settled/pending session records and original
+   `FrozenApiConfiguration` / `startup` / `blocks` / `remaining` funding across single
+   and consecutive default-branch races (`P0 -> P1 -> P2`, verified by
+   `verify_policy_drift_funding_preservation`), never rebinds prior accounting to
+   `P_live` (`ApiRunAccounting.require_binding`), and recovers cleanly on the next run
+   pinned to `P_live` (for manual `workflow_dispatch`, operators must select the
+   default branch's current ref/commit `P_live` rather than re-dispatching a stale
    SHA).
 
 5. **Per-PR serialization and account-owned cross-PR quotas (`G25`):**
    Preserve per-PR serialization (`reviewsensei-provider-review-<owner>/<repo>-<pr_number>`
    in GitHub Actions with `cancel-in-progress: false`, paired with collision-free
    length-prefixed internal keys in `ReviewConcurrencyPlan.for_pull_request`) without
-   adding a persistent global cross-repository lock service. Cross-PR and
-   cross-repository concurrency and rate limits remain owned by the configured
-   provider account, broker admission gate, and GitHub App installation quotas:
-   - isolate capability tokens per run (`repr=False`, zero cross-PR credential
-     sharing);
+   adding a persistent global cross-repository lock service. Cross-PR,
+   cross-repository, and manual CLI concurrency and rate limits remain owned by their
+   source-verified boundaries (`inspect_resource_owner_boundaries`):
+   - conserve per-run caller HTTP request tranches (`DEFAULT_API_REQUEST_LIMIT = 512`
+     split via `owner_allocations` across `startup + first_total + successor_total`,
+     with `EvidenceReadBudget` failing closed via `EvidenceBudgetExhausted`);
+   - isolate capability tokens per run (`repr=False`, `MAX_BROKER_BODY_BYTES = 262,144`,
+     zero cross-PR credential or ledger sharing);
    - perform single physical broker dispatches (`retry_count=0`, zero duplicate
      dispatch storms) and surface typed HTTP `429` (`GitHubHTTPTransientError`) or
-     HTTP `503` (`GitHubBrokerAdmissionHeldError`) refusals without disguising
-     throttling as success;
+     HTTP `503` (`GitHubBrokerAdmissionHeldError`) refusals—as well as non-zero fail-closed
+     exits on manual `review_sensei.cli.main` / `OllamaProvider` HTTP `429`/`503`—without
+     disguising throttling as success;
    - release in-process `ProviderAdmission` slots deterministically and preserve
      retained `publication_pending` / `publication_failed` state when throttling
      occurs after inference so a post-cooldown retry replays publication with zero

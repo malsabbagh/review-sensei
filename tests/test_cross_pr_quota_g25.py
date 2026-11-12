@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import tempfile
@@ -7,6 +8,9 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from email.message import Message
+from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
@@ -15,20 +19,29 @@ from review_sensei_github import (
     GitHubBrokerAdmissionHeldError,
     GitHubHTTPTransientError,
 )
+from review_sensei_github.api_run_plan import owner_allocations
+from review_sensei_github.broker_client import BrokerSession
 from review_sensei_github.session_ledger import parse_session_comment
+from test_action_reply_entry import ReplyEntryFixture
+from test_action_run import CommandEntryFixture
 from test_review_run import IDENTITY, EntryFixture
 
+from review_sensei import cli as core_cli
+from review_sensei.api_work import DEFAULT_API_REQUEST_LIMIT, MAX_API_REQUEST_LIMIT
+from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
 from review_sensei.concurrency import (
     AdmissionCancelled,
     AdmissionRejected,
     ProviderAdmission,
     ReviewConcurrencyPlan,
 )
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
 from review_sensei.operational_boundaries import (
     CrossPrConcurrencyComparison,
     QuotaThrottleRecoveryPlan,
+    ResourceOwnerBoundary,
     classify_quota_throttle_recovery,
+    inspect_resource_owner_boundaries,
     plan_cross_pr_concurrency,
 )
 
@@ -245,7 +258,7 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
                     request.full_url,
                     503,
                     "Service Unavailable",
-                    {},
+                    Message(),
                     _FakeHttpResponse(body, 503),
                 )
             if forced_code == 429:
@@ -254,7 +267,7 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
                     request.full_url,
                     429,
                     "Too Many Requests",
-                    {},
+                    Message(),
                     _FakeHttpResponse(body, 429),
                 )
             actor = (
@@ -318,10 +331,10 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
         # Unthrottled PRs across both repos succeed with isolated per-run tokens.
         session_101 = wave_one["101"]
         session_404 = wave_one["404"]
-        self.assertNotIsInstance(session_101, Exception)
-        self.assertNotIsInstance(session_404, Exception)
-        assert not isinstance(session_101, Exception)
-        assert not isinstance(session_404, Exception)
+        self.assertIsInstance(session_101, BrokerSession)
+        self.assertIsInstance(session_404, BrokerSession)
+        assert isinstance(session_101, BrokerSession)
+        assert isinstance(session_404, BrokerSession)
         self.assertNotEqual(session_101.token, session_404.token)
         self.assertNotIn("ghs_isolated_", repr(session_101))
         self.assertNotIn("sg1.", repr(session_101))
@@ -337,8 +350,8 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
             repo_name, _repo_id, pr_num, expected_run_id, _purpose = spec
             run_id, recovered = execute_one(spec)
             self.assertEqual(run_id, expected_run_id)
-            self.assertNotIsInstance(recovered, Exception)
-            assert not isinstance(recovered, Exception)
+            self.assertIsInstance(recovered, BrokerSession)
+            assert isinstance(recovered, BrokerSession)
             assert recovered.attestation is not None
             assert recovered.reservation_owner is not None
             self.assertEqual(recovered.attestation["run_id"], run_id)
@@ -380,7 +393,7 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
                             request.full_url,
                             status_code,
                             "throttled",
-                            {},
+                            Message(),
                             _FakeHttpResponse(
                                 json.dumps(payload).encode("utf-8"), status_code
                             ),
@@ -599,6 +612,197 @@ class CrossPrQuotaG25Tests(unittest.TestCase):
                 recovery_instruction="retry",
                 diagnostic="replay without retention",
             )
+
+    def test_resource_owner_boundaries_caller_tranches_cross_pr_isolation_and_manual_cli_throttling(
+        self,
+    ) -> None:
+        """Exercise G25 resource-owner contracts, caller HTTP tranche conservation, cross-PR isolation, and manual CLI 429/503 fail-closed behavior."""
+        boundaries = {b.boundary_id: b for b in inspect_resource_owner_boundaries()}
+        self.assertEqual(
+            set(boundaries),
+            {
+                "per_pr_workflow_group",
+                "per_run_caller_http_allowance",
+                "per_operation_broker_control_budget",
+                "github_installation_rate_limit",
+                "provider_account_or_local_endpoint",
+            },
+        )
+        for boundary in boundaries.values():
+            self.assertFalse(boundary.invents_new_service)
+            self.assertFalse(boundary.expands_allowance)
+        self.assertEqual(
+            boundaries["per_run_caller_http_allowance"].default_limit,
+            DEFAULT_API_REQUEST_LIMIT,
+        )
+        with self.assertRaises(ReviewInputError):
+            ResourceOwnerBoundary(
+                boundary_id="bad_service",
+                owner_scope="single_pull_request",
+                default_limit=1,
+                hard_ceiling=1,
+                invents_new_service=True,
+                expands_allowance=False,
+                source_symbol="bad:1",
+            )
+        with self.assertRaises(ReviewInputError):
+            ResourceOwnerBoundary(
+                boundary_id="bad_scope",
+                owner_scope="global_cluster_lock",
+                default_limit=1,
+                hard_ceiling=1,
+                invents_new_service=False,
+                expands_allowance=False,
+                source_symbol="bad:1",
+            )
+        with self.assertRaises(ReviewInputError):
+            ResourceOwnerBoundary(
+                boundary_id="bad_ceiling",
+                owner_scope="single_pull_request",
+                default_limit=10,
+                hard_ceiling=5,
+                invents_new_service=False,
+                expands_allowance=False,
+                source_symbol="bad:1",
+            )
+
+        # 1. Exact caller HTTP request conservation (`owner_allocations` & `EvidenceReadBudget`):
+        for startup_cost in (0, 7, 16):
+            alloc = owner_allocations(DEFAULT_API_REQUEST_LIMIT, startup_cost)
+            self.assertEqual(
+                startup_cost + alloc.first_total + alloc.successor_total,
+                DEFAULT_API_REQUEST_LIMIT,
+            )
+            self.assertGreater(alloc.first_work, 0)
+            self.assertGreater(alloc.successor_work, 0)
+        with self.assertRaises(ReviewInputError):
+            owner_allocations(MAX_API_REQUEST_LIMIT + 1, 0)
+
+        finite_read_budget = EvidenceReadBudget()
+        # 4 calls are reserved until finalization out of MAX_PART_READS (64):
+        for _ in range(MAX_PART_READS - 4):
+            finite_read_budget.consume()
+        with self.assertRaises(EvidenceBudgetExhausted):
+            finite_read_budget.consume()
+        for _ in range(4):
+            finite_read_budget.consume(fence=True)
+        with self.assertRaises(EvidenceBudgetExhausted):
+            finite_read_budget.consume(fence=True)
+
+        # 2. Cross-PR hosted isolation across CommandEntryFixture, EntryFixture, and ReplyEntryFixture:
+        with (
+            tempfile.TemporaryDirectory() as dir_cmd,
+            tempfile.TemporaryDirectory() as dir_rev,
+            tempfile.TemporaryDirectory() as dir_rep,
+        ):
+            pr_cmd = CommandEntryFixture(dir_cmd)
+            pr_rev = EntryFixture(dir_rev)
+            pr_rep = ReplyEntryFixture(dir_rep)
+            pr_rev.run_id = pr_cmd.run_id + 10
+            pr_rep.run_id = pr_cmd.run_id + 20
+
+            self.assertEqual(
+                pr_cmd.invoke_command("@reviewsensei review pause"), 0, pr_cmd.error
+            )
+            self.assertEqual(pr_rev.invoke(), 0, pr_rev.error)
+            self.assertEqual(pr_rep.invoke_reply(), 0, pr_rep.error)
+
+            assert (
+                pr_cmd.comment is not None
+                and pr_rev.comment is not None
+                and pr_rep.comment is not None
+            )
+            rec_cmd = parse_session_comment(pr_cmd.comment["body"], identity=IDENTITY)
+            rec_rev = parse_session_comment(pr_rev.comment["body"], identity=IDENTITY)
+            rec_rep = parse_session_comment(pr_rep.comment["body"], identity=IDENTITY)
+            assert (
+                rec_cmd is not None
+                and rec_rev is not None
+                and rec_rep is not None
+                and rec_rev.transaction is not None
+            )
+            self.assertTrue(rec_cmd.operator_paused)
+            self.assertFalse(rec_rev.operator_paused)
+            self.assertEqual(rec_rev.transaction.phase, "publication_succeeded")
+            self.assertEqual(pr_rep.reply_posts, 1)
+            self.assertEqual(
+                len(
+                    {
+                        rec_cmd.record_sha256,
+                        rec_rev.record_sha256,
+                        rec_rep.record_sha256,
+                    }
+                ),
+                3,
+            )
+
+        # 3. Manual CLI (`review_sensei.cli.main`) provider HTTP 429 & 503 fail-closed refusal:
+        sample_diff = (
+            "diff --git a/src/app.py b/src/app.py\n"
+            "--- a/src/app.py\n"
+            "+++ b/src/app.py\n"
+            "@@ -1 +1,2 @@\n"
+            " x = 1\n"
+            "+y = 2\n"
+        )
+        for status_code in (429, 503):
+            with (
+                self.subTest(manual_cli_status=status_code),
+                tempfile.TemporaryDirectory() as cli_dir,
+            ):
+                diff_path = Path(cli_dir) / "change.patch"
+                cfg_path = Path(cli_dir) / ".reviewsensei.yml"
+                out_path = Path(cli_dir) / "out.json"
+                diff_path.write_text(sample_diff, encoding="utf-8")
+                cfg_path.write_text(
+                    "schema: 1\ninference:\n  backend: local-ollama\n  model: qwen2.5-coder:7b\n",
+                    encoding="utf-8",
+                )
+                attempts = 0
+
+                class _ThrottledOpener:
+                    def open(self, req_obj: object, timeout: object = None) -> object:
+                        nonlocal attempts
+                        attempts += 1
+                        url = getattr(
+                            req_obj, "full_url", "http://127.0.0.1:11434/api/generate"
+                        )
+                        raise HTTPError(
+                            url,
+                            status_code,
+                            "throttled",
+                            hdrs=None,  # type: ignore[arg-type]
+                            fp=io.BytesIO(b'{"error":"rate limited"}'),
+                        )
+
+                err_buf = io.StringIO()
+                with (
+                    patch(
+                        "review_sensei.providers.ollama.build_opener",
+                        return_value=_ThrottledOpener(),
+                    ),
+                    patch("time.sleep", return_value=None),
+                    contextlib.redirect_stderr(err_buf),
+                ):
+                    rc_manual = core_cli.main(
+                        [
+                            "--diff",
+                            str(diff_path),
+                            "--config",
+                            str(cfg_path),
+                            "--format",
+                            "json",
+                            "--output",
+                            str(out_path),
+                            "--exit-semantics",
+                            "operational",
+                        ]
+                    )
+                self.assertNotEqual(rc_manual, 0)
+                self.assertGreaterEqual(attempts, 1)
+                self.assertLessEqual(attempts, 8)
+                self.assertIn(f"HTTP {status_code}", err_buf.getvalue())
+                self.assertFalse(out_path.exists())
 
 
 if __name__ == "__main__":
