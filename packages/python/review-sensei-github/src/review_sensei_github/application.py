@@ -1249,6 +1249,66 @@ class GitHubApplication:
         present_loaded = _require_present_marker(
             ledger, identity, effective_marker_state, reviewer=reviewer
         )
+        effective_max_active = (
+            max_active_findings
+            if max_active_findings is not None
+            else options.max_active_findings
+        )
+        effective_drift = enable_drift_tracking or options.enable_drift_tracking
+        if (
+            isinstance(reviewer, ReviewPublisher)
+            and ledger is not None
+            and result.transaction is None
+        ):
+            # An unbound "full" result can omit every caller-supplied hint of
+            # prior work. Consult the independently selected ledger instead of
+            # treating that omission as proof of an initial finding lifecycle.
+            # Do this before prepare_session_round: refusal must not reserve,
+            # abort, replace, re-enroll or charge another review round.
+            finding_key = (repository_id, pull_request)
+            drift_requested = (
+                effective_drift
+                or finding_key in reviewer._drift_states
+                or bool(drift_descriptors)
+                or bool(host_outdated_threads)
+                or bool(host_resolved_threads)
+            )
+            window_requested = (
+                effective_max_active is not None
+                or finding_key in reviewer._active_window_states
+                or bool(confirmed_fixes)
+                or bool(human_overrides)
+                or coverage_acceptance is not None
+                or authorized_rescan is not None
+            )
+            selected_state_missing = (
+                finding_key not in reviewer._drift_states
+                if drift_requested
+                else finding_key not in reviewer._active_window_states
+            )
+            if (drift_requested or window_requested) and selected_state_missing:
+                loaded_findings = (
+                    present_loaded
+                    if present_loaded is not None
+                    else ledger.load(identity)
+                )
+                if loaded_findings.status not in {"ok", "migrated", "missing"}:
+                    raise GitHubPublicationError(
+                        "finding inventory session ledger load failed: "
+                        f"{loaded_findings.status}"
+                    )
+                prior_record = loaded_findings.record
+                if prior_record is not None and (
+                    prior_record.completed_initial_reviews > 0
+                    or prior_record.completed_verification_rounds > 0
+                    or prior_record.convergence_history is not None
+                    or prior_record.transaction is not None
+                    or prior_record.publication_staging is not None
+                ):
+                    return PublicationResult(
+                        status="handoff",
+                        diagnostic="durable_finding_inventory_recovery_required",
+                    )
         if (
             transaction_record is None
             and ledger is not None
@@ -2050,12 +2110,6 @@ class GitHubApplication:
                 "evidence_confirmed_concerns": evidence_confirmed_concerns,
                 "authorized_dispositions": authorized_dispositions,
             }
-            effective_max_active = (
-                max_active_findings
-                if max_active_findings is not None
-                else options.max_active_findings
-            )
-            effective_drift = enable_drift_tracking or options.enable_drift_tracking
             if (
                 isinstance(reviewer, ReviewPublisher)
                 or effective_max_active is not None

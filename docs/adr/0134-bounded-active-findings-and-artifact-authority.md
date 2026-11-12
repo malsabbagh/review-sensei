@@ -33,11 +33,19 @@ identity, comment persistence, and repository trust are conflated:
 
 ## Decision
 
+The sections below describe the domain model and conditional ordinary-path
+hooks, not an authenticated durable wire contract. Active-window/drift state,
+artifact observations and trust snapshots still depend on complete supplied
+state or process-local caches. Ordinary cross-process finding reconstruction
+is not implemented; missing lifecycle proof must retain a handoff. The
+2026-11-12 amendments below qualify the implemented source scope.
+
 ### 1. Four-variable bounded active window (`review_sensei.active_finding_window`)
 
-Separate four immutable state variables on every review round:
+When a complete lifecycle state is available, the domain evaluator separates
+four immutable state variables on each review round:
 - `changed_file_coverage`: diff enumeration and per-file coverage state;
-- `authoritative_decision_inventory`: complete durable ledger of all unresolved,
+- `authoritative_decision_inventory`: complete in-memory inventory of unresolved,
   omitted-uncertain, ambiguous, verified-fixed, overridden, and rescan-superseded
   obligations regardless of display capacity;
 - `display_active_findings`: strict-cap (`max_active_findings`) priority-first
@@ -60,7 +68,8 @@ This ADR refines and extends ADR 0042 across multi-round lifecycles without
 changing `PublishedSlot` wire or state semantics: ADR 0042's slot invariants
 govern per-target reservation inside `display_active_findings`, while this ADR
 separates `changed_file_coverage` and `authoritative_decision_inventory` so
-non-displayed obligations remain durable approval gates.
+non-displayed obligations remain approval gates while that inventory is
+retained. A reduced persisted baseline does not restore those gates or slots.
 
 ### 2. Orthogonal criterion, anchor, and thread tracking (`review_sensei.finding_drift`)
 
@@ -94,12 +103,13 @@ Classify GitHub review surfaces into:
 - `projection`: `native_review_summary`, `inline_review_comment`,
   `check_run_text`, `comment_reaction`.
 
-Mutations or deletions of `projection` surfaces never alter authority, erase
-obligations, manufacture approval, or auto-recreate spam comments. Tampered,
-duplicated, stale, or foreign `authority` markers and missing/corrupted
-`archive_chain_part` carriers fail closed. After HTTP response loss, the target
-slot enters an exclusive `uncertain` hold that blocks any concurrent or
-duplicate re-dispatch before readback completes: exact unedited App-owned
+The artifact classifier treats mutations/deletions of `projection` surfaces as
+non-authoritative: supplied observations cannot erase retained obligations or
+manufacture approval. It refuses supplied tampered, duplicated, stale or foreign
+`authority` markers and missing/corrupted archive evidence. The current hooks do
+not establish complete durable observations of every native surface. After HTTP
+response loss, an available target slot enters a process-local exclusive
+`uncertain` hold before readback completes: exact unedited App-owned
 readback reconciles idempotently at most once (`reconciled-via-owned-readback`),
 whereas human edits, duplicates, or deletions preserve conservative
 `uncertain-after-response-loss` holds. Restricted operator `reenroll` is
@@ -140,22 +150,25 @@ Core domain modules (`review_sensei.active_finding_window`,
 `review_sensei.finding_drift`), GitHub adapter authority/trust modules
 (`review_sensei_github.artifact_authority`,
 `review_sensei_github.trust_transitions`), ordinary review/verify/command/reply
-entry-point integration in `review_sensei_github.publication` (`ReviewPublisher`,
+entry-point hooks in `review_sensei_github.publication` (`ReviewPublisher`,
 `ReviewApprovalFinalizer`) and `review_sensei_github.application`
-(`GitHubApplication`), and deterministic end-to-end qualification suites for
-G10, G16, G14, and G15. Existing wire schemas, workflow definitions, broker
-endpoints, and historical incident ledgers remain unchanged, and all new guards
-remain 100% backward-compatible with legacy callers.
+(`GitHubApplication`), with deterministic model and supplied-state integration
+suites for G10, G16, G14 and G15. These suites do not qualify durable ordinary
+cold reconstruction. Existing wire schemas, workflows, broker endpoints and
+historical incident ledgers remain unchanged. Incomplete opted-in lifecycle
+calls may now refuse instead of proceeding with reduced or missing state.
 
 ## Consequences
 
-- Approval is never granted when omitted, drifted, copied, or non-displayed
-  obligations remain unresolved, even at 100% diff coverage.
-- Every refusal or hold exposes a deterministic, bounded recovery route so a
-  legitimate PR can always reach completion and approval without manual database
-  edits or unbounded loops.
-- Deleted or human-edited GitHub comments cannot erase obligations, spoof ledger
-  state, or trigger comment-recreation storms.
+- With a complete retained lifecycle inventory, the evaluator withholds approval
+  for unresolved omitted, drifted, copied and non-displayed obligations, even at
+  100% diff coverage. Cold reconstruction remains an independent missing proof.
+- Refusals identify bounded next-step requirements. A reconstruction handoff is
+  not a currently supported route to completion or approval; do not retry it
+  unchanged, discard obligations or enlarge capacity to bypass it.
+- Supplied projection changes cannot erase the retained inventory. Durable
+  uncertain slots and authenticated ordinary native readback across restart
+  remain unqualified.
 - Cross-owner repository transfers sharing a numeric `repository_id` cannot
   inherit silent write or budget authority.
 
@@ -231,12 +244,15 @@ dispositions, confirmed prior concerns, retained continuation eligibility and
 non-new lifecycle records also identify prior-review context. Fix/override
 proposals, the explicit-reanalysis flag, resolved/outdated host threads and
 complete file coverage do not provide the missing proof. The original baseline
-and its criteria remain unchanged. Initial full reviews and existing same-process
-lifecycle behavior remain supported.
+and its criteria remain unchanged. Initial full reviews without prior context
+and existing same-process lifecycle behavior remain supported. The application
+now also checks selected durable history for unbound opted-in cold calls, as
+described in the amendment below.
 
 This is a fail-closed correction, not durable reconstruction or gap closure. A
-caller that labels a cold invocation as a first full review and omits all prior
-context cannot yet be distinguished from a real first review here. Command/
+low-level publisher without independently selected ledger authority still cannot
+distinguish a cold caller that omits every prior-context input from a real first
+review. Command/
 `verify` reconstruction, authenticated retention of complete lifecycle state and
 ordinary producer/consumer wiring remain unqualified. Process-local state is
 still not durable authority. Do not remove the baseline, relabel coverage,
@@ -245,3 +261,37 @@ the retained result, original criteria, receipts, accounting and uncertainty;
 qualify the full durable reconstruction contract before resuming this lifecycle
 from a new process. No live recovery, reenrollment, capacity expansion or fresh
 inference is authorized by this diagnostic.
+
+
+## Selected-ledger pre-reservation refusal amendment (2026-11-12)
+
+For an unbound result (`transaction is None`) with an opted-in active-window or
+drift route whose selected process-local state is missing, `GitHubApplication`
+consults the independently selected session ledger before preparing a session
+round. Prior review/verification counters, retained convergence history, a durable
+transaction or staged publication cause the existing inventory-recovery handoff.
+Invalid/conflicting/expired selected state refuses rather than becoming an empty
+initial inventory. The hosted `known` enrollment path reuses its existing bounded
+marker read. This adds no storage, census, wire format or allowance.
+
+Preceding source already returned a generic identity-bound-transaction handoff
+for the qualified ordinary fixture, but reserved and aborted first, advancing the
+retained root generation from 4 to 6. The amendment refuses before those writes:
+the local fixture's exact root/file bytes, original criteria and reservations
+remain unchanged, without another session-round charge. Hosted authority reads
+and their existing request accounting still apply and must remain charged. The
+one-GET hosted fixture is not deployed authentication/accounting qualification.
+This is not evidence of a previously unsafe native publish or approval.
+A valid bound transaction continues through its existing validation/replay gates;
+it is not classified as an unbound missing-context call.
+
+Validation uses an ordinary bound initial producer with two obligations and an
+active cap of one, on-disk retention and a real fresh-process unbound consumer,
+plus hosted owned-marker readback, projection deletion, an original analysis
+reservation, corrupt/conflicting/expired loads and terminal bound replay.
+These tests prove refusal and preservation, not full lifecycle reconstruction.
+G10/G14/G16 remain open, including durable slot/ambiguity/effect serialization,
+authenticated current-root restoration, command/verify restoration and cold
+response-loss reconciliation. G15 enrollment/trust remains separately unqualified.
+No recovery, reenrollment, live activation, release or historical settlement is
+authorized. Rollback removes this early guard without changing stored records.
