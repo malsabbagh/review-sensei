@@ -219,3 +219,27 @@ production transport seam, not deployed authenticated GitHub execution, distinct
 workflow-run transfer, non-POSIX private storage, or historical recovery. The
 native service and provider are fixtures; no real review or approval is submitted.
 The matrix found no further source integration defect in this bounded slice.
+
+### Standalone private-context recovery accounting boundary
+
+Standalone `publish` uses an evidence-read budget, not the ordinary hosted
+caller's authenticated request-accounting transport. If its retained session
+record carries caller accounting, opt-in private-context publication/recovery now
+holds with typed `absent_context` and
+`original_caller_accounting_transport_required` guidance directing the operator to
+ordinary hosted `review-run`. This check precedes context reconstruction,
+acceptance checkpoints, handoff replacement and native business effects. CLI
+allowance flags cannot grant original-run ownership or replace its funding.
+Malformed accounting still refuses; unknown writer accounting cannot fall back
+to a fresh allowance. Local unbound CLI capture/recovery retains its existing
+explicit local budget semantics, including synthetic local capture/retry labels;
+those labels do not represent an authenticated hosted owner.
+
+The public-entry regression seeds finite metered fixture accounting (384 total,
+37 prior liability and 40 reserved) via production constructors/serialization.
+Both result retry and retained reconstruction previously published; both now
+hold without changes to the ledger or handoff, new inference, or native reviews.
+This is a supported refusal boundary, not completed standalone metered recovery.
+Integrating an authenticated original-caller transport into that standalone route
+remains open G17 work. The ordinary hosted cold-process qualification above is
+unchanged.

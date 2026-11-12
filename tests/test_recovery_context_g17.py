@@ -1543,6 +1543,72 @@ class OrdinaryEntryHostedAndCliRecoveryG17Tests(
             self.assertEqual(final_record.transaction.phase, "publication_succeeded")
 
     @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_standalone_cli_holds_caller_accounted_context_before_business_effects(
+        self,
+    ):
+        from review_sensei.api_work import (
+            ApiExecutionOwner,
+            ApiRunIdentity,
+            FrozenApiConfiguration,
+            StartupPlan,
+            StartupSlot,
+            initial_accounting,
+        )
+
+        # A finite metered fixture uses the production accounting constructor and
+        # serializer. This negative control cannot authorize any real caller.
+        accounting = initial_accounting(
+            ApiRunIdentity(1, 456),
+            FrozenApiConfiguration(POLICY_COMMIT, "a" * 64, 384),
+            ApiExecutionOwner(1, "hosted", 0),
+            StartupPlan(
+                (
+                    StartupSlot("hosted", 1, ("configuration",)),
+                    StartupSlot("hosted", 2, ("configuration",)),
+                )
+            ),
+            prior_nonstartup_liability_upper_bound=37,
+        ).reserve("retained", 40)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for reconstruct in (False, True):
+                with self.subTest(reconstruct=reconstruct):
+                    local = root / str(reconstruct)
+                    local.mkdir()
+                    self.original_analysis(local)
+                    handoff_args = EndToEndFreshProcessRecoveryG17Tests._enable_diagnostics_and_handoff_args(
+                        local
+                    )
+                    state = _FailedPublication()
+                    self.assertEqual(
+                        self.invoke(local, state, extra=handoff_args)[0], 1
+                    )
+                    # Persist the original finite allowance and liabilities;
+                    # CLI must not reinterpret them as owner 2 or fresh 512 funds.
+                    ledger = LocalSessionLedger(local / "ledger")
+                    ledger.replace(
+                        IDENTITY,
+                        lambda record: record.evolve(
+                            api_run_accounting=accounting.to_document()
+                        ),
+                    )
+                    before = self.ledger_bytes(local)
+                    handoff = next((local / "handoff").glob("*.json"))
+                    before_handoff = handoff.read_bytes()
+                    state.fail_review = False
+                    code, _, error = self.invoke(
+                        local, state, reconstruct=reconstruct, extra=handoff_args
+                    )
+                    self.assertEqual(code, 1, error)
+                    self.assertIn(
+                        "original_caller_accounting_transport_required", error
+                    )
+                    self.assertIn("review-run", error)
+                    self.assertEqual(state.reviews, [])
+                    self.assertEqual(self.ledger_bytes(local), before)
+                    self.assertEqual(handoff.read_bytes(), before_handoff)
+
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_cli_publish_refusal_controls_explicit_context_mode_and_retention_cleanup(
         self,
     ) -> None:

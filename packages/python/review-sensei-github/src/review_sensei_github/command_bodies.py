@@ -97,6 +97,25 @@ def _extract_ledger_accounting_version(record: SessionRecord) -> str:
     return raw_ver
 
 
+def _require_unbound_cli_context_record(record: SessionRecord) -> None:
+    """Standalone publication cannot impersonate a metered hosted caller.
+
+    Its evidence-read budget is not an authenticated original-run transport.
+    Original caller accounting therefore requires the ordinary review-run route,
+    not user-supplied allowance flags or synthetic local capture/retry IDs.
+    """
+
+    _extract_ledger_accounting_version(record)
+    if record.api_run_accounting is not None:
+        raise RecoveryRefusalError(
+            "absent_context: original_caller_accounting_transport_required; "
+            "recover through ordinary hosted review-run with the authenticated "
+            "original caller accounting transport; standalone CLI cannot fund "
+            "or assume ownership of this retained result",
+            refusal_code="absent_context",
+        )
+
+
 def _resolve_cli_policy_commit(args: argparse.Namespace) -> str:
     explicit = getattr(args, "policy_commit", None)
     if explicit is not None:
@@ -1016,6 +1035,46 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         from review_sensei.bounded_evidence import EvidenceReadBudget
 
         publication_budget = EvidenceReadBudget()
+        if recovery_store is not None:
+            # Inspect the actual retained writer before context reconstruction,
+            # acceptance checkpoint, handoff replacement, or native effects.
+            context_source_ledger: SessionLedger | None = session_ledger
+            if context_source_ledger is None and args.github_session_ledger:
+                from review_sensei_github.session_ledger import (
+                    GitHubIssueCommentSessionLedger,
+                )
+
+                context_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
+                    "GH_TOKEN"
+                )
+                if not isinstance(context_token, str) or not context_token.strip():
+                    raise RecoveryRefusalError(
+                        "absent_context: original context ledger is unavailable",
+                        refusal_code="absent_context",
+                    )
+                context_source_ledger = GitHubIssueCommentSessionLedger(
+                    http,
+                    token=context_token.strip(),
+                    app_slug=args.app_slug,
+                    evidence_budget=publication_budget,
+                )
+            if context_source_ledger is not None:
+                context_record = context_source_ledger.load(
+                    SessionIdentity(
+                        args.repository,
+                        args.pull_request,
+                        repository_id=args.repository_id,
+                    )
+                )
+                if (
+                    context_record.status not in {"ok", "migrated"}
+                    or context_record.record is None
+                ):
+                    raise RecoveryRefusalError(
+                        "absent_context: original context ledger is unavailable",
+                        refusal_code="absent_context",
+                    )
+                _require_unbound_cli_context_record(context_record.record)
         configuration_context = (
             engine_cli._load_context_document(
                 args.configuration_context,
