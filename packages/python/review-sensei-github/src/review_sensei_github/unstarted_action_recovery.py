@@ -26,7 +26,7 @@ import json
 import re
 import weakref
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from review_sensei.api_work import (
@@ -84,6 +84,8 @@ CROSS_RUN_AUTHORITY_MODES: Final[frozenset[str]] = frozenset(
 )
 
 _ISSUED_WITNESSES: weakref.WeakSet[UnstartedCancellationWitness] = weakref.WeakSet()
+# Process-local capture provenance, never a persisted/cross-process recovery grant.
+_ISSUED_DISPATCH_EVIDENCE: dict[int, tuple[Any, ...]] = {}
 
 
 @dataclass(frozen=True)
@@ -124,13 +126,22 @@ class NoBusinessDispatchEvidence:
             raise ReviewInputError(
                 "stranded caller transport run_id conflicts with action intent"
             )
+        if (
+            caller._root != record.record_sha256
+            or caller.accounting.identity.repository_id != identity.repository_id
+            or caller.accounting.action is None
+            or caller.accounting.action["intent"] != intent
+        ):
+            raise ReviewInputError(
+                "stranded transport source/root/owner binding conflicts"
+            )
         accepted_present = bool(
             caller._operation_entry_started
             or caller._provider_effect_unresolved
             or caller._action_effect_boundary is not None
             or caller._action_result_proof is not None
         )
-        return cls(
+        captured = cls(
             identity=identity,
             target_run_id=caller.run.run_id,
             target_owner=ApiExecutionOwner(**intent["owner"]),
@@ -142,6 +153,17 @@ class NoBusinessDispatchEvidence:
             accepted_operation_present=accepted_present,
             native_effects_checked=True,
         )
+        key = id(captured)
+        _ISSUED_DISPATCH_EVIDENCE[key] = (
+            weakref.ref(
+                captured, lambda _ref: _ISSUED_DISPATCH_EVIDENCE.pop(key, None)
+            ),
+            _sha256_json(asdict(captured)),
+            dict(caller._confirmed_control_writes),
+            caller,
+            frozenset(caller._physical_mutation_ids),
+        )
+        return captured
 
 
 @dataclass(frozen=True, eq=False)
@@ -578,6 +600,36 @@ def verify_no_business_dispatch_evidence(
         raise ReviewInputError(
             "no-business-dispatch evidence exceeds pre-effect admission mutation count"
         )
+
+    capture_digest = _sha256_json(asdict(evidence))
+    issued = _ISSUED_DISPATCH_EVIDENCE.get(id(evidence))
+    if issued is None or issued[0]() is not evidence or issued[1] != capture_digest:
+        raise ReviewInputError(
+            "no-business-dispatch evidence requires an unchanged process-issued transport capture; "
+            "hold for exact result recovery"
+        )
+    assert isinstance(evidence, NoBusinessDispatchEvidence)
+    if issued[3]._physical_mutation_ids != issued[4]:
+        raise ReviewInputError(
+            "no-business-dispatch evidence is stale after a later mutation; hold for exact result recovery"
+        )
+    observed_mutations = [
+        str(item["request_id"]) for item in normalized_observations if item["mutation"]
+    ]
+    if (
+        len(observed_mutations) != len(set(observed_mutations))
+        or set(observed_mutations) != issued[4]
+    ):
+        raise ReviewInputError(
+            "no-business-dispatch physical mutation inventory conflicts; hold for exact result recovery"
+        )
+    receipts = issued[2]
+    for observation in normalized_observations:
+        if observation["mutation"] and str(observation["request_id"]) not in receipts:
+            raise ReviewInputError(
+                "no-business-dispatch mutation lacks confirmed owned control-write receipt; "
+                "hold for exact result recovery"
+            )
 
     source_id = int(intent["source"]["id"])
     app_author_id = getattr(ledger, "_evidence_author_id", None)

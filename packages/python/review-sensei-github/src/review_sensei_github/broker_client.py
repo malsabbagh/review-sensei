@@ -161,6 +161,11 @@ class BrokerClient:
             raise GitHubBrokerClientError("Broker timeout must be positive")
         self.broker_url = broker_url
         self.opener = opener
+        from .api_run_requests import ApiRunRequestTransport
+
+        caller = getattr(opener, "__self__", None)
+        if isinstance(caller, ApiRunRequestTransport):
+            caller._register_authentication_endpoints(broker_url)
         self.timeout = timeout
         if before_request is not None and not callable(before_request):
             raise GitHubBrokerClientError("Broker request accounting is invalid")

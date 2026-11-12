@@ -1275,6 +1275,89 @@ class UnstartedActionRecoveryG32Tests(unittest.TestCase):
 
 
 class OrdinaryCallerAuthorityGateG32Tests(unittest.TestCase):
+    def test_physical_business_mutation_within_old_count_is_not_admission_proof(self):
+        from review_sensei_github.unstarted_action_recovery import (
+            NoBusinessDispatchEvidence,
+            verify_no_business_dispatch_evidence,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            f, native, ledger, _, _, intent = (
+                UnstartedActionRecoveryG32Tests()._prepare(directory)
+            )
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            assert record is not None
+            before = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=record
+            )
+
+            def verify(evidence):
+                return verify_no_business_dispatch_evidence(
+                    caller=f.accounted,
+                    ledger=native,
+                    identity=IDENTITY,
+                    state=ApiRunAccounting.from_document(record.api_run_accounting),
+                    intent=intent,
+                    intent_sha256=before.intent_sha256,
+                    evidence=evidence,
+                )
+
+            with self.assertRaisesRegex(
+                ReviewInputError, "source/root/owner binding conflicts"
+            ):
+                NoBusinessDispatchEvidence.from_stranded_caller(
+                    f.accounted,
+                    identity=IDENTITY,
+                    record=record.evolve(generation=record.generation + 1),
+                )
+            # A real physical review POST, not an evidence boolean labelled business.
+            native.http.request(
+                "POST",
+                "/repos/owner/repo/pulls/7/reviews",
+                token=native.token,
+                body={
+                    "body": "business effect without a receipt marker",
+                    "event": "COMMENT",
+                    "commit_id": HEAD,
+                },
+            )
+            after = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=record
+            )
+            self.assertLessEqual(
+                sum(
+                    o["mutation"]
+                    for o in after.observed_requests
+                    if o["phase"] == "ordinary"
+                ),
+                2,
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError, "confirmed owned control-write receipt"
+            ):
+                verify(after)
+            with self.assertRaisesRegex(
+                ReviewInputError, "process-issued transport capture"
+            ):
+                verify(replace(before))
+            with self.assertRaisesRegex(
+                ReviewInputError, "stale after a later mutation"
+            ):
+                verify(before)
+            physical = f.accounted.observations[-1]
+            self.assertTrue(physical["mutation"])
+            physical["mutation"] = False
+            omitted = NoBusinessDispatchEvidence.from_stranded_caller(
+                f.accounted, identity=IDENTITY, record=record
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ReviewInputError, "physical mutation inventory conflicts"
+                ):
+                    verify(omitted)
+            finally:
+                physical["mutation"] = True
+
     def test_owned_native_marker_parser_refuses_ambiguous_metadata(self):
         from review_sensei_github.unstarted_action_recovery import (
             _native_artifact_matches,

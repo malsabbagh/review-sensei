@@ -45,7 +45,15 @@ keeping the existing caller workflow subscriptions unchanged:
    admission enforces immutable source-comment revision fences (`G27`), while
    stranded unstarted actions after source mutation (`G32`) require both
    verified `NoBusinessDispatchEvidence` and qualified cessation/canonical
-   fencing (`UnstartedCallerRecoveryGate`).
+   fencing (`UnstartedCallerRecoveryGate`). A request count is not non-dispatch
+   authority: the process-issued capture must cover the transport's complete
+   physical mutation inventory. Each mutation needs a confirmed owned root
+   activation/admission or predecessor-archive receipt, or an exact configured
+   broker authentication endpoint classification. Root receipts follow native
+   readback and bind the outgoing root; unrelated business mutations, copied or
+   changed captures, later mutations, missing receipts and unknown outcomes hold
+   for exact result recovery. This process-local proof is not serialized historical
+   cessation authority and creates no replacement allowance.
 2. **Current-state convergence, ownership, and finite stop rule (`G13`):**
    Reconcile admitted events and manual recovery actions against the
    authenticated live pull-request `(base_sha, head_sha)` target
