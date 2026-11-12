@@ -141,6 +141,7 @@ Hosted-only reuse requires core-input proof and per-package signed provenance (A
 Only confirmed archives enable narrative excerpts; all finding prose and authority stay intact.
 
 Never execute inactive selection.
+## Scoped retained-state qualification
 G12 capacity is not executable recovery evidence. The ADR 0131 qualifier reopens an existing local session in a fresh interpreter and authenticates its disposition snapshot graph via production readers. Its receipt reports only exercised components and physical read counts. Missing artifacts stay unqualified; never synthesize original context. Native-effect/inference replay counts stay unknown. Matching roots/capacity do not qualify result/archive/context recovery, terminal closure or historical settlement.
 
 Snapshot previews use only the ledger-owned snapshot_preview_parts cached-graph capability, not concrete cache attributes/filesystem paths. Explicit hydrate_snapshot_preview charges production v1/v2 reads before pure preview; unavailable cached evidence refuses without hidden I/O. Preserve ADR 0131 detached-proof and conservative post-hydration read-allowance contracts.
