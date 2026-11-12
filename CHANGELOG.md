@@ -2,6 +2,61 @@
 
 ## Unreleased
 
+## 0.8.21 - 2026-11-12
+
+Changes since [v0.8.20](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.20), from [a4c605c51162dd37dc1b938e6e77fb535ff6a566](https://github.com/malsabbagh/review-sensei/commit/a4c605c51162dd37dc1b938e6e77fb535ff6a566) through [98ec9789e5f060a4dc0b73144780ba6a89a0082b](https://github.com/malsabbagh/review-sensei/commit/98ec9789e5f060a4dc0b73144780ba6a89a0082b).
+
+Previous annotated tag object: `ffaf25468dbf682e43cb09bbfb047b6bd86c393e`.
+
+- docs: record released v0.8.20 ([0650ea1d93b882f663f12d03e66c7593a0d7e88c](https://github.com/malsabbagh/review-sensei/commit/0650ea1d93b882f663f12d03e66c7593a0d7e88c)).
+- Harden read-only completion query validation \(\#413\) ([189e875f917e24619726dd75c3f77540cef67d06](https://github.com/malsabbagh/review-sensei/commit/189e875f917e24619726dd75c3f77540cef67d06)).
+- Balance branch coverage with measured class timings \(\#414\) ([a3aede12a25c76a58b06f0b98a2797e53af4577a](https://github.com/malsabbagh/review-sensei/commit/a3aede12a25c76a58b06f0b98a2797e53af4577a)).
+- Balance Windows checkout workers with measured timings \(\#415\) ([6ed47a3dbef22cf597896be1c070c6fd71f1edd3](https://github.com/malsabbagh/review-sensei/commit/6ed47a3dbef22cf597896be1c070c6fd71f1edd3)).
+- Run macOS checkout tests in isolated workers \(\#416\) ([f006538cd4bd097f19a37e7d5eb0a96de350e145](https://github.com/malsabbagh/review-sensei/commit/f006538cd4bd097f19a37e7d5eb0a96de350e145)).
+- Preserve installed-suite hooks and exact test accounting \(\#417\) ([cfc4cc9ed12b494d0b70382034b04c133c890c16](https://github.com/malsabbagh/review-sensei/commit/cfc4cc9ed12b494d0b70382034b04c133c890c16)).
+- Retain bounded review accounting finalization observations \(\#419\) ([e91a7e4b8c6c6fdb9d61b906e0bc3c7ee47432c8](https://github.com/malsabbagh/review-sensei/commit/e91a7e4b8c6c6fdb9d61b906e0bc3c7ee47432c8)).
+- Preserve checkout hooks and restore isolated scheduling \(\#418\) ([9333f51391fc4a98bd6014c74b7f04f6df01fcfc](https://github.com/malsabbagh/review-sensei/commit/9333f51391fc4a98bd6014c74b7f04f6df01fcfc)).
+- chore\(deps\): bump mypy from 2.4.0 to 2.4.1 \(\#420\) ([b86cc2b76d093ff249b7ac6082064ca0b2b849d0](https://github.com/malsabbagh/review-sensei/commit/b86cc2b76d093ff249b7ac6082064ca0b2b849d0)).
+- chore\(deps\): bump ruff from 0.17.2 to 0.17.3 \(\#421\) ([22b554a8e5d569a878b89662d011941e9dba0821](https://github.com/malsabbagh/review-sensei/commit/22b554a8e5d569a878b89662d011941e9dba0821)).
+- Fix hosted supersession cleanup capability \(\#422\) ([baa473a51705ef68bea4ef9d69b0efbb8d31fc6c](https://github.com/malsabbagh/review-sensei/commit/baa473a51705ef68bea4ef9d69b0efbb8d31fc6c)).
+- Clarify routing-only workflow preflight \(\#424\) ([0a5e608e2cf3b06edc0070f466e9e62e564edd1b](https://github.com/malsabbagh/review-sensei/commit/0a5e608e2cf3b06edc0070f466e9e62e564edd1b)).
+- Document and test reviews of conflicted branches \(\#429\) ([7cf11698e6ed3e8b496d59f83603bafc9aea00a7](https://github.com/malsabbagh/review-sensei/commit/7cf11698e6ed3e8b496d59f83603bafc9aea00a7)).
+- Reject malformed draft flags before publication \(\#425\) ([a75cbb535a9df4091159a569c6effbbe68053045](https://github.com/malsabbagh/review-sensei/commit/a75cbb535a9df4091159a569c6effbbe68053045)).
+- Bind generated replies to their prepared base context \(\#428\) ([0da8016302ab8a8b0876e54ae0f4f5385a82b80e](https://github.com/malsabbagh/review-sensei/commit/0da8016302ab8a8b0876e54ae0f4f5385a82b80e)).
+- Add reader-only support for prospective G34 retained results \(\#431\) ([90bf2552676e71438e56bb22fef7c14d74fc9d68](https://github.com/malsabbagh/review-sensei/commit/90bf2552676e71438e56bb22fef7c14d74fc9d68)).
+- Authenticate bounded observed action-result ancestry \(\#436\) ([a5c0cd1584d73ddebc18784a57d33e3c13301afc](https://github.com/malsabbagh/review-sensei/commit/a5c0cd1584d73ddebc18784a57d33e3c13301afc)).
+- chore\(deps\): bump pypi-attestations from 0.0.30 to 0.0.31 \(\#435\) ([c6536b1fe34bc2496ca9c8eb864b14f2aceadba1](https://github.com/malsabbagh/review-sensei/commit/c6536b1fe34bc2496ca9c8eb864b14f2aceadba1)).
+- chore\(deps\): bump ruff from 0.17.3 to 0.17.4 \(\#432\) ([dbedd17c693656473ea59d99c659084faba052cf](https://github.com/malsabbagh/review-sensei/commit/dbedd17c693656473ea59d99c659084faba052cf)).
+- chore\(deps\): bump coverage from 7.17.0 to 7.17.2 \(\#434\) ([fedfa7d6caac9bb0ad54b367013c620763bd5de4](https://github.com/malsabbagh/review-sensei/commit/fedfa7d6caac9bb0ad54b367013c620763bd5de4)).
+- Test partial predecessor command admission boundaries \(\#430\) ([233cceb5f134ececdd014f3e50133abfcd0a5263](https://github.com/malsabbagh/review-sensei/commit/233cceb5f134ececdd014f3e50133abfcd0a5263)).
+- Preserve clean cancellation during HTTP response construction \(\#437\) ([76718d10923654cb6464c24f7b6480682862fc3f](https://github.com/malsabbagh/review-sensei/commit/76718d10923654cb6464c24f7b6480682862fc3f)).
+- chore\(deps\): bump the codeql-action group with 2 updates \(\#433\) ([c40f341e48aaf321a8ea0f11f695c6377ce6f53b](https://github.com/malsabbagh/review-sensei/commit/c40f341e48aaf321a8ea0f11f695c6377ce6f53b)).
+- Preserve bounded pull-request lookup failure evidence \(\#439\) ([4dd0ea1f65a8b2508da0c310b8968e995f350a6d](https://github.com/malsabbagh/review-sensei/commit/4dd0ea1f65a8b2508da0c310b8968e995f350a6d)).
+- Preserve bounded primary and cleanup diagnostics \(\#423\) ([1af38c27f62a77a779c4b59d924a5970fd84f2d5](https://github.com/malsabbagh/review-sensei/commit/1af38c27f62a77a779c4b59d924a5970fd84f2d5)).
+- Synchronize routing preflight architecture rules \(\#426\) ([63d24ebb2a0b02e1fc3d28cc927d90c42cd4cc6b](https://github.com/malsabbagh/review-sensei/commit/63d24ebb2a0b02e1fc3d28cc927d90c42cd4cc6b)).
+- Close fresh review accounting after a proven check rejection \(\#440\) ([eeb306498601156f958a9af223851c5049af23d1](https://github.com/malsabbagh/review-sensei/commit/eeb306498601156f958a9af223851c5049af23d1)).
+- Add opt-in bounded review decision providers \(\#427\) ([3b749a37a32d142cfb21e4ef487665361c8f95b3](https://github.com/malsabbagh/review-sensei/commit/3b749a37a32d142cfb21e4ef487665361c8f95b3)).
+- Qualify an unconnected canonical recovery authority candidate \(\#438\) ([546c7cb354dba173ba53b2db54f1591ac5aa991f](https://github.com/malsabbagh/review-sensei/commit/546c7cb354dba173ba53b2db54f1591ac5aa991f)).
+- Cover post-header PR lookup transport failure \(\#441\) ([a26fe480df541d3c1af5bf27dd7a43c44510a4c1](https://github.com/malsabbagh/review-sensei/commit/a26fe480df541d3c1af5bf27dd7a43c44510a4c1)).
+- Close Batch 3 historical recovery matrix, pre-entry abort, pending reassessment, and publication overflow gaps \(G03, G29, G30, G31\) \(\#449\) ([8fe73f07fcb1b328c7cab4bf60a902a14775f26d](https://github.com/malsabbagh/review-sensei/commit/8fe73f07fcb1b328c7cab4bf60a902a14775f26d)).
+- Close Batch 1 provenance, recovery context, representability and capacity gaps \(G11, G17, G34, G12\) \(\#448\) ([6db7e78101a3bc6759e232ca53b21d9c062b2614](https://github.com/malsabbagh/review-sensei/commit/6db7e78101a3bc6759e232ca53b21d9c062b2614)).
+- Close Batch 2 stale-ledger fencing, concurrency, unstarted-action recovery, and source-comment lifecycle gaps \(G02, G08, G32, G27\) \(\#446\) ([31708755338c85c75500f638e5d82a211e7b4230](https://github.com/malsabbagh/review-sensei/commit/31708755338c85c75500f638e5d82a211e7b4230)).
+- Close Batch 4 finding window, drift, artifact authority, and trust transition gaps \(G10, G16, G14, G15\) \(\#445\) ([44ad1b7a75c94405a5c3b038308986193a5af008](https://github.com/malsabbagh/review-sensei/commit/44ad1b7a75c94405a5c3b038308986193a5af008)).
+- feat\(github\): codify event routing, convergence, and merge-queue contracts \(G01, G07, G13, G26, G28\) \(\#443\) ([598e791ce0cbeffd0bdaa9e08e290ddae8da361d](https://github.com/malsabbagh/review-sensei/commit/598e791ce0cbeffd0bdaa9e08e290ddae8da361d)).
+- Formalize operational limits, title freshness, policy drift, and quota boundaries \(G09, G19, G20, G21, G25\) \(\#444\) ([45452f0e2e33dc4530aff6fb003ba28bc971b52d](https://github.com/malsabbagh/review-sensei/commit/45452f0e2e33dc4530aff6fb003ba28bc971b52d)).
+- Observe bounded check proof hook failure stages \(\#442\) ([a78454e0444e37210c4037ab7c424182edd903d6](https://github.com/malsabbagh/review-sensei/commit/a78454e0444e37210c4037ab7c424182edd903d6)).
+- Close Batch 5 reopen lifecycle, force-push ancestry, and draft/close timing gaps \(G05, G06, G23\) \(\#447\) ([07179c0f2bd6b761a95449ce3ce29d4633c80094](https://github.com/malsabbagh/review-sensei/commit/07179c0f2bd6b761a95449ce3ce29d4633c80094)).
+- feat\(publisher\): wire Stage B G10, G16, G14, G15 into ordinary review, verify, and admission paths \(\#455\) ([efde425bf5b6c315770d8f537b5d98a6c1bdb62b](https://github.com/malsabbagh/review-sensei/commit/efde425bf5b6c315770d8f537b5d98a6c1bdb62b)).
+- Qualify G02/G08/G09/G19/G20/G21/G25 writer-token, title, policy, quota, and indivisible-work boundaries \(\#453\) ([0ee95e2c0f97a7bc8b2e422ae6ded54976639cc7](https://github.com/malsabbagh/review-sensei/commit/0ee95e2c0f97a7bc8b2e422ae6ded54976639cc7)).
+- feat\(github\): add Stage D offline historical attempt-evidence packets \(G03, G29, G30, G31\) \(\#450\) ([e2fed2bb44e93e9fc413dc9a275b3884814bcc6c](https://github.com/malsabbagh/review-sensei/commit/e2fed2bb44e93e9fc413dc9a275b3884814bcc6c)).
+- fix\(recovery,lifecycle\): wire ordinary G17 recovery handoff and complete G05/G06/G23 qualification \(\#451\) ([14e79c626fa0c9b14fb3d1422b3e8386ba000901](https://github.com/malsabbagh/review-sensei/commit/14e79c626fa0c9b14fb3d1422b3e8386ba000901)).
+- fix\(lifecycle\): qualify G34 snapshot representability, G12 capacity envelope, and G11 provenance \(\#452\) ([90c8d588fb0d8efe3485c39e9cb18e46813dc84b](https://github.com/malsabbagh/review-sensei/commit/90c8d588fb0d8efe3485c39e9cb18e46813dc84b)).
+- feat\(github\): wire G27/G32/G13 caller lifecycle &amp; qualify G01/G07/G26/G28 \(\#454\) ([98ec9789e5f060a4dc0b73144780ba6a89a0082b](https://github.com/malsabbagh/review-sensei/commit/98ec9789e5f060a4dc0b73144780ba6a89a0082b)).
+
+## review-sensei-github 0.3.27 - 2026-11-12
+
+- Pin `review-sensei==0.8.21`.
+
 ## 0.8.20 - 2026-11-01
 
 Changes since the published core `0.8.18` / hosted `0.3.24` release. The
