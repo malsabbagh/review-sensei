@@ -1563,6 +1563,16 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
     def test_two_decision_disposition_snapshot_already_recorded_parity_and_zero_budget_calls(
         self,
     ) -> None:
+        self._assert_two_decision_snapshot_parity()
+
+    def test_two_decision_snapshot_parity_without_platform_metadata_cache(self) -> None:
+        # Windows deliberately authenticates full bytes on every part read.
+        # Exercise that production path on every CI platform, without relaxing
+        # either its physical request charges or the ordinary evidence ceiling.
+        with patch("review_sensei.session.sys.platform", "win32"):
+            self._assert_two_decision_snapshot_parity()
+
+    def _assert_two_decision_snapshot_parity(self) -> None:
         """Exact G34 2-decision disposition_snapshot reproducer and pre-loaded snapshot parity.
 
         On unpatched 07179c0f, preview stripped current_record.disposition_snapshot=None
@@ -1731,8 +1741,19 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                     prev_rec.disposition_snapshot, rec.disposition_snapshot
                 )
 
+                # The setup above represents two earlier commands. Replay is
+                # a new invocation: reopen its persisted state with an independent
+                # allowance, never reset the setup ledger's consumed budget.
+                setup_calls = ledger.evidence_budget.calls
+                replay_budget = EvidenceReadBudget()
+                replay_ledger = LocalSessionLedger(
+                    Path(tmp),
+                    enable_disposition_snapshot_writes=True,
+                    evidence_budget=replay_budget,
+                )
+                self.assertEqual(replay_ledger.load(IDENTITY).record, rec)
                 real_rec, real_res = apply_session_command(
-                    ledger,
+                    replay_ledger,
                     IDENTITY,
                     cmd_override,
                     finding_inventory=(finding,),
@@ -1741,6 +1762,13 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                     provenance="comment:43",
                     now=fixed_now,
                 )
+                # Hydrate once through the production reader, retaining the
+                # charged evidence for the subsequent pure diagnostic checks.
+                before_hydration = replay_budget.calls
+                auth_disps = read_session_dispositions(replay_ledger, real_rec)
+                hydration_calls = replay_budget.calls
+                self.assertGreater(hydration_calls, before_hydration)
+                self.assertEqual(ledger.evidence_budget.calls, setup_calls)
                 real_rep = evaluate_terminal_action_representability(
                     identity=IDENTITY,
                     intent_sha256=intent_sha,
@@ -1748,7 +1776,7 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                     result_document=asdict(real_res),
                     binding=binding,
                     current_record=real_rec,
-                    resolved_dispositions=read_session_dispositions(ledger, real_rec),
+                    resolved_dispositions=auth_disps,
                 )
                 self.assertEqual(real_res.receipts[0].outcome, "already-recorded")
                 self.assertEqual(asdict(prev_res), asdict(real_res))
@@ -1763,7 +1791,6 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                 self.assertEqual(prev_rep.refusal_code, "carrier_inline_bound_exceeded")
 
                 # Also verify _InMemoryPreviewLedger.read_disposition_snapshot via preloaded_dispositions & tamper guards:
-                auth_disps = read_session_dispositions(ledger, rec)
                 mem_ledger = _InMemoryPreviewLedger(
                     rec,
                     producer="local-ledger",
@@ -1774,6 +1801,7 @@ class TerminalRepresentabilityG34Tests(unittest.TestCase):
                 loaded_via_method = mem_ledger.read_disposition_snapshot(IDENTITY)
                 self.assertEqual(len(loaded_via_method), 2)
                 self.assertEqual(shared_budget.calls, 0)
+                self.assertEqual(replay_budget.calls, hydration_calls)
 
                 tampered = (
                     {**dict(auth_disps[0]), "reason": "tampered"},
