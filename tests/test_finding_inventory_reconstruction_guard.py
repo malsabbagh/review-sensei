@@ -12,6 +12,7 @@ from copy import copy
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from review_sensei_github import GitHubPublicationError, ReviewPublisher
 from review_sensei_github.approval import approval_eligibility_from_result
@@ -365,12 +366,13 @@ class EnrolledColdFindingGuardTests(unittest.TestCase):
     identity = SessionIdentity("owner/repo", 1, repository_id=1)
     _baseline = FindingInventoryReconstructionGuardTests._baseline
 
-    def _produce(self, directory):
+    def _produce(self, directory, *, drift=False):
         from tests.test_review_transaction import CONFIGURATION, EVIDENCE, POLICY
 
         helper = fixtures.OrdinaryPublisherActiveWindowTests()
         host = _WindowGitHubHost(head_sha=HEAD_1)
         _, app, publisher, options = helper._make_app(host, directory, cap=1)
+        options = replace(options, enable_drift_tracking=drift)
         result = replace(
             _result(
                 _comment("src/app.py", line=5, body="Required auth check."),
@@ -421,9 +423,19 @@ class EnrolledColdFindingGuardTests(unittest.TestCase):
         )
         outcome = app.publish_review(**arguments)
         self.assertEqual(outcome.status, "published")
-        inventory = publisher.active_window_state(repository_id=1, pull_request=1)
-        self.assertEqual(len(inventory.authoritative_decision_inventory.obligations), 2)
-        self.assertEqual(len(inventory.display_active_findings.entries), 1)
+        if drift:
+            inventory = publisher.drift_state(repository_id=1, pull_request=1)
+            self.assertEqual(len(inventory.inventory.obligations), 2)
+            self.assertEqual(len(inventory.active_entries), 1)
+            self.assertIsNone(
+                publisher.active_window_state(repository_id=1, pull_request=1)
+            )
+        else:
+            inventory = publisher.active_window_state(repository_id=1, pull_request=1)
+            self.assertEqual(
+                len(inventory.authoritative_decision_inventory.obligations), 2
+            )
+            self.assertEqual(len(inventory.display_active_findings.entries), 1)
         return app, host, arguments
 
     def test_real_process_restart_omitted_context_preserves_exact_ledger(self):
@@ -476,7 +488,12 @@ print(json.dumps({'status':outcome.status, 'diagnostic':outcome.diagnostic,
                         env={
                             **os.environ,
                             "PYTHONPATH": os.pathsep.join(
-                                ("src", "packages/python/review-sensei-github/src", ".")
+                                str(Path(__file__).resolve().parents[1] / relative)
+                                for relative in (
+                                    "src",
+                                    "packages/python/review-sensei-github/src",
+                                    ".",
+                                )
                             ),
                         },
                         text=True,
@@ -664,4 +681,73 @@ print(json.dumps({'status':outcome.status, 'diagnostic':outcome.diagnostic,
             self.assertEqual(after, before)
             self.assertEqual(after.reservation_id, prepared.reservation_id)
             self.assertEqual(after.transaction.phase, "analysis")
+            self.assertEqual(host.calls, [])
+
+    def test_pristine_selected_ledger_reaches_session_preparation(self):
+        from review_sensei_github import application as application_module
+
+        # A genuinely first unbound call is not diagnosed as lost inventory.
+        # Its downstream identity-bound-transaction requirement is unchanged.
+        for drift in (False, True):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as directory:
+                host = _WindowGitHubHost(head_sha=HEAD_1)
+                _, app, _, options = (
+                    fixtures.OrdinaryPublisherActiveWindowTests()._make_app(
+                        host, directory, cap=1
+                    )
+                )
+                options = replace(options, enable_drift_tracking=drift)
+                before = app.session_ledger.load(self.identity).record
+                self.assertEqual(before.completed_initial_reviews, 0)
+                self.assertIsNone(before.transaction)
+                self.assertIsNone(before.convergence_history)
+                with patch.object(
+                    application_module,
+                    "prepare_session_round",
+                    wraps=application_module.prepare_session_round,
+                ) as prepare:
+                    outcome = app.publish_review(
+                        options=options,
+                        oidc_token="fixture",
+                        repository="owner/repo",
+                        repository_id=1,
+                        pull_request=1,
+                        head_sha=HEAD_1,
+                        base_branch="main",
+                        base_sha=BASE_SHA,
+                        result=_result(),
+                        diff=ORDINARY_DIFF,
+                        app_slug="reviewsensei[bot]",
+                    )
+                prepare.assert_called_once()
+                self.assertEqual(prepare.call_args.args[1], self.identity)
+                self.assertEqual(
+                    (outcome.status, outcome.diagnostic),
+                    ("handoff", "identity-bound transaction required"),
+                )
+                self.assertEqual(host.calls, [])
+
+    def test_present_drift_with_cap_does_not_require_unused_window_state(self):
+        from review_sensei_github import application as application_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            app, host, arguments = self._produce(directory, drift=True)
+            self.assertIsNotNone(
+                app.reviewer.drift_state(repository_id=1, pull_request=1)
+            )
+            self.assertIsNone(
+                app.reviewer.active_window_state(repository_id=1, pull_request=1)
+            )
+            self.assertEqual(arguments["options"].max_active_findings, 1)
+            host.calls.clear()
+            with patch.object(
+                application_module,
+                "prepare_session_round",
+                wraps=application_module.prepare_session_round,
+            ) as prepare:
+                outcome = app.publish_review(**{**arguments, "result": _result()})
+            # Drift is the selected lifecycle; the cap configures its display
+            # size, not a simultaneous independent active-window inventory.
+            prepare.assert_called_once()
+            self.assertNotEqual(outcome.diagnostic, DIAGNOSTIC)
             self.assertEqual(host.calls, [])
