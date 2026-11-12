@@ -679,6 +679,22 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
     def setUp(self):
         self.workflow = (ROOT / ".github/workflows/publish-npm.yml").read_text()
 
+    def test_npm_matrices_use_supported_native_runner_labels(self):
+        expected = {
+            "darwin-arm64": "macos-15",
+            "darwin-x64": "macos-15-intel",
+            "linux-arm64-gnu": "ubuntu-24.04-arm",
+            "linux-x64-gnu": "ubuntu-latest",
+            "win32-x64": "windows-latest",
+        }
+        for job in ("native-build", "verify-published"):
+            with self.subTest(job=job):
+                body = self.workflow.split(f"  {job}:\n", 1)[1]
+                matrix = body.split("      matrix:\n", 1)[1].split("    steps:\n", 1)[0]
+                rows = re.findall(r"- target: ([\w-]+)\n\s+os: ([\w.-]+)", matrix)
+                self.assertEqual(len(rows), len(expected))
+                self.assertEqual(dict(rows), expected)
+
     def test_only_marshal_signed_tag_can_start_npm_publication(self):
         self.assertIn('tags:\n      - "v*.*.*"', self.workflow)
         for retired in (
