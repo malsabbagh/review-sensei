@@ -35,7 +35,7 @@ from review_sensei.bounded_evidence import (
     canonical_bytes,
 )
 from review_sensei.errors import ReviewInputError
-from review_sensei.session import SessionRecord
+from review_sensei.session import SessionIdentity, SessionRecord
 
 
 class AcceptedActionTests(unittest.TestCase):
@@ -155,6 +155,65 @@ class AcceptedActionTests(unittest.TestCase):
                 current = read_current_action(ledger, IDENTITY)
                 self.assertEqual(current.root_sha256, root)
                 self.assertNotEqual(getattr(current, field), value)
+
+    def test_selected_snapshot_rechecks_scope_after_detaching_subclass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f, _, ledger, _, _, _, record = _prepare_fixture(directory)
+            other_identity = SessionIdentity("owner/repo", 8, repository_id=123)
+            other = SessionRecord.create(other_identity).evolve(
+                api_run_accounting=record.api_run_accounting
+            )
+
+            class RedirectedRecord(SessionRecord):
+                def to_dict(self):
+                    return other.to_dict()
+
+            # Native parsing produces base SessionRecords. A caller-supplied
+            # subclass must not redirect the detached snapshot to another PR.
+            redirected = RedirectedRecord.from_dict(record.to_dict())
+            self.assertEqual(redirected.identity(), IDENTITY)
+            self.assertEqual(
+                SessionRecord.from_dict(redirected.to_dict()).identity(), other_identity
+            )
+            before = copy.deepcopy(f.comment)
+            count = len(f.trace)
+            with self.assertRaisesRegex(ReviewInputError, "record scope conflicts"):
+                observe_selected_action(ledger, IDENTITY, redirected)
+            self.assertEqual(f.comment, before)
+            self.assertEqual(len(f.trace), count)
+
+    def test_terminal_without_retained_result_refuses_observation_and_lifecycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f, _, ledger, _, _, intent, _ = _prepare_fixture(directory)
+            boundary = f.accounted.begin_action_effect(ledger, IDENTITY, intent)
+            proof = f.accounted.settle_action_effect(
+                ledger,
+                IDENTITY,
+                boundary,
+                outcome={"kind": "explicit_noop", "reason": "status"},
+                result_document={"action": "status", "applied": False},
+            )
+            closed = f.accounted.close_action(ledger, IDENTITY, proof)
+            before = copy.deepcopy(f.comment)
+            count = len(f.trace)
+            # Simulate a corrupted in-memory selected snapshot. The closed
+            # accounting codec already requires every terminal retained result.
+            closed.api_run_accounting["action"]["result"] = None
+            with self.assertRaisesRegex(
+                ReviewInputError, "retained result is malformed"
+            ):
+                observe_selected_action(ledger, IDENTITY, closed)
+            with self.assertRaisesRegex(
+                ReviewInputError, "retained result is malformed"
+            ):
+                classify_source_comment_lifecycle(
+                    caller=f.accounted,
+                    ledger=ledger,
+                    identity=IDENTITY,
+                    record=closed,
+                )
+            self.assertEqual(f.comment, before)
+            self.assertEqual(len(f.trace), count)
 
     def test_ordinary_lifecycle_consumes_observation_without_extra_requests(self):
         with tempfile.TemporaryDirectory() as directory:

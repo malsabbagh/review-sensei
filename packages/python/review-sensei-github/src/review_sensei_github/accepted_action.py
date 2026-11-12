@@ -76,6 +76,8 @@ def observe_selected_action(
     # label while changing the observed action. This is integrity, not native
     # discovery, freshness, writer exclusion or recovery authority.
     record = SessionRecord.from_dict(record.to_dict())
+    if record.identity() != identity:
+        raise ReviewInputError("accepted action record scope conflicts")
     if record.api_run_accounting is None:
         raise ReviewInputError("accepted action record lacks caller accounting")
     state = ApiRunAccounting.from_document(record.api_run_accounting)
