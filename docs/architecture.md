@@ -247,6 +247,12 @@ The versioned synthetic corpus flows through a bounded, provider-neutral
 evaluation loader and FixtureProvider into the unchanged ReviewService. Reports retain only aggregate, non-monetary metrics. Live endpoints are
 authority-gated by the CLI; CI uses fixture mode.
 
+## Scoped retained-state qualification
+
+G12 capacity is not executable recovery evidence. The ADR 0131 qualifier reopens an existing local session in a fresh interpreter and authenticates its disposition snapshot graph via production readers. Its receipt reports only exercised components and physical read counts. Missing artifacts stay unqualified; never synthesize original context. Native-effect/inference replay counts stay unknown. Matching roots/capacity do not qualify result/archive/context recovery, terminal closure or historical settlement.
+
+Snapshot previews use only the ledger-owned snapshot_preview_parts cached-graph capability, not concrete cache attributes/filesystem paths. Explicit hydrate_snapshot_preview charges production v1/v2 reads before pure preview; unavailable cached evidence refuses without hidden I/O. Preserve ADR 0131 detached-proof and conservative post-hydration read-allowance contracts.
+
 ## Quality and supply-chain boundary
 
 Deterministic, provider-independent CI gates Ruff format/lint, mypy, compileall, branch coverage, three packaged Draft 2020-12 contracts and immutable Action pins. Build both distributions/SHA-256s; run unpacked-sdist dist-safe/downstream against installed wheels outside checkout. CodeQL Python/JS/TS findings use deterministic SARIF. Checkout-only scripts/.github/packages/deploy tests stay in compatibility/quality jobs. All workflow permissions default to

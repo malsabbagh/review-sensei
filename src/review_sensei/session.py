@@ -16,6 +16,7 @@ and cannot reset the round limit.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import ntpath
@@ -4060,6 +4061,103 @@ def _trusted_evidence_resolver(
     return producer, reader
 
 
+def authenticated_snapshot_preview_parts(
+    identity: SessionIdentity,
+    record: SessionRecord,
+    *,
+    producer: str,
+    cached_part: Callable[[str], AuthenticatedPart | None],
+) -> dict[str, AuthenticatedPart] | None:
+    """Pure cached graph proof, never a physical read or mutation capability.
+
+    Return detached parts referenced by this exact authenticated v1/v2 graph,
+    or None if any part is not cached. Malformed cached evidence still raises.
+    The adapter must supply only bytes authenticated in its normal read phase.
+    """
+    if (record.repository, record.pull_request, record.repository_id) != (
+        identity.repository,
+        identity.pull_request,
+        identity.repository_id,
+    ):
+        raise ReviewInputError("snapshot preview identity does not match")
+    parts: dict[str, AuthenticatedPart] = {}
+
+    class CacheReader:
+        def evidence_producer(self) -> str:
+            return producer
+
+        def check(self) -> None:
+            # No physical operations: manifest/page decoders enforce byte bounds.
+            if len(parts) > MAX_PART_READS:
+                raise ReviewInputError("snapshot preview graph exceeds part bound")
+
+        def read_evidence(
+            self,
+            requested: SessionIdentity,
+            manifest: dict[str, object],
+            *,
+            expected_binding: Mapping[str, object],
+        ) -> object:
+            if (
+                requested != identity
+                or expected_binding.get("producer") != producer
+                or expected_binding.get("repository") != identity.repository
+                or expected_binding.get("repository_id") != identity.repository_id
+                or expected_binding.get("pull_request") != identity.pull_request
+            ):
+                raise ReviewInputError("snapshot preview binding does not match")
+            if manifest.get("encoding") == INLINE_ENCODING:
+                return read_inline_evidence(manifest, expected_binding=expected_binding)
+
+            def read(storage_id: str) -> AuthenticatedPart:
+                part = cached_part(storage_id)
+                if part is None:
+                    raise ReviewInputError("snapshot preview part is unavailable")
+                detached = AuthenticatedPart(
+                    copy.deepcopy(part.document), part.producer
+                )
+                parts[storage_id] = detached
+                return detached
+
+            return read_partitioned_evidence(
+                manifest,
+                reader=read,
+                expected_binding=expected_binding,
+                budget=cast(EvidenceReadBudget, self),
+            )
+
+    from .disposition_snapshot import (
+        normalize_snapshot,
+        read_paged_snapshot,
+        snapshot_document,
+    )
+
+    try:
+        root = normalize_snapshot(record.disposition_snapshot)
+        if root is None:
+            return {}
+        manifest = root["state_manifest"]
+        resolver = CacheReader()
+        document = resolver.read_evidence(
+            identity, manifest, expected_binding=manifest["binding"]
+        )
+        if root["schema_version"] == "2.0":
+            read_paged_snapshot(
+                document, root=root, reader=resolver.read_evidence, identity=identity
+            )
+        else:
+            snapshot_document(
+                document,
+                result_digest=root["result_digest"],
+                item_count=manifest["item_count"],
+            )
+    except ReviewInputError as exc:
+        if str(exc) == "snapshot preview part is unavailable":
+            return None
+        raise
+    return parts
+
+
 def read_session_dispositions(
     ledger: object, record: SessionRecord
 ) -> tuple[Mapping[str, object], ...]:
@@ -4943,6 +5041,45 @@ class LocalSessionLedger:
         return read_associated_history(
             self, proof, source_digest=source_digest, operation_id=operation_id, now=now
         )
+
+    def snapshot_preview_parts(
+        self, identity: SessionIdentity, record: SessionRecord
+    ) -> dict[str, AuthenticatedPart] | None:
+        """Authenticate only cached bytes; never stat/open or mutate this ledger."""
+
+        def cached(storage_id: str) -> AuthenticatedPart | None:
+            entry = self._part_documents.get((identity, storage_id))
+            if entry is None:
+                return None
+            try:
+                raw = entry[1]
+                if (
+                    len(raw) > MAX_PART_BYTES
+                    or hashlib.sha256(raw).hexdigest() != storage_id
+                ):
+                    raise ValueError("invalid cached bytes")
+                doc = json.loads(raw)
+                if canonical_bytes(doc) != raw:
+                    raise ValueError("noncanonical cached bytes")
+            except (ValueError, UnicodeError) as exc:
+                raise ReviewInputError("cached partition JSON is invalid") from exc
+            return AuthenticatedPart(doc, self.evidence_producer())
+
+        return authenticated_snapshot_preview_parts(
+            identity, record, producer=self.evidence_producer(), cached_part=cached
+        )
+
+    def hydrate_snapshot_preview(
+        self, identity: SessionIdentity, record: SessionRecord
+    ) -> None:
+        """Explicit normal read phase: authenticate full graph and charge physical I/O."""
+        if (record.repository, record.pull_request, record.repository_id) != (
+            identity.repository,
+            identity.pull_request,
+            identity.repository_id,
+        ):
+            raise ReviewInputError("snapshot preview identity does not match")
+        read_session_dispositions(self, record)
 
     def _part_directory(
         self,

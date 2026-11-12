@@ -11,16 +11,20 @@ request allowance.
 
 This module inventories the authoritative representation limits across all layers,
 evaluates both individual component bounds and combined cross-stage envelopes
-(including multibyte UTF-8 byte accounting and maximum histories), and qualifies
-interruption + fresh-process replay invariants across every retained,
-publication, and terminal stage without conferring runtime authority.
+(including multibyte UTF-8 byte accounting and maximum histories). Scenario
+simulation is not observed recovery evidence. Optional subprocess qualification
+covers only an actual retained session root and its disposition snapshot graph,
+without conferring runtime authority or claiming native replay.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 import tempfile
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,12 +35,14 @@ from .api_work import (
     DEFAULT_API_REQUEST_LIMIT,
     LEGACY_ACCOUNTING_VERSION,
     PARTITIONED_ACTION_ACCOUNTING_VERSION,
+    ApiRunAccounting,
 )
 from .baseline import (
     MAX_HISTORY_BASELINE_BYTES,
     MAX_HISTORY_ENVELOPE_RESERVE_BYTES,
 )
 from .bounded_evidence import (
+    INLINE_ENCODING,
     MAX_MANIFEST_BYTES,
     MAX_PART_BYTES,
     MAX_PART_READS,
@@ -47,12 +53,23 @@ from .bounded_evidence import (
     MAX_STORED_PARTS,
     PACKED_CHUNK_BYTES,
     PART_FRAMING_RESERVE,
+    PART_READ_SECONDS,
+    PARTITION_ENCODING,
     EvidenceReadBudget,
+    canonical_bytes,
+    partition_evidence,
+    read_inline_evidence,
 )
+from .convergence import DIAGNOSTIC_ROUND_CEILING, MAX_FAILED_ATTEMPTS
 from .coverage import MAX_COVERAGE_ENTRIES, MAX_COVERAGE_HUNKS
-from .disposition import MAX_OVERRIDE_IDS
-from .disposition_snapshot import MAX_DISPOSITION_SNAPSHOT_ROOT_BYTES
+from .disposition import MAX_OVERRIDE_IDS, incomplete_coverage_from_result
+from .disposition_snapshot import (
+    MAX_DISPOSITION_SNAPSHOT_ROOT_BYTES,
+    normalize_snapshot,
+    validate_page_index,
+)
 from .errors import ReviewInputError
+from .models import ReviewResult
 from .provenance_manifest import (
     RecoveryPrescription,
     _exact_bool,
@@ -83,15 +100,22 @@ from .session import (
     MAX_DISPOSITION_BYTES,
     MAX_DISPOSITION_ITEMS,
     MAX_DISPOSITION_REASON_BYTES,
+    MAX_GENERATION,
     MAX_SESSION_COMMENT_BYTES,
     MAX_SESSION_RECORD_BYTES,
     MAX_STORED_CONTINUATION_GRANTS,
+    LocalSessionLedger,
+    ReviewTransaction,
+    SessionIdentity,
     SessionRecord,
     disposition_array_bytes,
+    disposition_snapshot_capacity,
+    read_session_dispositions,
 )
 from .terminal_representability import (
     MAX_COVERAGE_ENTRY_COUNT,
     MAX_COVERAGE_TOKEN_BYTES,
+    TerminalRepresentabilityReport,
     estimate_session_comment_bytes,
     estimate_session_record_bytes,
 )
@@ -644,10 +668,18 @@ class CombinedComponentFootprint:
     quarantine_lineage_bytes: int = 0
     historical_assessments_bytes: int = 0
     future_root_reserve_bytes: int = 0
+    future_growth_bytes: int = 0
+    intermediate_peak_record_bytes: int = 0
+    intermediate_peak_comment_bytes: int = 0
+    exact_comment_bytes_override: int | None = None
     consumed_grant_count: int = 0
     recovery_context_bundle_bytes: int = 0
     handoff_files: int = 0
     handoff_total_bytes: int = 0
+    decoded_result_bytes: int = 0
+    coverage_entry_count: int = 0
+    max_coverage_token_bytes: int = 0
+    terminal_action_manifest_bytes: int = 0
     published_review_summary_utf8_bytes: int = 0
     published_finding_count: int = 0
     published_marker_overhead_bytes: int = 1_024
@@ -658,6 +690,9 @@ class CombinedComponentFootprint:
     recovery_context_part_reads: int = 0
     ancestry_part_reads: int = 0
     publication_reconciliation_reads: int = 0
+    startup_requests: int = 0
+    ancestry_requests: int = 0
+    retry_reconcile_requests: int = 0
     committed_requests: int = 0
     unknown_usage_requests: int = 0
     active_reserved_requests: int = 0
@@ -685,10 +720,17 @@ class CombinedComponentFootprint:
             "quarantine_lineage_bytes",
             "historical_assessments_bytes",
             "future_root_reserve_bytes",
+            "future_growth_bytes",
+            "intermediate_peak_record_bytes",
+            "intermediate_peak_comment_bytes",
             "consumed_grant_count",
             "recovery_context_bundle_bytes",
             "handoff_files",
             "handoff_total_bytes",
+            "decoded_result_bytes",
+            "coverage_entry_count",
+            "max_coverage_token_bytes",
+            "terminal_action_manifest_bytes",
             "published_review_summary_utf8_bytes",
             "published_finding_count",
             "published_marker_overhead_bytes",
@@ -699,6 +741,9 @@ class CombinedComponentFootprint:
             "recovery_context_part_reads",
             "ancestry_part_reads",
             "publication_reconciliation_reads",
+            "startup_requests",
+            "ancestry_requests",
+            "retry_reconcile_requests",
             "committed_requests",
             "unknown_usage_requests",
             "active_reserved_requests",
@@ -724,6 +769,15 @@ class CombinedComponentFootprint:
             "allow_v3_writer",
             _exact_bool(self.allow_v3_writer, field="allow_v3_writer"),
         )
+        if self.exact_comment_bytes_override is not None:
+            object.__setattr__(
+                self,
+                "exact_comment_bytes_override",
+                _non_negative_int(
+                    self.exact_comment_bytes_override,
+                    field="exact_comment_bytes_override",
+                ),
+            )
 
     @property
     def projected_record_bytes(self) -> int:
@@ -738,15 +792,45 @@ class CombinedComponentFootprint:
             + self.quarantine_lineage_bytes
             + self.historical_assessments_bytes
             + self.future_root_reserve_bytes
+            + self.future_growth_bytes
         )
 
     @property
+    def max_intermediate_record_bytes(self) -> int:
+        return max(self.projected_record_bytes, self.intermediate_peak_record_bytes)
+
+    @property
     def projected_comment_bytes(self) -> int:
+        if self.exact_comment_bytes_override is not None:
+            return self.exact_comment_bytes_override
         # Each consumed grant line is ~114 UTF-8 bytes; session intro + fence + marker ~220 bytes.
         grant_framing_bytes = self.consumed_grant_count * 114
         marker_and_fence_bytes = 220
         return (
             self.projected_record_bytes + grant_framing_bytes + marker_and_fence_bytes
+        )
+
+    @property
+    def max_intermediate_comment_bytes(self) -> int:
+        if self.exact_comment_bytes_override is not None:
+            extra_record_peak = max(
+                0, self.max_intermediate_record_bytes - self.projected_record_bytes
+            )
+            return max(
+                self.exact_comment_bytes_override + extra_record_peak,
+                self.intermediate_peak_comment_bytes,
+            )
+        grant_framing_bytes = self.consumed_grant_count * 114
+        marker_and_fence_bytes = 220
+        derived_from_record_peak = (
+            self.max_intermediate_record_bytes
+            + grant_framing_bytes
+            + marker_and_fence_bytes
+        )
+        return max(
+            self.projected_comment_bytes,
+            self.intermediate_peak_comment_bytes,
+            derived_from_record_peak,
         )
 
     @property
@@ -775,7 +859,10 @@ class CombinedComponentFootprint:
     @property
     def total_projected_requests(self) -> int:
         return (
-            self.committed_requests
+            self.startup_requests
+            + self.ancestry_requests
+            + self.retry_reconcile_requests
+            + self.committed_requests
             + self.unknown_usage_requests
             + self.active_reserved_requests
             + self.retained_stage_requests
@@ -806,6 +893,9 @@ class CombinedCapacityEvaluation:
     remaining_api_headroom: int
     recovery: RecoveryPrescription
     authority: bool = False
+    max_intermediate_record_bytes: int = 0
+    max_intermediate_comment_bytes: int = 0
+    future_growth_bytes: int = 0
 
     def __post_init__(self) -> None:
         _exact_false_authority(self.authority, field="authority")
@@ -821,6 +911,26 @@ class CombinedCapacityEvaluation:
             "combined_envelope_fits",
             _exact_bool(self.combined_envelope_fits, field="combined_envelope_fits"),
         )
+        peak_rec = max(
+            self.projected_record_bytes,
+            _non_negative_int(
+                self.max_intermediate_record_bytes,
+                field="max_intermediate_record_bytes",
+            ),
+        )
+        peak_com = max(
+            self.projected_comment_bytes,
+            _non_negative_int(
+                self.max_intermediate_comment_bytes,
+                field="max_intermediate_comment_bytes",
+            ),
+        )
+        growth = _non_negative_int(
+            self.future_growth_bytes, field="future_growth_bytes"
+        )
+        object.__setattr__(self, "max_intermediate_record_bytes", peak_rec)
+        object.__setattr__(self, "max_intermediate_comment_bytes", peak_com)
+        object.__setattr__(self, "future_growth_bytes", growth)
         if self.combined_envelope_fits:
             if not self.individual_components_fit or self.refusal_code is not None:
                 raise ReviewInputError(
@@ -846,7 +956,10 @@ class CombinedCapacityEvaluation:
             "reason": self.reason,
             "component_violations": list(self.component_violations),
             "projected_record_bytes": self.projected_record_bytes,
+            "max_intermediate_record_bytes": self.max_intermediate_record_bytes,
             "projected_comment_bytes": self.projected_comment_bytes,
+            "max_intermediate_comment_bytes": self.max_intermediate_comment_bytes,
+            "future_growth_bytes": self.future_growth_bytes,
             "projected_review_body_bytes": self.projected_review_body_bytes,
             "total_ordinary_part_reads": self.total_ordinary_part_reads,
             "total_projected_requests": self.total_projected_requests,
@@ -1055,13 +1168,40 @@ def evaluate_combined_capacity(
             footprint.ancestry_part_reads,
             MAX_RECOVERY_ANCESTOR_DEPTH,
         ),
+        (
+            "decoded_result_bytes",
+            footprint.decoded_result_bytes,
+            MAX_DECODED_RESULT_BYTES,
+        ),
+        (
+            "coverage_entry_count",
+            footprint.coverage_entry_count,
+            MAX_COVERAGE_ENTRY_COUNT,
+        ),
+        (
+            "max_coverage_token_bytes",
+            footprint.max_coverage_token_bytes,
+            MAX_COVERAGE_TOKEN_BYTES,
+        ),
+        (
+            "terminal_action_manifest_bytes",
+            footprint.terminal_action_manifest_bytes,
+            MAX_MANIFEST_BYTES,
+        ),
     )
     for label, actual, limit in component_checks:
         if actual > limit:
             violations.append(f"{label}={actual} exceeds {limit}")
+    if footprint.protected_tail_requests < RESERVED_FENCE_READS:
+        violations.append(
+            f"protected_tail_requests={footprint.protected_tail_requests} "
+            f"below RESERVED_FENCE_READS={RESERVED_FENCE_READS}"
+        )
 
     individual_ok = len(violations) == 0
     headroom = footprint.original_api_limit - footprint.total_projected_requests
+    peak_record_bytes = footprint.max_intermediate_record_bytes
+    peak_comment_bytes = footprint.max_intermediate_comment_bytes
     if not individual_ok:
         return CombinedCapacityEvaluation(
             individual_components_fit=False,
@@ -1078,15 +1218,20 @@ def evaluate_combined_capacity(
             recovery=_prescribe_combined_recovery(
                 "individual_component_limit_exceeded"
             ),
+            max_intermediate_record_bytes=peak_record_bytes,
+            max_intermediate_comment_bytes=peak_comment_bytes,
+            future_growth_bytes=footprint.future_growth_bytes,
         )
 
-    if footprint.projected_record_bytes > MAX_SESSION_RECORD_BYTES:
+    if peak_record_bytes > MAX_SESSION_RECORD_BYTES:
         return CombinedCapacityEvaluation(
             individual_components_fit=True,
             combined_envelope_fits=False,
             refusal_code="combined_session_record_bytes_exceeded",
             reason=(
-                f"combined SessionRecord size {footprint.projected_record_bytes}B "
+                f"combined SessionRecord size (projected={footprint.projected_record_bytes}B, "
+                f"max_intermediate={peak_record_bytes}B, "
+                f"future_growth={footprint.future_growth_bytes}B) "
                 f"exceeds MAX_SESSION_RECORD_BYTES={MAX_SESSION_RECORD_BYTES} "
                 "even though every individual sub-component fits its own cap"
             ),
@@ -1100,16 +1245,19 @@ def evaluate_combined_capacity(
             recovery=_prescribe_combined_recovery(
                 "combined_session_record_bytes_exceeded"
             ),
+            max_intermediate_record_bytes=peak_record_bytes,
+            max_intermediate_comment_bytes=peak_comment_bytes,
+            future_growth_bytes=footprint.future_growth_bytes,
         )
 
-    if footprint.projected_comment_bytes > MAX_SESSION_COMMENT_BYTES:
+    if peak_comment_bytes > MAX_SESSION_COMMENT_BYTES:
         return CombinedCapacityEvaluation(
             individual_components_fit=True,
             combined_envelope_fits=False,
             refusal_code="combined_session_comment_bytes_exceeded",
             reason=(
-                f"combined session comment size {footprint.projected_comment_bytes}B "
-                f"(grants={footprint.consumed_grant_count}) "
+                f"combined session comment size (projected={footprint.projected_comment_bytes}B, "
+                f"max_intermediate={peak_comment_bytes}B, grants={footprint.consumed_grant_count}) "
                 f"exceeds MAX_SESSION_COMMENT_BYTES={MAX_SESSION_COMMENT_BYTES}"
             ),
             component_violations=(),
@@ -1122,6 +1270,9 @@ def evaluate_combined_capacity(
             recovery=_prescribe_combined_recovery(
                 "combined_session_comment_bytes_exceeded"
             ),
+            max_intermediate_record_bytes=peak_record_bytes,
+            max_intermediate_comment_bytes=peak_comment_bytes,
+            future_growth_bytes=footprint.future_growth_bytes,
         )
 
     if footprint.projected_review_body_bytes > MAX_PUBLISHED_REVIEW_BODY_BYTES:
@@ -1143,6 +1294,9 @@ def evaluate_combined_capacity(
             recovery=_prescribe_combined_recovery(
                 "combined_review_body_bytes_exceeded"
             ),
+            max_intermediate_record_bytes=peak_record_bytes,
+            max_intermediate_comment_bytes=peak_comment_bytes,
+            future_growth_bytes=footprint.future_growth_bytes,
         )
 
     if (
@@ -1166,6 +1320,9 @@ def evaluate_combined_capacity(
             total_projected_requests=footprint.total_projected_requests,
             remaining_api_headroom=headroom,
             recovery=_prescribe_combined_recovery("combined_stored_parts_exceeded"),
+            max_intermediate_record_bytes=peak_record_bytes,
+            max_intermediate_comment_bytes=peak_comment_bytes,
+            future_growth_bytes=footprint.future_growth_bytes,
         )
 
     if footprint.total_ordinary_part_reads > ORDINARY_EVIDENCE_READ_LIMIT:
@@ -1188,6 +1345,9 @@ def evaluate_combined_capacity(
             recovery=_prescribe_combined_recovery(
                 "combined_evidence_read_budget_exceeded"
             ),
+            max_intermediate_record_bytes=peak_record_bytes,
+            max_intermediate_comment_bytes=peak_comment_bytes,
+            future_growth_bytes=footprint.future_growth_bytes,
         )
 
     if footprint.total_projected_requests > footprint.original_api_limit:
@@ -1209,6 +1369,9 @@ def evaluate_combined_capacity(
             recovery=_prescribe_combined_recovery(
                 "combined_api_request_budget_exceeded"
             ),
+            max_intermediate_record_bytes=peak_record_bytes,
+            max_intermediate_comment_bytes=peak_comment_bytes,
+            future_growth_bytes=footprint.future_growth_bytes,
         )
 
     return CombinedCapacityEvaluation(
@@ -1224,6 +1387,9 @@ def evaluate_combined_capacity(
         total_projected_requests=footprint.total_projected_requests,
         remaining_api_headroom=headroom,
         recovery=prescribe_recovery("supported_read_only_observation"),
+        max_intermediate_record_bytes=peak_record_bytes,
+        max_intermediate_comment_bytes=peak_comment_bytes,
+        future_growth_bytes=footprint.future_growth_bytes,
     )
 
 
@@ -1237,39 +1403,173 @@ def require_combined_capacity(
     return evaluation
 
 
-def evaluate_live_session_envelope(
+def estimate_lifecycle_future_growth_bytes(
+    record: SessionRecord,
+    *,
+    include_staging_peak: bool = False,
+    include_snapshot_promotion: bool = False,
+) -> int:
+    """Measure exact canonical UTF-8 byte growth under worst-width lifecycle evolution."""
+
+    current_bytes = estimate_session_record_bytes(record)
+    shell = record.to_dict()
+    if include_staging_peak and record.publication_staging is None:
+        shell["publication_staging"] = "s" * MAX_STAGING_BYTES
+    shell.update(
+        generation=max(record.generation, MAX_GENERATION),
+        completed_initial_reviews=max(
+            record.completed_initial_reviews, DIAGNOSTIC_ROUND_CEILING
+        ),
+        completed_verification_rounds=max(
+            record.completed_verification_rounds, DIAGNOSTIC_ROUND_CEILING
+        ),
+        failed_attempts=max(record.failed_attempts, MAX_FAILED_ATTEMPTS),
+        failed_attempts_head_sha="a" * 64,
+        reservation_id="a" * 64,
+        reserved_slot="failed-attempt",
+        last_committed_reservation_id="b" * 64,
+        reservation_owner={"run_id": "9" * 19, "head_sha": "a" * 40},
+    )
+    worst_updated = "9999-12-31T23:59:59.999999Z"
+    if len(worst_updated) > len(str(shell.get("updated_at", ""))):
+        shell["updated_at"] = worst_updated
+    future_tx = ReviewTransaction.create(
+        repository=record.repository,
+        pull_request=record.pull_request,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        policy_digest="c" * 64,
+        configuration_digest="d" * 64,
+        evidence_digest="e" * 64,
+        reservation_id="f" * 64,
+        generation=max(record.generation, MAX_GENERATION),
+    ).to_dict()
+    future_tx.update(phase="publication_suppressed", result_sha256="a" * 64)
+    if record.transaction is None or len(canonical_bytes(future_tx)) > len(
+        canonical_bytes(shell["transaction"])
+    ):
+        shell["transaction"] = future_tx
+    if (
+        include_snapshot_promotion
+        and record.disposition_snapshot is None
+        and record.dispositions
+    ):
+        cap = disposition_snapshot_capacity(record)
+        inline_bytes = disposition_array_bytes(record.dispositions)
+        if cap > inline_bytes:
+            shell["dispositions"] = []
+            shell["disposition_snapshot"] = "d" * cap
+    return max(0, len(canonical_bytes(shell)) - current_bytes)
+
+
+def _snapshot_part_reads_from_record(record: SessionRecord) -> int:
+    if record.disposition_snapshot is None:
+        return 0
+    root = normalize_snapshot(record.disposition_snapshot)
+    if root is None:
+        return 0
+    manifest = root["state_manifest"]
+    reads = 0
+    if manifest.get("encoding") == PARTITION_ENCODING:
+        parts = manifest.get("parts")
+        if isinstance(parts, list):
+            reads += len(parts)
+    if root["schema_version"] == "2.0" and manifest.get("encoding") == INLINE_ENCODING:
+        try:
+            doc = read_inline_evidence(manifest, expected_binding=manifest["binding"])
+            pages = validate_page_index(doc, root=root)
+            for page_ref in pages:
+                if page_ref.get("encoding") == PARTITION_ENCODING:
+                    page_parts = page_ref.get("parts")
+                    if isinstance(page_parts, list):
+                        reads += len(page_parts)
+        except ReviewInputError:
+            pass
+    elif (
+        root["schema_version"] == "2.0"
+        and manifest.get("encoding") == PARTITION_ENCODING
+    ):
+        # Conservative bound when page index itself is partitioned: at least 1 page part read
+        reads += 1
+    return reads
+
+
+def decompose_session_and_result_footprint(
     record: SessionRecord,
     *,
     repository_id: int,
     pull_request: int,
+    retained_result: ReviewResult | None = None,
     consumed_grants: Sequence[str] = (),
     review_summary_text: str = "",
     published_finding_count: int = 0,
     future_root_reserve_bytes: int = 0,
+    include_future_growth: bool = False,
+    include_intermediate_staging_peak: bool = False,
+    intermediate_records: Sequence[SessionRecord] = (),
+    terminal_report: TerminalRepresentabilityReport | None = None,
+    terminal_carrier_bytes: int = 0,
     extra_ordinary_part_reads: int = 0,
+    archive_ancestor_depth: int = 0,
+    retry_reconcile_requests: int = 0,
     committed_requests: int = 0,
     unknown_usage_requests: int = 0,
     required_stage_requests: int = 0,
+    stored_parts_count: int = 0,
+    stored_parts_total_bytes: int = 0,
     original_api_limit: int = DEFAULT_API_REQUEST_LIMIT,
-) -> CombinedCapacityEvaluation:
-    """Evaluate exact UTF-8 byte and request envelopes on a live ``SessionRecord``.
+) -> CombinedComponentFootprint:
+    """Decompose a complete ``SessionRecord`` and optional ``ReviewResult`` into an exact footprint."""
 
-    ``exact_comment_bytes`` measures the rendered GitHub issue comment for the
-    session ledger marker (``SessionRecord`` JSON + consumed-grant headers),
-    whereas ``review_summary_text`` and ``published_finding_count`` are priced on
-    the separate GitHub PR review body surface (``projected_review_body_bytes``).
-    """
-
-    summary_metrics = measure_utf8_text(review_summary_text)
     raw_record_bytes = estimate_session_record_bytes(record)
-    raw_comment_bytes = estimate_session_comment_bytes(
-        record,
-        repository_id=repository_id,
-        pull_request=pull_request,
-        consumed_grants=consumed_grants,
+    disp_bytes = (
+        disposition_array_bytes(record.dispositions) if record.dispositions else 0
     )
-    disp_bytes = disposition_array_bytes(record.dispositions)
+    snap_root_bytes = (
+        len(canonical_bytes(record.disposition_snapshot))
+        if record.disposition_snapshot is not None
+        else 0
+    )
+    snap_part_reads = _snapshot_part_reads_from_record(record)
+    conv_bytes = (
+        len(canonical_bytes(record.convergence_history))
+        if record.convergence_history is not None
+        else 0
+    )
+    queue_bytes = (
+        len(canonical_bytes(record.assessment_queue))
+        if record.assessment_queue is not None
+        else 0
+    )
+    staging_bytes = (
+        len(canonical_bytes(record.publication_staging))
+        if record.publication_staging is not None
+        else 0
+    )
+    quarantine_bytes = (
+        len(canonical_bytes(record.quarantine_lineage))
+        if record.quarantine_lineage
+        else 0
+    )
+    hist_assess_bytes = (
+        len(canonical_bytes(record.historical_assessments))
+        if record.historical_assessments
+        else 0
+    )
+
     accounting_version = ACCOUNTING_VERSION
+    acc_manifest_bytes = 0
+    startup_reqs = 0
+    ancestry_reads = _non_negative_int(
+        archive_ancestor_depth, field="archive_ancestor_depth"
+    )
+    eff_committed = _non_negative_int(committed_requests, field="committed_requests")
+    eff_unknown = _non_negative_int(
+        unknown_usage_requests, field="unknown_usage_requests"
+    )
+    eff_reserved = 0
+    eff_limit = _non_negative_int(original_api_limit, field="original_api_limit")
+
     if record.api_run_accounting is not None:
         if not isinstance(record.api_run_accounting, Mapping):
             raise ReviewInputError(
@@ -1283,41 +1583,300 @@ def evaluate_live_session_envelope(
                 "record.api_run_accounting is missing a valid version string"
             )
         accounting_version = ver
+        action_raw = record.api_run_accounting.get("action")
+        if isinstance(action_raw, Mapping) and isinstance(
+            action_raw.get("result"), Mapping
+        ):
+            acc_manifest_bytes = max(
+                acc_manifest_bytes, len(canonical_bytes(action_raw["result"]))
+            )
+        prev_raw = record.api_run_accounting.get("previous_record")
+        if isinstance(prev_raw, Mapping) and isinstance(
+            prev_raw.get("manifest"), Mapping
+        ):
+            acc_manifest_bytes = max(
+                acc_manifest_bytes, len(canonical_bytes(prev_raw["manifest"]))
+            )
+            ancestry_reads = max(ancestry_reads, 1)
+        if accounting_version in SUPPORTED_ENVELOPE_WRITER_VERSIONS:
+            parsed_acc = ApiRunAccounting.from_document(record.api_run_accounting)
+            startup_reqs = (
+                parsed_acc.startup.liability + parsed_acc.prior_nonstartup_liability
+            )
+            eff_committed = max(eff_committed, parsed_acc.confirmed)
+            eff_unknown = max(eff_unknown, parsed_acc.uncertain)
+            eff_reserved = parsed_acc.reserved_undispatched
+            if original_api_limit == DEFAULT_API_REQUEST_LIMIT:
+                eff_limit = parsed_acc.configuration.limit
 
+    decoded_res_bytes = 0
+    result_part_reads = _non_negative_int(
+        extra_ordinary_part_reads, field="extra_ordinary_part_reads"
+    )
+    cov_count = 0
+    max_cov_tok = 0
+    eff_summary_text = review_summary_text
+    eff_finding_count = _non_negative_int(
+        published_finding_count, field="published_finding_count"
+    )
+
+    if retained_result is not None:
+        result_doc = retained_result.to_dict()
+        decoded_res_bytes = len(canonical_bytes(result_doc))
+        if not eff_summary_text:
+            eff_summary_text = retained_result.summary
+        eff_finding_count = max(eff_finding_count, len(retained_result.comments))
+        inc_tokens = incomplete_coverage_from_result(retained_result)
+        cov_count = len(inc_tokens)
+        max_cov_tok = max((len(tok.encode("utf-8")) for tok in inc_tokens), default=0)
+        if 0 < decoded_res_bytes <= MAX_PARTITION_DECODED_BYTES:
+            res_binding = {
+                "repository": record.repository,
+                "repository_id": repository_id,
+                "pull_request": pull_request,
+                "base_sha": (
+                    record.transaction.base_sha
+                    if record.transaction is not None
+                    else "a" * 40
+                ),
+                "head_sha": (
+                    record.transaction.head_sha
+                    if record.transaction is not None
+                    else "b" * 40
+                ),
+                "policy_digest": (
+                    record.transaction.policy_digest
+                    if record.transaction is not None
+                    else "c" * 64
+                ),
+                "configuration_digest": (
+                    record.transaction.configuration_digest
+                    if record.transaction is not None
+                    else "d" * 64
+                ),
+                "generation": record.generation,
+                "producer": "local-ledger",
+                "purpose": "evidence",
+                "schema_version": "1.0",
+            }
+            res_parts = partition_evidence(
+                result_doc,
+                binding=res_binding,
+                item_count=max(1, len(retained_result.comments)),
+            )
+            result_part_reads += len(res_parts)
+
+    summary_metrics = measure_utf8_text(eff_summary_text)
     reserve = _non_negative_int(
         future_root_reserve_bytes, field="future_root_reserve_bytes"
     )
-    base_without_disp = max(0, raw_record_bytes - disp_bytes)
-    footprint = CombinedComponentFootprint(
-        base_shell_bytes=base_without_disp,
+    growth_bytes = (
+        estimate_lifecycle_future_growth_bytes(
+            record,
+            include_staging_peak=False,
+            include_snapshot_promotion=True,
+        )
+        if include_future_growth
+        else 0
+    )
+
+    term_manifest_bytes = _non_negative_int(
+        terminal_carrier_bytes, field="terminal_carrier_bytes"
+    )
+    if terminal_report is not None:
+        term_manifest_bytes = max(
+            term_manifest_bytes,
+            terminal_report.manifest_bytes
+            if terminal_report.manifest_bytes is not None
+            else terminal_report.carrier_bytes,
+        )
+        cov_count = max(cov_count, terminal_report.disposition_entry_count)
+        max_cov_tok = max(max_cov_tok, terminal_report.max_disposition_token_bytes)
+
+    inter_rec_peak = 0
+    inter_com_peak = 0
+    for inter_rec in intermediate_records:
+        inter_rec_peak = max(inter_rec_peak, estimate_session_record_bytes(inter_rec))
+        inter_com_peak = max(
+            inter_com_peak,
+            estimate_session_comment_bytes(
+                inter_rec,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                consumed_grants=consumed_grants,
+            ),
+        )
+    if include_intermediate_staging_peak:
+        # Replacement snapshot or publication staging coexisting before root compaction:
+        staging_extra = MAX_STAGING_BYTES if record.publication_staging is None else 0
+        inter_rec_peak = max(
+            inter_rec_peak,
+            raw_record_bytes
+            + reserve
+            + growth_bytes
+            + staging_extra
+            + term_manifest_bytes,
+        )
+    if terminal_report is not None:
+        inter_rec_peak = max(
+            inter_rec_peak, terminal_report.max_intermediate_record_bytes
+        )
+        inter_com_peak = max(
+            inter_com_peak, terminal_report.max_intermediate_comment_bytes
+        )
+
+    sub_total = (
+        disp_bytes
+        + snap_root_bytes
+        + conv_bytes
+        + queue_bytes
+        + staging_bytes
+        + acc_manifest_bytes
+        + quarantine_bytes
+        + hist_assess_bytes
+    )
+    base_shell = max(0, raw_record_bytes - sub_total)
+
+    raw_comment_bytes = estimate_session_comment_bytes(
+        record,
+        repository_id=repository_id,
+        pull_request=pull_request,
+        consumed_grants=consumed_grants,
+    )
+    exact_comment_projected = raw_comment_bytes + reserve + growth_bytes
+
+    return CombinedComponentFootprint(
+        base_shell_bytes=base_shell,
         dispositions_bytes=disp_bytes,
+        disposition_snapshot_root_bytes=snap_root_bytes,
+        convergence_history_bytes=conv_bytes,
+        assessment_queue_bytes=queue_bytes,
+        publication_staging_bytes=staging_bytes,
+        accounting_manifest_bytes=acc_manifest_bytes,
+        quarantine_lineage_bytes=quarantine_bytes,
+        historical_assessments_bytes=hist_assess_bytes,
         future_root_reserve_bytes=reserve,
+        future_growth_bytes=growth_bytes,
+        intermediate_peak_record_bytes=inter_rec_peak,
+        intermediate_peak_comment_bytes=inter_com_peak,
+        exact_comment_bytes_override=exact_comment_projected,
         consumed_grant_count=len(consumed_grants),
+        decoded_result_bytes=decoded_res_bytes,
+        coverage_entry_count=cov_count,
+        max_coverage_token_bytes=max_cov_tok,
+        terminal_action_manifest_bytes=term_manifest_bytes,
         published_review_summary_utf8_bytes=summary_metrics.utf8_bytes,
-        published_finding_count=published_finding_count,
-        retained_result_part_reads=extra_ordinary_part_reads,
-        committed_requests=committed_requests,
-        unknown_usage_requests=unknown_usage_requests,
+        published_finding_count=eff_finding_count,
+        stored_parts_count=stored_parts_count,
+        stored_parts_total_bytes=stored_parts_total_bytes,
+        retained_result_part_reads=result_part_reads,
+        disposition_snapshot_part_reads=snap_part_reads,
+        ancestry_part_reads=ancestry_reads,
+        startup_requests=startup_reqs,
+        ancestry_requests=ancestry_reads,
+        retry_reconcile_requests=retry_reconcile_requests,
+        committed_requests=eff_committed,
+        unknown_usage_requests=eff_unknown,
+        active_reserved_requests=eff_reserved,
         publication_requests=required_stage_requests,
-        original_api_limit=original_api_limit,
+        original_api_limit=eff_limit,
         accounting_version=accounting_version,
     )
+
+
+def evaluate_live_session_envelope(
+    record: SessionRecord,
+    *,
+    repository_id: int,
+    pull_request: int,
+    retained_result: ReviewResult | None = None,
+    consumed_grants: Sequence[str] = (),
+    review_summary_text: str = "",
+    published_finding_count: int = 0,
+    future_root_reserve_bytes: int = 0,
+    include_future_growth: bool = False,
+    include_intermediate_staging_peak: bool = False,
+    intermediate_records: Sequence[SessionRecord] = (),
+    terminal_report: TerminalRepresentabilityReport | None = None,
+    terminal_carrier_bytes: int = 0,
+    extra_ordinary_part_reads: int = 0,
+    archive_ancestor_depth: int = 0,
+    retry_reconcile_requests: int = 0,
+    committed_requests: int = 0,
+    unknown_usage_requests: int = 0,
+    required_stage_requests: int = 0,
+    stored_parts_count: int = 0,
+    stored_parts_total_bytes: int = 0,
+    original_api_limit: int = DEFAULT_API_REQUEST_LIMIT,
+) -> CombinedCapacityEvaluation:
+    """Evaluate exact UTF-8 byte and request envelopes on a live ``SessionRecord`` and ``ReviewResult``.
+
+    ``exact_comment_bytes`` measures the rendered GitHub issue comment for the
+    session ledger marker (``SessionRecord`` JSON + consumed-grant headers),
+    whereas ``review_summary_text`` and ``published_finding_count`` are priced on
+    the separate GitHub PR review body surface (``projected_review_body_bytes``).
+    """
+
+    raw_record_bytes = estimate_session_record_bytes(record)
+    raw_comment_bytes = estimate_session_comment_bytes(
+        record,
+        repository_id=repository_id,
+        pull_request=pull_request,
+        consumed_grants=consumed_grants,
+    )
+    footprint = decompose_session_and_result_footprint(
+        record,
+        repository_id=repository_id,
+        pull_request=pull_request,
+        retained_result=retained_result,
+        consumed_grants=consumed_grants,
+        review_summary_text=review_summary_text,
+        published_finding_count=published_finding_count,
+        future_root_reserve_bytes=future_root_reserve_bytes,
+        include_future_growth=include_future_growth,
+        include_intermediate_staging_peak=include_intermediate_staging_peak,
+        intermediate_records=intermediate_records,
+        terminal_report=terminal_report,
+        terminal_carrier_bytes=terminal_carrier_bytes,
+        extra_ordinary_part_reads=extra_ordinary_part_reads,
+        archive_ancestor_depth=archive_ancestor_depth,
+        retry_reconcile_requests=retry_reconcile_requests,
+        committed_requests=committed_requests,
+        unknown_usage_requests=unknown_usage_requests,
+        required_stage_requests=required_stage_requests,
+        stored_parts_count=stored_parts_count,
+        stored_parts_total_bytes=stored_parts_total_bytes,
+        original_api_limit=original_api_limit,
+    )
     preliminary = evaluate_combined_capacity(footprint)
-    exact_comment_bytes = raw_comment_bytes + reserve
+    total_delta = footprint.future_root_reserve_bytes + footprint.future_growth_bytes
+    exact_projected_record = max(
+        raw_record_bytes + total_delta, footprint.projected_record_bytes
+    )
+    exact_comment_bytes = raw_comment_bytes + total_delta
+    exact_peak_record = max(
+        exact_projected_record, footprint.max_intermediate_record_bytes
+    )
+    exact_peak_comment = max(
+        exact_comment_bytes,
+        footprint.intermediate_peak_comment_bytes,
+        raw_comment_bytes + max(0, exact_peak_record - raw_record_bytes),
+    )
     if (
         preliminary.combined_envelope_fits
-        and exact_comment_bytes > MAX_SESSION_COMMENT_BYTES
+        and exact_peak_comment > MAX_SESSION_COMMENT_BYTES
     ):
         return CombinedCapacityEvaluation(
             individual_components_fit=True,
             combined_envelope_fits=False,
             refusal_code="combined_session_comment_bytes_exceeded",
             reason=(
-                f"exact rendered session comment {exact_comment_bytes}B "
+                f"exact rendered session comment (projected={exact_comment_bytes}B, "
+                f"max_intermediate={exact_peak_comment}B) "
                 f"exceeds MAX_SESSION_COMMENT_BYTES={MAX_SESSION_COMMENT_BYTES}"
             ),
             component_violations=(),
-            projected_record_bytes=raw_record_bytes + reserve,
+            projected_record_bytes=exact_projected_record,
             projected_comment_bytes=exact_comment_bytes,
             projected_review_body_bytes=preliminary.projected_review_body_bytes,
             total_ordinary_part_reads=preliminary.total_ordinary_part_reads,
@@ -1326,6 +1885,9 @@ def evaluate_live_session_envelope(
             recovery=_prescribe_combined_recovery(
                 "combined_session_comment_bytes_exceeded"
             ),
+            max_intermediate_record_bytes=exact_peak_record,
+            max_intermediate_comment_bytes=exact_peak_comment,
+            future_growth_bytes=footprint.future_growth_bytes,
         )
     return CombinedCapacityEvaluation(
         individual_components_fit=preliminary.individual_components_fit,
@@ -1333,13 +1895,16 @@ def evaluate_live_session_envelope(
         refusal_code=preliminary.refusal_code,
         reason=preliminary.reason,
         component_violations=preliminary.component_violations,
-        projected_record_bytes=raw_record_bytes + reserve,
+        projected_record_bytes=exact_projected_record,
         projected_comment_bytes=exact_comment_bytes,
         projected_review_body_bytes=preliminary.projected_review_body_bytes,
         total_ordinary_part_reads=preliminary.total_ordinary_part_reads,
         total_projected_requests=preliminary.total_projected_requests,
         remaining_api_headroom=preliminary.remaining_api_headroom,
         recovery=preliminary.recovery,
+        max_intermediate_record_bytes=exact_peak_record,
+        max_intermediate_comment_bytes=exact_peak_comment,
+        future_growth_bytes=footprint.future_growth_bytes,
     )
 
 
@@ -1667,7 +2232,12 @@ def simulate_interruption_and_fresh_replay(
     recovery_bundle: OriginalRecoveryContextBundle | None = None,
     verify_fresh_handoff: bool = True,
 ) -> InterruptionReplayResult:
-    """Qualify interruption handling and fresh-process replay for one G12 scenario."""
+    """Simulate one G12 scenario; optional context roundtrip is process-local.
+
+    Scenario outcomes are modelled estimates, not observed native replay evidence.
+    Use ``qualify_retained_interruption_replay`` for scoped subprocess snapshot
+    authentication against actual retained artifacts.
+    """
 
     _exact_bool(verify_fresh_handoff, field="verify_fresh_handoff")
     explicit_handoff_args = (handoff_directory, handoff_key, recovery_bundle)
@@ -1850,7 +2420,456 @@ def build_supported_scenario_matrix() -> tuple[InterruptionScenario, ...]:
     return tuple(scenarios)
 
 
+@dataclass(frozen=True)
+class BoundaryInterruptionResult:
+    """Capacity estimates plus explicitly scoped read-only artifact qualification.
+
+    Existing flags remain conservative compatibility projections. Null counters
+    mean native effects and inference replay were not exercised, not zero work.
+    """
+
+    interruption_stage: str
+    interruption_mode: str
+    footprint: CombinedComponentFootprint
+    envelope_evaluation: CombinedCapacityEvaluation
+    fresh_ledger_reloaded: bool
+    fresh_handoff_verified: bool
+    retained_snapshot_preserved: bool
+    retained_unknown_charges: int
+    protected_fence_tail_preserved: bool
+    duplicate_side_effects: int | None
+    fresh_inference_calls: int | None
+    recovery: RecoveryPrescription
+    authority: bool = False
+    qualification_status: str = "not_exercised"
+    qualified_components: tuple[str, ...] = ()
+    physical_reads: int | None = None
+
+    def __post_init__(self) -> None:
+        _exact_false_authority(self.authority, field="authority")
+        if self.interruption_stage not in INTERRUPTION_STAGES:
+            raise ReviewInputError(
+                f"unsupported interruption_stage: {self.interruption_stage!r}"
+            )
+        if self.interruption_mode not in INTERRUPTION_MODES:
+            raise ReviewInputError(
+                f"unsupported interruption_mode: {self.interruption_mode!r}"
+            )
+        if (
+            self.duplicate_side_effects is not None
+            or self.fresh_inference_calls is not None
+        ):
+            raise ReviewInputError(
+                "read-only snapshot qualification does not measure effect or inference replay"
+            )
+        expected_status = {
+            (): {"not_exercised", "capacity_refused", "retained_artifacts_required"},
+            ("session_root",): {"root_verified"},
+            ("session_root", "disposition_snapshot"): {"snapshot_graph_verified"},
+        }
+        if self.qualification_status not in expected_status.get(
+            self.qualified_components, set()
+        ):
+            raise ReviewInputError(
+                "snapshot qualification status does not match evidence"
+            )
+        if (
+            self.fresh_handoff_verified
+            or self.fresh_ledger_reloaded != bool(self.qualified_components)
+            or self.retained_snapshot_preserved
+            != ("disposition_snapshot" in self.qualified_components)
+        ):
+            raise ReviewInputError(
+                "snapshot qualification flags exceed exercised evidence"
+            )
+        if self.qualified_components:
+            if (
+                type(self.physical_reads) is not int
+                or not 0 < self.physical_reads <= ORDINARY_EVIDENCE_READ_LIMIT
+            ):
+                raise ReviewInputError("snapshot physical read observation is invalid")
+        elif self.physical_reads is not None:
+            raise ReviewInputError(
+                "unexercised snapshot has no physical read observation"
+            )
+        if not self.protected_fence_tail_preserved:
+            raise ReviewInputError(
+                "boundary replay must preserve the 4-call protected fence tail"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interruption_stage": self.interruption_stage,
+            "interruption_mode": self.interruption_mode,
+            "envelope_evaluation": self.envelope_evaluation.to_dict(),
+            "fresh_ledger_reloaded": self.fresh_ledger_reloaded,
+            "fresh_handoff_verified": self.fresh_handoff_verified,
+            "retained_snapshot_preserved": self.retained_snapshot_preserved,
+            "retained_unknown_charges": self.retained_unknown_charges,
+            "protected_fence_tail_preserved": self.protected_fence_tail_preserved,
+            "duplicate_side_effects": self.duplicate_side_effects,
+            "fresh_inference_calls": self.fresh_inference_calls,
+            "recovery": self.recovery.to_dict(),
+            "authority": False,
+            "qualification_status": self.qualification_status,
+            "qualified_components": list(self.qualified_components),
+            "physical_reads": self.physical_reads,
+            "unqualified_components": [
+                "retained_result",
+                "archive",
+                "quarantined_state",
+                "historical_assessments",
+                "assessment_queue",
+                "convergence_history",
+                "recovery_context",
+                "publication",
+                "terminal_accounting",
+                "historical_settlement",
+            ],
+        }
+
+
+def _snapshot_reader_identity() -> dict[str, str]:
+    """Fingerprint the executing probe and public reader at their loaded origins."""
+    modules = (sys.modules[__name__], sys.modules[read_session_dispositions.__module__])
+    return {
+        str(Path(module.__file__).resolve()): hashlib.sha256(
+            Path(module.__file__).read_bytes()
+        ).hexdigest()
+        for module in modules
+        if module.__file__ is not None
+    }
+
+
+def _snapshot_probe_command() -> list[str]:
+    # -I ignores PYTHONPATH and cwd; -S prevents site startup hooks. Explicit
+    # absolute parent search paths retain installed dependencies and checkouts.
+    package = Path(__file__).resolve().parent
+    paths = [str(package.parent)] + [
+        str(Path(path).resolve())
+        for path in sys.path
+        if path and Path(path).is_absolute() and Path(path).resolve() != Path.cwd()
+    ]
+    identity = _snapshot_reader_identity()
+    bootstrap = (
+        "import sys, pathlib, hashlib; "
+        f"sys.path[:] = {paths!r}; "
+        f"expected = {identity!r}; "
+        "assert all(hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() == h "
+        "for p, h in expected.items()); "
+        "from review_sensei.combined_capacity import "
+        "_snapshot_probe_main, _snapshot_reader_identity; "
+        "assert _snapshot_reader_identity() == expected; _snapshot_probe_main()"
+    )
+    return [sys.executable, "-I", "-S", "-B", "-c", bootstrap]
+
+
+def _run_snapshot_probe(
+    command: list[str], request: bytes
+) -> subprocess.CompletedProcess[bytes]:
+    """Never retain more than 1025 output bytes; discard stderr at the OS sink."""
+    with tempfile.TemporaryFile() as input_file:
+        input_file.write(request)
+        input_file.seek(0)
+        with subprocess.Popen(
+            command, stdin=input_file, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        ) as process:
+            assert process.stdout is not None
+            output = bytearray()
+
+            def drain() -> None:
+                assert process.stdout is not None
+                output.extend(process.stdout.read(1025))
+                if len(output) > 1024:
+                    process.kill()
+
+            reader = threading.Thread(target=drain, daemon=True)
+            reader.start()
+            try:
+                process.wait(timeout=PART_READ_SECONDS)
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
+            finally:
+                reader.join()
+            return subprocess.CompletedProcess(
+                command, process.returncode, bytes(output), b""
+            )
+
+
+def _snapshot_probe_main() -> None:
+    """Bounded read-only subprocess worker; emits no retained source bytes."""
+    request = json.loads(sys.stdin.buffer.read(16_385))
+    identity = SessionIdentity(**request["identity"])
+    budget = EvidenceReadBudget()
+    ledger = LocalSessionLedger(Path(request["directory"]), evidence_budget=budget)
+    record = ledger.load(identity).record
+    if (
+        record is None
+        or hashlib.sha256(canonical_bytes(record.to_dict())).hexdigest()
+        != request["root_sha256"]
+    ):
+        raise ReviewInputError("retained root missing or changed")
+    components = ["session_root"]
+    if record.disposition_snapshot is not None:
+        read_session_dispositions(ledger, record)
+        components.append("disposition_snapshot")
+    budget.check()
+    print(
+        json.dumps(
+            {
+                "components": components,
+                "physical_reads": budget.calls,
+                "reader_identity": _snapshot_reader_identity(),
+            }
+        )
+    )
+
+
+def _qualify_snapshot_subprocess(
+    directory: Path, *, identity: SessionIdentity, record: SessionRecord
+) -> tuple[tuple[str, ...], int]:
+    if not directory.is_dir():
+        raise ReviewInputError("retained ledger directory is required")
+    if (record.repository, record.repository_id, record.pull_request) != (
+        identity.repository,
+        identity.repository_id,
+        identity.pull_request,
+    ):
+        raise ReviewInputError("retained ledger identity does not match")
+    request = canonical_bytes(
+        {
+            "directory": str(directory.resolve()),
+            "identity": {
+                "repository": identity.repository,
+                "repository_id": identity.repository_id,
+                "pull_request": identity.pull_request,
+            },
+            "root_sha256": hashlib.sha256(
+                canonical_bytes(record.to_dict())
+            ).hexdigest(),
+        }
+    )
+    if len(request) > 16_384:
+        raise ReviewInputError("retained snapshot qualification input exceeds bound")
+    try:
+        process = _run_snapshot_probe(_snapshot_probe_command(), request)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ReviewInputError(
+            "retained snapshot subprocess unavailable or timed out"
+        ) from exc
+    if process.returncode != 0 or len(process.stdout) > 1_024:
+        raise ReviewInputError("retained snapshot subprocess authentication failed")
+    try:
+        observed = json.loads(process.stdout)
+        components = observed["components"]
+        calls = observed["physical_reads"]
+        expected = ["session_root"] + (
+            ["disposition_snapshot"] if record.disposition_snapshot is not None else []
+        )
+        if (
+            observed.get("reader_identity") != _snapshot_reader_identity()
+            or components != expected
+            or type(calls) is not int
+            or not 0 < calls <= ORDINARY_EVIDENCE_READ_LIMIT
+        ):
+            raise ValueError("invalid observation")
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ReviewInputError("retained snapshot subprocess receipt invalid") from exc
+    return tuple(components), calls
+
+
+def qualify_retained_interruption_replay(
+    record: SessionRecord,
+    *,
+    identity: SessionIdentity,
+    interruption_stage: str,
+    interruption_mode: str,
+    retained_result: ReviewResult | None = None,
+    consumed_grants: Sequence[str] = (),
+    review_summary_text: str = "",
+    published_finding_count: int = 0,
+    future_root_reserve_bytes: int = 0,
+    include_future_growth: bool = False,
+    include_intermediate_staging_peak: bool = False,
+    intermediate_records: Sequence[SessionRecord] = (),
+    terminal_report: TerminalRepresentabilityReport | None = None,
+    terminal_carrier_bytes: int = 0,
+    extra_ordinary_part_reads: int = 0,
+    archive_ancestor_depth: int = 0,
+    retry_reconcile_requests: int = 0,
+    committed_requests: int = 0,
+    unknown_usage_requests: int = 0,
+    required_stage_requests: int = 0,
+    stored_parts_count: int = 0,
+    stored_parts_total_bytes: int = 0,
+    original_api_limit: int = DEFAULT_API_REQUEST_LIMIT,
+    ledger_directory: Path | None = None,
+) -> BoundaryInterruptionResult:
+    """Estimate an interruption envelope and optionally qualify retained snapshots.
+
+    Actual artifacts are mandatory for qualification. A separate interpreter
+    authenticates the root and all disposition snapshot parts through production
+    readers. This does not replay publication, results, archives or recovery
+    contexts, and supplies no original-budget or historical-settlement authority.
+    """
+
+    if interruption_stage not in INTERRUPTION_STAGES:
+        raise ReviewInputError(
+            f"unsupported interruption_stage: {interruption_stage!r}"
+        )
+    if interruption_mode not in INTERRUPTION_MODES:
+        raise ReviewInputError(f"unsupported interruption_mode: {interruption_mode!r}")
+
+    if identity.repository_id is None:
+        raise ReviewInputError("retained qualification repository_id is required")
+    repo_id = identity.repository_id
+    in_flight_charge = (
+        1
+        if interruption_mode
+        in {"in_flight_not_stored", "in_flight_stored_response_lost"}
+        else 0
+    )
+    record_uncertain = 0
+    if isinstance(record.api_run_accounting, Mapping):
+        ver = record.api_run_accounting.get(
+            "version", record.api_run_accounting.get("schema_version")
+        )
+        if ver in SUPPORTED_ENVELOPE_WRITER_VERSIONS:
+            record_uncertain = ApiRunAccounting.from_document(
+                record.api_run_accounting
+            ).uncertain
+    total_unknown = (
+        max(
+            _non_negative_int(unknown_usage_requests, field="unknown_usage_requests"),
+            record_uncertain,
+        )
+        + in_flight_charge
+    )
+    footprint = decompose_session_and_result_footprint(
+        record,
+        repository_id=repo_id,
+        pull_request=identity.pull_request,
+        retained_result=retained_result,
+        consumed_grants=consumed_grants,
+        review_summary_text=review_summary_text,
+        published_finding_count=published_finding_count,
+        future_root_reserve_bytes=future_root_reserve_bytes,
+        include_future_growth=include_future_growth,
+        include_intermediate_staging_peak=include_intermediate_staging_peak,
+        intermediate_records=intermediate_records,
+        terminal_report=terminal_report,
+        terminal_carrier_bytes=terminal_carrier_bytes,
+        extra_ordinary_part_reads=extra_ordinary_part_reads,
+        archive_ancestor_depth=archive_ancestor_depth,
+        retry_reconcile_requests=retry_reconcile_requests,
+        committed_requests=committed_requests,
+        unknown_usage_requests=total_unknown,
+        required_stage_requests=required_stage_requests,
+        stored_parts_count=stored_parts_count,
+        stored_parts_total_bytes=stored_parts_total_bytes,
+        original_api_limit=original_api_limit,
+    )
+    evaluation = evaluate_live_session_envelope(
+        record,
+        repository_id=repo_id,
+        pull_request=identity.pull_request,
+        retained_result=retained_result,
+        consumed_grants=consumed_grants,
+        review_summary_text=review_summary_text,
+        published_finding_count=published_finding_count,
+        future_root_reserve_bytes=future_root_reserve_bytes,
+        include_future_growth=include_future_growth,
+        include_intermediate_staging_peak=include_intermediate_staging_peak,
+        intermediate_records=intermediate_records,
+        terminal_report=terminal_report,
+        terminal_carrier_bytes=terminal_carrier_bytes,
+        extra_ordinary_part_reads=extra_ordinary_part_reads,
+        archive_ancestor_depth=archive_ancestor_depth,
+        retry_reconcile_requests=retry_reconcile_requests,
+        committed_requests=committed_requests,
+        unknown_usage_requests=total_unknown,
+        required_stage_requests=required_stage_requests,
+        stored_parts_count=stored_parts_count,
+        stored_parts_total_bytes=stored_parts_total_bytes,
+        original_api_limit=original_api_limit,
+    )
+
+    if not evaluation.combined_envelope_fits:
+        return BoundaryInterruptionResult(
+            interruption_stage=interruption_stage,
+            interruption_mode=interruption_mode,
+            footprint=footprint,
+            envelope_evaluation=evaluation,
+            fresh_ledger_reloaded=False,
+            fresh_handoff_verified=False,
+            retained_snapshot_preserved=False,
+            retained_unknown_charges=footprint.unknown_usage_requests,
+            protected_fence_tail_preserved=(
+                footprint.protected_tail_requests >= RESERVED_FENCE_READS
+            ),
+            duplicate_side_effects=None,
+            fresh_inference_calls=None,
+            recovery=evaluation.recovery,
+            qualification_status="capacity_refused",
+        )
+
+    # Estimates remain available without artifacts, but never count as replay.
+    qualified: tuple[str, ...] = ()
+    physical_reads: int | None = None
+    status = "retained_artifacts_required"
+    if ledger_directory is not None:
+        qualified, physical_reads = _qualify_snapshot_subprocess(
+            ledger_directory, identity=identity, record=record
+        )
+        status = (
+            "snapshot_graph_verified"
+            if "disposition_snapshot" in qualified
+            else "root_verified"
+        )
+    snapshot_ok = "disposition_snapshot" in qualified
+    fence_tail_ok = footprint.protected_tail_requests >= RESERVED_FENCE_READS
+
+    if (interruption_stage, interruption_mode) in CHECK_DEFINITE_REJECTION_CASES:
+        rx = prescribe_recovery(
+            "eligible_recovery_awaiting_authorization",
+            has_uncertain_dispatches=True,
+        )
+    elif interruption_mode == "definite_rejection":
+        rx = prescribe_recovery("provenance_mismatch")
+    elif interruption_stage == "retained_result_staging":
+        rx = prescribe_recovery(
+            "eligible_recovery_awaiting_authorization",
+            has_partial_coverage=True,
+        )
+    else:
+        rx = prescribe_recovery(
+            "eligible_recovery_awaiting_authorization",
+            has_retained_result=True,
+        )
+
+    return BoundaryInterruptionResult(
+        interruption_stage=interruption_stage,
+        interruption_mode=interruption_mode,
+        footprint=footprint,
+        envelope_evaluation=evaluation,
+        fresh_ledger_reloaded="session_root" in qualified,
+        fresh_handoff_verified=False,
+        retained_snapshot_preserved=snapshot_ok,
+        retained_unknown_charges=footprint.unknown_usage_requests,
+        protected_fence_tail_preserved=fence_tail_ok,
+        duplicate_side_effects=None,
+        fresh_inference_calls=None,
+        recovery=rx,
+        qualification_status=status,
+        qualified_components=qualified,
+        physical_reads=physical_reads,
+    )
+
+
 __all__ = [
+    "BoundaryInterruptionResult",
     "COMBINED_REFUSAL_CODES",
     "CombinedCapacityError",
     "CombinedCapacityEvaluation",
@@ -1872,10 +2891,13 @@ __all__ = [
     "SUPPORTED_ENVELOPE_WRITER_VERSIONS",
     "TEXT_ENCODINGS",
     "build_supported_scenario_matrix",
+    "decompose_session_and_result_footprint",
+    "estimate_lifecycle_future_growth_bytes",
     "evaluate_combined_capacity",
     "evaluate_live_session_envelope",
     "lookup_representation_limit",
     "measure_utf8_text",
+    "qualify_retained_interruption_replay",
     "require_combined_capacity",
     "simulate_interruption_and_fresh_replay",
     "verify_inventory_against_runtime_constants",

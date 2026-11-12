@@ -17,7 +17,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import Any, cast
@@ -31,14 +31,18 @@ from .api_work import (
 from .bounded_evidence import (
     INLINE_ENCODING,
     MAX_MANIFEST_BYTES,
+    MAX_PART_READS,
     MAX_PARTITION_DECODED_BYTES,
+    PARTITION_ENCODING,
     AuthenticatedPart,
+    EvidenceReadBudget,
     canonical_bytes,
     encode_evidence,
     evidence_manifest,
     inline_manifest,
     partition_evidence,
     read_inline_evidence,
+    read_partitioned_evidence,
 )
 from .disposition import (
     FindingIdentity,
@@ -85,8 +89,10 @@ TERMINAL_REFUSAL_CODES = frozenset(
         "carrier_inline_bound_exceeded",
         "session_root_bytes_exceeded",
         "request_budget_exhausted_before_effect",
+        "snapshot_parts_unavailable_for_preview",
     }
 )
+
 
 _SESSION_COMMENT_INTRO = "ReviewSensei session ledger (round counters only; no source)."
 _DISPOSITION_ARRAY_OVERFLOW_MESSAGES = frozenset(
@@ -189,6 +195,14 @@ class ActionSettlementPricing:
     terminal_close_requests: int = 1
     committed_requests: int = 0
     original_api_limit: int = 512
+    startup_requests: int = 0
+    ancestry_read_requests: int = 0
+    snapshot_read_requests: int = 0
+    retry_reconcile_requests: int = 0
+    ambiguous_write_charges: int = 0
+    ordinary_evidence_reads: int = 0
+    protected_fence_reads: int = 4
+    evidence_read_limit: int = MAX_PART_READS
 
     def __post_init__(self) -> None:
         for attr in (
@@ -199,6 +213,13 @@ class ActionSettlementPricing:
             "part_write_and_readback_requests",
             "terminal_close_requests",
             "committed_requests",
+            "startup_requests",
+            "ancestry_read_requests",
+            "snapshot_read_requests",
+            "retry_reconcile_requests",
+            "ambiguous_write_charges",
+            "ordinary_evidence_reads",
+            "protected_fence_reads",
         ):
             object.__setattr__(
                 self, attr, _non_negative_int(getattr(self, attr), field=attr)
@@ -207,11 +228,33 @@ class ActionSettlementPricing:
         if limit <= 0:
             raise ReviewInputError("original_api_limit must be positive")
         object.__setattr__(self, "original_api_limit", limit)
+        read_limit = _non_negative_int(
+            self.evidence_read_limit, field="evidence_read_limit"
+        )
+        if read_limit <= 0 or self.protected_fence_reads >= read_limit:
+            raise ReviewInputError(
+                "evidence_read_limit must exceed protected_fence_reads"
+            )
+        object.__setattr__(self, "evidence_read_limit", read_limit)
+
+    @property
+    def ordinary_evidence_read_cap(self) -> int:
+        return self.evidence_read_limit - self.protected_fence_reads
+
+    def evidence_tail_fits(self) -> bool:
+        return (
+            self.ordinary_evidence_reads + self.snapshot_read_requests
+        ) <= self.ordinary_evidence_read_cap
 
     @property
     def required_requests(self) -> int:
         return (
-            self.cold_census_requests
+            self.startup_requests
+            + self.ancestry_read_requests
+            + self.snapshot_read_requests
+            + self.retry_reconcile_requests
+            + self.ambiguous_write_charges
+            + self.cold_census_requests
             + self.business_mutation_requests
             + self.refinalization_requests
             + self.receipt_publication_requests
@@ -228,7 +271,10 @@ class ActionSettlementPricing:
         return self.original_api_limit - self.total_projected_requests
 
     def fits(self) -> bool:
-        return self.total_projected_requests <= self.original_api_limit
+        return (
+            self.total_projected_requests <= self.original_api_limit
+            and self.evidence_tail_fits()
+        )
 
     def to_dict(self) -> dict[str, int | bool]:
         return {
@@ -239,6 +285,16 @@ class ActionSettlementPricing:
             "part_write_and_readback_requests": self.part_write_and_readback_requests,
             "terminal_close_requests": self.terminal_close_requests,
             "committed_requests": self.committed_requests,
+            "startup_requests": self.startup_requests,
+            "ancestry_read_requests": self.ancestry_read_requests,
+            "snapshot_read_requests": self.snapshot_read_requests,
+            "retry_reconcile_requests": self.retry_reconcile_requests,
+            "ambiguous_write_charges": self.ambiguous_write_charges,
+            "ordinary_evidence_reads": self.ordinary_evidence_reads,
+            "protected_fence_reads": self.protected_fence_reads,
+            "evidence_read_limit": self.evidence_read_limit,
+            "ordinary_evidence_read_cap": self.ordinary_evidence_read_cap,
+            "evidence_tail_fits": self.evidence_tail_fits(),
             "required_requests": self.required_requests,
             "total_projected_requests": self.total_projected_requests,
             "original_api_limit": self.original_api_limit,
@@ -276,6 +332,8 @@ class TerminalRepresentabilityReport:
     pricing: ActionSettlementPricing
     recovery: RecoveryPrescription
     authority: bool = False
+    max_intermediate_record_bytes: int = 0
+    max_intermediate_comment_bytes: int = 0
 
     def __post_init__(self) -> None:
         _exact_false_authority(self.authority, field="authority")
@@ -288,6 +346,22 @@ class TerminalRepresentabilityReport:
             self,
             "v3_writer_enabled",
             _exact_bool(self.v3_writer_enabled, field="v3_writer_enabled"),
+        )
+        object.__setattr__(
+            self,
+            "max_intermediate_record_bytes",
+            _non_negative_int(
+                self.max_intermediate_record_bytes,
+                field="max_intermediate_record_bytes",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "max_intermediate_comment_bytes",
+            _non_negative_int(
+                self.max_intermediate_comment_bytes,
+                field="max_intermediate_comment_bytes",
+            ),
         )
         if self.representable:
             if self.refusal_code is not None:
@@ -311,6 +385,8 @@ class TerminalRepresentabilityReport:
             "manifest_bytes": self.manifest_bytes,
             "projected_record_bytes": self.projected_record_bytes,
             "projected_comment_bytes": self.projected_comment_bytes,
+            "max_intermediate_record_bytes": self.max_intermediate_record_bytes,
+            "max_intermediate_comment_bytes": self.max_intermediate_comment_bytes,
             "future_reserve_bytes": self.future_reserve_bytes,
             "accounting_version": self.accounting_version,
             "v3_writer_enabled": self.v3_writer_enabled,
@@ -397,6 +473,16 @@ def _prescribe_terminal_recovery(
                 "Use supported caller-requests-v1 or caller-requests-v2 writers within the 8192-byte inline bound.",
             ),
         )
+    if refusal_code == "snapshot_parts_unavailable_for_preview":
+        return RecoveryPrescription(
+            action="supply_original_context_or_rescan",
+            command="supply-original-recovery-context",
+            requires_fresh_inference=False,
+            steps=(
+                "Supply the owning session ledger or pre-authenticated disposition snapshot parts so preview can evaluate existing decisions without discarding snapshot state.",
+                "Never strip an authenticated disposition_snapshot during pre-effect admission.",
+            ),
+        )
     return RecoveryPrescription(
         action="supply_original_context_or_rescan",
         command="supply-original-recovery-context",
@@ -406,6 +492,34 @@ def _prescribe_terminal_recovery(
             "Load the authenticated current SessionRecord from the owning session ledger before evaluating settlement.",
         ),
     )
+
+
+def _try_decode_inline_snapshot_dispositions(
+    snapshot: Mapping[str, object] | None,
+) -> tuple[Mapping[str, object], ...] | None:
+    if snapshot is None:
+        return None
+    from .disposition_snapshot import (
+        normalize_snapshot,
+        snapshot_document,
+    )
+
+    try:
+        root = normalize_snapshot(snapshot)
+        if root is None or root["schema_version"] != "1.0":
+            return None
+        manifest = root["state_manifest"]
+        binding = manifest["binding"]
+        if manifest.get("encoding") != INLINE_ENCODING:
+            return None
+        document = read_inline_evidence(manifest, expected_binding=binding)
+        return snapshot_document(
+            document,
+            result_digest=root["result_digest"],
+            item_count=manifest["item_count"],
+        )
+    except ReviewInputError:
+        return None
 
 
 def evaluate_terminal_action_representability(
@@ -424,6 +538,8 @@ def evaluate_terminal_action_representability(
     disposition_entry_count: int = 0,
     max_disposition_token_bytes: int = 0,
     action_name: str | None = None,
+    resolved_dispositions: Sequence[Mapping[str, object]] | None = None,
+    intermediate_record: SessionRecord | None = None,
 ) -> TerminalRepresentabilityReport:
     """Evaluate whether a candidate action result and root close are representable pre-effect."""
 
@@ -467,11 +583,22 @@ def evaluate_terminal_action_representability(
                 )
 
     record_obj = current_record if isinstance(current_record, SessionRecord) else None
-    disp_bytes = (
-        disposition_array_bytes(record_obj.dispositions)
-        if record_obj is not None
-        else 0
-    )
+    if resolved_dispositions is not None:
+        disp_bytes = disposition_array_bytes(resolved_dispositions)
+    elif record_obj is not None:
+        if record_obj.dispositions:
+            disp_bytes = disposition_array_bytes(record_obj.dispositions)
+        else:
+            inline_disps = _try_decode_inline_snapshot_dispositions(
+                record_obj.disposition_snapshot
+            )
+            disp_bytes = (
+                disposition_array_bytes(inline_disps)
+                if inline_disps is not None
+                else disposition_array_bytes(record_obj.dispositions)
+            )
+    else:
+        disp_bytes = 0
 
     if accounting_version == PARTITIONED_ACTION_ACCOUNTING_VERSION and not v3_enabled:
         return TerminalRepresentabilityReport(
@@ -526,13 +653,22 @@ def evaluate_terminal_action_representability(
     manifest_bytes = len(canonical_bytes(manifest)) if manifest is not None else None
 
     if not effective_pricing.fits():
+        budget_reason = (
+            f"projected physical requests {effective_pricing.total_projected_requests} "
+            f"exceed original limit {effective_pricing.original_api_limit}"
+            if effective_pricing.total_projected_requests
+            > effective_pricing.original_api_limit
+            else (
+                f"ordinary evidence reads "
+                f"{effective_pricing.ordinary_evidence_reads + effective_pricing.snapshot_read_requests} "
+                f"exceed cap {effective_pricing.ordinary_evidence_read_cap} "
+                f"preserving {effective_pricing.protected_fence_reads} fence reads"
+            )
+        )
         return TerminalRepresentabilityReport(
             representable=False,
             refusal_code="request_budget_exhausted_before_effect",
-            reason=(
-                f"projected physical requests {effective_pricing.total_projected_requests} "
-                f"exceed original limit {effective_pricing.original_api_limit}"
-            ),
+            reason=budget_reason,
             disposition_entry_count=disposition_entry_count,
             max_disposition_token_bytes=max_disposition_token_bytes,
             disposition_bytes=disp_bytes,
@@ -603,7 +739,23 @@ def evaluate_terminal_action_representability(
 
     projected_record_bytes = 0
     projected_comment_bytes = 0
+    max_intermediate_record_bytes = 0
+    max_intermediate_comment_bytes = 0
     if record_obj is not None:
+        repo_id = identity.repository_id or record_obj.repository_id or 1
+        inter_rec = (
+            intermediate_record if intermediate_record is not None else record_obj
+        )
+        inter_record_bytes = estimate_session_record_bytes(inter_rec) + reserve
+        inter_comment_bytes = (
+            estimate_session_comment_bytes(
+                inter_rec,
+                repository_id=repo_id,
+                pull_request=identity.pull_request,
+                consumed_grants=consumed_grants,
+            )
+            + reserve
+        )
         raw_payload = copy.deepcopy(record_obj.to_dict())
         raw_payload["generation"] = record_obj.generation + 1
         accounting_doc = raw_payload.get("api_run_accounting")
@@ -621,13 +773,14 @@ def evaluate_terminal_action_representability(
             raw_payload["api_run_accounting"] = updated_accounting
         raw_record_bytes = estimate_session_record_bytes(raw_payload)
         projected_record_bytes = raw_record_bytes + reserve
-        if projected_record_bytes > MAX_SESSION_RECORD_BYTES:
+        max_intermediate_record_bytes = max(inter_record_bytes, projected_record_bytes)
+        if max_intermediate_record_bytes > MAX_SESSION_RECORD_BYTES:
             return TerminalRepresentabilityReport(
                 representable=False,
                 refusal_code="session_root_bytes_exceeded",
                 reason=(
-                    f"projected SessionRecord size {projected_record_bytes} bytes "
-                    f"(record={raw_record_bytes}B + reserve={reserve}B) "
+                    f"projected/intermediate SessionRecord size {max_intermediate_record_bytes} bytes "
+                    f"(terminal={raw_record_bytes}B + reserve={reserve}B) "
                     f"exceeds MAX_SESSION_RECORD_BYTES={MAX_SESSION_RECORD_BYTES}"
                 ),
                 disposition_entry_count=disposition_entry_count,
@@ -646,6 +799,8 @@ def evaluate_terminal_action_representability(
                 recovery=_prescribe_terminal_recovery(
                     "session_root_bytes_exceeded", action_name=action_name
                 ),
+                max_intermediate_record_bytes=max_intermediate_record_bytes,
+                max_intermediate_comment_bytes=inter_comment_bytes,
             )
         evolved = record_obj.evolve(
             generation=record_obj.generation + 1,
@@ -653,7 +808,6 @@ def evaluate_terminal_action_representability(
                 Mapping[str, object] | None, raw_payload.get("api_run_accounting")
             ),
         )
-        repo_id = identity.repository_id or evolved.repository_id or 1
         raw_comment_bytes = estimate_session_comment_bytes(
             evolved,
             repository_id=repo_id,
@@ -661,12 +815,15 @@ def evaluate_terminal_action_representability(
             consumed_grants=consumed_grants,
         )
         projected_comment_bytes = raw_comment_bytes + reserve
-        if projected_comment_bytes > MAX_SESSION_COMMENT_BYTES:
+        max_intermediate_comment_bytes = max(
+            inter_comment_bytes, projected_comment_bytes
+        )
+        if max_intermediate_comment_bytes > MAX_SESSION_COMMENT_BYTES:
             return TerminalRepresentabilityReport(
                 representable=False,
                 refusal_code="session_root_bytes_exceeded",
                 reason=(
-                    f"projected session comment size {projected_comment_bytes} bytes "
+                    f"projected/intermediate session comment size {max_intermediate_comment_bytes} bytes "
                     f"(comment={raw_comment_bytes}B + reserve={reserve}B) "
                     f"exceeds MAX_SESSION_COMMENT_BYTES={MAX_SESSION_COMMENT_BYTES}"
                 ),
@@ -686,6 +843,8 @@ def evaluate_terminal_action_representability(
                 recovery=_prescribe_terminal_recovery(
                     "session_root_bytes_exceeded", action_name=action_name
                 ),
+                max_intermediate_record_bytes=max_intermediate_record_bytes,
+                max_intermediate_comment_bytes=max_intermediate_comment_bytes,
             )
 
     return TerminalRepresentabilityReport(
@@ -706,29 +865,150 @@ def evaluate_terminal_action_representability(
         v3_writer_enabled=v3_enabled,
         pricing=effective_pricing,
         recovery=prescribe_recovery("supported_read_only_observation"),
+        max_intermediate_record_bytes=max_intermediate_record_bytes,
+        max_intermediate_comment_bytes=max_intermediate_comment_bytes,
     )
 
 
-class _InMemoryPreviewLedger:
-    """Pure in-memory sandbox ledger that never constructs a budget or touches I/O."""
+class _PassiveBudgetCheck:
+    @staticmethod
+    def check() -> None:
+        return None
 
-    supports_paged_disposition_snapshot_writes = False
+
+def _verify_partitioned_manifest_without_consume(
+    manifest: Mapping[str, object],
+    *,
+    reader: Callable[[str], AuthenticatedPart],
+    expected_binding: Mapping[str, object],
+    budget: Any = None,
+) -> object:
+    check_target = (
+        budget
+        if callable(getattr(budget, "check", None))
+        else cast(Any, _PassiveBudgetCheck())
+    )
+    return read_partitioned_evidence(
+        dict(manifest),
+        reader=reader,
+        expected_binding=expected_binding,
+        budget=cast(EvidenceReadBudget, check_target),
+    )
+
+
+def _preload_snapshot_parts_from_ledger(
+    source_ledger: object | None,
+    identity: SessionIdentity,
+    record: SessionRecord | None,
+    *,
+    producer: str,
+) -> dict[str, AuthenticatedPart]:
+    """Pure adapter capability only: no private caches, paths or hidden reads."""
+    if source_ledger is None or record is None or record.disposition_snapshot is None:
+        return {}
+    capability = getattr(source_ledger, "snapshot_preview_parts", None)
+    if not callable(capability):
+        return {}
+    parts = capability(identity, record)
+    if parts is None:
+        return {}
+    if not isinstance(parts, Mapping) or any(
+        not isinstance(key, str)
+        or not isinstance(part, AuthenticatedPart)
+        or part.producer != producer
+        for key, part in parts.items()
+    ):
+        raise ReviewInputError("snapshot preview capability returned invalid parts")
+    return dict(parts)
+
+
+class _InMemoryPreviewLedger:
+    """Pure in-memory sandbox ledger that never mutates real storage or touches I/O."""
 
     def __init__(
         self,
         record: SessionRecord | None,
         *,
+        producer: str = "local-ledger",
         enable_disposition_snapshot_writes: bool = False,
+        supports_paged_disposition_snapshot_writes: bool = False,
         evidence_budget: Any = None,
+        preloaded_parts: Mapping[str, AuthenticatedPart] | None = None,
+        preloaded_dispositions: Sequence[Mapping[str, object]] | None = None,
+        disposition_page_cache: Mapping[str, Any] | None = None,
     ) -> None:
         self._record = record
+        self._producer = producer
         self.enable_disposition_snapshot_writes = enable_disposition_snapshot_writes
-        self.evidence_budget = evidence_budget
+        self.supports_paged_disposition_snapshot_writes = (
+            supports_paged_disposition_snapshot_writes
+        )
+        self.evidence_budget = (
+            evidence_budget
+            if evidence_budget is not None
+            else (
+                EvidenceReadBudget()
+                if record is not None and record.disposition_snapshot is not None
+                else None
+            )
+        )
         self._parts: dict[str, tuple[object, str]] = {}
+        self._preloaded_parts: dict[str, AuthenticatedPart] = {
+            str(part_id): AuthenticatedPart(copy.deepcopy(part.document), part.producer)
+            for part_id, part in (preloaded_parts or {}).items()
+        }
         self._staged_documents: dict[str, tuple[dict[str, object], object]] = {}
+        self._disposition_page_cache: dict[str, Any] = copy.deepcopy(
+            dict(disposition_page_cache or {})
+        )
+        self._preloaded_snapshot_doc: (
+            tuple[str, dict[str, object], dict[str, object]] | None
+        ) = None
+        if (
+            preloaded_dispositions is not None
+            and record is not None
+            and record.disposition_snapshot is not None
+        ):
+            self._register_preloaded_dispositions(record, preloaded_dispositions)
+
+    def _register_preloaded_dispositions(
+        self,
+        record: SessionRecord,
+        preloaded_dispositions: Sequence[Mapping[str, object]],
+    ) -> None:
+        from .disposition_snapshot import normalize_snapshot
+        from .session import _stored_dispositions
+
+        root = normalize_snapshot(record.disposition_snapshot)
+        if root is None or root["schema_version"] != "1.0":
+            return
+        manifest = root["state_manifest"]
+        binding = dict(manifest["binding"])
+        stored = _stored_dispositions(
+            [dict(item) for item in preloaded_dispositions], snapshot=True
+        )
+        candidate_doc: dict[str, object] = {
+            "schema_version": "1.0",
+            "result_digest": root["result_digest"],
+            "dispositions": list(stored),
+        }
+        raw = canonical_bytes(candidate_doc)
+        if len(stored) != manifest.get("item_count"):
+            raise ReviewInputError(
+                "preloaded disposition snapshot item_count does not match authenticated root"
+            )
+        if manifest.get("encoding") == PARTITION_ENCODING and (
+            len(raw) != manifest.get("decoded_bytes")
+            or hashlib.sha256(raw).hexdigest() != manifest.get("sha256")
+        ):
+            raise ReviewInputError(
+                "preloaded disposition snapshot digest does not match authenticated root"
+            )
+        key = hashlib.sha256(canonical_bytes(manifest)).hexdigest()
+        self._preloaded_snapshot_doc = (key, binding, candidate_doc)
 
     def evidence_producer(self) -> str:
-        return "local-ledger"
+        return self._producer
 
     def _write_part(
         self, identity: SessionIdentity, part_id: str, payload: object
@@ -739,10 +1019,15 @@ class _InMemoryPreviewLedger:
     def _read_part(
         self, identity: SessionIdentity, storage_id: str
     ) -> AuthenticatedPart:
-        if storage_id not in self._parts:
-            raise ReviewInputError("preview part is unavailable")
-        doc, prod = self._parts[storage_id]
-        return AuthenticatedPart(copy.deepcopy(doc), prod)
+        if storage_id in self._parts:
+            doc, prod = self._parts[storage_id]
+            return AuthenticatedPart(copy.deepcopy(doc), prod)
+        preloaded = self._preloaded_parts.get(storage_id)
+        if preloaded is not None:
+            return AuthenticatedPart(
+                copy.deepcopy(preloaded.document), preloaded.producer
+            )
+        raise ReviewInputError("preview part is unavailable")
 
     def stage_evidence(
         self,
@@ -794,6 +1079,59 @@ class _InMemoryPreviewLedger:
         self._staged_documents[key] = (dict(binding), copy.deepcopy(document))
         return manifest
 
+    def stage_disposition_snapshot_batch(
+        self,
+        identity: SessionIdentity,
+        *,
+        record: SessionRecord,
+        binding: dict[str, object],
+        pages: Sequence[Mapping[str, Any]],
+        values: tuple[Mapping[str, object], ...],
+        result_digest: str,
+        max_manifest_bytes: int,
+    ) -> dict[str, object]:
+        from .disposition_snapshot import (
+            prepare_local_paged_snapshot,
+            read_paged_snapshot,
+        )
+        from .session import _remember_disposition_pages
+
+        if not self.enable_disposition_snapshot_writes:
+            raise ReviewInputError("disposition snapshot writer is disabled")
+        if (
+            binding.get("repository") != identity.repository
+            or binding.get("pull_request") != identity.pull_request
+            or binding.get("repository_id") != identity.repository_id
+            or binding.get("producer") != self.evidence_producer()
+            or binding.get("purpose") != "dispositions"
+        ):
+            raise ReviewInputError("preview disposition batch binding does not match")
+        prepared = prepare_local_paged_snapshot(
+            binding=binding,
+            pages=pages,
+            values=values,
+            result_digest=result_digest,
+            max_manifest_bytes=max_manifest_bytes,
+        )
+        for part_id, part_doc in prepared.parts.items():
+            if part_id not in self._preloaded_parts:
+                self._write_part(identity, part_id, part_doc)
+        document = self.read_evidence(
+            identity, prepared.manifest, expected_binding=binding
+        )
+        root = {
+            "schema_version": "2.0",
+            "result_digest": result_digest,
+            "state_manifest": prepared.manifest,
+        }
+        restored = read_paged_snapshot(
+            document, root=root, reader=self.read_evidence, identity=identity
+        )
+        if restored != values:
+            raise ReviewInputError("preview disposition batch readback differs")
+        _remember_disposition_pages(self, root, document)
+        return prepared.manifest
+
     def read_evidence(
         self,
         identity: SessionIdentity,
@@ -805,9 +1143,80 @@ class _InMemoryPreviewLedger:
             return read_inline_evidence(manifest, expected_binding=expected_binding)
         key = hashlib.sha256(canonical_bytes(manifest)).hexdigest()
         staged = self._staged_documents.get(key)
-        if staged is None or staged[0] != dict(expected_binding):
-            raise ReviewInputError("preview partition binding or manifest mismatch")
-        return copy.deepcopy(staged[1])
+        if staged is not None:
+            if staged[0] != dict(expected_binding):
+                raise ReviewInputError("preview partition binding or manifest mismatch")
+            return copy.deepcopy(staged[1])
+        if (
+            self._preloaded_snapshot_doc is not None
+            and self._preloaded_snapshot_doc[0] == key
+        ):
+            if self._preloaded_snapshot_doc[1] != dict(expected_binding):
+                raise ReviewInputError("preview partition binding or manifest mismatch")
+            return copy.deepcopy(self._preloaded_snapshot_doc[2])
+        if (
+            isinstance(manifest, dict)
+            and manifest.get("encoding") == PARTITION_ENCODING
+        ):
+            parts = manifest.get("parts")
+            if isinstance(parts, list) and all(
+                isinstance(ref, Mapping)
+                and (
+                    str(ref.get("storage_id")) in self._parts
+                    or str(ref.get("storage_id")) in self._preloaded_parts
+                )
+                for ref in parts
+            ):
+                return _verify_partitioned_manifest_without_consume(
+                    manifest,
+                    reader=lambda storage_id: self._read_part(identity, storage_id),
+                    expected_binding=expected_binding,
+                    budget=self.evidence_budget,
+                )
+            raise ReviewInputError("preview part is unavailable")
+        raise ReviewInputError("preview partition binding or manifest mismatch")
+
+    def read_disposition_snapshot(
+        self,
+        identity: SessionIdentity,
+        record: SessionRecord | None = None,
+    ) -> tuple[Mapping[str, object], ...]:
+        """Serve authenticated snapshot entries in-memory with 0 evidence_budget calls."""
+
+        target = record if record is not None else self._record
+        if target is None:
+            return ()
+        if target.disposition_snapshot is None:
+            return target.dispositions
+        from .disposition_snapshot import (
+            normalize_snapshot,
+            read_paged_snapshot,
+            snapshot_document,
+        )
+        from .session import _remember_disposition_pages
+
+        if isinstance(self.evidence_budget, EvidenceReadBudget):
+            self.evidence_budget.check()
+        root = normalize_snapshot(target.disposition_snapshot)
+        assert root is not None
+        manifest = root["state_manifest"]
+        binding = manifest["binding"]
+        if binding["producer"] != self.evidence_producer():
+            raise ReviewInputError(
+                "disposition snapshot producer does not match session"
+            )
+        document = self.read_evidence(identity, manifest, expected_binding=binding)
+        if root["schema_version"] == "2.0":
+            values = read_paged_snapshot(
+                document, root=root, reader=self.read_evidence, identity=identity
+            )
+            _remember_disposition_pages(self, root, document)
+            return values
+        return snapshot_document(
+            document,
+            result_digest=root["result_digest"],
+            item_count=manifest["item_count"],
+        )
 
     def load(
         self, identity: SessionIdentity, *, now: datetime | None = None
@@ -866,6 +1275,34 @@ class _InMemoryPreviewLedger:
         return self._record
 
 
+def _resolve_preview_producer(
+    *,
+    current_record: SessionRecord | None,
+    source_ledger: object | None,
+    binding: Mapping[str, object],
+) -> str:
+    if source_ledger is not None:
+        producer_fn = getattr(source_ledger, "evidence_producer", None)
+        if callable(producer_fn):
+            value = producer_fn()
+            if isinstance(value, str) and value:
+                return value
+    if current_record is not None and isinstance(
+        current_record.disposition_snapshot, Mapping
+    ):
+        state_manifest = current_record.disposition_snapshot.get("state_manifest")
+        if isinstance(state_manifest, Mapping):
+            snap_binding = state_manifest.get("binding")
+            if isinstance(snap_binding, Mapping):
+                snap_producer = snap_binding.get("producer")
+                if isinstance(snap_producer, str) and snap_producer:
+                    return snap_producer
+    binding_producer = binding.get("producer")
+    if isinstance(binding_producer, str) and binding_producer:
+        return binding_producer
+    return "local-ledger"
+
+
 def preview_session_command_representability(
     *,
     identity: SessionIdentity,
@@ -881,7 +1318,11 @@ def preview_session_command_representability(
     provenance: str | None = None,
     incomplete_coverage: Sequence[str] | None = None,
     enable_disposition_snapshot_writes: bool = False,
+    supports_paged_disposition_snapshot_writes: bool | None = None,
     evidence_budget: Any = None,
+    source_ledger: Any = None,
+    preloaded_parts: Mapping[str, AuthenticatedPart] | None = None,
+    preloaded_dispositions: Sequence[Mapping[str, object]] | None = None,
     accounting_version: str = ACCOUNTING_VERSION,
     pricing: ActionSettlementPricing | None = None,
     future_reserve_bytes: int = 0,
@@ -894,8 +1335,9 @@ def preview_session_command_representability(
     """Dry-run ``apply_session_command`` in-memory and evaluate G34 representability.
 
     Never mutates any remote or caller-owned session ledger and never triggers
-    network requests. Early disposition token/cap/array overflows are classified
-    into structured ``TerminalRepresentabilityReport`` refusals.
+    network requests. Preserves ``current_record.disposition_snapshot`` on the
+    in-memory sandbox record and serves pre-loaded snapshot entries with 0 extra
+    ``evidence_budget`` physical calls.
     """
 
     effective_pricing = pricing or ActionSettlementPricing()
@@ -975,25 +1417,40 @@ def preview_session_command_representability(
                 ),
             )
 
-    existing_snapshot_bytes = (
-        len(
-            canonical_bytes(
-                {"disposition_snapshot": current_record.disposition_snapshot}
-            )
+    preview_producer = _resolve_preview_producer(
+        current_record=current_record,
+        source_ledger=source_ledger,
+        binding=binding,
+    )
+    merged_preloaded_parts = _preload_snapshot_parts_from_ledger(
+        source_ledger,
+        identity,
+        current_record,
+        producer=preview_producer,
+    )
+    if preloaded_parts is not None:
+        merged_preloaded_parts.update(preloaded_parts)
+    paged_writes_enabled = (
+        supports_paged_disposition_snapshot_writes
+        if supports_paged_disposition_snapshot_writes is not None
+        else bool(
+            getattr(source_ledger, "supports_paged_disposition_snapshot_writes", False)
         )
-        if current_record is not None
-        and current_record.disposition_snapshot is not None
-        else 0
     )
-    sandbox_record = (
-        current_record.evolve(disposition_snapshot=None)
-        if existing_snapshot_bytes > 0 and current_record is not None
-        else current_record
-    )
+
+    # Preserve current_record (including any authenticated disposition_snapshot)
+    # directly on sandbox_record so already-recorded, verify, and snapshot-append
+    # paths evaluate against the true authenticated decision inventory.
+    sandbox_record = current_record
     sandbox_ledger = _InMemoryPreviewLedger(
         sandbox_record,
+        producer=preview_producer,
         enable_disposition_snapshot_writes=enable_disposition_snapshot_writes,
+        supports_paged_disposition_snapshot_writes=paged_writes_enabled,
         evidence_budget=evidence_budget,
+        preloaded_parts=merged_preloaded_parts,
+        preloaded_dispositions=preloaded_dispositions,
+        disposition_page_cache=None,
     )
     try:
         preview_record, preview_result = apply_session_command(
@@ -1075,6 +1532,46 @@ def preview_session_command_representability(
                     ),
                 ),
             )
+        if (
+            current_record is not None
+            and current_record.disposition_snapshot is not None
+            and text
+            in {
+                "preview partition binding or manifest mismatch",
+                "preview part is unavailable",
+            }
+        ):
+            return (
+                None,
+                None,
+                TerminalRepresentabilityReport(
+                    representable=False,
+                    refusal_code="snapshot_parts_unavailable_for_preview",
+                    reason=(
+                        "authenticated disposition_snapshot references external parts "
+                        "not pre-loaded for in-memory preview; refusing conservatively"
+                    ),
+                    disposition_entry_count=entry_count,
+                    max_disposition_token_bytes=max_token_bytes,
+                    disposition_bytes=0,
+                    envelope_bytes=0,
+                    carrier_bytes=0,
+                    payload_bytes=0,
+                    manifest_bytes=None,
+                    projected_record_bytes=estimate_session_record_bytes(
+                        current_record
+                    ),
+                    projected_comment_bytes=0,
+                    future_reserve_bytes=reserve,
+                    accounting_version=accounting_version,
+                    v3_writer_enabled=v3_enabled,
+                    pricing=effective_pricing,
+                    recovery=_prescribe_terminal_recovery(
+                        "snapshot_parts_unavailable_for_preview",
+                        action_name=command.action,
+                    ),
+                ),
+            )
         raise
 
     if preview_result is None:
@@ -1090,6 +1587,28 @@ def preview_session_command_representability(
             part_write_and_readback_requests=staged_part_count * 2,
         )
 
+    resolved_dispositions: Sequence[Mapping[str, object]] | None = None
+    if preview_record is not None:
+        if preview_record.disposition_snapshot is not None:
+            try:
+                resolved_dispositions = sandbox_ledger.read_disposition_snapshot(
+                    identity, preview_record
+                )
+            except ReviewInputError as exc:
+                # Commands that do not read or change dispositions can price the
+                # retained root without hydration. Never hide authentication or
+                # binding errors, or unavailable data for a snapshot mutation.
+                if str(exc) != "preview part is unavailable" or command.action in {
+                    "accept-risk",
+                    "dismiss",
+                    "defer",
+                    "accept-coverage-uncertainty",
+                    "verify",
+                }:
+                    raise
+        else:
+            resolved_dispositions = preview_record.dispositions
+
     outcome = (
         {"kind": "applied", "reason": None}
         if preview_result.applied
@@ -1097,18 +1616,6 @@ def preview_session_command_representability(
             "kind": "explicit_noop",
             "reason": "status" if command.action == "status" else "no_change",
         }
-    )
-    # Strip existing snapshot during dry-run only to avoid reading remote parts;
-    # re-add its root footprint only when the command neither staged a replacement
-    # snapshot (preview_record.disposition_snapshot is not None) nor cleared the
-    # ledger via reenrollment.
-    effective_reserve = (
-        reserve + existing_snapshot_bytes
-        if existing_snapshot_bytes > 0
-        and command.action != "reenroll"
-        and preview_record is not None
-        and preview_record.disposition_snapshot is None
-        else reserve
     )
     report = evaluate_terminal_action_representability(
         identity=identity,
@@ -1119,12 +1626,14 @@ def preview_session_command_representability(
         current_record=preview_record,
         accounting_version=accounting_version,
         pricing=effective_pricing,
-        future_reserve_bytes=effective_reserve,
+        future_reserve_bytes=reserve,
         consumed_grants=consumed_grants,
         allow_v3_writer=v3_enabled,
         disposition_entry_count=entry_count,
         max_disposition_token_bytes=max_token_bytes,
         action_name=command.action,
+        resolved_dispositions=resolved_dispositions,
+        intermediate_record=current_record,
     )
     return preview_result, preview_record, report
 
