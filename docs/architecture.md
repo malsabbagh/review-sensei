@@ -1017,17 +1017,6 @@ and proposed [ADR 0124](adr/0124-review-engine-decision-providers.md).
 
 ## Scoped retained-state qualification
 
-The G12 capacity model is separate from executable recovery evidence. As detailed
-in ADR 0131, the retained-state qualifier opens an existing local session in a
-fresh interpreter and authenticates its disposition snapshot graph through the
-production readers. Its receipt names only the components exercised and counts
-physical reads. Missing artifacts remain unqualified; no synthetic original
-context is created. Native-effect and inference replay counters remain unknown.
-Result/archive/context recovery, terminal closure and historical settlement are
-separate gates, not consequences of matching roots or fitting capacity estimates.
+G12 capacity is not executable recovery evidence. The ADR 0131 qualifier reopens an existing local session in a fresh interpreter and authenticates its disposition snapshot graph via production readers. Its receipt reports only exercised components and physical read counts. Missing artifacts stay unqualified; never synthesize original context. Native-effect/inference replay counts stay unknown. Matching roots/capacity do not qualify result/archive/context recovery, terminal closure or historical settlement.
 
-Snapshot previews consume the ledger-owned `snapshot_preview_parts` cached-graph
-capability, never concrete cache attributes or filesystem paths. Explicit
-`hydrate_snapshot_preview` runs the charged production v1/v2 reader before the
-pure preview; unavailable cached evidence refuses rather than triggering hidden
-I/O. See ADR 0131 for the detached-proof and conservative post-hydration read-allowance contracts.
+Snapshot previews use only the ledger-owned snapshot_preview_parts cached-graph capability, not concrete cache attributes/filesystem paths. Explicit hydrate_snapshot_preview charges production v1/v2 reads before pure preview; unavailable cached evidence refuses without hidden I/O. Preserve ADR 0131 detached-proof and conservative post-hydration read-allowance contracts.
