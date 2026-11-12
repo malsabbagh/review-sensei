@@ -140,3 +140,8 @@ Hosted-only reuse requires core-input proof and per-package signed provenance (A
 Only confirmed archives enable narrative excerpts; all finding prose and authority stay intact.
 
 Never execute inactive selection.
+## Scoped retained-state qualification
+in ADR 0131, the retained-state qualifier opens an existing local session in a
+production readers. Its receipt names only the components exercised and counts
+capability, never concrete cache attributes or filesystem paths. Explicit
+pure preview; unavailable cached evidence refuses rather than triggering hidden
