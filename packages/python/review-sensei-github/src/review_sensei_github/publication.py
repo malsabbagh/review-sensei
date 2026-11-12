@@ -5143,6 +5143,43 @@ def prepare_publication_review(
         raise GitHubPublicationError("review evidence verification failed") from exc
 
 
+@dataclass(frozen=True)
+class _CheckObservationContext:
+    """Exact invocation identity for projection observation, never authority."""
+
+    repository: str
+    repository_id: int
+    pull_request: int
+    base_sha: str
+    head_sha: str
+    result_digest: str
+
+    def __post_init__(self) -> None:
+        from review_sensei.session import SessionIdentity
+
+        SessionIdentity(
+            self.repository, self.pull_request, repository_id=self.repository_id
+        )
+        if (
+            any(
+                not isinstance(value, str) or GIT_SHA_HEX.fullmatch(value) is None
+                for value in (self.base_sha, self.head_sha)
+            )
+            or not isinstance(self.result_digest, str)
+            or re.fullmatch(r"[a-f0-9]{64}", self.result_digest) is None
+        ):
+            raise ReviewInputError("check observation binding is invalid")
+
+
+@dataclass(frozen=True)
+class _ConfirmedCheckObservation:
+    """Native projection receipt; explicitly not an inventory qualification."""
+
+    context: _CheckObservationContext
+    check_run_id: int
+    authority_evaluated: bool = field(default=False, init=False)
+
+
 class ReviewPublisher:
     """Publish one validated review as App-authored inline comments and summary."""
 
@@ -5160,9 +5197,12 @@ class ReviewPublisher:
         self._defer_thread_cleanup = False
         self._thread_cleanup_token_provider: Callable[[], str] | None = None
         self._confirmed_publication_only = False
+        self._carried_context: dict[str, Any] | None = None
         self._pending_thread_cleanup: Callable[[], str | None] | None = None
         self._confirmed_review_id: int | None = None
         self._confirmed_check: tuple[str, str, int] | None = None
+        self._check_observation_hold = False
+        self._check_observation: _ConfirmedCheckObservation | None = None
         self._persisted_index_has_blocking: bool = False
         self._active_window_states: dict[tuple[int, int], ActiveWindowRoundState] = {}
         self._active_window_inputs: dict[tuple[int, int], tuple[str, str, str]] = {}
@@ -6606,6 +6646,7 @@ class ReviewPublisher:
         head_sha: str,
         app_slug: str,
         outcome: CheckOutcome | None,
+        observation_context: _CheckObservationContext | None = None,
     ) -> str | None:
         """Write one gate state for a reviewed head and report an unusable capability.
 
@@ -6613,7 +6654,24 @@ class ReviewPublisher:
         not change review publication or approval eligibility.
         """
 
+        if observation_context is not None and (
+            observation_context.repository != repository
+            or observation_context.head_sha != head_sha
+        ):
+            raise ReviewInputError("check observation target changed")
         context = getattr(self, "_carried_context", None)
+        if (
+            outcome is not None
+            and outcome.conclusion == "success"
+            and context is not None
+            and (
+                observation_context is None
+                or context.get("repository") != observation_context.repository
+                or context.get("pull_request") != observation_context.pull_request
+                or context.get("head_sha") != observation_context.head_sha
+            )
+        ):
+            raise ReviewInputError("carried check observation target changed")
         if (
             outcome is not None
             and outcome.conclusion == "success"
@@ -6670,32 +6728,27 @@ class ReviewPublisher:
             return "check_publication_failed"
         if outcome is not None:
             self._confirmed_check = (repository, head_sha, result.check_run_id)
-            pr_ctx = self._carried_context.get("pull_request")
-            if type(pr_ctx) is int and pr_ctx > 0:
-                known_rids = {
-                    rid
-                    for (rid, pr) in (
-                        set(self._active_window_states) | set(self._drift_states)
+            if observation_context is not None:
+                try:
+                    self._observe_confirmed_check(
+                        observation_context, result.check_run_id
                     )
-                    if pr == pr_ctx
-                }
-                if len(known_rids) == 1:
-                    rid = next(iter(known_rids))
-                    self.finalizer._record_artifact_decision(
-                        repository_id=rid,
-                        pull_request=pr_ctx,
-                        decision=evaluate_observed_artifact(
-                            ObservedGitHubArtifact(
-                                artifact_kind="check_run_text",
-                                artifact_id=str(result.check_run_id),
-                                present=True,
-                            ),
-                            inventory=self._current_authoritative_inventory(
-                                repository_id=rid, pull_request=pr_ctx
-                            ),
-                        ),
-                    )
+                except (ReviewInputError, ValueError, TypeError, RuntimeError):
+                    # The native response is confirmed, not an unknown or failed
+                    # dispatch. Retain that receipt and all charges; hold later
+                    # approval instead of reclassifying/retrying the check write.
+                    self._check_observation_hold = True
+                    return "approval_withheld"
         return None
+
+    def _observe_confirmed_check(
+        self, observation_context: _CheckObservationContext, check_run_id: int
+    ) -> None:
+        # Do not authenticate authority from process-local finding caches. G14
+        # durable inventory qualification remains a separate lifecycle gate.
+        self._check_observation = _ConfirmedCheckObservation(
+            observation_context, check_run_id
+        )
 
     def _check_state_or_diagnostic(
         self,
@@ -6705,6 +6758,7 @@ class ReviewPublisher:
         head_sha: str,
         app_slug: str,
         outcome: CheckOutcome | None,
+        observation_context: _CheckObservationContext | None = None,
     ) -> str | None:
         """Write one gate state, reporting an unusable capability as a diagnostic.
 
@@ -6724,6 +6778,7 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 app_slug=app_slug,
                 outcome=outcome,
+                observation_context=observation_context,
             )
         except CheckOperationError as exc:
             self._check_accounting_failure = exc.failure
@@ -6738,6 +6793,7 @@ class ReviewPublisher:
             diagnostic is not None
             and check_token is not None
             and not known_failure(self._check_accounting_failure)
+            and not (diagnostic == "approval_withheld" and self._check_observation_hold)
         ):
             self._check_accounting_unknown = True
         return diagnostic
@@ -6774,6 +6830,7 @@ class ReviewPublisher:
         *,
         token: str,
         repository: str,
+        repository_id: int,
         pull_request: int,
         head_sha: str,
         base_sha: str,
@@ -6859,19 +6916,33 @@ class ReviewPublisher:
             head_sha=head_sha,
             app_slug=app_slug,
             outcome=replay_check_outcome,
+            observation_context=_CheckObservationContext(
+                repository,
+                repository_id,
+                pull_request,
+                base_sha,
+                head_sha,
+                review_result_digest(result),
+            ),
         )
         if check_token is None and check_capability_failure is not None:
             check_diagnostic = check_capability_failure.code
             self._check_accounting_failure = check_capability_failure
-        finalized = self.finalizer.finalize(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            eligibility=replay_eligibility,
-            require_persisted=True,
-            coverage_uncertainty_accepted=coverage_uncertainty_accepted,
+        finalized = (
+            PublicationResult(
+                status="approval_withheld", diagnostic="approval_withheld"
+            )
+            if self._check_observation_hold
+            else self.finalizer.finalize(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=replay_eligibility,
+                require_persisted=True,
+                coverage_uncertainty_accepted=coverage_uncertainty_accepted,
+            )
         )
         diagnostic = check_diagnostic
         if diagnostic is None and finalized.status == "approval_withheld":
@@ -6956,6 +7027,7 @@ class ReviewPublisher:
             raise ReviewInputError(
                 "publication selection is inactive; native revision protocol required"
             )
+        previous_carried_context = getattr(self, "_carried_context", None)
         self._carried_context = dict(
             token=token,
             repository=repository,
@@ -6970,6 +7042,8 @@ class ReviewPublisher:
         self._check_accounting_approval: PublicationResult | None = None
         self._check_accounting_review_id: int | None = None
         self._check_accounting_unknown = False
+        self._check_observation_hold = False
+        self._check_observation = None
         prev_observed_trust = self.finalizer._observed_trust_context
         self.finalizer._observed_trust_context = observed_trust
         owns_operation_budget = (
@@ -7037,6 +7111,7 @@ class ReviewPublisher:
                 else self._finish_thread_cleanup(publication)
             )
         finally:
+            self._carried_context = previous_carried_context
             self.finalizer._observed_trust_context = prev_observed_trust
             if owns_operation_budget:
                 self.finalizer._operation_budget = None
@@ -7973,6 +8048,7 @@ class ReviewPublisher:
                     return self._finalize_published_result(
                         token=token,
                         repository=repository,
+                        repository_id=repository_id,
                         pull_request=pull_request,
                         head_sha=head_sha,
                         base_sha=base_sha,
@@ -8003,6 +8079,7 @@ class ReviewPublisher:
                         return self._finalize_published_result(
                             token=token,
                             repository=repository,
+                            repository_id=repository_id,
                             pull_request=pull_request,
                             head_sha=head_sha,
                             base_sha=base_sha,
@@ -8044,6 +8121,7 @@ class ReviewPublisher:
                         return self._finalize_published_result(
                             token=token,
                             repository=repository,
+                            repository_id=repository_id,
                             pull_request=pull_request,
                             head_sha=head_sha,
                             base_sha=base_sha,
@@ -8246,6 +8324,14 @@ class ReviewPublisher:
         # reports; a failed publication overrides the conclusion below. An
         # App-authored pull request receives no gate: its review is
         # informational and this run never approves it.
+        check_observation_context = _CheckObservationContext(
+            repository,
+            repository_id,
+            pull_request,
+            base_sha,
+            head_sha,
+            review_result_digest(result),
+        )
         if write_preflight.app_authored:
             check_diagnostic: str | None = "app_authored"
         else:
@@ -8255,6 +8341,7 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 app_slug=app_slug,
                 outcome=None,
+                observation_context=check_observation_context,
             )
             if check_diagnostic is None:
                 planned_check_outcome = (
@@ -8297,6 +8384,7 @@ class ReviewPublisher:
                     head_sha=head_sha,
                     app_slug=app_slug,
                     outcome=planned_check_outcome,
+                    observation_context=check_observation_context,
                 )
         if (
             not write_preflight.app_authored
@@ -9072,16 +9160,22 @@ class ReviewPublisher:
         another eligibility reason.
         """
 
-        finalized = self.finalizer.finalize(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            eligibility=eligibility,
-            require_persisted=require_persisted,
-            assume_inline_unresolved=assume_inline_unresolved,
-            coverage_uncertainty_accepted=coverage_uncertainty_accepted,
+        finalized = (
+            PublicationResult(
+                status="approval_withheld", diagnostic="approval_withheld"
+            )
+            if self._check_observation_hold
+            else self.finalizer.finalize(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
+                require_persisted=require_persisted,
+                assume_inline_unresolved=assume_inline_unresolved,
+                coverage_uncertainty_accepted=coverage_uncertainty_accepted,
+            )
         )
         self._check_accounting_approval = finalized
         diagnostic = check_diagnostic

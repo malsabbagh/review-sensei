@@ -193,3 +193,22 @@ ledger mutation.
 
 Coordinate canonical writer fencing (G02/G08) and full recovery-context
 retention (G17/G34) before enabling automated cross-process takeover.
+
+
+## Check receipt stabilization (2026-11-12)
+
+Check projection observation receives an explicit immutable numeric repository,
+PR, base/head and result-digest context through ordinary, replayed and explicit
+partitioned publication. A fresh check-only publisher needs no fabricated carried
+assessment context. Carried historical-reader inputs are scoped to the ordinary
+publication invocation and cannot be borrowed by another target.
+
+A confirmed native check response is retained before optional observation.
+Observation failure preserves its ID and charged requests, performs no retry,
+uses the closed `approval_withheld` diagnostic and prevents later approval in
+that invocation. It does not become a failed/unknown native dispatch. Cancellation
+and unexpected failures outside that optional observation boundary are unchanged.
+The projection receipt explicitly records `authority_evaluated=False`: it is not
+proof of durable finding inventory, trust, enrollment, or historical settlement.
+G10/G14/G15/G16 durable ordinary-path integration remains separately unqualified;
+process-local caches are not promoted to authenticated authority by this fix.
