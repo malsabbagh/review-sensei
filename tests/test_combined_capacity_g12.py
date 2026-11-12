@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -609,6 +610,22 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 key=b"z" * 32,
                 now=lambda: datetime.now(timezone.utc),
             )
+            if os.name != "posix":
+                # The preceding hosted/convergence subjourneys remain portable.
+                # This private-store replay cannot claim Windows ACL qualification.
+                retained = {
+                    name: (root / name).read_bytes()
+                    for name in ("result.json", "configuration.json", "admission.json")
+                }
+                with self.assertRaisesRegex(
+                    ReviewInputError, "unsupported on this platform"
+                ):
+                    handoff_store.save(admitted.bundle)
+                self.assertFalse((root / "handoff").exists())
+                for name, content in retained.items():
+                    self.assertEqual((root / name).read_bytes(), content)
+                self.assertEqual(ledger.load(PUB_IDENTITY).record, failed_rec)
+                return
             handoff_store.save(admitted.bundle)
             for artifact in ("result.json", "configuration.json", "admission.json"):
                 (root / artifact).unlink()
