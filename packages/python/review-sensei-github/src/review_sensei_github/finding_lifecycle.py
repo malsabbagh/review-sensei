@@ -1268,58 +1268,21 @@ class FindingLifecycleJournal:
         ReplyFinalizationPlan.bind_capacity(plan, pending_documents=pending_commitments)
         return result
 
-    @_sizing_producer
-    def preflight_command_finalization(
-        self, plan, *, preview_record, capacity_details, http, budget, _sizing_factories
-    ):
-        """Whole-command admission; detached previews never become authority."""
+    def _command_branch_documents(self, plan, *, http, budget):
+        """Derive exact success/stop checkpoint sizes without admitting an action.
+
+        Requires the actual source-observed native plan, but emits only detached
+        documents. It neither binds a hypothetical intent nor grants its execution.
+        Original runtime preflight still binds the admitted intent and source root.
+        """
+        import copy
+
         from .command_finalization_plan import CommandFinalizationPlan
 
         if type(plan) is not CommandFinalizationPlan:
             raise ReviewInputError("command finalization capacity plan is unissued")
         plan.require(self, http=http, budget=budget)
-        if (
-            not isinstance(capacity_details, dict)
-            or preview_record is None
-            or preview_record.identity() != self._record.identity()
-            or capacity_details.get("original_root") != self._record.record_sha256
-            or capacity_details.get("preview_root") != preview_record.record_sha256
-            or not isinstance(capacity_details.get("intent_sha256"), str)
-            or not isinstance(capacity_details.get("staged_parts"), tuple)
-        ):
-            raise ReviewInputError("command finalization disposition preview changed")
-        import copy
-
-        from review_sensei.finding_lifecycle_store import preflight_finding_lifecycle
-
-        from .api_run_requests import ApiRunSessionLedger
-        from .review_run import ActionRunLedger
-
         payload = json.loads(plan.payload)
-        reads = payload.get("execution_read_tail")
-        capabilities = payload.get("execution_capability_tail")
-        if (
-            payload.get("read_contract") != "closed-plain-single-complete-page-v1"
-            or not isinstance(reads, dict)
-            or not isinstance(capabilities, dict)
-            or any(
-                type(value) is not int or value < 0
-                for value in (*reads.values(), *capabilities.values())
-            )
-            or type(self.ledger) not in {ApiRunSessionLedger, ActionRunLedger}
-            or getattr(self.ledger.load, "__func__", None)
-            is not ApiRunSessionLedger.load
-        ):
-            raise ReviewInputError(
-                "command_finalization_capacity_read_tail_unqualified"
-            )
-        caller = self.ledger.caller
-        action = caller.accounting.action
-        if (
-            action is None
-            or _digest(action["intent"]) != capacity_details["intent_sha256"]
-        ):
-            raise ReviewInputError("command finalization admitted intent changed")
         requests = tuple(
             request
             for request in (
@@ -1535,8 +1498,66 @@ class FindingLifecycleJournal:
         # conservative final checkpoint. Later native effects are prohibited
         # after a source-planned cleanup stop, not silently added to that branch.
         alternatives = tuple(reversed(branches))
+
+        return alternatives, pending_commitments, len(shadow.effects) + 1, requests
+
+    @_sizing_producer
+    def preflight_command_finalization(
+        self, plan, *, preview_record, capacity_details, http, budget, _sizing_factories
+    ):
+        """Whole-command admission; detached previews never become authority."""
+        from .command_finalization_plan import CommandFinalizationPlan
+
+        if type(plan) is not CommandFinalizationPlan:
+            raise ReviewInputError("command finalization capacity plan is unissued")
+        plan.require(self, http=http, budget=budget)
+        if (
+            not isinstance(capacity_details, dict)
+            or preview_record is None
+            or preview_record.identity() != self._record.identity()
+            or capacity_details.get("original_root") != self._record.record_sha256
+            or capacity_details.get("preview_root") != preview_record.record_sha256
+            or not isinstance(capacity_details.get("intent_sha256"), str)
+            or not isinstance(capacity_details.get("staged_parts"), tuple)
+        ):
+            raise ReviewInputError("command finalization disposition preview changed")
+        from review_sensei.finding_lifecycle_store import preflight_finding_lifecycle
+
+        from .api_run_requests import ApiRunSessionLedger
+        from .review_run import ActionRunLedger
+
+        payload = json.loads(plan.payload)
+        reads = payload.get("execution_read_tail")
+        capabilities = payload.get("execution_capability_tail")
+        if (
+            payload.get("read_contract") != "closed-plain-single-complete-page-v1"
+            or not isinstance(reads, dict)
+            or not isinstance(capabilities, dict)
+            or any(
+                type(value) is not int or value < 0
+                for value in (*reads.values(), *capabilities.values())
+            )
+            or type(self.ledger) not in {ApiRunSessionLedger, ActionRunLedger}
+            or getattr(self.ledger.load, "__func__", None)
+            is not ApiRunSessionLedger.load
+        ):
+            raise ReviewInputError(
+                "command_finalization_capacity_read_tail_unqualified"
+            )
+        caller = self.ledger.caller
+        action = caller.accounting.action
+        if (
+            action is None
+            or _digest(action["intent"]) != capacity_details["intent_sha256"]
+        ):
+            raise ReviewInputError("command finalization admitted intent changed")
+        from review_sensei.source_registry import require_instance_source
+
+        require_instance_source(self, methods=("_command_branch_documents",))
+        alternatives, pending_commitments, item_count, requests = (
+            self._command_branch_documents(plan, http=http, budget=budget)
+        )
         documents = list(alternatives[0][0])
-        exact_indices = set(alternatives[0][1])
 
         def valid():
             plan.require(self, http=http, budget=budget)
@@ -1609,7 +1630,7 @@ class FindingLifecycleJournal:
             head_sha=self.head_sha,
             policy_digest=self.policy_digest,
             configuration_digest=self.configuration_digest,
-            item_count=len(shadow.effects) + 1,
+            item_count=item_count,
             reserved_tail_calls=native_calls + 6,
             projected_root=projected,
             branch_documents=branch_proof,

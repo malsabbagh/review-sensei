@@ -120,6 +120,21 @@ class PreentryCapacityTests(unittest.TestCase):
                 object.__setattr__(receipt, "root", root)
             plan = observe_disposition_capacity(receipt)
             plan.require(plan.journal, http=plan.http, budget=plan.budget)
+            before_sizing = len(run.caller.observations)
+            original_effects = copy.deepcopy(plan.journal.effects)
+            branches, pending, item_count, requests = (
+                plan.journal._command_branch_documents(
+                    plan, http=plan.http, budget=plan.budget
+                )
+            )
+            self.assertTrue(branches)
+            self.assertTrue(pending)
+            self.assertTrue(requests)
+            self.assertGreater(item_count, len(original_effects))
+            self.assertEqual(len(plan.journal.effects), len(original_effects))
+            self.assertEqual(plan.journal.effects, original_effects)
+            self.assertEqual(len(run.caller.observations), before_sizing)
+            self.assertIsNone(run.caller.accounting.action)
             count = len(run.caller.observations)
             with self.assertRaisesRegex(ReviewInputError, "unissued"):
                 observe_disposition_capacity(receipt)
