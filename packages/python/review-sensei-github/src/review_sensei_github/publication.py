@@ -10224,6 +10224,12 @@ class ReviewPublisher:
                 ),
             )
         )
+        if not write_preflight.app_authored and not grouped_publication:
+            from .guarded_publication_plan import require_durable_floor
+
+            require_durable_floor(
+                lifecycle_journal, checks_enabled=check_token is not None
+            )
         ordinary_observation = getattr(self, "_ordinary_publication_observation", None)
         if ordinary_observation is not None and not write_preflight.app_authored:
             from .ordinary_publication_plan import admit_current
