@@ -795,6 +795,13 @@ class BrokerClient:
         return parsed
 
 
+# Register actual capability transport before capturing the session observation
+# source, so both pin the same immutable validated response implementation.
+from .trust_capabilities import _install_capability_source  # noqa: E402
+
+_install_capability_source(BrokerClient)
+del _install_capability_source
+
 # Capture the actual exchange implementation once. No public model factory can
 # issue an enrollment observation; the issuer remains inside this source hook.
 from .trust_enrollment import _install_observation_source  # noqa: E402

@@ -3411,3 +3411,9 @@ from .trust_effects import _install_transport_source  # noqa: E402
 
 _install_transport_source(ApiRunRequestTransport)
 del _install_transport_source
+
+
+from .trust_capabilities import _install_capability_transport  # noqa: E402
+
+_install_capability_transport(ApiRunRequestTransport)
+del _install_capability_transport

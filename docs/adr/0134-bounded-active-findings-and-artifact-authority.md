@@ -478,3 +478,15 @@ a lost native response retains its unknown accounting and is not replayed.
 This primitive introduces no public effect-mode CLI flag. After initialization,
 unpriced business routes still hold before their first native mutation. It does
 not qualify review/check/command finalization, partitioned writes, or recovery.
+
+Capability provenance is now separately source-registered from actual v3
+`BrokerClient.exchange` completion and its validated physical response. Its
+closure-private receipt binds the returned credential hash, exact capability,
+request scope, configured broker, and original caller. A supplied token/model,
+substituted exchange/transport, mismatched response capability, changed source
+profile, or capability beyond the original observed installation permissions
+cannot qualify. Legacy/custom exchanges retain their old return behavior but
+issue no unsupported provenance. Looking up provenance spends no request and
+**does not make a reused token fresh**: business dispatch still needs a complete
+prepaid route and a separate exact-effect refresh. This source facility enables
+neither a public effect-mode flag nor an unpriced business mutation.
