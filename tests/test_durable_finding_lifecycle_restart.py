@@ -238,6 +238,11 @@ def _worker(root: Path, mode: str, action: str, evidence: dict):
         "lost_replay": 1,
         "command": 1,
         "verify": 1,
+        "copy": 2,
+        "duplicate": 2,
+        "delete": 2,
+        "rewrite": 2,
+        "partial": 2,
         "rename": 2,
         "move": 3,
         "split": 4,
@@ -359,10 +364,33 @@ def _worker(root: Path, mode: str, action: str, evidence: dict):
         publication_diff = "\n".join(
             ORDINARY_DIFF.replace("src/app.py", target) for target in targets
         )
+    if action in {"copy", "duplicate"}:
+        drift_descriptors = (
+            FileDriftDescriptor(
+                "file_copy" if action == "copy" else "duplicate_code",
+                "src/app.py",
+                ("src/copied.py",),
+                ("auth",),
+            ),
+        )
+        publication_diff += "\n" + ORDINARY_DIFF.replace("src/app.py", "src/copied.py")
+    elif action in {"delete", "rewrite"}:
+        drift_descriptors = (
+            FileDriftDescriptor(
+                "line_deletion" if action == "delete" else "whole_file_rewrite",
+                "src/app.py",
+            ),
+        )
     if action in {"replay", "lost_replay"}:
         result = ReviewResult.from_dict(json.loads((root / "result.json").read_text()))
     else:
         selected = comments if action in {"initial", "lost", "crash"} else ()
+        if action in {"copy", "duplicate"}:
+            selected = (
+                comments[0],
+                replace(comments[0], path="src/copied.py"),
+                comments[1],
+            )
         if action == "promote":
             selected = (comments[1],)
         if action in drift_targets:
@@ -370,6 +398,16 @@ def _worker(root: Path, mode: str, action: str, evidence: dict):
                 replace(comments[0], path=target) for target in drift_targets[action][1]
             ) + (comments[1],)
         result = replace(_result(*selected), model="fixture-model")
+        if action in {"copy", "duplicate"}:
+            result = replace(
+                result, coverage=_coverage("src/app.py", "src/copied.py", "src/db.py")
+            )
+        elif action == "partial":
+            result = replace(
+                result,
+                coverage=_coverage("src/db.py", partial_path="src/app.py"),
+                review_status="partial",
+            )
         if action in drift_targets:
             result = replace(
                 result, coverage=_coverage(*drift_targets[action][1], "src/db.py")
@@ -388,11 +426,15 @@ def _worker(root: Path, mode: str, action: str, evidence: dict):
             ),
             evidence_digest=ReviewTransaction.compute_evidence_digest(EVIDENCE),
         )
-        baseline = baseline_from_review(
-            result,
-            cache_key=current_key,
-            policy=POLICY,
-            generation=prepared.record.generation + 1,
+        baseline = (
+            baseline_from_review(
+                result,
+                cache_key=current_key,
+                policy=POLICY,
+                generation=prepared.record.generation + 1,
+            )
+            if result.review_status == "complete"
+            else None
         )
         result = checkpoint_review_analysis(
             ledger, IDENTITY, prepared, result, baseline=baseline
@@ -748,6 +790,44 @@ class DurableFindingRestartTests(unittest.TestCase):
             self.assertEqual(row["status"], "ambiguous-multi-target")
             self.assertEqual(row["target"], original["target"])
             self.assertFalse(any(r["state"] == "APPROVED" for r in resumed["reviews"]))
+
+    def test_copy_deletion_rewrite_and_partial_coverage_survive_cold_resume(self):
+        for action in ("copy", "duplicate", "delete", "rewrite", "partial"):
+            with (
+                self.subTest(action=action),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                first = self.run_phase(root, "drift", "initial")
+                originals = {o["id"]: o for o in first["state"]["obligations"]}
+                original = next(o for o in originals.values() if o["symbol"] == "auth")
+                changed = self.run_phase(root, "drift", action)
+                resumed = self.run_phase(root, "drift", "ambiguous_resume")
+                for result in (changed, resumed):
+                    self.assertIsNone(result["error"], result)
+                    self.assertEqual(result["status"], "published", result)
+                    rows = {o["id"]: o for o in result["state"]["obligations"]}
+                    self.assertEqual(set(rows), set(originals))
+                    for oid, before in originals.items():
+                        self.assertEqual(rows[oid]["criterion"], before["criterion"])
+                        self.assertEqual(
+                            rows[oid]["fingerprint"], before["fingerprint"]
+                        )
+                        self.assertNotEqual(rows[oid]["status"], "verified-fixed")
+                    self.assertEqual(rows[original["id"]]["target"], original["target"])
+                    self.assertEqual(len(result["threads"]), 1)
+                    self.assertFalse(any(t["isResolved"] for t in result["threads"]))
+                    self.assertFalse(
+                        any(r["state"] == "APPROVED" for r in result["reviews"])
+                    )
+                    if action in {"copy", "duplicate"}:
+                        self.assertEqual(
+                            rows[original["id"]]["status"], "ambiguous-multi-target"
+                        )
+                        self.assertEqual(
+                            set(rows[original["id"]]["candidate_paths"]),
+                            {"src/app.py", "src/copied.py"},
+                        )
 
     def test_cold_maintainer_command_restores_hidden_obligation(self):
         for mode in ("window", "drift"):
