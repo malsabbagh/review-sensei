@@ -51,3 +51,48 @@ class PreentryIntentTests(unittest.TestCase):
                 canonical_bytes(f.caller.accounting.action["intent"]),
                 canonical_bytes(preview),
             )
+
+    def test_admission_rejects_instance_and_class_intent_substitution(self):
+        from review_sensei_github.api_run_requests import ApiRunRequestTransport
+
+        from review_sensei.errors import ReviewInputError
+
+        for target in ("instance", "class"):
+            with (
+                self.subTest(target=target),
+                tempfile.TemporaryDirectory() as directory,
+                patch("time.time", return_value=NOW),
+            ):
+                f = StatusFixture(directory)
+                before = canonical_bytes(f.caller.accounting.to_document())
+                root, count = f.caller._root, len(f.caller.observations)
+                invoked = []
+
+                def forged(*args, **kwargs):
+                    invoked.append(True)
+                    return {
+                        "purpose": "command",
+                        "source": {},
+                        "head_sha": "f" * 40,
+                        "operation_key": "f" * 64,
+                        "source_root": "f" * 64,
+                    }
+
+                owner = f.caller if target == "instance" else ApiRunRequestTransport
+                with patch.object(owner, "action_intent_document", forged):
+                    with self.assertRaises(ReviewInputError):
+                        f.caller.admit_action(
+                            f.action_ledger,
+                            f.run.identity,
+                            purpose="command",
+                            source=f.session.attestation["source"],
+                            head_sha=f.run.head_sha,
+                            operation_key="a" * 64,
+                        )
+                self.assertFalse(invoked)
+                self.assertEqual(
+                    canonical_bytes(f.caller.accounting.to_document()), before
+                )
+                self.assertEqual(f.caller._root, root)
+                self.assertEqual(len(f.caller.observations), count)
+                self.assertIsNone(f.caller.accounting.action)

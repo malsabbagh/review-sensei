@@ -1810,6 +1810,11 @@ class ApiRunRequestTransport:
         self._require_ledger(ledger, identity)
         if self._action_unresolved():
             raise ReviewInputError("caller action admission has unresolved work")
+        from review_sensei.source_registry import require_instance_source
+
+        # This new pure sizing seam must never become an overridable authority
+        # factory. Check its original defining-module method before admission.
+        require_instance_source(self, methods=("action_intent_document",))
         intent = self.action_intent_document(
             purpose=purpose,
             source=source,
