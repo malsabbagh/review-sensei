@@ -115,3 +115,31 @@ PR342 recovery at 1024, zero-part inline paging, insufficient funding, response
 growth, duplicate IDs, deleted dependencies before and after PATCH, changed
 ordering and unsupported page/allocation envelopes. These original-budget
 fixtures are source qualification, not universal capacity or final exact-head CI.
+
+
+### Quarantine source-owned checkpoint prices
+
+The complete authenticated quarantine census has a separately source-qualified
+checkpoint price. With `n > 0` new parts and a closed census bound `p <= 10`,
+its whole operation reserves `p + 6 + 2*n` calls. Once that exact operation has
+issued its fresh owned-root snapshot, its target-bound remaining stage reserves
+`2*n + 5`. Both core and native part-codec guards consume this proof; an outer
+quote alone cannot bypass an unfunded inner guard. The exact document digest,
+part hashes, binding, item count and manifest allowance are pinned. All original
+confirmation and caller terminal tails remain protected.
+
+Only the one-time installed native producer can issue these one-use witnesses.
+Copied or substituted issuers, changed targets, foreign/stale snapshots and
+unqualified adapters cannot obtain the smaller price. Unsupported inherited
+adapters retain their conservative generic guards. Zero-part quarantine writes
+still use the generic price until their actual inline writer is independently
+qualified. No arithmetic-only discount, larger census or new allowance follows
+from this contract.
+
+The fixed 200-object bound counts existing observed comments together with
+prospective allocations. The older ordinary REST profile's 300-comment positive
+case is therefore incompatible with this bounded lifecycle profile and now has
+an explicit pre-publication hold. That is a stated support limit, not successful
+handling of a larger inventory. No observed objects are hidden or excluded to
+fit the bound. A future larger profile would need separate authorization and
+qualification; the current implementation does not provide it.
