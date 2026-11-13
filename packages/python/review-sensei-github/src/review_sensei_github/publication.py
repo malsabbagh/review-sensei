@@ -6859,6 +6859,16 @@ class ReviewPublisher:
         for instance, native_receipt in confirmed.items():
             scoped[instance] = native_receipt.to_dict()
 
+    @staticmethod
+    def _inline_comment_payload(comment, comment_body, anchor) -> dict[str, object]:
+        """Pure native body producer shared with ordinary capacity planning."""
+        return {
+            "path": comment.path,
+            "body": comment_body,
+            "line": comment.line,
+            "side": "LEFT" if anchor == "left" else "RIGHT",
+        }
+
     def _prepare_native_finding_readback(self, assembled: AssembledReview) -> None:
         context = getattr(self, "_native_finding_context", None)
         if context is None:
@@ -8052,6 +8062,11 @@ class ReviewPublisher:
             )
         )
         if not replacements and not drift_has_resolved:
+            return
+        # A supplied complete empty candidate set already makes the cleanup
+        # closure a no-op before capability issuance, fences, or native I/O.
+        # None still means discover; do not erase a previously pending owner.
+        if threads is not None and not threads and self._pending_thread_cleanup is None:
             return
 
         def cleanup() -> str | None:
@@ -10427,17 +10442,7 @@ class ReviewPublisher:
                     ),
                 )
                 continue
-            comment_payload: dict[str, object] = {
-                "path": comment.path,
-                "body": comment_body,
-            }
-            if anchor == "left":
-                comment_payload["line"] = comment.line
-                comment_payload["side"] = "LEFT"
-            else:
-                comment_payload["line"] = comment.line
-                comment_payload["side"] = "RIGHT"
-            comments.append(comment_payload)
+            comments.append(self._inline_comment_payload(comment, comment_body, anchor))
         # auto-approve submits GitHub's Changes requested review when this
         # head has required fixes, then approves a later eligible head. Both
         # auto-approve and blocking fail the ReviewSensei check when required

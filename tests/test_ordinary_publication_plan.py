@@ -7,12 +7,30 @@ from unittest.mock import patch
 
 from review_sensei_github import ordinary_publication_plan
 from review_sensei_github.ordinary_publication_plan import price_prefixes
+from review_sensei_github.publication import ReviewPublisher
 
 from review_sensei.bounded_evidence import canonical_bytes
+from review_sensei.models import ReviewComment
 from tests import test_recovery_context_g17 as recovery
 
 
 class OrdinaryPublicationPlanTests(unittest.TestCase):
+    def test_inline_payload_preserves_actual_prepared_prose_and_anchor(self):
+        comment = ReviewComment(path="src/app.py", line=12, body="Original criterion")
+        for anchor, side in (("left", "LEFT"), ("right", "RIGHT")):
+            with self.subTest(anchor=anchor):
+                self.assertEqual(
+                    ReviewPublisher._inline_comment_payload(
+                        comment, "Authenticated rendered criterion and marker", anchor
+                    ),
+                    {
+                        "path": "src/app.py",
+                        "body": "Authenticated rendered criterion and marker",
+                        "line": 12,
+                        "side": side,
+                    },
+                )
+
     def test_private_prefix_envelopes_leave_actual_source_and_meter_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = (
