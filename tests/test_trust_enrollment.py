@@ -290,6 +290,8 @@ print(record.record_sha256)
         with self.assertRaisesRegex(ReviewInputError, "legacy"):
             original_observation(original)
         _, _, record = self.enrolled()
+        with self.assertRaisesRegex(ReviewInputError, "current integrity shape"):
+            replace(record, _digest_shape_input="legacy")
         with self.assertRaisesRegex(ReviewInputError, "removed or replaced"):
             record.evolve(trust_enrollment=None)
         changed = copy.deepcopy(record.trust_enrollment)
