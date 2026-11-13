@@ -116,6 +116,9 @@ class OrderedNativeBatch:
             from .command_finalization_plan import stop_command_cleanup
 
             stop_command_cleanup(self.journal)
+            from .reply_finalization_plan import stop_reply_cleanup
+
+            stop_reply_cleanup(self.journal)
         self._closed = True
         self._commit()
 

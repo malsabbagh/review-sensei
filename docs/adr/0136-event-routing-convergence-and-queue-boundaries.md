@@ -337,3 +337,40 @@ subsets after partial cleanup. Until a structural bound covers those subsets,
 this path holds before PUT/check/cleanup; unrelated fixed history and the existing
 single-target path are not blocked. Endpoint projections alone are not a proof
 for every mixed subset, and this hold is not full-gap closure.
+
+### Source-qualified human reply cleanup prefixes
+
+A closed, single-page, inline-authority human assessment on an issue comment may
+now price its complete finalization before publishing the visible reply. This is
+an actual reply producer, not a command/disposition capability: validated source
+and assessment evidence determine the exact new authority frame and admitted
+reply intent. Complete native discovery must match the retained immutable comment
+and thread IDs and native body digest. Fresh source, head, authority and per-target
+REST ownership fences remain required during execution.
+
+The process-local reply plan commits the original selected lifecycle document,
+source frame, request order, original budget, and finite release projections. It
+prices report delivery, authority publication, cleanup, possible approval, check
+publication, uncertainty readback and durable terminal retention together. Newly
+allocated review IDs retain conservative encoding bounds. Same-journal reuse is
+allowed only across exact source-owned custody; it avoids duplicate restoration,
+not the fresh pending-intent checkpoint/CAS before native publication. A copied,
+mutated, foreign or stale plan grants no execution or sizing exemption.
+
+Reachable releases are the source-authenticated preconfirmed group and the
+confirmed ordered mutation prefix. The preconfirmed group is released only when
+all its members are still positively observed. Unexpectedly resolved suffix
+members remain contingent for a later priced invocation. First unconfirmed cleanup
+stops later native check/approval writes and returns current-incomplete status;
+old approval/check observations cannot substitute for current completion. Lost
+responses retain their intents and cold G32 holds, without inferred cessation.
+
+Qualification includes an unchanged 512-call two-finding producer/reply sequence
+and an actual one-call-short original allocation refusal before visible or native
+business effects. This does not remove the generic command subset hold above or
+qualify arbitrary paginated, external-inventory, custom-reader, or cold uncertain
+recovery paths. A non-approving policy with an inline blocking finding retains
+`reply_capacity_inline_blocking_tail_unqualified` until its additional scan and
+check outcomes have a source-qualified complete tail. All storage, response,
+query, effect and funding limits remain
+unchanged; this source-qualified slice is not full-gap closure.

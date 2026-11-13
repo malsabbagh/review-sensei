@@ -55,6 +55,7 @@ from .publication import (
 )
 from .qualification import TrustedOpenRouterQualification
 from .reply_budget import bounded_reply_publication
+from .reply_finalization_plan import source_reply_capacity
 
 if TYPE_CHECKING:
     from .default_human_inventory import HumanInventoryReference
@@ -933,6 +934,7 @@ class HumanAssessmentPublisher:
         )
 
     @bounded_reply_publication
+    @source_reply_capacity
     def publish(
         self,
         *,
@@ -947,6 +949,7 @@ class HumanAssessmentPublisher:
         reviews_policy: str = "auto-approve",
         recorded_replay: bool = False,
         pending_report_layout: str = "legacy",
+        _capacity_source=None,
     ) -> ReplyResult:
         conversation = prepared.conversation
         if prepared.feedback is not None and self.before_read is None:
@@ -1059,6 +1062,55 @@ class HumanAssessmentPublisher:
                 "human assessment review capability is missing"
             )
         refreshed = original.with_fresh_human_review(updated_inventory)
+        evidence_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "decisions": [item.to_dict() for item in reply.decisions],
+                    "source_body_sha256": hashlib.sha256(
+                        prepared.source_body.encode()
+                    ).hexdigest(),
+                    "source_actor": prepared.source_actor,
+                    "source_metadata_digest": prepared.source_metadata_digest,
+                    **(
+                        {
+                            "feedback_digest": prepared.feedback.digest,
+                            "feedback_event_key": prepared.feedback.event_key,
+                        }
+                        if prepared.feedback is not None
+                        else {}
+                    ),
+                    "diff_sha256": prepared.evidence_bundle.digest
+                    if work is not None and prepared.evidence_bundle is not None
+                    else hashlib.sha256(
+                        (conversation.context.diff_context or "").encode()
+                    ).hexdigest(),
+                    "plan_id": work.execution.plan.plan_id
+                    if work is not None
+                    else None,
+                    "batch_evidence": [
+                        {
+                            "batch_id": batch.batch.batch_id,
+                            "evidence_ids": batch.batch.evidence_ids,
+                            "requirement_ids": batch.batch.requirement_ids,
+                        }
+                        for batch in work.execution.completed
+                    ]
+                    if work is not None
+                    else [],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        # The exact authority frame is sizing data, not published authority.
+        # Keep arbitrary renderer overrides behind their original fresh fences.
+        body = (
+            HumanAssessmentPublisher._authority_body(
+                prepared, updated_inventory, refreshed, evidence_sha256=evidence_digest
+            )
+            if self._authority_body is HumanAssessmentPublisher._authority_body
+            else None
+        )
         # Receipt scans and local report framing cannot activate decisions.
         # Acquire the complete fresh source/root/PR fence in the pending-page
         # callback immediately before each write or reconciled return instead
@@ -1103,89 +1155,207 @@ class HumanAssessmentPublisher:
             return None
 
         self._preflight_reference_capacity(prepared, refreshed)
-        outcome = self.conversation.publish_pending(
-            layout=pending_report_layout,
-            eligibility=refreshed,
-            fence=pending_fence,
-            authority_digest=hashlib.sha256(
-                json.dumps(
-                    [
-                        prepared.source_body,
-                        prepared.source_actor,
-                        prepared.source_metadata_digest,
-                    ],
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest(),
-            diagnostic=prepared.evidence_diagnostic,
-            decision_reasons={
-                item.fingerprint: item.rationale for item in reply.decisions
-            },
-            assessment_digest=hashlib.sha256(
-                json.dumps(
-                    [item.to_dict() for item in reply.decisions],
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest(),
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            source_comment_id=conversation.source_comment_id,
-            source_updated_at=conversation.source_updated_at,
-            head_sha=conversation.head_sha,
-            reply=ConversationReply(body=reply.body, resolve=False),
-            app_slug=app_slug,
-            root_comment_id=conversation.root_comment_id,
-            source_kind=conversation.source_kind,
+        from .reply_finalization_plan import (
+            execute_reply_capacity,
+            prepare_reply_capacity,
         )
-        if prepared.evidence_diagnostic:
-            outcome = replace(
-                outcome,
-                assessment_status="insufficient_evidence",
-                assessment_diagnostic=prepared.evidence_diagnostic,
-            )
-        if outcome.status not in {"replied", "already_replied"} or (
-            updated_inventory == inventory and inventory.pending
-        ):
-            return outcome
-        assert review_token is not None
-        # The App reply is not an authority record. Recheck human authorization,
-        # exact base/head and latest result immediately before recording the
-        # refreshed eligibility. Partial decisions keep the other concerns open.
-        if not self.source_fence(
+
+        capacity_plan = prepare_reply_capacity(
+            self,
+            prepared=prepared,
+            refreshed=refreshed,
+            body=body,
+            reply=reply,
             token=token,
+            check_token=check_token,
             repository=repository,
             pull_request=pull_request,
-            prepared=prepared,
             app_slug=app_slug,
-        ):
-            return ReplyResult(
-                status="skipped_edited_source", comment_id=outcome.comment_id
+            reviews_policy=reviews_policy,
+            layout=pending_report_layout,
+            source=_capacity_source,
+        )
+        with execute_reply_capacity(capacity_plan, self):
+            outcome = self.conversation.publish_pending(
+                layout=pending_report_layout,
+                eligibility=refreshed,
+                fence=pending_fence,
+                authority_digest=hashlib.sha256(
+                    json.dumps(
+                        [
+                            prepared.source_body,
+                            prepared.source_actor,
+                            prepared.source_metadata_digest,
+                        ],
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                diagnostic=prepared.evidence_diagnostic,
+                decision_reasons={
+                    item.fingerprint: item.rationale for item in reply.decisions
+                },
+                assessment_digest=hashlib.sha256(
+                    json.dumps(
+                        [item.to_dict() for item in reply.decisions],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                source_comment_id=conversation.source_comment_id,
+                source_updated_at=conversation.source_updated_at,
+                head_sha=conversation.head_sha,
+                reply=ConversationReply(body=reply.body, resolve=False),
+                app_slug=app_slug,
+                root_comment_id=conversation.root_comment_id,
+                source_kind=conversation.source_kind,
             )
-        if resuming:
-            # A previous attempt durably reassessed but failed before approval.
-            # The conversation publisher has now reconciled this source's
-            # reply (or acknowledged a new mention). Re-enter the exact-head
-            # finalizer without another assessment record or model decision.
-            # Its fresh PR/root/full-prose checks precede thread mutations and
-            # approval; repeating them here cannot authorize any new write.
-            finalized = self._finalize_lifecycle_decisions(
-                inventory=updated_inventory,
+            if prepared.evidence_diagnostic:
+                outcome = replace(
+                    outcome,
+                    assessment_status="insufficient_evidence",
+                    assessment_diagnostic=prepared.evidence_diagnostic,
+                )
+            if outcome.status not in {"replied", "already_replied"} or (
+                updated_inventory == inventory and inventory.pending
+            ):
+                return outcome
+            assert review_token is not None
+            # The App reply is not an authority record. Recheck human authorization,
+            # exact base/head and latest result immediately before recording the
+            # refreshed eligibility. Partial decisions keep the other concerns open.
+            if not self.source_fence(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                prepared=prepared,
+                app_slug=app_slug,
+            ):
+                return ReplyResult(
+                    status="skipped_edited_source", comment_id=outcome.comment_id
+                )
+            if resuming:
+                # A previous attempt durably reassessed but failed before approval.
+                # The conversation publisher has now reconciled this source's
+                # reply (or acknowledged a new mention). Re-enter the exact-head
+                # finalizer without another assessment record or model decision.
+                # Its fresh PR/root/full-prose checks precede thread mutations and
+                # approval; repeating them here cannot authorize any new write.
+                finalized = self._finalize_lifecycle_decisions(
+                    inventory=updated_inventory,
+                    token=review_token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=conversation.head_sha,
+                    app_slug=app_slug,
+                    eligibility=refreshed,
+                    check_token=check_token,
+                    reviews_policy=reviews_policy,
+                )
+                completed = ReplyResult(
+                    status=finalized.status
+                    if finalized.status.startswith("skipped_")
+                    else outcome.status,
+                    comment_id=outcome.comment_id,
+                    resolution_status=finalized.thread_resolution,
+                    approval_status=finalized.status,
+                    approval_diagnostic=finalized.diagnostic,
+                )
+                return self._completed_reply(
+                    finalized,
+                    completed,
+                    prepared,
+                    repository,
+                    pull_request,
+                    refreshed.result_digest,
+                )
+            preflight = self.finalizer._preflight(
                 token=review_token,
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=conversation.head_sha,
                 app_slug=app_slug,
-                eligibility=refreshed,
-                check_token=check_token,
-                reviews_policy=reviews_policy,
             )
-            completed = ReplyResult(
-                status=finalized.status
-                if finalized.status.startswith("skipped_")
-                else outcome.status,
-                comment_id=outcome.comment_id,
+            if preflight.result is not None:
+                return ReplyResult(
+                    status=preflight.result.status, comment_id=outcome.comment_id
+                )
+            if preflight.app_authored or preflight.base_sha != inventory.base_sha:
+                return ReplyResult(
+                    status="skipped_stale_base", comment_id=outcome.comment_id
+                )
+            current = self.finalizer.load_eligibility(
+                token=review_token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=conversation.head_sha,
+                app_slug=app_slug,
+                require_valid=original.human_inventory_reference is not None,
+            )
+            if current != original:
+                return ReplyResult(
+                    status="skipped_stale_head", comment_id=outcome.comment_id
+                )
+            # Preserve custom renderer timing; only the source-owned pure renderer
+            # is evaluated before delivery for complete-tail capacity planning.
+            if body is None:
+                body = self._authority_body(
+                    prepared,
+                    updated_inventory,
+                    refreshed,
+                    evidence_sha256=evidence_digest,
+                )
+
+            def publish_authority():
+                return self.finalizer.http.request(
+                    "POST",
+                    self.http.repository_path(
+                        repository, f"/pulls/{pull_request}/reviews"
+                    ),
+                    token=review_token,
+                    body={
+                        "commit_id": conversation.head_sha,
+                        "event": "COMMENT",
+                        "body": body,
+                    },
+                )
+
+            def publish_and_finalize():
+                status, payload = publish_authority()
+                if (
+                    status not in {200, 201}
+                    or not isinstance(payload, dict)
+                    or type(payload.get("id")) is not int
+                ):
+                    raise GitHubPublicationError(
+                        "human assessment publication was not confirmed"
+                    )
+                # Native readback inside finalization, not the POST response,
+                # authenticates the refreshed decisions. The next write checkpoints
+                # this response and its own pending intent atomically in one root.
+                return self._finalize_lifecycle_decisions(
+                    inventory=updated_inventory,
+                    token=review_token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=conversation.head_sha,
+                    app_slug=app_slug,
+                    eligibility=refreshed,
+                    check_token=check_token,
+                    reviews_policy=reviews_policy,
+                )
+
+            consumer = getattr(self.finalizer, "_finding_lifecycle_consumer", None)
+            finalized = (
+                consumer.run(publish_and_finalize)
+                if consumer is not None
+                else publish_and_finalize()
+            )
+            completed = replace(
+                outcome,
+                finalization_completion=None,
                 resolution_status=finalized.thread_resolution,
                 approval_status=finalized.status,
                 approval_diagnostic=finalized.diagnostic,
@@ -1198,135 +1368,6 @@ class HumanAssessmentPublisher:
                 pull_request,
                 refreshed.result_digest,
             )
-        preflight = self.finalizer._preflight(
-            token=review_token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=conversation.head_sha,
-            app_slug=app_slug,
-        )
-        if preflight.result is not None:
-            return ReplyResult(
-                status=preflight.result.status, comment_id=outcome.comment_id
-            )
-        if preflight.app_authored or preflight.base_sha != inventory.base_sha:
-            return ReplyResult(
-                status="skipped_stale_base", comment_id=outcome.comment_id
-            )
-        current = self.finalizer.load_eligibility(
-            token=review_token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=conversation.head_sha,
-            app_slug=app_slug,
-            require_valid=original.human_inventory_reference is not None,
-        )
-        if current != original:
-            return ReplyResult(
-                status="skipped_stale_head", comment_id=outcome.comment_id
-            )
-        evidence_digest = hashlib.sha256(
-            json.dumps(
-                {
-                    "decisions": [item.to_dict() for item in reply.decisions],
-                    "source_body_sha256": hashlib.sha256(
-                        prepared.source_body.encode()
-                    ).hexdigest(),
-                    "source_actor": prepared.source_actor,
-                    "source_metadata_digest": prepared.source_metadata_digest,
-                    **(
-                        {
-                            "feedback_digest": prepared.feedback.digest,
-                            "feedback_event_key": prepared.feedback.event_key,
-                        }
-                        if prepared.feedback is not None
-                        else {}
-                    ),
-                    "diff_sha256": prepared.evidence_bundle.digest
-                    if work is not None and prepared.evidence_bundle is not None
-                    else hashlib.sha256(
-                        (conversation.context.diff_context or "").encode()
-                    ).hexdigest(),
-                    "plan_id": work.execution.plan.plan_id
-                    if work is not None
-                    else None,
-                    "batch_evidence": [
-                        {
-                            "batch_id": batch.batch.batch_id,
-                            "evidence_ids": batch.batch.evidence_ids,
-                            "requirement_ids": batch.batch.requirement_ids,
-                        }
-                        for batch in work.execution.completed
-                    ]
-                    if work is not None
-                    else [],
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
-        body = self._authority_body(
-            prepared, updated_inventory, refreshed, evidence_sha256=evidence_digest
-        )
-
-        def publish_authority():
-            return self.finalizer.http.request(
-                "POST",
-                self.http.repository_path(repository, f"/pulls/{pull_request}/reviews"),
-                token=review_token,
-                body={
-                    "commit_id": conversation.head_sha,
-                    "event": "COMMENT",
-                    "body": body,
-                },
-            )
-
-        def publish_and_finalize():
-            status, payload = publish_authority()
-            if (
-                status not in {200, 201}
-                or not isinstance(payload, dict)
-                or type(payload.get("id")) is not int
-            ):
-                raise GitHubPublicationError(
-                    "human assessment publication was not confirmed"
-                )
-            # Native readback inside finalization, not the POST response,
-            # authenticates the refreshed decisions. The next write checkpoints
-            # this response and its own pending intent atomically in one root.
-            return self._finalize_lifecycle_decisions(
-                inventory=updated_inventory,
-                token=review_token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=conversation.head_sha,
-                app_slug=app_slug,
-                eligibility=refreshed,
-                check_token=check_token,
-                reviews_policy=reviews_policy,
-            )
-
-        consumer = getattr(self.finalizer, "_finding_lifecycle_consumer", None)
-        finalized = (
-            consumer.run(publish_and_finalize)
-            if consumer is not None
-            else publish_and_finalize()
-        )
-        completed = replace(
-            outcome,
-            finalization_completion=None,
-            resolution_status=finalized.thread_resolution,
-            approval_status=finalized.status,
-            approval_diagnostic=finalized.diagnostic,
-        )
-        return self._completed_reply(
-            finalized,
-            completed,
-            prepared,
-            repository,
-            pull_request,
-            refreshed.result_digest,
-        )
 
     @staticmethod
     def _completed_reply(

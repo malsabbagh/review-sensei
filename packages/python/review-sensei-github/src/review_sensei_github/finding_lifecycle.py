@@ -849,6 +849,9 @@ class FindingLifecycleJournal:
     @_sizing_producer
     def preflight_native_batch(self, requests, *, native_calls, _sizing_factories):
         """Price the complete known batch without issuing authority or a write."""
+        from .reply_finalization_plan import require_reply_cleanup_batch
+
+        require_reply_cleanup_batch(self, requests)
         import copy
 
         from review_sensei.finding_lifecycle_store import preflight_finding_lifecycle
@@ -1048,6 +1051,198 @@ class FindingLifecycleJournal:
             self._ordered_native_batch = ordered
             self._ordered_pending_documents = pending_bytes
             return ordered.approve()
+
+    @_sizing_producer
+    def preflight_reply_finalization(self, plan, *, http, budget, _sizing_factories):
+        """Price a source-issued reply tail before report or authority publication.
+
+        Shadow states are capacity data only. A newly allocated assessment review
+        ID is unknown, so subsequent checkpoints retain generic encoding bounds.
+        """
+        import copy
+
+        from review_sensei.finding_lifecycle_store import preflight_finding_lifecycle
+
+        from .api_run_requests import ApiRunSessionLedger
+        from .reply_finalization_plan import ReplyFinalizationPlan
+        from .review_run import ActionRunLedger
+
+        if type(plan) is not ReplyFinalizationPlan:
+            raise ReviewInputError("reply finalization capacity plan is unissued")
+        ReplyFinalizationPlan.require(plan, self, http=http, budget=budget)
+        payload = json.loads(plan.payload)
+        reads = payload.get("execution_read_tail")
+        capabilities = payload.get("execution_capability_tail")
+        cleanup_calls = payload.get("cleanup_native_calls")
+        report_calls = payload.get("report_native_calls")
+        if (
+            payload.get("read_contract")
+            != "closed-inline-reply-single-complete-page-v1"
+            or not isinstance(reads, dict)
+            or not isinstance(capabilities, dict)
+            or any(
+                type(value) is not int or value < 0
+                for value in (*reads.values(), *capabilities.values())
+            )
+            or type(cleanup_calls) is not int
+            or cleanup_calls < 0
+            or type(report_calls) is not int
+            or report_calls < 0
+            or type(self.ledger) not in {ApiRunSessionLedger, ActionRunLedger}
+            or getattr(self.ledger.load, "__func__", None)
+            is not ApiRunSessionLedger.load
+        ):
+            raise ReviewInputError("reply_finalization_capacity_read_tail_unqualified")
+        requests = payload.get("ordered_requests")
+        cleanup = payload.get("cleanup_requests")
+        if (
+            not isinstance(requests, list)
+            or not requests
+            or len(requests) > MAX_EFFECTS
+            or not isinstance(cleanup, list)
+            or not isinstance(plan.states, tuple)
+            or len(plan.states) < 2
+        ):
+            raise ReviewInputError("reply finalization capacity plan is incomplete")
+        review_path = f"/repos/{self.identity.repository}/pulls/{self.identity.pull_request}/reviews"
+        check_prefix = f"/repos/{self.identity.repository}/check-runs"
+        phase = "authority"
+        observed_cleanup = []
+        for value in requests:
+            if not isinstance(value, list) or len(value) != 3:
+                raise ReviewInputError("reply finalization request is invalid")
+            method, path, raw = value
+            if not isinstance(raw, dict) or not isinstance(path, str):
+                raise ReviewInputError("reply finalization request is invalid")
+            if phase == "authority":
+                if not (
+                    method == "POST"
+                    and path == review_path
+                    and set(raw) == {"commit_id", "event", "body"}
+                    and raw["commit_id"] == self.head_sha
+                    and raw["event"] == "COMMENT"
+                    and isinstance(raw["body"], str)
+                ):
+                    raise ReviewInputError("reply finalization authority scope changed")
+                phase = "cleanup"
+            elif path == "/graphql" and phase == "cleanup":
+                if not (
+                    method == "POST"
+                    and self._is_effect(method, path, raw)
+                    and "resolveReviewThread" in str(raw.get("query", ""))
+                ):
+                    raise ReviewInputError("reply finalization cleanup scope changed")
+                observed_cleanup.append(value)
+            elif path == review_path and phase == "cleanup":
+                if not (
+                    method == "POST"
+                    and set(raw) == {"commit_id", "event", "body"}
+                    and raw["commit_id"] == self.head_sha
+                    and raw["event"] == "APPROVE"
+                    and isinstance(raw["body"], str)
+                ):
+                    raise ReviewInputError("reply finalization approval scope changed")
+                phase = "check"
+            elif phase in {"cleanup", "check"} and (
+                method == "POST"
+                and path == check_prefix
+                or method == "PATCH"
+                and re.fullmatch(re.escape(check_prefix) + r"/[1-9][0-9]*", path)
+            ):
+                if not self._is_effect(method, path, raw):
+                    raise ReviewInputError("reply finalization check scope changed")
+                phase = "done"
+            else:
+                raise ReviewInputError("reply finalization request order changed")
+        if observed_cleanup != cleanup or phase != "done":
+            raise ReviewInputError("reply finalization complete check tail is missing")
+        if any(effect["status"] == "pending" for effect in self.effects):
+            raise ReviewInputError("reply finalization prior outcome remains uncertain")
+
+        shadow = copy.copy(self)
+        shadow.reviewer = copy.copy(self.reviewer)
+        shadow.effects = copy.deepcopy(self.effects)
+        shadow._planned = plan.states[0]
+        shadow._finalizer_capacity_states = tuple(plan.states)
+        documents: list[dict[str, Any]] = []
+        branches: list[tuple[tuple[dict[str, Any], ...], frozenset[int]]] = []
+        pending_commitments: dict[str, bytes] = {}
+        seen = {effect["request_sha256"] for effect in self.effects}
+        for position, (method, path, raw) in enumerate(requests):
+            request = _request_identity(raw)
+            digest = _digest({"method": method, "path": path, "request": request})
+            legacy = _digest({"method": method, "path": path, "request": raw})
+            if digest in seen or legacy in seen:
+                raise ReviewInputError(
+                    "reply finalization retained replay is unqualified"
+                )
+            seen.update((digest, legacy))
+            if len(shadow.effects) >= MAX_EFFECTS:
+                raise ReviewInputError("reply finalization effect capacity exceeded")
+            effect = dict(
+                method=method,
+                path=path,
+                request=request,
+                request_sha256=digest,
+                status="pending",
+                response=None,
+            )
+            if method == "PATCH" and path.startswith(check_prefix + "/"):
+                precondition = self._check_precondition(path)
+                if precondition is not None:
+                    effect["check_update_precondition"] = precondition
+            shadow.effects.append(effect)
+            _require_effect_scope(shadow._document(), self.identity, self.head_sha)
+            pending, future, confirmed = shadow._preflight_effect(capacity_only=True)
+            if position == 0:
+                # Only this pending state precedes the unknown new native ID.
+                pending_commitments[digest] = canonical_bytes(pending)
+            # After authority publication, both native IDs and the released
+            # prefix can differ from this shadow. The maximum candidate covers
+            # every supplied state and pending/rejected/confirmed outcome; use
+            # its generic bound for EACH reached checkpoint, not only the last.
+            documents.append(pending if position == 0 else future)
+            branches.append((tuple((*documents, future)), frozenset()))
+            shadow.effects = confirmed
+            # Later real finalization authenticates the authority POST first.
+            # This detached projection never installs that positive proof live.
+            if position == 0:
+                shadow._planned = plan.states[1]
+
+        alternatives = tuple(reversed(branches))
+        documents = list(alternatives[0][0])
+
+        def valid():
+            ReplyFinalizationPlan.require(plan, self, http=http, budget=budget)
+            return True
+
+        proof = _sizing_factories[2](self.ledger, self._record, alternatives, valid)
+        restore_calls = plan.price_restore_calls()
+        native_calls = (
+            sum(reads.values())
+            + sum(capabilities.values())
+            + cleanup_calls
+            + report_calls
+            + restore_calls
+            + 2 * sum(path != "/graphql" for _, path, _ in requests)
+        )
+        result = preflight_finding_lifecycle(
+            self.ledger,
+            self._record,
+            document=documents[0],
+            future_documents=tuple(documents[1:]),
+            operation_id=self.operation_id,
+            base_sha=self.base_sha,
+            head_sha=self.head_sha,
+            policy_digest=self.policy_digest,
+            configuration_digest=self.configuration_digest,
+            item_count=len(shadow.effects) + 1,
+            reserved_tail_calls=native_calls + 6,
+            branch_documents=proof,
+        )
+        self.preflight_native_tail(calls=native_calls)
+        ReplyFinalizationPlan.bind_capacity(plan, pending_documents=pending_commitments)
+        return result
 
     @_sizing_producer
     def preflight_command_finalization(
@@ -2025,11 +2220,18 @@ class FindingLifecycleJournal:
             self._observe_review_read(method, path, response)
             self._observe_check_read(method, path, response)
             return response
+        if getattr(self, "_reply_native_stopped", False):
+            raise ReviewInputError(
+                "reply cleanup incomplete; later native dispatch stopped"
+            )
         if getattr(self, "_command_native_stopped", False):
             raise ReviewInputError(
                 "command cleanup incomplete; later native dispatch stopped"
             )
         raw_request = {} if body is None else body
+        from .reply_finalization_plan import require_reply_native_request
+
+        require_reply_native_request(self, method, path, raw_request)
         ordered = getattr(self, "_ordered_native_batch", None)
         if ordered is not None:
             ordered.before_request(method, path, raw_request)

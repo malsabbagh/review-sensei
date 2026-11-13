@@ -168,6 +168,7 @@ class _Consumer(ContextDecorator):
         self.record = None
         self.enrolled = False
         self._previous = []
+        self._previous_journals = []
         self._entered = False
         self._bound_snapshot = False
 
@@ -309,11 +310,18 @@ class _Consumer(ContextDecorator):
         return self
 
     def __enter__(self):
-        self._prepare()
+        reply_plan = getattr(self, "_reply_capacity_plan", None)
+        if reply_plan is not None and reply_plan.reuses_retained_lifecycle():
+            self.journal = reply_plan.reuse_retained_lifecycle(self)
+        else:
+            self._prepare()
         if self.journal is None:
             self._entered = True
             return self
         journal = self.journal
+        reply_plan = getattr(self, "_reply_capacity_plan", None)
+        if reply_plan is not None:
+            reply_plan.transfer(self, journal)
 
         class Transport:
             def __init__(self, delegate):
@@ -333,7 +341,16 @@ class _Consumer(ContextDecorator):
                     if hasattr(self.reviewer, name):
                         setattr(owner, name, getattr(self.reviewer, name))
                 self._previous.append((owner, owner.http))
-                owner.http = Transport(owner.http)
+                if reply_plan is not None:
+                    from .finding_lifecycle import _JournalTransport
+
+                    self._previous_journals.append(
+                        (owner, getattr(owner, "_finding_lifecycle_journal", None))
+                    )
+                    owner._finding_lifecycle_journal = journal
+                    owner.http = _JournalTransport(journal, owner.http)
+                else:
+                    owner.http = Transport(owner.http)
         except BaseException:
             self._restore_transports()
             raise
@@ -343,6 +360,9 @@ class _Consumer(ContextDecorator):
     def _restore_transports(self):
         for owner, http in reversed(self._previous):
             owner.http = http
+        for owner, journal in reversed(self._previous_journals):
+            owner._finding_lifecycle_journal = journal
+        self._previous_journals.clear()
         self._previous.clear()
 
     def __exit__(self, exc_type, exc, traceback):

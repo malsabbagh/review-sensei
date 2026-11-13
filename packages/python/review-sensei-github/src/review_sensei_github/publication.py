@@ -4958,7 +4958,17 @@ class ReviewApprovalFinalizer:
                 and not live.app_authored
             )
 
+        from .reply_finalization_plan import executing_plan
+
+        reply_journal = getattr(self, "_finding_lifecycle_journal", None)
+        reply_plan = (
+            executing_plan(reply_journal) if reply_journal is not None else None
+        )
         batch_fence_calls = 2 if plain_frontier is not None else None
+        if reply_plan is not None:
+            # Exact source-qualified inline readers are one complete page;
+            # pure decoders plus the existing live PR fence cost two reads.
+            batch_fence_calls = 2
         if native_root is not None:
             from .api_run_plan import READ_OPERATION_REQUESTS
             from .api_run_requests import ApiRunSessionLedger
@@ -5055,11 +5065,24 @@ class ReviewApprovalFinalizer:
                     cleanup_token_provider=self._thread_cleanup_token_provider,
                 )
                 consumer = getattr(self, "_finding_lifecycle_consumer", None)
+                resolved_instances = set(resolution.resolved) - set(
+                    resolution.unconfirmed
+                )
+                if reply_plan is not None:
+                    from .reply_finalization_plan import (
+                        restrict_reply_release,
+                        stop_reply_cleanup,
+                    )
+
+                    resolved_instances = restrict_reply_release(
+                        reply_journal, resolved_instances
+                    )
+                    if resolution.unconfirmed:
+                        stop_reply_cleanup(reply_journal)
                 if consumer is not None:
                     consumer.release_confirmed_slots(
                         head_sha=head_sha,
-                        instances=set(resolution.resolved)
-                        - set(resolution.unconfirmed),
+                        instances=resolved_instances,
                     )
                 return resolution
             except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
@@ -5184,6 +5207,16 @@ class ReviewApprovalFinalizer:
                     index=index,
                     reviews=reviews,
                 )
+                reply_journal = getattr(self, "_finding_lifecycle_journal", None)
+                if reply_journal is not None and resolution.unconfirmed:
+                    from .reply_finalization_plan import stop_reply_cleanup
+
+                    if stop_reply_cleanup(reply_journal):
+                        return PublicationResult(
+                            status="gate_reevaluation_failed",
+                            diagnostic="reply_cleanup_incomplete",
+                            thread_resolution="unconfirmed",
+                        )
                 if (
                     check_token
                     and not auto_approve_enabled

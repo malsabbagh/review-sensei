@@ -535,27 +535,11 @@ class ActionReplyEntryTests(unittest.TestCase):
             fixture.next_run()
             fixture.live_head = fixture.requested_head = HEAD
             fixture.prepare_reply()
-            fixture.thread_rows = [
-                {
-                    "id": "native-thread-" + str(comment["id"]),
-                    "isResolved": True,
-                    "comments": {
-                        "nodes": [
-                            {
-                                "databaseId": comment["id"],
-                                "body": comment["body"],
-                                "path": comment["path"],
-                                "line": comment["line"],
-                                "author": {
-                                    "login": "reviewsensei",
-                                    "__typename": "Bot",
-                                },
-                            }
-                        ]
-                    },
-                }
-                for comment in fixture.inline
-            ]
+            # Reuse the actual native producer's opaque thread/comment bindings.
+            # Resolution is an observed native state, not a synthesized ID.
+            fixture.thread_rows = copy.deepcopy(fixture.threads)
+            for row in fixture.thread_rows:
+                row["isResolved"] = True
             fixture.source["body"] = (
                 "@reviewsensei The caller contract is intentional; the added change is checked."
             )
