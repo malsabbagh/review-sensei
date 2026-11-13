@@ -146,3 +146,8 @@ from .quarantine_pr_observation import install_hold_reader as _install_pr_hold  
 
 _install_pr_hold(QuarantineHoldReader)
 del _install_pr_hold
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

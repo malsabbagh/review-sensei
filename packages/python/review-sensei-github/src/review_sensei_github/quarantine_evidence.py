@@ -845,3 +845,8 @@ from .quarantine_pr_observation import install_reader as _install_pr_reader  # n
 
 setattr(CurrentReadScope, "require", _install_pr_reader(CurrentReadScope))
 del _install_pr_reader
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()
