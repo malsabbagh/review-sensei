@@ -38,7 +38,10 @@ class PagedFindingCheckpointTests(unittest.TestCase):
 
     def test_source_plan_charges_full_pages_and_keeps_generic_ten(self):
         with tempfile.TemporaryDirectory() as directory:
-            f, record, kwargs = self.fixture(directory)
+            # The sealed aligned recipe packs fifteen rows into three pages.
+            # Keep this specialization regression above the generic ten-call
+            # allowance by requiring four genuine bounded pages instead.
+            f, record, kwargs = self.fixture(directory, count=24)
             plan = preflight_finding_lifecycle(f.ledger, record, **kwargs)
             quoted = plan["conditional_calls"]
             before = len(f.caller.observations)
