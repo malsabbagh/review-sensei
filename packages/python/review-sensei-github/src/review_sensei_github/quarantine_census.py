@@ -70,7 +70,7 @@ def _unique(pairs):
     return result
 
 
-def is_readonly_census(request, api_url):
+def is_readonly_census(request, api_url, *, identity=None, resolution_only=False):
     """Classify only closed source reads, never arbitrary GraphQL POSTs."""
     if not isinstance(api_url, str) or request.get_method() != "POST":
         return False
@@ -89,6 +89,30 @@ def is_readonly_census(request, api_url):
     except (ValueError, UnicodeError):
         return False
     if not isinstance(value, dict) or not isinstance(value.get("query"), str):
+        return False
+    # This ordinary discovery POST is a read, but only for the current root's
+    # repository/PR and the original single bounded source operation.
+    from review_sensei.session import SessionIdentity
+    from review_sensei.source_registry import require_module_seal
+
+    from . import thread_resolution
+
+    if resolution_only and value.get("operationName") == "FindingResolutionThreads":
+        try:
+            require_module_seal(thread_resolution)
+        except ReviewInputError:
+            return False
+        variables = value.get("variables")
+        return (
+            type(identity) is SessionIdentity
+            and set(value) == {"query", "operationName", "variables"}
+            and value["query"] == thread_resolution._QUERY
+            and isinstance(variables, dict)
+            and _variables(variables)
+            and variables["owner"] + "/" + variables["name"] == identity.repository
+            and variables["number"] == identity.pull_request
+        )
+    if resolution_only:
         return False
     if value["query"] == QUERY:
         return set(value) == {"query", "variables"} and _variables(value["variables"])

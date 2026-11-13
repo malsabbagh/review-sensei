@@ -483,7 +483,14 @@ def _install_transport_source(source_class):
             raise ReviewInputError("trust effect native destination is unsupported")
         from .quarantine_census import is_readonly_census
 
-        if is_readonly_census(request, caller._quarantine_census_api_url):
+        if is_readonly_census(
+            request,
+            profile.api_origin,
+            resolution_only=caller._quarantine_census_api_url is None,
+            identity=caller._effect_record.identity()
+            if caller._effect_record is not None
+            else None,
+        ):
             return False
         # Stronger routes are deliberately not inferred from this transport mode.
         if getattr(caller, "_controlled_restart_admission", None) is not None:
@@ -577,7 +584,14 @@ def _install_transport_source(source_class):
             if (
                 request.get_method() in {"POST", "PUT", "PATCH", "DELETE"}
                 and f"{url.scheme}://{url.netloc}" == profile.api_origin
-                and not is_readonly_census(request, caller._quarantine_census_api_url)
+                and not is_readonly_census(
+                    request,
+                    profile.api_origin,
+                    resolution_only=caller._quarantine_census_api_url is None,
+                    identity=caller._effect_record.identity()
+                    if caller._effect_record is not None
+                    else None,
+                )
             ):
                 raise ReviewInputError("trust effect fresh receipt is unavailable")
             return

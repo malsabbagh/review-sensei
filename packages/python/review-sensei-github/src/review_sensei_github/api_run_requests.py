@@ -862,8 +862,19 @@ class ApiRunRequestTransport:
         request_deadline = self._monotonic() + timeout
         self._sequence += 1
         from .quarantine_census import is_readonly_census
+        from .trust_effects import verification_profile
 
-        read_only_census = is_readonly_census(request, self._quarantine_census_api_url)
+        trust_profile = verification_profile(self)
+        read_only_census = is_readonly_census(
+            request,
+            trust_profile.api_origin
+            if trust_profile is not None
+            else self._quarantine_census_api_url,
+            resolution_only=self._quarantine_census_api_url is None,
+            identity=self._effect_record.identity()
+            if self._effect_record is not None
+            else None,
+        )
         is_mutation = (
             request.get_method() in {"POST", "PUT", "PATCH", "DELETE"}
             and not read_only_census
