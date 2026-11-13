@@ -514,7 +514,7 @@ class _Observation:
             query = parse_qs(urlsplit(path).query)
             if (
                 role is None
-                or _REMAINING[self][role] <= 0
+                or _REMAINING[self].get(role, 0) <= 0
                 or query.get("page", ["1"]) != ["1"]
                 or query.get("per_page", ["100"]) != ["100"]
             ):

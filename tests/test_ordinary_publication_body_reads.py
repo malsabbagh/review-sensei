@@ -3,7 +3,7 @@
 import unittest
 
 from tests import test_ordinary_publication_populated as populated
-from tests.test_ordinary_publication_reads import OrdinaryPublicationReadCustodyTests
+from tests import test_ordinary_publication_reads as read_fixtures
 
 
 class OrdinaryBodyReadTests(unittest.TestCase):
@@ -15,7 +15,9 @@ class OrdinaryBodyReadTests(unittest.TestCase):
     def test_body_root_role_is_exact_not_a_generic_review_read(self):
         from review_sensei_github import ordinary_publication_reads as reads
 
-        publisher, journal, _ = OrdinaryPublicationReadCustodyTests().fixture()
+        publisher, journal, _ = (
+            read_fixtures.OrdinaryPublicationReadCustodyTests().fixture()
+        )
         with reads.observe_publication(publisher, journal) as observation:
             prefix = "/repos/owner/repo/pulls/1/reviews/"
             self.assertEqual(observation.role("GET", prefix + "17", None), "review")
@@ -28,6 +30,27 @@ class OrdinaryBodyReadTests(unittest.TestCase):
             ):
                 self.assertIsNone(observation.role(method, path, None))
         self.assertNotIn("review", dict(reads._ROLES))
+
+    def test_optional_body_role_without_allocation_refuses_before_transport(self):
+        from review_sensei_github import ordinary_publication_reads as reads
+
+        from review_sensei.errors import ReviewInputError
+
+        publisher, journal, _ = (
+            read_fixtures.OrdinaryPublicationReadCustodyTests().fixture()
+        )
+
+        class NoTransport:
+            def request(self, *args, **kwargs):
+                raise AssertionError("unfunded optional role dispatched")
+
+        with reads.observe_publication(publisher, journal) as observation:
+            # Negative-only budget model: no source capability is manufactured.
+            reads._REMAINING[observation] = dict(reads._ROLES)
+            with self.assertRaisesRegex(ReviewInputError, "exceeds source tail"):
+                observation.read(
+                    NoTransport(), "GET", "/repos/owner/repo/pulls/1/reviews/17", {}
+                )
 
     def test_normal_body_source_derived_one_short_has_zero_native_effects(self):
         case = populated.OrdinaryPopulatedPublicationTests()
