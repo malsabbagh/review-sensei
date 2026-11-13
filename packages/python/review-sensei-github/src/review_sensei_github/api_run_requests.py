@@ -137,7 +137,8 @@ class _AccountedResponse:
         self._read = False
 
     def __getattr__(self, name: str) -> Any:
-        validate, response = self._validate_return, self._response
+        validate = object.__getattribute__(self, "_validate_return")
+        response = object.__getattribute__(self, "_response")
         try:
             return getattr(response, name)
         finally:
@@ -145,27 +146,62 @@ class _AccountedResponse:
                 validate()
 
     def __enter__(self) -> _AccountedResponse:
-        validate, response = self._validate_return, self._response
+        validate = object.__getattribute__(self, "_validate_return")
+        response = object.__getattribute__(self, "_response")
         try:
             response.__enter__()
+        except BaseException:
+            try:
+                response.__exit__(*sys.exc_info())
+            except BaseException:
+                # Cleanup cannot replace the original transport error. The
+                # captured validator below may strengthen it to a custody hold.
+                pass
+            finally:
+                if validate is not None:
+                    validate()
+            raise
+        try:
             if validate is not None:
                 validate()
         except BaseException:
-            response.__exit__(*sys.exc_info())
+            try:
+                response.__exit__(*sys.exc_info())
+            except BaseException:
+                pass
+            finally:
+                if validate is not None:
+                    validate()
             raise
         return self
 
     def __exit__(self, *args: Any) -> Any:
-        validate, response = self._validate_return, self._response
+        validate = object.__getattribute__(self, "_validate_return")
+        response = object.__getattribute__(self, "_response")
+        held = None
+        if validate is not None:
+            try:
+                validate()
+            except BaseException as error:
+                held = error
         try:
-            return response.__exit__(*args)
+            result = response.__exit__(*args)
+        except BaseException:
+            if held is not None:
+                raise held
+            raise
         finally:
             if validate is not None:
                 validate()
+        if held is not None:
+            raise held
+        return result
 
     def read(self, size: int) -> Any:
-        validate, response = self._validate_return, self._response
-        confirmed, already_read = self._confirmed, self._read
+        validate = object.__getattribute__(self, "_validate_return")
+        response = object.__getattribute__(self, "_response")
+        confirmed = object.__getattribute__(self, "_confirmed")
+        already_read = object.__getattribute__(self, "_read")
         try:
             value = response.read(size)
             if not already_read:
@@ -1038,11 +1074,18 @@ class ApiRunRequestTransport:
             finally:
                 validate_trust_return(self)
         except BaseException:
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
-            else:
-                response.__exit__(*sys.exc_info())
+            try:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+                else:
+                    response.__exit__(*sys.exc_info())
+            except BaseException:
+                # Preserve an established source hold; cleanup cannot make an
+                # effected request appear recoverably transient or unstarted.
+                pass
+            finally:
+                validate_trust_return(self)
             raise
         return _AccountedResponse(
             response,

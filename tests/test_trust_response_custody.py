@@ -31,7 +31,7 @@ class ReturnFixture(PauseFixture):
         class Returned:
             @property
             def status(self):
-                if fixture.boundary == "status":
+                if fixture.boundary in {"status", "status-cleanup-error"}:
                     fixture.install()
                 return response.status
 
@@ -40,19 +40,26 @@ class ReturnFixture(PauseFixture):
 
             def __enter__(self):
                 response.__enter__()
-                if fixture.boundary == "enter":
+                if fixture.boundary in {"enter", "enter-error", "enter-cleanup-error"}:
                     fixture.install()
+                if fixture.boundary in {"enter-error", "enter-cleanup-error"}:
+                    raise OSError("synthetic failed response enter")
                 return self
 
             def read(self, size):
                 raw = response.read(size)
-                if fixture.boundary == "read":
+                if fixture.boundary in {"read", "read-restore-cleanup-error"}:
                     fixture.install()
                 return raw
 
             def __exit__(self, *args):
                 fixture.closed = True
                 result = response.__exit__(*args)
+                if fixture.boundary == "read-restore-cleanup-error":
+                    fixture.restore()
+                    raise OSError("cleanup restored source but failed")
+                if fixture.boundary in {"enter-cleanup-error", "status-cleanup-error"}:
+                    raise OSError("synthetic response cleanup failed")
                 if fixture.boundary == "exit":
                     fixture.install()
                 return result
@@ -62,7 +69,17 @@ class ReturnFixture(PauseFixture):
 
 class ResponseCustodyTests(unittest.TestCase):
     def test_response_mutation_never_invokes_shadow_and_keeps_physical_debit(self):
-        for boundary in ("status", "enter", "read", "exit", "lost"):
+        for boundary in (
+            "status",
+            "enter",
+            "read",
+            "exit",
+            "lost",
+            "enter-error",
+            "enter-cleanup-error",
+            "status-cleanup-error",
+            "read-restore-cleanup-error",
+        ):
             with (
                 self.subTest(boundary=boundary),
                 tempfile.TemporaryDirectory() as directory,
@@ -98,7 +115,13 @@ class ResponseCustodyTests(unittest.TestCase):
                     change.start()
                     changes.append(change)
 
-                f.install = install
+                def restore():
+                    del wrapper.pagination_page_size
+                    for change in reversed(changes):
+                        change.stop()
+                    changes.clear()
+
+                f.install, f.restore = install, restore
                 f.boundary, f.armed, f.closed = boundary, True, False
                 try:
                     with self.assertRaises(ReviewInputError):
@@ -113,7 +136,9 @@ class ResponseCustodyTests(unittest.TestCase):
                 self.assertTrue(native["mutation"])
                 self.assertEqual(
                     native["outcome"],
-                    "response" if boundary in {"read", "exit"} else "unknown",
+                    "response"
+                    if boundary in {"read", "exit", "read-restore-cleanup-error"}
+                    else "unknown",
                 )
                 self.assertNotEqual(f.caller.accounting.action["phase"], "terminal")
                 if boundary != "lost":
