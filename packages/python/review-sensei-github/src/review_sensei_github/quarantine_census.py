@@ -568,10 +568,24 @@ class _LifecycleCapacity:
 
 
 def _lifecycle_profile(ledger):
+    from .publication_recovery import _publication_transport
+    from .quarantine_origin import _AUTHENTICATED, AuthenticatedQuarantine
+
+    authenticated = ledger._quarantine_authenticated
+    if (
+        getattr(_publication_transport(ledger.http), "_quarantine_capacity_guard", None)
+        is not None
+        or type(authenticated) is not AuthenticatedQuarantine
+        or authenticated not in _AUTHENTICATED
+    ):
+        raise ReviewInputError("quarantine lifecycle capacity source profile changed")
     return {
         "tail": ledger._quarantine_native_comment_bounds,
         "tail_parts": ledger._quarantine_native_tail_parts,
         "producer": ledger.evidence_producer(),
+        "authenticated_source": id(authenticated),
+        "isolation": authenticated.archive["target_isolation"],
+        "lineage": authenticated.lineage,
     }
 
 

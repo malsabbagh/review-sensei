@@ -99,6 +99,29 @@ class QuarantineLifecycleCapacityTests(unittest.TestCase):
                     with census.activate_lifecycle_capacity(overridden):
                         with self.assertRaises(ReviewInputError):
                             census.fetch_comments(ledger, identity)
+                    from review_sensei_github.publication_recovery import (
+                        _publication_transport,
+                    )
+
+                    transport = _publication_transport(ledger.http)
+                    guarded = original(ledger, identity, **kwargs)
+                    with census.activate_lifecycle_capacity(guarded):
+                        with patch.object(
+                            transport, "_quarantine_capacity_guard", object()
+                        ):
+                            with self.assertRaisesRegex(
+                                ReviewInputError, "source profile changed"
+                            ):
+                                census.fetch_comments(ledger, identity)
+                        with patch.object(
+                            ledger,
+                            "_quarantine_native_tail_parts",
+                            ledger._quarantine_native_tail_parts + 1,
+                        ):
+                            with self.assertRaisesRegex(
+                                ReviewInputError, "scope changed"
+                            ):
+                                census.fetch_comments(ledger, identity)
                     forged = replace(scope)
                     with self.assertRaisesRegex(ReviewInputError, "source-issued"):
                         with census.activate_lifecycle_capacity(forged):
