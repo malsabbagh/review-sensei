@@ -477,5 +477,9 @@ the original 512-call allowance per run; ten-at-once no longer fits its complete
 semantic terminal-carrier reserve. The current lifecycle remains enabled in its
 separate two-decision command and cold-verify qualification. A current 25-finding,
 ten-decision command at 512 refuses its complete operation before business
-writes, preserving the inventory and accepted semantic history. The historical
-snapshot result is not evidence that this larger current-lifecycle command fits.
+writes, preserving the inventory and accepted semantic history. Its measured
+preflight requires 205 calls with 109 ordinary calls available: 134 for staging
+and 13 lifecycle checkpoints, plus a 71-call protected/native tail. The projected
+13 added parts and 160,323 retained bytes do not explain this funding refusal.
+The historical snapshot result is not evidence that this larger current-lifecycle
+command fits.
