@@ -46,6 +46,33 @@ class GuardedLifecycleCapacityTests(unittest.TestCase):
                 self.assertEqual(proof.plan.metadata_unknown, plan.metadata_unknown)
                 self.assertEqual(guard.comment_plan, plan)
                 self.assertEqual(capacity._guard_state(guard), state)
+                # Packing depends on authenticated insertion order, not just
+                # the unordered set of retained maxima.
+                self.assertGreaterEqual(len(plan.known), 2)
+                original_known = plan.known
+                try:
+                    object.__setattr__(
+                        plan,
+                        "known",
+                        MappingProxyType(dict(reversed(tuple(plan.known.items())))),
+                    )
+                    with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                        capacity.installed_capacity(ledger, identity)
+                    with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                        guard.before_request("GET", "/unused", None)
+                finally:
+                    object.__setattr__(plan, "known", original_known)
+                keys = tuple(plan.known)[:2]
+                metadata_plan = replace(plan, metadata_known={keys[0]: 1, keys[1]: 2})
+                detached = copy.copy(guard)
+                detached.comment_plan = metadata_plan
+                metadata_state = capacity._guard_state(detached)
+                object.__setattr__(
+                    metadata_plan,
+                    "metadata_known",
+                    MappingProxyType({keys[1]: 2, keys[0]: 1}),
+                )
+                self.assertNotEqual(capacity._guard_state(detached), metadata_state)
                 with self.assertRaisesRegex(ReviewInputError, "unissued"):
                     capacity.activate_lifecycle_extension(copy.copy(proof))
                 transport = capacity._INSTALLED_GUARDS[guard][1]()

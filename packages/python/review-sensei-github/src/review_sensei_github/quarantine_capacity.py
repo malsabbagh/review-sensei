@@ -131,9 +131,9 @@ def _guard_state(guard):
         None
         if plan is None
         else {
-            "known": sorted(plan.known.items()),
+            "known": list(plan.known.items()),
             "unknown": plan.unknown,
-            "metadata_known": sorted(plan.metadata_known.items()),
+            "metadata_known": list(plan.metadata_known.items()),
             "metadata_unknown": plan.metadata_unknown,
         }
     )
