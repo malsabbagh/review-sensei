@@ -77,6 +77,28 @@ class QuarantineLifecycleCapacityTests(unittest.TestCase):
                             original(ledger, identity, **kwargs)
                     with self.assertRaises(ReviewInputError):
                         original(ledger, identity, added_parts=256)
+
+                    class DuckScope:
+                        def require(self, *args):
+                            raise AssertionError("duck callback must not run")
+
+                    with patch.object(
+                        ledger,
+                        "_quarantine_lifecycle_capacity",
+                        DuckScope(),
+                        create=True,
+                    ):
+                        with self.assertRaisesRegex(ReviewInputError, "unissued"):
+                            census.fetch_comments(ledger, identity)
+                    overridden = original(ledger, identity, **kwargs)
+                    object.__setattr__(
+                        overridden,
+                        "require",
+                        lambda *args: self.fail("overridden scope callback ran"),
+                    )
+                    with census.activate_lifecycle_capacity(overridden):
+                        with self.assertRaises(ReviewInputError):
+                            census.fetch_comments(ledger, identity)
                     forged = replace(scope)
                     with self.assertRaisesRegex(ReviewInputError, "source-issued"):
                         with census.activate_lifecycle_capacity(forged):

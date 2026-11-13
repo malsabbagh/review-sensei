@@ -309,7 +309,9 @@ def fetch_comments(
     if lifecycle is not None:
         from .packed_comment_census import fetch_packed_comments
 
-        plan = lifecycle.require(ledger, identity)
+        if type(lifecycle) is not _LifecycleCapacity:
+            raise ReviewInputError("quarantine lifecycle census scope is unissued")
+        plan = _LifecycleCapacity.require(lifecycle, ledger, identity)
         return fetch_packed_comments(
             ledger,
             identity,
@@ -525,7 +527,7 @@ class _LifecycleCapacity:
         issued = _LIFECYCLE_ACTIVE.get(self)
         if (
             issued is None
-            or issued[0] != self._seal()
+            or issued[0] != _LifecycleCapacity._seal(self)
             or ledger is not self.ledger
             or ledger.caller is not self.caller
             or identity != self.identity
@@ -687,19 +689,37 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         raise ReviewInputError(
             "quarantine lifecycle original tail profile is unsupported"
         )
-    reserve = native_reserve(authenticated.archive["target_isolation"])
-    old = (
-        ()
-        if reserve is None
-        else (reserve["issue_comments"]["max_object_wire_bytes"],)
-        * reserve["issue_comments"]["new_objects"]
+    isolation = authenticated.archive["target_isolation"]
+    from .publication_recovery import _publication_transport
+
+    guard = getattr(
+        _publication_transport(ledger.http), "_quarantine_capacity_guard", None
     )
+    if (
+        isolation.get("schema_version") != "quarantine-target-isolation-v1"
+        or native_reserve(isolation) is not None
+        or guard is not None
+    ):
+        # Published-tail and body-limit guards include mutable object maxima,
+        # closure widths and receipt updates beyond this legacy capacity-only
+        # contract. Never replace or reinterpret their source-issued plan.
+        if guard is not None:
+            from .quarantine_capacity import NativeCapacityGuard
+
+            if type(guard) is not NativeCapacityGuard:
+                raise ReviewInputError(
+                    "quarantine lifecycle capacity guard source changed"
+                )
+            NativeCapacityGuard.require(guard, guard.stats)
+        raise ReviewInputError(
+            "quarantine lifecycle guarded capacity requires its original plan"
+        )
     # Preserve the original per-obligation event/archive and ordinary
     # verification storage promises, independently of this review's tail.
     promised_parts = 2 * len(authenticated.pending) + 5
     plan = CommentAllocationPlan(
         known,
-        (*old, *tail, *((MAX_PART_BYTES + 512,) * (added_parts + promised_parts))),
+        (*tail, *((MAX_PART_BYTES + 512,) * (added_parts + promised_parts))),
     )
     if plan.worst_read_calls() > MAX_PAGINATION_PAGES:
         raise ReviewInputError(
@@ -715,7 +735,7 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         canonical_bytes(_lifecycle_profile(ledger)),
         plan,
     )
-    _LIFECYCLE_ISSUED[scope] = scope._seal()
+    _LIFECYCLE_ISSUED[scope] = _LifecycleCapacity._seal(scope)
     return scope
 
 
@@ -724,17 +744,16 @@ def activate_lifecycle_capacity(scope):
 
     @contextmanager
     def active():
-        if (
-            type(scope) is not _LifecycleCapacity
-            or _LIFECYCLE_ISSUED.pop(scope, None) != scope._seal()
-        ):
+        if type(scope) is not _LifecycleCapacity or _LIFECYCLE_ISSUED.pop(
+            scope, None
+        ) != _LifecycleCapacity._seal(scope):
             raise ReviewInputError(
                 "quarantine lifecycle capacity was not source-issued"
             )
         ledger = scope.ledger
         if getattr(ledger, "_quarantine_lifecycle_capacity", None) is not None:
             raise ReviewInputError("quarantine lifecycle census cannot nest")
-        _LIFECYCLE_ACTIVE[scope] = (scope._seal(), None)
+        _LIFECYCLE_ACTIVE[scope] = (_LifecycleCapacity._seal(scope), None)
         ledger._quarantine_lifecycle_capacity = scope
         try:
             yield
