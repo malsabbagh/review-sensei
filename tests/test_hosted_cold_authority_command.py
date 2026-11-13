@@ -121,6 +121,9 @@ class HostedColdAuthorityCommandTests(unittest.TestCase):
                         after["comment"]["body"], identity=IDENTITY
                     )
                     if mode == "unchanged":
+                        self.assertEqual(
+                            retained.api_run_accounting["action"]["phase"], "terminal"
+                        )
                         # Successful verification appends semantic history; its
                         # source inventory and criterion bytes do not change.
                         current_manifest = retained.finding_lifecycle["manifest"]
