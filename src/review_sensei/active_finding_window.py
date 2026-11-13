@@ -451,8 +451,10 @@ class AuthoritativeObligation:
             )
         if self.line is not None and (type(self.line) is not int or self.line < 1):
             raise ReviewInputError("obligation line must be a positive integer")
-        if self.side not in {"LEFT", "RIGHT"}:
-            raise ReviewInputError("obligation side must be LEFT or RIGHT")
+        if self.side not in {"LEFT", "RIGHT", "FILE"}:
+            raise ReviewInputError("obligation side must be LEFT, RIGHT, or FILE")
+        if self.side == "FILE" and self.line is not None:
+            raise ReviewInputError("file-level obligation must omit line")
         if self.symbol is not None and (
             not isinstance(self.symbol, str) or not self.symbol.strip()
         ):

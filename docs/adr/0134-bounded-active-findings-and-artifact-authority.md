@@ -537,3 +537,11 @@ seals, including inherited ledger methods; a replaced or decorated helper from
 before the action module import cannot acquire a stronger route. Source checks
 are read-only and do not authenticate supplied ledger data or grant dispatch.
 Unsupported opted routes refuse while the default command path remains unchanged.
+
+Normalized file-level findings retain `FILE` with an absent line in the durable
+active-window obligation, matching the existing admitted comment contract and
+wire representation. They are not rewritten into inline findings or resolved
+by placement. The complete criterion and human/blocking classification survive
+serialization even when the active display cap hides another obligation.
+A file-level obligation with a line is invalid. This validation correction does
+not establish native body-slot readback or response-loss recovery on its own.
