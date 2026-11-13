@@ -273,7 +273,16 @@ archive/allocation. Pending publication and uncertain original effects retain
 priority over no-progress refusal; observation never settles those liabilities.
 Settlement uses the source-issued, integrity-revalidated current caller
 checkpoint: unchanged carriers reuse the bound observation, and changed inline
-carriers are decoded without another remote read. The existing final expected-root
+carriers are decoded without another remote read. Authenticated quarantine
+history contributes its complete immutable inventory and pending obligations to
+the existing fixed-width, domain-separated inventory/unresolved hashes and count.
+A real historical decision can therefore advance progress when the current
+finding carrier is unchanged; a colliding current-finding no-op cannot. The
+historical observation needs its exact registered source root, or an exact owned
+GET receipt proving unchanged complete lineage across the same caller's CAS.
+Missing custody is not an empty historical inventory. This adds no settlement
+read, wire field, fresh budget or history reset; raw current findings are kept
+separately in invocation-local context so the aggregate is applied once. The existing final expected-root
 CAS and native readback authenticate the resulting summary. The ordinary command
 representability preview reserves bounded summary bytes within the unchanged
 root limit. The admitted-intent preflight prices a worst-width new observation,
