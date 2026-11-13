@@ -153,3 +153,24 @@ class OrdinaryPublicationReadCustodyTests(unittest.TestCase):
             with self.assertRaisesRegex(ReviewInputError, "callback"):
                 observation._require(journal, publisher)
         self.assertEqual(calls, [])
+
+    def test_foreign_or_copied_transport_cannot_supply_an_observation(self):
+        publisher, journal, http = self.fixture()
+        called = []
+        foreign = SimpleNamespace(request=lambda *a, **k: called.append(True))
+        with reads.observe_publication(publisher, journal) as observation:
+            reads._REMAINING[observation] = {"pr": 1, "reviews": 1}
+            for transport in (foreign, copy.copy(http)):
+                with self.subTest(transport=type(transport).__name__):
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "transport is unbound"
+                    ):
+                        observation.read(
+                            transport, "GET", "/repos/owner/repo/pulls/1", {}
+                        )
+                    self.assertEqual(reads._OBSERVED[observation], {})
+                    self.assertEqual(
+                        reads._REMAINING[observation], {"pr": 1, "reviews": 1}
+                    )
+                    self.assertIsNone(reads.issued_witness(journal))
+        self.assertEqual(called, [])

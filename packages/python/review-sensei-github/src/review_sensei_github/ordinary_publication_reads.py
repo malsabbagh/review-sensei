@@ -539,6 +539,8 @@ class _Observation:
 
     def read(self, transport, method, path, kwargs):
         self._require(self.journal, self.publisher)
+        if not any(transport is old for _, _, old, _, _ in self.bindings):
+            raise ReviewInputError("ordinary publication read transport is unbound")
         body = kwargs.get("body")
         is_read = method == "GET" or (
             method == "POST"
@@ -609,7 +611,19 @@ class _Observation:
         elif role in {"pr", "check"}:
             complete = complete and isinstance(value, dict)
         if role is not None:
-            if _REMAINING.get(self) is not None and not complete:
+            # A definitive check-lookup denial is handled by the original
+            # check publisher and its physically bound rejection receipt. It
+            # is not a successful census or native-effect settlement, and its
+            # one charged read still consumes this role. Other incomplete
+            # responses retain the original hard stop.
+            known_check_denial = (
+                role == "checks" and type(status) is int and status in {401, 403}
+            )
+            if (
+                _REMAINING.get(self) is not None
+                and not complete
+                and not known_check_denial
+            ):
                 raise ReviewInputError("ordinary publication read is incomplete")
             if complete:
                 _OBSERVED[self][role] = canonical_bytes(value)

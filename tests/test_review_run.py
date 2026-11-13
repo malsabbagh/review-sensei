@@ -3561,9 +3561,13 @@ class CheckAccountingEntryTests(unittest.TestCase):
         from fake_github_http import json_response
         from review_sensei_github.session_ledger import parse_session_comment
 
-        for operation in ("lookup", "create", "update"):
+        for operation, response_status in (
+            (operation, status)
+            for operation in ("lookup", "create", "update")
+            for status in (401, 403)
+        ):
             with (
-                self.subTest(operation=operation),
+                self.subTest(operation=operation, status=response_status),
                 tempfile.TemporaryDirectory() as directory,
             ):
                 f = EntryFixture(directory)
@@ -3584,7 +3588,7 @@ class CheckAccountingEntryTests(unittest.TestCase):
                     )
                     if selected:
                         f.trace.append((f.attempt, request.method, path))
-                        return json_response({}, 403)
+                        return json_response({}, response_status)
                     return external(request, timeout)
 
                 f.external = deny_native
@@ -3597,7 +3601,7 @@ class CheckAccountingEntryTests(unittest.TestCase):
                     {
                         "code": "check_access_denied",
                         "operation": operation,
-                        "status": 403,
+                        "status": response_status,
                     },
                 )
                 record = parse_session_comment(f.comment["body"], identity=IDENTITY)
@@ -3610,7 +3614,7 @@ class CheckAccountingEntryTests(unittest.TestCase):
                 )
                 self.assertEqual(f.provider_calls, 1)
 
-    def test_unknown_check_responses_preserve_publication_and_open_accounting(self):
+    def test_check_response_loss_requires_exact_reconciliation_or_holds(self):
         import json
         from urllib.parse import urlsplit
 
@@ -3649,10 +3653,50 @@ class CheckAccountingEntryTests(unittest.TestCase):
                     return external(request, timeout)
 
                 f.external = unknown
-                self.assertEqual(f.invoke(), 1, f.error)
+                reconciled = fault == "stored-lost-create"
+                self.assertEqual(f.invoke(), 0 if reconciled else 1, f.error)
                 output = json.loads((f.root / "publication.json").read_text())
-                self.assertFalse(output["accounting_terminal"])
+                self.assertEqual(output["accounting_terminal"], reconciled)
                 record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                if reconciled:
+                    from review_sensei.api_work import ApiRunAccounting
+
+                    durable = ApiRunAccounting.from_document(record.api_run_accounting)
+                    self.assertEqual(durable.configuration.limit, 512)
+                    self.assertEqual(durable.uncertain, 1)
+                    self.assertEqual(
+                        durable.terminal_transaction, record.transaction.transaction_id
+                    )
+                    self.assertEqual(record.transaction.phase, "publication_succeeded")
+                    self.assertEqual(output["status"], "published")
+                    lost = [
+                        item
+                        for item in f.accounted.observations
+                        if item["outcome"] == "unknown" and item["mutation"]
+                    ]
+                    self.assertEqual(len(lost), 1)
+                    self.assertIn(
+                        lost[0]["request_id"], f.accounted._reconciled_mutations
+                    )
+                    self.assertTrue(
+                        any(
+                            pending.request_id == lost[0]["request_id"]
+                            for block in durable.blocks
+                            for pending in block.pending
+                        )
+                    )
+                    self.assertEqual(len(f.check_runs), 1)
+                    self.assertEqual(f.check_runs[0]["conclusion"], "success")
+                    self.assertEqual(
+                        sum(
+                            method == "POST" and path.endswith("/check-runs")
+                            for _, method, path in f.trace
+                        ),
+                        1,
+                    )
+                    self.assertTrue(any(r["state"] == "APPROVED" for r in f.reviews))
+                    self.assertEqual(f.provider_calls, 1)
+                    continue
                 if fault == "lost-capability":
                     self.assertEqual(record.transaction.phase, "publication_succeeded")
                 else:
