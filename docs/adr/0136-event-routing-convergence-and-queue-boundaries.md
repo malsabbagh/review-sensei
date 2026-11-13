@@ -339,13 +339,43 @@ still requires genuine zero-dispatch plus cessation/epoch evidence and is not
 conferred by action observation, history, terminal accounting or this summary.
 
 The command finalizer prices both complete and contingent override projections
-before native cleanup. A remaining G12/G14 boundary is named
-`finding_lifecycle_verified_fixed_subset_capacity_unqualified`: multiple eligible,
-receipt-bound, previously verified-fixed contingent targets may release arbitrary
-subsets after partial cleanup. Until a structural bound covers those subsets,
-this path holds before PUT/check/cleanup; unrelated fixed history and the existing
-single-target path are not blocked. Endpoint projections alone are not a proof
-for every mixed subset, and this hold is not full-gap closure.
+before native cleanup. The generic G12/G14 boundary remains named
+`finding_lifecycle_verified_fixed_subset_capacity_unqualified`: endpoint
+projections alone cannot bound every independently variable release subset.
+A source-qualified ordinary command may instead use the retained reply evidence
+and finite cleanup-prefix contract below. Unsupported readers, source frames and
+release layouts retain the pre-native hold; this is not full-gap closure.
+
+### Source-qualified command cleanup prefixes
+
+A fresh ordinary command can consume the original inline finding index and its
+later human-assessment frame when both complete bodies, numeric native review
+identities and head bindings match retained authenticated native-write receipts.
+The frame pair is not inferred from a copied marker, a newer approval or missing
+history. Its closing frontier and fresh pull-request fence still apply before
+execution.
+
+The exact transferred command plan prices the complete preconfirmed group and
+every ordered confirmed cleanup prefix, including layouts with and without that
+group. It does not enumerate or assume arbitrary success subsets. Planning and
+execution validate all selected thread/comment IDs and whole-body digests,
+including already-resolved targets, through the existing discovery query. Local
+rewalk of those same nodes adds no HTTP reads. An edited original criterion is
+not released merely because GitHub reports its thread resolved.
+
+Only observed confirmed members can release their original contingent slots.
+The durable shadow for later check/approval intents includes the preconfirmed
+group after cleanup, but never in the earlier review-body update. First uncertain
+cleanup preserves the confirmed prefix and unresolved obligations and blocks
+later native completion. Copied plans and changed authority frames remain held.
+
+Qualification uses the actual original 512-call reply producer, a fresh command
+with reopened and preconfirmed targets, mixed confirmed/refused cleanup, native
+body mutation after plan transfer and cold verification. A new command with an
+actual one-call-short 457-call configuration refuses before business writes and
+does not change the producer's original 512-call history. This is a bounded
+source contract, not general cold-uncertain recovery or authority to settle an
+unknown effect.
 
 ### Source-qualified human reply cleanup prefixes
 
@@ -376,9 +406,9 @@ responses retain their intents and cold G32 holds, without inferred cessation.
 
 Qualification includes an unchanged 512-call two-finding producer/reply sequence
 and an actual one-call-short original allocation refusal before visible or native
-business effects. This does not remove the generic command subset hold above or
-qualify arbitrary paginated, external-inventory, custom-reader, or cold uncertain
-recovery paths. A non-approving policy with an inline blocking finding retains
+business effects. Its command consumer is qualified only through the exact
+source-bound prefix contract above; neither path qualifies arbitrary paginated,
+external-inventory, custom-reader, or cold uncertain recovery paths. A non-approving policy with an inline blocking finding retains
 `reply_capacity_inline_blocking_tail_unqualified` until its additional scan and
 check outcomes have a source-qualified complete tail. All storage, response,
 query, effect and funding limits remain
