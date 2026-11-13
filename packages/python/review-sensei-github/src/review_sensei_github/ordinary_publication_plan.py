@@ -14,6 +14,24 @@ from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
 
 
+def _capacity_request_identity(method, path, body):
+    """Bound the real body producer's compact size, never a runtime intent."""
+    from .finding_lifecycle import _request_identity
+    from .publication import MAX_PUBLISHED_REVIEW_BODY_BYTES
+
+    request = _request_identity(body)
+    # A check warning may cross a decimal-width boundary after initial framing.
+    # The actual writer enforces this cap; hashes and status shape stay exact.
+    if (
+        method == "POST"
+        and path.endswith("/reviews")
+        and isinstance(request, dict)
+        and isinstance(request.get("body"), dict)
+    ):
+        request["body"]["utf8_bytes"] = MAX_PUBLISHED_REVIEW_BODY_BYTES
+    return request
+
+
 def price_prefixes(journal, requests, *, native_calls):
     """Build complete durable envelopes from an authenticated producer plan.
 
@@ -24,7 +42,6 @@ def price_prefixes(journal, requests, *, native_calls):
     from .finding_lifecycle import (
         MAX_EFFECTS,
         _digest,
-        _request_identity,
         _require_effect_scope,
     )
 
@@ -43,7 +60,7 @@ def price_prefixes(journal, requests, *, native_calls):
     documents: list[dict[str, Any]] = []
     stops: list[dict[str, Any]] = []
     for method, path, body, precondition in requests:
-        request = _request_identity(body)
+        request = _capacity_request_identity(method, path, body)
         effect = {
             "method": method,
             "path": path,

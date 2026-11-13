@@ -1,6 +1,7 @@
 """Source-produced initial-publication sizing never installs a live prefix."""
 
 import copy
+import hashlib
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -73,6 +74,51 @@ class OrdinaryPublicationPlanTests(unittest.TestCase):
                         ),
                     )
                     documents, count = price_prefixes(journal, requests, native_calls=4)
+                    from review_sensei_github.finding_lifecycle import _unpack_journal
+                    from review_sensei_github.publication import (
+                        MAX_PUBLISHED_REVIEW_BODY_BYTES,
+                        _framed_review_body,
+                        render_check_warning,
+                    )
+
+                    for warning in (
+                        "",
+                        render_check_warning("check_permission", concise=True),
+                    ):
+                        rendered = _framed_review_body(
+                            "s" * 7_750 + warning,
+                            review_marker="review",
+                            index_marker="index",
+                            eligibility_marker="eligibility",
+                        )
+                        if warning:
+                            self.assertGreaterEqual(len(rendered.encode()), 10_000)
+                        else:
+                            self.assertLess(len(rendered.encode()), 10_000)
+                        changed = (
+                            *requests[:-1],
+                            (
+                                requests[-1][0],
+                                requests[-1][1],
+                                {**requests[-1][2], "body": rendered},
+                                None,
+                            ),
+                        )
+                        variants, _ = price_prefixes(journal, changed, native_calls=4)
+                        commitment = _unpack_journal(variants[1])["effects"][-1][
+                            "request"
+                        ]["body"]
+                        self.assertEqual(
+                            commitment["utf8_bytes"], MAX_PUBLISHED_REVIEW_BODY_BYTES
+                        )
+                        self.assertGreaterEqual(
+                            commitment["utf8_bytes"], len(rendered.encode())
+                        )
+                        self.assertEqual(
+                            commitment["$body_sha256"],
+                            hashlib.sha256(rendered.encode()).hexdigest(),
+                        )
+                        self.assertEqual(changed[-1][2]["body"], rendered)
                     self.assertEqual(len(documents), 3)
                     self.assertEqual(count, len(effects) + 3)
                     self.assertEqual(journal.effects, effects)
