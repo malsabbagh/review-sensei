@@ -57,7 +57,9 @@ class _StatusRoute:
                 "trust status complete route does not admit other commands"
             )
         self.action = command.action
-        extra = (NATIVE_OPERATION_REQUESTS + 1) if self.action != "status" else 0
+        # The business replace executes its source/head fence before the
+        # independently bounded native operation, including on a lost response.
+        extra = (2 + NATIVE_OPERATION_REQUESTS + 1) if self.action != "status" else 0
         # Continue reads the current collaborator permission exactly once.
         extra += int(self.action == "continue")
         caller.budget_view.preflight(STATUS_WORK_CALLS + extra)

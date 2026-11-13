@@ -55,6 +55,7 @@ class TrustPauseRouteTests(unittest.TestCase):
         for action in ("pause", "continue"):
             quote = (
                 STATUS_WORK_CALLS
+                + 2
                 + NATIVE_OPERATION_REQUESTS
                 + 1
                 + int(action == "continue")
