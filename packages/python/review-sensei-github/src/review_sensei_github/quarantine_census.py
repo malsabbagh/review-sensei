@@ -631,7 +631,7 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
     if (
         type(ledger) not in {ApiRunSessionLedger, ActionRunLedger, ReviewRunLedger}
         or type(added_parts) is not int
-        or not 0 < added_parts <= 256
+        or not 0 <= added_parts <= 256
     ):
         raise ReviewInputError("quarantine lifecycle capacity source is unsupported")
     caller = ledger.caller
@@ -815,7 +815,7 @@ def lifecycle_checkpoint_operation(ledger, caller, identity):
 
 
 def lifecycle_checkpoint_pricing(
-    ledger, record, *, added_parts, added_bytes, checkpoint_parts, factory
+    ledger, record, *, added_parts, added_bytes, checkpoint_parts, factory, inline=False
 ):
     """Closed legacy-isolation review writer, not generic quarantine pricing."""
     from review_sensei.bounded_evidence import PARTITION_ENCODING, canonical_bytes
@@ -823,20 +823,25 @@ def lifecycle_checkpoint_pricing(
     from .api_run_requests import ApiRunSessionLedger
     from .quarantine_evidence import CurrentReadScope
     from .quarantine_origin import QuarantineOriginReader
-    from .review_run import ReviewRunLedger
+    from .review_run import ActionRunLedger, ReviewRunLedger
     from .session_ledger import GitHubIssueCommentSessionLedger
 
     caller = ledger.caller
     reader = ledger._quarantine_origin_reader
     if (
-        type(ledger) not in {ApiRunSessionLedger, ReviewRunLedger}
+        type(ledger) not in {ApiRunSessionLedger, ReviewRunLedger, ActionRunLedger}
+        or (type(ledger) is ActionRunLedger and not inline)
         or record is not caller._effect_record
         or caller._abort_source is not None
         or getattr(caller, "_controlled_restart_admission", None) is not None
         or ledger._broker is not None
         or type(reader) is not QuarantineOriginReader
         or type(reader.current_scope) is not CurrentReadScope
-        or not any(checkpoint_parts)
+        or (not any(checkpoint_parts) and not inline)
+        or (
+            inline
+            and (checkpoint_parts != (0,) or added_parts != 0 or added_bytes != 0)
+        )
         or any(type(n) is not int or n < 0 for n in checkpoint_parts)
         or record.assessment_queue is not None
         or record.disposition_snapshot is not None
@@ -866,6 +871,11 @@ def lifecycle_checkpoint_pricing(
         for obj, name, source in methods
     ):
         return None
+    from .quarantine_action import decision_fence_capacity
+
+    business = decision_fence_capacity(ledger)
+    if business is None:
+        return None
     scope = lifecycle_capacity_plan(ledger, record.identity(), added_parts=added_parts)
     auth = ledger._quarantine_authenticated
     lineage = auth.lineage
@@ -889,6 +899,7 @@ def lifecycle_checkpoint_pricing(
             or caller._root != record.record_sha256
             or canonical_bytes(record.to_dict()) != original
             or reader._authenticated_sources.get(cache_key) != expected
+            or decision_fence_capacity(ledger) != business
             or any(
                 getattr(getattr(obj, name), "__func__", None) is not source
                 for obj, name, source in methods
@@ -912,10 +923,13 @@ def lifecycle_checkpoint_pricing(
         record,
         checkpoint_parts=checkpoint_parts,
         capacity=capacity,
-        calls=tuple(17 if n == 0 else pages + 6 + 2 * n for n in checkpoint_parts),
+        calls=tuple(
+            pages + 6 + business[0] if inline else 17 if n == 0 else pages + 6 + 2 * n
+            for n in checkpoint_parts
+        ),
         validate=validate,
         page_counts=tuple(pages for _ in checkpoint_parts),
-        profile="quarantine-complete-census-v1",
+        profile="quarantine-inline-v1" if inline else "quarantine-complete-census-v1",
     )
 
 
@@ -959,11 +973,29 @@ def lifecycle_staging_pricing(ledger, record, *, checkpoint_parts, target, facto
     if (
         not isinstance(target, dict)
         or set(target)
-        != {"binding", "document_sha256", "parts", "item_count", "manifest_allowance"}
+        != (
+            {"binding", "document_sha256", "parts", "item_count", "manifest_allowance"}
+            | ({"inline_manifest"} if scope.parts == 0 else set())
+        )
         or not isinstance(target["parts"], tuple)
         or len(target["parts"]) != scope.parts
     ):
         return None
+
+    if scope.parts == 0:
+        import hashlib
+
+        from review_sensei.bounded_evidence import read_inline_evidence
+
+        manifest = target["inline_manifest"]
+        document = read_inline_evidence(manifest, expected_binding=target["binding"])
+        if (
+            len(canonical_bytes(manifest)) > target["manifest_allowance"]
+            or manifest["item_count"] != target["item_count"]
+            or hashlib.sha256(canonical_bytes(document)).hexdigest()
+            != target["document_sha256"]
+        ):
+            return None
 
     def validate():
         active = _LIFECYCLE_ACTIVE.get(scope)
@@ -986,7 +1018,7 @@ def lifecycle_staging_pricing(ledger, record, *, checkpoint_parts, target, facto
             or canonical_bytes(record.to_dict()) != scope.record_bytes
             or canonical_bytes(scope.record.to_dict()) != scope.record_bytes
             or checkpoint_parts != (scope.parts,)
-            or scope.parts < 1
+            or scope.parts < 0
             or any(
                 getattr(getattr(obj, name), "__func__", None) is not source
                 for obj, name, source in methods
@@ -1015,6 +1047,8 @@ def lifecycle_staging_pricing(ledger, record, *, checkpoint_parts, target, facto
         calls=(2 * scope.parts + 5,),
         validate=validate,
         page_counts=(1,),
-        profile="quarantine-staging-v1",
+        profile="quarantine-staging-v1"
+        if scope.parts
+        else "quarantine-inline-staging-v1",
         staging_target=target,
     )

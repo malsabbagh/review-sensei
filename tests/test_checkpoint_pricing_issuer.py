@@ -87,13 +87,21 @@ class CheckpointPricingIssuerTests(unittest.TestCase):
 
         def observe(proof, ledger, record, parts, **kwargs):
             issued = core._CHECKPOINT_PRICING.get(proof)
-            if issued is not None and issued[9] == "quarantine-complete-census-v1":
+            if issued is not None and issued[9] in {
+                "quarantine-complete-census-v1",
+                "quarantine-inline-v1",
+            }:
                 self.assertTrue(all(3 <= pages <= 10 for pages in issued[8]))
-                self.assertIsNone(ledger.preflight_finding_lifecycle_inline(record))
+                if issued[9] == "quarantine-inline-v1":
+                    self.assertTrue(all(n == 0 for n in parts))
                 self.assertEqual(
                     issued[5],
                     tuple(
-                        17 if n == 0 else pages + 6 + 2 * n
+                        pages + 6
+                        if issued[9] == "quarantine-inline-v1"
+                        else 17
+                        if n == 0
+                        else pages + 6 + 2 * n
                         for pages, n in zip(issued[8], parts)
                     ),
                 )

@@ -2362,7 +2362,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             or type(added_bytes) is not int
             or not 0 <= added_parts <= MAX_STORED_PARTS
             or added_bytes < 0
-            or (added_parts == 0 and (added_bytes != 0 or self._quarantine_required))
+            or (added_parts == 0 and added_bytes != 0)
             or (added_parts > 0 and added_bytes == 0)
             or not self._inventory_complete
             or self.caller._terminal_reason is not None
@@ -2417,6 +2417,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         added_bytes,
         checkpoint_parts,
         checkpoint_stage=False,
+        checkpoint_inline=False,
         checkpoint_target=None,
         _checkpoint_factory=None,
     ):
@@ -2443,6 +2444,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 added_bytes=added_bytes,
                 checkpoint_parts=checkpoint_parts,
                 factory=_checkpoint_factory,
+                inline=checkpoint_inline,
             )
         from review_sensei.bounded_evidence import canonical_bytes
 
@@ -2598,7 +2600,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             _inline_checkpoint_read_free,
         )
 
-        if not _inline_checkpoint_read_free(record):
+        if not self._quarantine_required and not _inline_checkpoint_read_free(record):
             return None
         from review_sensei.finding_lifecycle_store import _qualified_checkpoint_pricer
 
@@ -2610,6 +2612,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             added_parts=0,
             added_bytes=0,
             checkpoint_parts=(0,),
+            checkpoint_inline=self._quarantine_required,
         )
         if proof is None:
             return None
@@ -2621,7 +2624,9 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             "sealed": bool(getattr(self, "_plain_finding_scope_active", False)),
         }
 
-    def replace_finding_lifecycle_inline(self, identity, mutate, *, record):
+    def replace_finding_lifecycle_inline(
+        self, identity, mutate, *, record, reserved_tail_calls=0
+    ):
         plan = self.preflight_finding_lifecycle_inline(record)
         if plan is None or plan["sealed"]:
             raise ReviewInputError(
@@ -2633,6 +2638,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             record=record,
             parts=0,
             retained_bytes=0,
+            reserved_tail_calls=reserved_tail_calls,
         )
 
     def _preflight_plain_finding_parts(
@@ -3153,7 +3159,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         return comment_id, record
 
     def replace_finding_lifecycle_parts(
-        self, identity, mutate, *, record, parts, retained_bytes
+        self, identity, mutate, *, record, parts, retained_bytes, reserved_tail_calls=0
     ):
         self.preflight_finding_lifecycle_retention(
             identity,
@@ -3169,8 +3175,29 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
 
             if record is not self.caller._effect_record:
                 raise ReviewInputError("quarantine lifecycle input is not source-owned")
+            from .quarantine_action import decision_fence_capacity
+
+            business = decision_fence_capacity(self)
+            if (
+                business is None
+                or type(reserved_tail_calls) is not int
+                or reserved_tail_calls < 0
+            ):
+                raise ReviewInputError(
+                    "quarantine lifecycle complete source tail is unsupported"
+                )
             scope = lifecycle_capacity_plan(self, identity, added_parts=parts)
             with activate_lifecycle_capacity(scope):
+                # Whole operation, protected caller tail and the existing fresh
+                # action guard are funded before any guard/census dispatch.
+                assert self.evidence_budget is not None
+                self.evidence_budget.preflight(
+                    scope.plan.worst_read_calls()
+                    + 6
+                    + 2 * parts
+                    + business[0]
+                    + reserved_tail_calls
+                )
                 return self.replace(identity, mutate)
         if getattr(self, "_finding_lifecycle_page_size", None) is not None:
             raise ReviewInputError("finding lifecycle scoped mutation cannot nest")

@@ -531,7 +531,7 @@ def execute_command(run: ReviewRun, args: Any) -> int:
     if quarantine is not None:
         from .quarantine_action import (
             QuarantineTargetRefusal,
-            decision_authority,
+            issue_decision_fence,
             prepare_quarantine_target,
         )
 
@@ -539,7 +539,7 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             quarantine_target = prepare_quarantine_target(
                 run, authority, quarantine, app, permission
             )
-            run.ledger.business_guard = lambda: decision_authority(run, authority)
+            run.ledger.business_guard = issue_decision_fence(run, authority)
         except QuarantineTargetRefusal as error:
             quarantine_refusal = str(error)
     historical_refusal = None

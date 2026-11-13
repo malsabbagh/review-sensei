@@ -15,11 +15,31 @@ from review_sensei.errors import ReviewInputError
 
 
 class QuarantineStagingPricingTests(unittest.TestCase):
-    def exercise(self, *, one_short):
+    def exercise(self, *, one_short, inline=False):
         with tempfile.TemporaryDirectory() as directory:
             fixture = JourneyFixture(directory)
             old, registration = fixture.original_origins()
-            fixture.revision(fixture.live_head, binary=True)
+            if inline:
+                fixture.revision(fixture.live_head, binary=True)
+            if not inline:
+                import random
+                import string
+
+                rng = random.Random(8129)
+                fixture.provider_comments = [
+                    {
+                        "path": "src/app.py",
+                        "line": 2,
+                        "side": "RIGHT",
+                        "body": "Independently confirm this external requirement. "
+                        + "".join(
+                            rng.choices(string.ascii_letters + string.digits, k=3000)
+                        ),
+                        "severity": "high",
+                        "blocking": False,
+                        "needs_human": True,
+                    }
+                ]
             registration["head_sha"] = fixture.live_head
             fixture.event_document = event(registration)
             stage, activate = (
@@ -41,7 +61,7 @@ class QuarantineStagingPricingTests(unittest.TestCase):
             @contextmanager
             def narrowed(scope):
                 with activate(scope):
-                    if selected:
+                    if selected or (scope.parts == 0) != inline:
                         yield
                         return
                     budget = scope.caller.budget_view
@@ -61,7 +81,11 @@ class QuarantineStagingPricingTests(unittest.TestCase):
 
             def observe(proof, ledger, record, parts, **kwargs):
                 issued = core._CHECKPOINT_PRICING.get(proof)
-                if issued is not None and issued[9] == "quarantine-staging-v1":
+                if issued is not None and issued[9] == (
+                    "quarantine-inline-staging-v1"
+                    if inline
+                    else "quarantine-staging-v1"
+                ):
                     self.assertIsNot(record, ledger.caller._effect_record)
                     self.assertEqual(issued[5], (2 * parts[0] + 5,))
                     self.assertIsNotNone(kwargs.get("staging_target"))
@@ -138,7 +162,7 @@ class QuarantineStagingPricingTests(unittest.TestCase):
                 patch.object(core, "_consume_checkpoint_pricing", observe),
                 registered_resource([registration]),
             ):
-                result = fixture.invoke()
+                result = fixture.invoke(human=not inline)
             self.assertTrue(selected)
             if not one_short:
                 self.assertTrue(
@@ -166,11 +190,12 @@ class QuarantineStagingPricingTests(unittest.TestCase):
                 )
             else:
                 self.assertEqual(result, 0, fixture.error)
-                self.assertTrue(
+                self.assertEqual(
                     any(
                         method == "POST" and path.endswith("/issues/7/comments")
                         for _, method, path in calls
-                    )
+                    ),
+                    not inline,
                 )
                 self.assertTrue(any(method == "PATCH" for _, method, _ in calls))
 
@@ -179,3 +204,9 @@ class QuarantineStagingPricingTests(unittest.TestCase):
 
     def test_one_short_holds_before_part_or_root_mutation(self):
         self.exercise(one_short=True)
+
+    def test_actual_inline_exact_funding_preserves_full_tail(self):
+        self.exercise(one_short=False, inline=True)
+
+    def test_actual_inline_one_short_holds_before_any_census_or_mutation(self):
+        self.exercise(one_short=True, inline=True)

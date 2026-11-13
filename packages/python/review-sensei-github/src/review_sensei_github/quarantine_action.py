@@ -7,6 +7,7 @@ import json
 import re
 import weakref
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote
 
 from review_sensei.bounded_evidence import (
@@ -160,6 +161,128 @@ def decision_authority(run, authority):
     ):
         raise ReviewInputError("quarantine current policy changed")
     return role
+
+
+# These guards expose a closed four-read cost, not a substitute for fresh
+# maintainer/source/head/policy authentication on every existing invocation.
+_DECISION_FENCES: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_VERIFIED_ACTION_FENCE = VerifiedRunAction.fence
+_DECISION_AUTHORITY = decision_authority
+
+
+@dataclass(frozen=True, eq=False)
+class QuarantineDecisionFence:
+    run: Any
+    authority: VerifiedRunAction
+
+    def __call__(self):
+        if _decision_fence_scope(self) is None:
+            raise ReviewInputError("quarantine decision fence source changed")
+        return decision_authority(self.run, self.authority)
+
+
+_DECISION_FENCE_CALL = QuarantineDecisionFence.__call__
+
+
+def _action_fence_scope(ledger, authority):
+    if type(authority) is not VerifiedRunAction:
+        return None
+    run = authority.run
+    if ledger.caller._effect_record is None:
+        return None
+    if (
+        run.ledger is not ledger
+        or run.caller is not ledger.caller
+        or run.identity != ledger.caller._effect_record.identity()
+        or authority.owner != ledger.caller.accounting.owner
+        or not isinstance(authority.document, dict)
+        or run.head_sha != authority.document.get("head_sha")
+        or getattr(authority.fence, "__func__", None) is not _VERIFIED_ACTION_FENCE
+    ):
+        return None
+    return canonical_bytes(authority.document)
+
+
+def _decision_fence_binding(run, authority, scope):
+    reader = getattr(run.ledger, "_quarantine_origin_reader", None)
+    current = None if reader is None else reader.current_scope
+    if reader is None or current is None:
+        return None
+    return (
+        id(run),
+        id(authority),
+        scope,
+        id(run.http),
+        id(run.ledger),
+        id(run.caller),
+        id(reader),
+        id(current),
+        reader.metadata_token,
+        canonical_bytes(
+            {
+                "run": vars(run.caller.run),
+                "identity": vars(run.identity),
+                "head_sha": run.head_sha,
+                "base_sha": run.base_sha,
+                "scope_head": current.head_sha,
+                "scope_base": current.base_sha,
+                "policy_branch": getattr(run.ledger, "_quarantine_policy_branch", None),
+            }
+        ),
+    )
+
+
+def _decision_fence_scope(guard):
+    if type(guard) is not QuarantineDecisionFence:
+        return None
+    run, authority = guard.run, guard.authority
+    from .quarantine_evidence import CurrentReadScope
+
+    reader = getattr(run.ledger, "_quarantine_origin_reader", None)
+    scope = _action_fence_scope(run.ledger, authority)
+    if (
+        scope is None
+        or authority.run is not run
+        or reader is None
+        or type(reader.current_scope) is not CurrentReadScope
+        or getattr(reader.current_scope.validate_pull, "__func__", None)
+        is not CurrentReadScope.validate_pull
+        or getattr(guard.__call__, "__func__", None) is not _DECISION_FENCE_CALL
+        or decision_authority is not _DECISION_AUTHORITY
+        or _DECISION_FENCES.get(guard) != _decision_fence_binding(run, authority, scope)
+    ):
+        return None
+    return scope
+
+
+def issue_decision_fence(run, authority):
+    scope = _action_fence_scope(run.ledger, authority)
+    if scope is None or authority.run is not run:
+        raise ReviewInputError("quarantine decision fence owner is unsupported")
+    guard = QuarantineDecisionFence(run, authority)
+    _DECISION_FENCES[guard] = _decision_fence_binding(run, authority, scope)
+    if _decision_fence_scope(guard) is None:
+        raise ReviewInputError("quarantine decision fence source is unsupported")
+    return guard
+
+
+def decision_fence_capacity(ledger):
+    """Known source call counts only; arbitrary callbacks have no cheaper price."""
+    from .review_run import ActionRunLedger
+
+    guard = getattr(ledger, "business_guard", None)
+    if type(ledger) is not ActionRunLedger:
+        return (0, None) if guard is None else None
+    if type(guard) is QuarantineDecisionFence:
+        if guard.run.ledger is not ledger:
+            return None
+        scope = _decision_fence_scope(guard)
+        return (4, (id(guard), scope.decode())) if scope is not None else None
+    authority = getattr(guard, "__self__", None)
+    if getattr(guard, "__func__", None) is not _VERIFIED_ACTION_FENCE:
+        return None
+    scope = _action_fence_scope(ledger, authority)
+    return (2, (id(authority), scope.decode())) if scope is not None else None
 
 
 def _current_collision_pairs(retained, state, head_sha):

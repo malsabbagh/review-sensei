@@ -422,14 +422,19 @@ def _consume_checkpoint_pricing(
         raise ReviewInputError("finding lifecycle checkpoint page pricing is invalid")
     profile = issued[9]
     if (
-        profile == "quarantine-staging-v1"
+        profile in {"quarantine-staging-v1", "quarantine-inline-staging-v1"}
         and (staging_target is None or issued[11] != canonical_bytes(staging_target))
-    ) or (profile != "quarantine-staging-v1" and staging_target is not None):
+    ) or (
+        profile not in {"quarantine-staging-v1", "quarantine-inline-staging-v1"}
+        and staging_target is not None
+    ):
         raise ReviewInputError("finding lifecycle staging target changed or absent")
     if profile not in {
         "plain-v1",
         "quarantine-complete-census-v1",
         "quarantine-staging-v1",
+        "quarantine-inline-v1",
+        "quarantine-inline-staging-v1",
     }:
         raise ReviewInputError(
             "finding lifecycle checkpoint pricing profile is invalid"
@@ -452,6 +457,14 @@ def _consume_checkpoint_pricing(
             or (
                 profile == "quarantine-staging-v1"
                 and (n < 1 or page != 1 or price != 2 * n + 5)
+            )
+            or (
+                profile == "quarantine-inline-v1"
+                and (n != 0 or page < 3 or price not in {page + 6, page + 8, page + 10})
+            )
+            or (
+                profile == "quarantine-inline-staging-v1"
+                and (n != 0 or page != 1 or price != 5)
             )
             for n, price, page in zip(checkpoint_parts, prices, pages)
         )
@@ -710,7 +723,10 @@ def _refine_checkpoint_pricing(
     if proof is None:
         return None
     issued = _CHECKPOINT_PRICING.get(proof)
-    if issued is not None and issued[9] == "quarantine-staging-v1":
+    if issued is not None and issued[9] in {
+        "quarantine-staging-v1",
+        "quarantine-inline-staging-v1",
+    }:
         raise ReviewInputError(
             "finding lifecycle staging proof cannot price future checkpoints"
         )
@@ -740,6 +756,11 @@ def _remaining_staging_price(
         "item_count": item_count,
         "manifest_allowance": allowance,
     }
+    if not parts:
+        manifest = inline_manifest(envelope, binding=binding, item_count=item_count)
+        if manifest is None or len(canonical_bytes(manifest)) > allowance:
+            return None
+        target["inline_manifest"] = manifest
     proof = pricer(
         record,
         added_parts=len(parts),
@@ -751,7 +772,9 @@ def _remaining_staging_price(
     if proof is None:
         return None
     issued = _CHECKPOINT_PRICING.get(proof)
-    if issued is None or issued[9] != "quarantine-staging-v1":
+    if issued is None or issued[9] != (
+        "quarantine-staging-v1" if parts else "quarantine-inline-staging-v1"
+    ):
         raise ReviewInputError(
             "finding lifecycle remaining stage pricing is unsupported"
         )
@@ -831,11 +854,13 @@ def _remote_inline_plan(ledger: Any, record: Any) -> Mapping[str, object] | None
         # These counts come only from the consumed source/root-bound proof.
         # The core's outer stage has already supplied the initial read.
         plan["conditional_calls"] = prices[0] - 1
-        if issued[9] != "plain-v1":
+        if issued[9] not in {"plain-v1", "quarantine-inline-v1"}:
             raise ReviewInputError(
                 "finding lifecycle inline checkpoint profile is unsupported"
             )
-        plan["post_mutator_calls"] = 3 + 2 * (pages - 1)
+        plan["post_mutator_calls"] = (
+            5 if issued[9] == "quarantine-inline-v1" else 3 + 2 * (pages - 1)
+        )
         if (
             set(plan)
             != {"conditional_calls", "post_mutator_calls", "page_size", "sealed"}
@@ -1274,18 +1299,14 @@ def stage_finding_lifecycle(
                 post_calls = remote_plan["post_mutator_calls"]
                 assert type(post_calls) is int
                 commit_calls = post_calls
-            remaining_price = (
-                _remaining_staging_price(
-                    ledger,
-                    current,
-                    parts,
-                    envelope=envelope,
-                    binding=binding,
-                    item_count=item_count,
-                    allowance=allowance,
-                )
-                if part_calls
-                else None
+            remaining_price = _remaining_staging_price(
+                ledger,
+                current,
+                parts if part_calls else (),
+                envelope=envelope,
+                binding=binding,
+                item_count=item_count,
+                allowance=allowance,
             )
             budget.preflight(
                 (
@@ -1317,19 +1338,30 @@ def stage_finding_lifecycle(
         _inline_local_commit_calls(ledger, record) is not None
         or _remote_inline_plan(ledger, record) is not None
     ):
+        kwargs = (
+            {"reserved_tail_calls": reserved_tail_calls}
+            if _qualified_checkpoint_pricer(ledger) is not None
+            else {}
+        )
         return ledger.replace_finding_lifecycle_inline(
-            record.identity(), mutate, record=record
+            record.identity(), mutate, record=record, **kwargs
         )
     scoped_parts = getattr(ledger, "replace_finding_lifecycle_parts", None)
     if prospective_record.finding_lifecycle["manifest"][
         "encoding"
     ] != INLINE_ENCODING and callable(scoped_parts):
+        kwargs = (
+            {"reserved_tail_calls": reserved_tail_calls}
+            if _qualified_checkpoint_pricer(ledger) is not None
+            else {}
+        )
         return scoped_parts(
             record.identity(),
             mutate,
             record=record,
             parts=len(parts),
             retained_bytes=sum(len(canonical_bytes(part)) + 128 for part in parts),
+            **kwargs,
         )
     return ledger.replace(record.identity(), mutate)
 
