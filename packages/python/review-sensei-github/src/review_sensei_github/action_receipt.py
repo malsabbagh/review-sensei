@@ -64,11 +64,29 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
         else path
     )
     from .api_run_plan import COMMAND_RECEIPT_CONFIRMATION_REQUESTS
+    from .trust_effects import verification_profile
 
-    capacity = 1 + COMMAND_RECEIPT_CONFIRMATION_REQUESTS
+    profile = verification_profile(run.caller)
+    verification = int(profile is not None)
+    if profile is not None:
+        from .trust_capabilities import require_source_capability
+
+        require_source_capability(
+            run.caller,
+            token,
+            capability="issue_reply",
+            authority=profile.session.attestation,
+        )
+    # This local allocation preserves confirmation, but is not whole-route
+    # admission. The source effect gate still refuses an unpriced business route.
+    write_tail = 1 + COMMAND_RECEIPT_CONFIRMATION_REQUESTS
+    capacity = write_tail + verification
     run.caller.budget_view.preflight(capacity)
     with run.caller._operation(
-        "command-receipt:" + digest, capacity, write_tail=capacity
+        "command-receipt:" + digest,
+        capacity,
+        write_tail=write_tail,
+        prewrite_reads=verification,
     ) as allocation:
         observation_index = len(run.caller.observations)
         unknown = False
