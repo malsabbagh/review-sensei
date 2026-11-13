@@ -41,3 +41,39 @@ class SourceRegistryTests(unittest.TestCase):
                     ReviewInputError, "instance method changed"
                 ):
                     require_instance_source(ledger, methods=methods)
+
+    def test_new_methods_and_lookup_behavior_cannot_join_original_class(self):
+        from review_sensei_github.review_run import ActionRunLedger
+
+        from review_sensei.source_registry import require_instance_source
+
+        ledger = object.__new__(ActionRunLedger)
+        for name in ("new_method", "__getattribute__", "__getattr__", "__setattr__"):
+            with (
+                self.subTest(name=name),
+                patch.object(ActionRunLedger, name, lambda *a, **k: None, create=True),
+            ):
+                with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                    require_instance_source(ledger, methods=(name,))
+        require_instance_source(ledger, methods=("load",))
+
+    def test_existing_dataclass_behavior_is_not_an_unsealed_dunder(self):
+        from review_sensei import session
+
+        with patch.object(session.SessionRecord, "__setattr__", lambda *a, **k: None):
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(session)
+
+    def test_class_consumer_ignores_unrelated_factory_but_module_consumer_does_not(
+        self,
+    ):
+        from review_sensei_github import review_run
+
+        from review_sensei.source_registry import require_instance_source
+
+        ledger = object.__new__(review_run.ActionRunLedger)
+        methods = ("load", "read_evidence", "replace", "evidence_producer")
+        with patch.object(review_run, "GitHubHttp", lambda *a, **k: None):
+            require_instance_source(ledger, methods=methods)
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(review_run)

@@ -17,6 +17,8 @@ from .errors import ReviewInputError
 def _build_registry():
     registered: dict[Any, tuple[tuple[Any, str, Any, Any], ...]] = {}
 
+    classes: dict[type, Any] = {}
+
     def normalize(value):
         return getattr(value, "__func__", value)
 
@@ -56,61 +58,99 @@ def _build_registry():
                 continue
             bindings.append((module, key, value, getattr(value, "__code__", None)))
             if inspect.isclass(value) and value.__module__ == name:
+                members: list[tuple[Any, str, Any, Any]] = []
+                original_methods = {}
+                executable = set()
                 for attribute in dir(value):
-                    if attribute.startswith("__") and attribute not in {
-                        "__init__",
-                        "__new__",
-                        "__call__",
-                    }:
-                        continue
-                    member = normalize(getattr(value, attribute))
+                    member = normalize(inspect.getattr_static(value, attribute))
+                    if isinstance(member, property) or callable(member):
+                        executable.add(attribute)
+                        row = (
+                            value,
+                            attribute,
+                            member,
+                            getattr(member, "__code__", None),
+                        )
+                        members.append(row)
+                        if callable(member):
+                            original_methods[attribute] = member
                     if isinstance(member, property):
-                        bindings.append((value, attribute, member, None))
                         for accessor in ("fget", "fset", "fdel"):
                             function = getattr(member, accessor)
                             if function is not None:
-                                bindings.append(
+                                members.append(
                                     (member, accessor, function, function.__code__)
                                 )
-                    elif inspect.isfunction(member):
-                        bindings.append((value, attribute, member, member.__code__))
+                classes[value] = (
+                    module,
+                    str(getattr(value, "__name__", key))
+                    if getattr(module, str(getattr(value, "__name__", key)), None)
+                    is value
+                    else key,
+                    frozenset(vars(value)),
+                    frozenset(executable),
+                    tuple(members),
+                    original_methods,
+                )
+                bindings.extend(members)
         registered[module] = tuple(bindings)
+
+    def require_bindings(bindings):
+        for owner, name, original, code in bindings:
+            current = normalize(
+                inspect.getattr_static(owner, name, None)
+                if inspect.isclass(owner)
+                else getattr(owner, name, None)
+            )
+            if (
+                current is not original
+                or getattr(current, "__code__", None) is not code
+            ):
+                raise ReviewInputError("original module source changed: " + name)
+
+    def require_class(cls):
+        original = classes.get(cls)
+        if original is None:
+            raise ReviewInputError("original source class is unavailable")
+        module, name, namespace, executable, bindings, _methods = original
+        if (
+            sys.modules.get(module.__name__) is not module
+            or getattr(module, name, None) is not cls
+            or frozenset(vars(cls)) != namespace
+            or frozenset(
+                name
+                for name in dir(cls)
+                if callable(normalize(inspect.getattr_static(cls, name)))
+                or isinstance(inspect.getattr_static(cls, name), property)
+            )
+            != executable
+        ):
+            raise ReviewInputError("original class source changed")
+        require_bindings(bindings)
 
     def require_module_seal(module):
         bindings = registered.get(module) if isinstance(module, ModuleType) else None
         if bindings is None or sys.modules.get(module.__name__) is not module:
             raise ReviewInputError("original source module seal is unavailable")
-        for owner, name, original, code in bindings:
-            current = normalize(getattr(owner, name, None))
-            if (
-                current is not original
-                or getattr(current, "__code__", None) is not code
-            ):
-                raise ReviewInputError("original module source changed")
+        require_bindings(bindings)
+        for cls, source in classes.items():
+            if source[0] is module:
+                require_class(cls)
 
     def require_instance_source(instance, *, methods):
         cls = type(instance)
-        source_modules = []
         for base in cls.__mro__:
-            if base is object:
-                continue
-            module = sys.modules.get(base.__module__)
-            bindings = registered.get(module)
-            if bindings is None or not any(
-                owner is module and original is base
-                for owner, _name, original, _code in bindings
-            ):
-                raise ReviewInputError("original source class is unavailable")
-            require_module_seal(module)
-            source_modules.append(module)
-        if not source_modules:
+            if base is not object:
+                require_class(base)
+        source = classes.get(cls)
+        if source is None:
             raise ReviewInputError("original source class is unavailable")
+        original_methods = source[5]
         if not isinstance(methods, tuple) or any(
             not isinstance(name, str)
+            or name not in original_methods
             or name in instance.__dict__
-            or normalize(getattr(instance, name, None))
-            is not normalize(getattr(cls, name, None))
-            or not callable(getattr(instance, name, None))
+            or normalize(getattr(instance, name, None)) is not original_methods[name]
             for name in methods
         ):
             raise ReviewInputError("original source instance method changed")
