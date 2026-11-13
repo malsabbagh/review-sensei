@@ -30,6 +30,7 @@ _ACTIVE: WeakKeyDictionary = WeakKeyDictionary()
 _WITNESSES: WeakKeyDictionary = WeakKeyDictionary()
 _OBSERVED: WeakKeyDictionary = WeakKeyDictionary()
 _REMAINING: WeakKeyDictionary = WeakKeyDictionary()
+_QUALIFIED: WeakKeyDictionary = WeakKeyDictionary()
 
 
 def _install_publication_source(source_class):
@@ -188,8 +189,18 @@ class _Observation:
                 or _transport_signature(old, journal, self.budget) != signature
             ):
                 raise ReviewInputError("ordinary publication transport custody changed")
-        if self.record is not None and (
-            canonical_bytes(self.record.to_dict()) != self.record_bytes
+        qualified = _QUALIFIED.get(self)
+        if qualified is not None and (
+            qualified
+            != (
+                self.record,
+                self.record_bytes,
+                self.result,
+                self.result_bytes,
+                self.projected,
+                self.projected_bytes,
+            )
+            or canonical_bytes(self.record.to_dict()) != self.record_bytes
             or canonical_bytes(self.result.to_dict()) != self.result_bytes
             or canonical_bytes(self.projected.to_dict()) != self.projected_bytes
         ):
@@ -209,6 +220,8 @@ class _Observation:
     ):
         self._require(self.journal, self.publisher)
         journal = self.journal
+        from .publication import review_result_digest
+
         if (
             self.witness is not None
             or record is not journal._record
@@ -228,6 +241,7 @@ class _Observation:
             or type(checks_enabled) is not bool
             or record.quarantine_lineage is not None
             or record.historical_assessments is not None
+            or eligibility.result_digest != review_result_digest(projected_result)
             or eligibility.head_sha != journal.head_sha
             or eligibility.partitioned_root is not None
             or eligibility.native_union is not None
@@ -277,6 +291,14 @@ class _Observation:
             projected_result,
             canonical_bytes(projected_result.to_dict()),
         )
+        _QUALIFIED[self] = (
+            self.record,
+            self.record_bytes,
+            self.result,
+            self.result_bytes,
+            self.projected,
+            self.projected_bytes,
+        )
         _REMAINING[self] = dict(_ROLES)
         self.witness = OrdinaryPublicationReadWitness(_ROLES, 14)
         _WITNESSES[self.witness] = self
@@ -313,9 +335,11 @@ class _Observation:
             ) != (owner, name, scope.pull_request) or variables.get(
                 "after"
             ) is not None:
-                raise ReviewInputError(
-                    "ordinary publication thread query scope changed"
-                )
+                if _REMAINING.get(self) is not None:
+                    raise ReviewInputError(
+                        "ordinary publication thread query scope changed"
+                    )
+                return None
             return "threads"
         return None
 
@@ -364,6 +388,7 @@ class _Observation:
                 and isinstance(value, dict)
                 and isinstance(value.get("check_runs"), list)
                 and len(value["check_runs"]) < 100
+                and type(value.get("total_count", len(value["check_runs"]))) is int
                 and value.get("total_count", len(value["check_runs"]))
                 == len(value["check_runs"])
             )
@@ -443,5 +468,6 @@ def observe_publication(publisher, journal):
         _ACTIVE.pop(observation, None)
         _OBSERVED.pop(observation, None)
         _REMAINING.pop(observation, None)
+        _QUALIFIED.pop(observation, None)
         for owner, attr, old, wrapper, _ in reversed(observation.bindings):
             setattr(owner, attr, old)
