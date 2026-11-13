@@ -528,3 +528,12 @@ requires the real caller budget facade and immutable accounting/configuration
 source, reconciles original authenticated block balances with physical debits,
 and checks subsequent balance reductions against the actual request trace.
 These checks neither replenish work nor move terminal capacity into work.
+
+Original helper identities are registered at each defining module's end by a
+provider-neutral core registrar, not captured lazily from current attributes
+when the command first runs. Registration is write-once and requires the actual
+module loader's executing definition. The status consumer checks those earlier
+seals, including inherited ledger methods; a replaced or decorated helper from
+before the action module import cannot acquire a stronger route. Source checks
+are read-only and do not authenticate supplied ledger data or grant dispatch.
+Unsupported opted routes refuse while the default command path remains unchanged.

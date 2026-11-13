@@ -803,6 +803,12 @@ def run_action(
 # constructing a status plan cannot install a transport dispatch permit.
 import sys as _sys  # noqa: E402
 
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
 from .trust_effects import _install_command_source  # noqa: E402
 
 _install_command_source(_sys.modules[__name__])
+from .trust_effects import _finish_command_source  # noqa: E402
+
+_seal_original_source()
+_finish_command_source(_sys.modules[__name__])

@@ -392,18 +392,27 @@ class TrustStatusRouteTests(unittest.TestCase):
 
         code = """
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
-import sys
+import sys, tempfile
+from unittest.mock import patch
 assert 'review_sensei_github.action_run' not in sys.modules
 original = ApiRunRequestTransport.admit_action
+from functools import wraps
+@wraps(original)
 def substitute(*args, **kwargs):
     return original(*args, **kwargs)
 ApiRunRequestTransport.admit_action = substitute
-try:
-    import review_sensei_github.action_run
-except Exception as error:
-    assert 'original transport source changed' in str(error), repr(error)
-else:
-    raise AssertionError('late registration accepted substituted transport')
+from review_sensei_github.action_run import execute_command
+from tests.test_trust_status_route import StatusFixture
+from tests.test_run_authority import NOW
+with patch('time.time', return_value=NOW), tempfile.TemporaryDirectory() as directory:
+    f = StatusFixture(directory)
+    try:
+        execute_command(f.run, f.args)
+    except Exception as error:
+        assert 'source changed' in str(error), repr(error)
+    else:
+        raise AssertionError('late registration accepted substituted transport')
+    assert not any(m == 'PATCH' for m, _, _ in f.native)
 """
         result = subprocess.run(
             [sys.executable, "-c", code],
@@ -413,3 +422,79 @@ else:
             timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_helpers_substituted_before_action_import_are_not_original_source(self):
+        import os
+        import subprocess
+        import sys
+
+        for module, name, method in (
+            ("review_sensei_github.application", "GitHubApplication", "__init__"),
+            ("review_sensei_github.publication", "ReviewPublisher", "__init__"),
+            ("review_sensei.disposition", "apply_session_command", None),
+            (
+                "review_sensei_github.action_representability",
+                "require_action_settlement_representable",
+                None,
+            ),
+        ):
+            with self.subTest(module=module, name=name):
+                code = f"""
+import importlib, sys, tempfile
+from unittest.mock import patch
+module = importlib.import_module({module!r})
+owner = getattr(module, {name!r}) if {method!r} is not None else module
+name = {method!r} if {method!r} is not None else {name!r}
+assert 'review_sensei_github.action_run' not in sys.modules
+original = getattr(owner, name)
+from functools import wraps
+@wraps(original)
+def substitute(*args, **kwargs):
+    return original(*args, **kwargs)
+setattr(owner, name, substitute)
+from review_sensei_github.action_run import execute_command
+from tests.test_trust_status_route import StatusFixture
+from tests.test_run_authority import NOW
+with patch('time.time', return_value=NOW), tempfile.TemporaryDirectory() as directory:
+    f = StatusFixture(directory)
+    try:
+        execute_command(f.run, f.args)
+    except Exception as error:
+        assert 'source changed' in str(error), repr(error)
+    else:
+        raise AssertionError('preimport helper substitution acquired a route')
+    assert not any(m == 'PATCH' for m, _, _ in f.native)
+"""
+                result = subprocess.run(
+                    [sys.executable, "-c", code],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_shared_instance_registry_checks_original_inherited_ledger_methods(self):
+        from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
+
+        from review_sensei.source_registry import require_instance_source
+
+        f = StatusFixture(self.directory.name)
+        methods = ("load", "read_evidence", "replace", "evidence_producer")
+        require_instance_source(f.action_ledger, methods=methods)
+        with patch.object(f.action_ledger, "load", lambda *a, **k: None):
+            with self.assertRaisesRegex(ReviewInputError, "instance method changed"):
+                require_instance_source(f.action_ledger, methods=methods)
+        with patch.object(
+            GitHubIssueCommentSessionLedger, "read_evidence", lambda *a, **k: None
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_instance_source(f.action_ledger, methods=methods)
+
+        class Copy(ActionRunLedger):
+            pass
+
+        copied = object.__new__(Copy)
+        copied.__dict__.update(f.action_ledger.__dict__)
+        with self.assertRaisesRegex(ReviewInputError, "class is unavailable"):
+            require_instance_source(copied, methods=methods)

@@ -47,7 +47,7 @@ def _unavailable(*args, **kwargs):
 enable = verification_profile = verification_calls = before_request = consume = (
     require_native_attempt
 ) = _unavailable
-_install_command_source = _unavailable
+_install_command_source = _finish_command_source = _unavailable
 
 
 def _install_transport_source(source_class):
@@ -59,7 +59,8 @@ def _install_transport_source(source_class):
         before_request, \
         consume, \
         require_native_attempt, \
-        _install_command_source
+        _install_command_source, \
+        _finish_command_source
     from .api_run_requests import ApiRunRequestTransport
 
     if _source is not None or source_class is not ApiRunRequestTransport:
@@ -84,15 +85,11 @@ def _install_transport_source(source_class):
         from .run_authority import VerifiedRunAction
         from .trust_status import _StatusRoute
 
-        if any(
-            source_class.__dict__.get(name) is not original
-            for name, original in transport_originals
-        ):
-            raise ReviewInputError("trust command original transport source changed")
         if command_registered or module is not action_run:
             raise ReviewInputError("trust command source registration is invalid")
         command_registered = True
         execute_source = module.execute_command
+        source_seal = None
         module_sources = {
             name: getattr(module, name)
             for name in ("application", "_options", "parse_maintainer_command")
@@ -160,6 +157,10 @@ def _install_transport_source(source_class):
             )
 
             def require_source():
+                if source_seal is None:
+                    raise ReviewInputError(
+                        "trust status source definition is incomplete"
+                    )
                 source_seal()
                 if (
                     module.execute_command is not execute
@@ -231,9 +232,17 @@ def _install_transport_source(source_class):
                 _admitted_routes.pop(profile, None)
 
         setattr(module, "execute_command", execute)
-        from .trust_status_source import capture_status_source
 
-        source_seal = capture_status_source()
+        def finish_command_source(completed_module):
+            nonlocal source_seal
+            from .trust_status_source import capture_status_source
+
+            if completed_module is not module or source_seal is not None:
+                raise ReviewInputError("trust command source completion is invalid")
+            source_seal = capture_status_source()
+
+        global _finish_command_source
+        _finish_command_source = finish_command_source
 
     _install_command_source = install_command_source
     initialize_source = source_class.initialize_and_activate

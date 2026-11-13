@@ -271,3 +271,8 @@ class _StatusRoute:
         if self.intent is None:
             self.intent = canonical_bytes(caller.accounting.action["intent"])
         self.count += 1
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()
