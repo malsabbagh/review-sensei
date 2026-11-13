@@ -451,8 +451,6 @@ class BrokerClient:
             or SESSION_GRANT_PATTERN.fullmatch(grant) is None
         ):
             raise GitHubBrokerClientError("Broker current run grant conflicts")
-        from .trust_enrollment import _record_session_observation
-
         session = BrokerSession(
             token=token,
             state=state,
@@ -461,7 +459,7 @@ class BrokerClient:
             attestation=attestation,
             app_id=self._validated_app_id(parsed.get("app_id")),
         )
-        return _record_session_observation(self, session)
+        return session
 
     def open_session_release(
         self,
@@ -742,3 +740,11 @@ class BrokerClient:
         if self.control is not None and control_request is not None:
             self.control.verify(parsed.get("control_receipt"), control_request)
         return parsed
+
+
+# Capture the actual exchange implementation once. No public model factory can
+# issue an enrollment observation; the issuer remains inside this source hook.
+from .trust_enrollment import _install_observation_source  # noqa: E402
+
+_install_observation_source(BrokerClient)
+del _install_observation_source

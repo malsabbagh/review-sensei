@@ -11,6 +11,7 @@ import json
 import time
 import weakref
 from dataclasses import dataclass
+from functools import wraps
 from typing import Any
 
 from review_sensei.bounded_evidence import canonical_bytes
@@ -31,38 +32,71 @@ class _Observation:
     document: bytes
 
 
-_ISSUED: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_SOURCE_INSTALLED = False
+_observation_lookup = None
 
 
-def _record_session_observation(broker, session):
-    """Called only by the successful native broker exchange producer."""
-    authority = session.attestation
-    if authority is None or authority.get("version") != 4:
+def _install_observation_source(source_class):
+    """One-time binding; only the captured real exchange can issue a receipt."""
+    global _SOURCE_INSTALLED, _observation_lookup
+    if _SOURCE_INSTALLED:
+        raise ReviewInputError("trust observation source already installed")
+    from .broker_client import BrokerClient
+
+    if source_class is not BrokerClient:
+        raise ReviewInputError("trust observation source class is unsupported")
+    source, post = source_class.open_session, source_class._post
+    issued: weakref.WeakSet[_Observation] = weakref.WeakSet()
+
+    @wraps(source)
+    def exchange(self, *args, **kwargs):
+        observed = self.authority is not None and self.authority.get("version") == 4
+        if observed and (
+            type(self) is not source_class
+            or getattr(self.open_session, "__func__", None) is not exchange
+            or getattr(self._post, "__func__", None) is not post
+            or source_class.open_session is not exchange
+            or source_class._post is not post
+        ):
+            raise ReviewInputError("trust observation source dispatch changed")
+        session = source(self, *args, **kwargs)
+        if not observed:
+            return session
+        authority = parse_authority(session.attestation, grant=True)
+        if authority["version"] != 4:
+            raise ReviewInputError("trust observation source downgraded")
+        document = canonical_bytes(
+            {
+                "schema_version": DOCUMENT_VERSION,
+                "app_id": session.app_id,
+                "authority": authority,
+            }
+        )
+        receipt = _Observation(self, session, document)
+        issued.add(receipt)
+        object.__setattr__(session, "_trust_observation", receipt)
         return session
-    authority = parse_authority(authority, grant=True)
-    document = canonical_bytes(
-        {
-            "schema_version": DOCUMENT_VERSION,
-            "app_id": session.app_id,
-            "authority": authority,
-        }
-    )
-    receipt = _Observation(broker, session, document)
-    _ISSUED[receipt] = True
-    # Session object equality or caller-supplied attestation is never issuance.
-    object.__setattr__(session, "_trust_observation", receipt)
-    return session
+
+    def lookup(broker, session):
+        receipt = getattr(session, "_trust_observation", None)
+        if (
+            type(receipt) is not _Observation
+            or receipt not in issued
+            or receipt.broker is not broker
+            or receipt.session is not session
+        ):
+            raise ReviewInputError("trust current observation requires source issuance")
+        return receipt
+
+    _SOURCE_INSTALLED = True
+    _observation_lookup = lookup
+    setattr(source_class, "open_session", exchange)
 
 
 def current_observation(broker, session):
-    receipt = getattr(session, "_trust_observation", None)
-    if (
-        type(receipt) is not _Observation
-        or receipt not in _ISSUED
-        or receipt.broker is not broker
-        or receipt.session is not session
-    ):
-        raise ReviewInputError("trust current observation requires source issuance")
+    if _observation_lookup is None:
+        raise ReviewInputError("trust observation source is unavailable")
+    receipt = _observation_lookup(broker, session)
     document = json.loads(receipt.document)
     authority = parse_authority(document["authority"], grant=True)
     if not authority["issued_at"] <= int(time.time()) < authority["expires_at"]:
@@ -136,44 +170,106 @@ def compare_current_observation(broker, session, record):
 
 @dataclass(frozen=True, eq=False)
 class _RestoredEnrollment:
-    ledger: object
-    record: Any
+    ledger: Any
+    record_bytes: bytes
+    enrollment_bytes: bytes
+    root: str
     producer: str
 
 
-_RESTORED: weakref.WeakSet[_RestoredEnrollment] = weakref.WeakSet()
+_native_sources: dict[str, Any] = {}
+
+
+def _install_native_source(source_class):
+    """Pin each known ordinary source once during its defining module import."""
+    role = source_class.__name__
+    if role in _native_sources:
+        raise ReviewInputError("trust native source already installed")
+    expected: Any
+    if role == "GitHubIssueCommentSessionLedger":
+        from .session_ledger import GitHubIssueCommentSessionLedger
+
+        expected = GitHubIssueCommentSessionLedger
+    elif role == "StartupRunLedger":
+        from .review_run import StartupRunLedger
+
+        expected = StartupRunLedger
+    else:
+        raise ReviewInputError("trust native source class is unsupported")
+    if source_class is not expected:
+        raise ReviewInputError("trust native source class is unsupported")
+    methods = {
+        name: getattr(source_class, name)
+        for name in dir(source_class)
+        if not name.startswith("__") and callable(getattr(source_class, name))
+    }
+    issued: weakref.WeakSet[_RestoredEnrollment] = weakref.WeakSet()
+
+    def guard(ledger):
+        if type(ledger) is not source_class or any(
+            name in ledger.__dict__ or getattr(source_class, name) is not method
+            for name, method in methods.items()
+        ):
+            raise ReviewInputError("trust native source implementation changed")
+        if ledger.app_slug is None or ledger.evidence_budget is None:
+            raise ReviewInputError("trust cold restore requires bounded native source")
+
+    def load(ledger, identity, now):
+        guard(ledger)
+        loaded = methods["load"](ledger, identity, now=now)
+        guard(ledger)
+        if loaded.status not in {"ok", "migrated"} or loaded.record is None:
+            raise ReviewInputError("trust cold original root unavailable")
+        if loaded.record.trust_enrollment is None:
+            return loaded, None
+        original_observation(loaded.record)
+        receipt = _RestoredEnrollment(
+            ledger,
+            canonical_bytes(loaded.record.to_dict()),
+            canonical_bytes(loaded.record.trust_enrollment),
+            loaded.record.record_sha256,
+            ledger.evidence_producer(),
+        )
+        issued.add(receipt)
+        return loaded, receipt
+
+    def restore(receipt):
+        from review_sensei.session import SessionRecord
+
+        if type(receipt) is not _RestoredEnrollment or receipt not in issued:
+            raise ReviewInputError(
+                "trust original enrollment requires native source restore"
+            )
+        guard(receipt.ledger)
+        if receipt.ledger.evidence_producer() != receipt.producer:
+            raise ReviewInputError("trust original native producer changed")
+        record = SessionRecord.from_dict(json.loads(receipt.record_bytes))
+        if (
+            record.record_sha256 != receipt.root
+            or canonical_bytes(record.trust_enrollment) != receipt.enrollment_bytes
+        ):
+            raise ReviewInputError("trust original receipt commitment changed")
+        return record
+
+    _native_sources[role] = (source_class, load, restore)
 
 
 def load_original_enrollment(ledger, identity, *, now=None):
-    """Use the ordinary bounded native load once; do not accept supplied roots.
-
-    Intended to replace, not follow, the admission's existing session load.
-    Its caller must retain the original read allowance and terminal reservations.
-    Missing legacy enrollment remains explicit and issues no historical proof.
-    """
-    from .api_run_requests import ApiRunSessionLedger
-    from .session_ledger import GitHubIssueCommentSessionLedger
-
-    if (
-        type(ledger) not in {GitHubIssueCommentSessionLedger, ApiRunSessionLedger}
-        or ledger.app_slug is None
-        or ledger.evidence_budget is None
-    ):
+    """Replace the ordinary bounded native load; do not add a second census."""
+    source = _native_sources.get(type(ledger).__name__)
+    if source is None or source[0] is not type(ledger):
         raise ReviewInputError("trust cold restore requires bounded native source")
-    loaded = ledger.load(identity, now=now)
-    if loaded.status not in {"ok", "migrated"} or loaded.record is None:
-        raise ReviewInputError("trust cold original root unavailable")
-    if loaded.record.trust_enrollment is None:
-        return loaded, None
-    original_observation(loaded.record)
-    receipt = _RestoredEnrollment(ledger, loaded.record, ledger.evidence_producer())
-    _RESTORED.add(receipt)
-    return loaded, receipt
+    return source[1](ledger, identity, now)
 
 
 def compare_restored_observation(broker, session, restored):
-    if type(restored) is not _RestoredEnrollment or restored not in _RESTORED:
+    if type(restored) is not _RestoredEnrollment:
         raise ReviewInputError(
             "trust original enrollment requires native source restore"
         )
-    return compare_current_observation(broker, session, restored.record)
+    source = _native_sources.get(type(restored.ledger).__name__)
+    if source is None:
+        raise ReviewInputError(
+            "trust original enrollment requires native source restore"
+        )
+    return compare_current_observation(broker, session, source[2](restored))

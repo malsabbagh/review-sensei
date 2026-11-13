@@ -3333,3 +3333,11 @@ class GitHubIssueCommentSessionLedger:
         if result.content_digest() != target_tx.result_sha256:
             raise ReviewInputError("retained result digest does not match transaction")
         return replace(result, transaction=target_tx)
+
+
+# Register the real cold-reader implementation once; model decoders cannot
+# manufacture an authenticated original enrollment receipt.
+from .trust_enrollment import _install_native_source  # noqa: E402
+
+_install_native_source(GitHubIssueCommentSessionLedger)
+del _install_native_source

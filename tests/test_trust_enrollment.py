@@ -147,12 +147,99 @@ print(record.record_sha256)
                     compare_restored_observation(
                         fixture.client, session, replace(restored)
                     )
+                initial = compare_restored_observation(
+                    fixture.client, session, restored
+                )
+                mutable = loaded.record.trust_enrollment
+                mutable["document"]["authority"]["current_observation"]["installation"][
+                    "id"
+                ] = 100
+                mutable["sha256"] = hashlib.sha256(
+                    canonical_bytes(mutable["document"])
+                ).hexdigest()
+                # Receipt owns immutable source bytes, not this mutable model.
+                self.assertEqual(
+                    compare_restored_observation(fixture.client, session, restored),
+                    initial,
+                )
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(budget.calls, 1)
             else:
                 with self.assertRaises(ReviewInputError):
                     load_original_enrollment(ledger, IDENTITY, now=STAMP)
             self.assertTrue(all(method == "GET" for method, _, _ in calls))
+
+    def test_source_issuer_is_closed_and_decorated_dispatch_cannot_issue(self):
+        from functools import wraps
+        from types import SimpleNamespace
+
+        from review_sensei_github.broker_client import BrokerClient
+        from review_sensei_github.trust_enrollment import _install_observation_source
+
+        with self.assertRaisesRegex(ReviewInputError, "already installed"):
+            _install_observation_source(BrokerClient)
+        fixture, session = source_session()
+        with self.assertRaisesRegex(ReviewInputError, "dispatch changed"):
+            BrokerClient.open_session(
+                SimpleNamespace(authority=observed("review")[0]),
+                "synthetic-oidc",
+                repository_id=123,
+                pull_request=7,
+                head_sha=HEAD,
+            )
+        original = BrokerClient.open_session
+
+        @wraps(original)
+        def decorated(self, *args, **kwargs):
+            return original(self, *args, **kwargs)
+
+        with patch.object(BrokerClient, "open_session", decorated):
+            with self.assertRaisesRegex(ReviewInputError, "dispatch changed"):
+                fixture.client.open_session(
+                    "synthetic-oidc", repository_id=123, pull_request=7, head_sha=HEAD
+                )
+        with patch.object(fixture.client, "_post", wraps=fixture.client._post):
+            with self.assertRaisesRegex(ReviewInputError, "dispatch changed"):
+                fixture.client.open_session(
+                    "synthetic-oidc", repository_id=123, pull_request=7, head_sha=HEAD
+                )
+        self.assertEqual(len(fixture.calls), 1)
+
+    def test_native_reader_rejects_decorated_and_substituted_paths_before_io(self):
+        from functools import wraps
+
+        from fake_github_http import make_http
+        from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
+        from review_sensei_github.trust_enrollment import (
+            _install_native_source,
+            load_original_enrollment,
+        )
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        with self.assertRaisesRegex(ReviewInputError, "already installed"):
+            _install_native_source(GitHubIssueCommentSessionLedger)
+        http, calls = make_http([])
+        ledger = GitHubIssueCommentSessionLedger(
+            http,
+            token="synthetic",
+            app_slug="reviewsensei[bot]",
+            evidence_budget=EvidenceReadBudget(),
+        )
+        original = GitHubIssueCommentSessionLedger.load
+
+        @wraps(original)
+        def decorated(self, *args, **kwargs):
+            return original(self, *args, **kwargs)
+
+        with patch.object(GitHubIssueCommentSessionLedger, "load", decorated):
+            with self.assertRaisesRegex(ReviewInputError, "implementation changed"):
+                load_original_enrollment(ledger, IDENTITY)
+        for method in ("load", "_discover", "evidence_producer", "_part_owner"):
+            with patch.object(ledger, method, wraps=getattr(ledger, method)):
+                with self.assertRaisesRegex(ReviewInputError, "implementation changed"):
+                    load_original_enrollment(ledger, IDENTITY)
+        self.assertEqual(calls, [])
 
     def test_supplied_or_mutated_models_and_expired_receipts_never_issue(self):
         fixture, session, record = self.enrolled()

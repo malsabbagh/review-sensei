@@ -133,6 +133,12 @@ class StartupRunLedger(GitHubIssueCommentSessionLedger):
         return self.http.paginate(path=path, token=self.token)
 
 
+from .trust_enrollment import _install_native_source  # noqa: E402
+
+_install_native_source(StartupRunLedger)
+del _install_native_source
+
+
 @dataclass(frozen=True)
 class CompletedAnalysis:
     result: ReviewResult = field(repr=False)
