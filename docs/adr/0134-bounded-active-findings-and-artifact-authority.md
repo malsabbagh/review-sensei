@@ -346,3 +346,39 @@ selection history or evidence that a revoke/restore transition did not occur
 between observations. Those claims require an authenticated durable event
 producer or an explicitly accepted narrower product contract. Neither option is
 implicitly selected by this source change.
+
+
+### Explicit legacy profile and historical lifecycle origins
+
+The local compatibility profile is selected only for the exact source-owned
+local ledger/publisher/finalizer combination, with hosted-ledger and lifecycle
+write flags disabled, no active-window or drift enrollment, no cached lifecycle,
+native or trust uncertainty, and a successfully loaded root without a lifecycle
+reference. It preserves the existing ledger, history and finalizer. Enrolled,
+custom, malformed and lifecycle-bearing contexts do not take this route. This
+corrects producer/consumer profile asymmetry, not a migration or empty-history
+fallback. Existing 77/100/250 human-inventory journeys exercise the original
+profile without changing their provider-count or approval assertions.
+
+`quarantine-lifecycle-published-assessment-source-v1` keeps the historical source's
+closed four-field shape while giving its assessment IDs explicit immutable
+semantics: `instance` is the original obligation ID and `concern` is the original
+resolution criterion digest, independent of latest display comments. Its
+original record is authenticated by the selected root or enclosing predecessor
+archive. Fresh charged partition reads validate manifest, length, producer and
+scope; the reader accepts self-contained packed-v3 journals, not v4 dependency
+references lacking this historical proof contract. It does not synthesize a
+current `load` or restore historical state as present authority.
+
+The journal binds confirmed main-review POST or scoped PUT commitments to fresh
+native review identity, owner, head, body and finding index. Current-scope fences
+surround the operation. Required blocking and human obligations include hidden
+findings; complete-origin mode preserves resolved criteria, and distinct origins
+preserve duplicate obligations. The existing 100-assessment/24,000-byte per-origin
+and 200-assessment aggregate caps remain unchanged. Missing/edited/foreign
+carriers, native body/owner/head mutation, duplicate publication or version
+conflict hold. `tests/test_quarantine_lifecycle_origin.py` covers an actual
+cap-one producer with three obligations and a genuinely archived predecessor,
+not a supplied synthetic lifecycle dictionary. This source reader qualification
+does not establish a complete successor-quarantine journey or settle its prior
+uncertain effects.

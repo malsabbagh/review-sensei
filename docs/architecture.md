@@ -1054,15 +1054,27 @@ approval is held for that invocation. The projection receipt expressly does not
 evaluate durable authority. See [ADR 0134](adr/0134-bounded-active-findings-and-artifact-authority.md).
 
 
-## Cold finding inventory at the session boundary
+## Durable finding inventory at the session boundary
 
-Active-window/drift inventories are still process-local, not reconstructed from
-reduced baseline history. The unbound cold application path checks selected
-ledger history before preparing a session round. An existing lifecycle without
-selected in-memory state produces a handoff, preserving reservations and
-review-round counters. Hosted authority-read charges continue.
+The bounded lifecycle candidate persists complete immutable finding criteria,
+active/contingent slots, location and native-thread bindings, coverage and native
+intent/receipt history beneath the independently selected session root. Fresh
+application processes reconstruct this state from authenticated inline or
+partitioned evidence instead of reconstructing authority from reduced baseline
+history. Complete producer, reader, publication and terminal-accounting
+qualification remains pending for the final exact candidate.
 
-Known-marker reads are reused within existing bounds, with no extra census,
-storage or allowance. Bound transaction validation is unchanged. This correction
-does not supply durable slot/effect restoration or close G10/G14/G16. See
+Explicit local legacy sessions continue their established human-inventory path
+when they have no lifecycle reference or cached lifecycle/native/trust state and
+have not selected hosted-ledger, active-window or drift enrollment. This is not
+migration of an incomplete enrolled session: missing authenticated lifecycle
+state on an enrolled path still produces a handoff, preserving original
+reservations, uncertainty and review-round counters.
+
+Historical quarantine origins have a separate versioned v3 source contract. An
+authenticated original record binds complete immutable criteria and fresh
+carrier/native-publication readback; a historical record is not fabricated
+current-root authority. Unsupported shared-base dependencies and missing native
+proof remain held. These changes add no census, storage allowance, activation
+or historical settlement. See
 [ADR 0134](adr/0134-bounded-active-findings-and-artifact-authority.md).
