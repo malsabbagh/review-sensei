@@ -89,8 +89,8 @@ class GuardedPublicationFloorTests(unittest.TestCase):
             forbidden = [
                 row
                 for row in fixture.trace
-                if row[0] in {"POST", "PUT", "PATCH", "DELETE"}
-                and ("check-runs" in row[1] or row[1].endswith("/reviews"))
+                if row[1] in {"POST", "PUT", "PATCH", "DELETE"}
+                and ("check-runs" in row[2] or row[2].endswith("/reviews"))
             ]
             self.assertEqual(forbidden, [])
             self.assertEqual(
