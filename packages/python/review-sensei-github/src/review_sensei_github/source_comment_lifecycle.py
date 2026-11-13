@@ -50,7 +50,7 @@ from review_sensei.writer_containment import (
     IssuedWriterToken,
 )
 
-from .api_run_history import read_action_result
+from .accepted_action import observe_selected_action
 from .api_run_owner import ApiRunActionsEvidence
 from .api_run_requests import json_copy
 from .unstarted_action_recovery import (
@@ -464,8 +464,8 @@ def _determine_phase_and_source(
         raise ReviewInputError("source lifecycle record lacks caller accounting")
     state = ApiRunAccounting.from_document(record.api_run_accounting)
     state.require_writer_version()
-    action = state.action
-    if action is None:
+    accepted = observe_selected_action(ledger, identity, record)
+    if accepted is None:
         if candidate_source is None:
             raise ReviewInputError(
                 "pre-admission source lifecycle classification requires candidate_source"
@@ -475,7 +475,7 @@ def _determine_phase_and_source(
             _validate_source_descriptor(candidate_source, label="candidate source"),
         )
     bound_source = _validate_source_descriptor(
-        action["intent"]["source"], label="admitted source"
+        accepted.source_document(), label="admitted source"
     )
     if candidate_source is not None:
         validated_candidate = _validate_source_descriptor(
@@ -488,7 +488,7 @@ def _determine_phase_and_source(
             raise ReviewInputError(
                 "candidate source comment identity conflicts with admitted action"
             )
-    if action["phase"] == "terminal":
+    if accepted.phase == "terminal":
         return "terminal_completed", bound_source
     same_caller_unresolved = (
         transport_state.is_activated
@@ -510,8 +510,8 @@ def _determine_phase_and_source(
         or state.terminal_transaction is not None
     )
     action_started = (
-        bool(action["execution_started"])
-        or state.uncertain > 0
+        accepted.execution_started
+        or accepted.uncertain_requests > 0
         or same_caller_unresolved
         or has_conflicting_review_work
     )
@@ -570,11 +570,6 @@ def classify_source_comment_lifecycle(
         candidate_source=candidate_source,
         has_pending_receipt=has_pending_receipt,
     )
-    if phase == "terminal_completed":
-        if record is None:
-            raise ReviewInputError("terminal source lifecycle requires a record")
-        read_action_result(ledger, identity, record)
-
     observation = observe_live_source_revision(
         caller=caller,
         ledger=ledger,

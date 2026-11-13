@@ -55,16 +55,21 @@ keeping the existing caller workflow subscriptions unchanged:
    for exact result recovery. This process-local proof is not serialized historical
    cessation authority and creates no replacement allowance.
 2. **Current-state convergence, ownership, and finite stop rule (`G13`):**
-   Reconcile admitted events and manual recovery actions against the
-   authenticated live pull-request `(base_sha, head_sha)` target
-   (`LivePullRequestTarget`) rather than assuming durable FIFO webhook delivery.
-   Assign explicit ownership (`RECONCILIATION_OWNERS`) and enforce a finite
-   no-progress stop (`MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS = 2`,
-   `finite_no_progress_stop`) on repeated unchanged non-progressing attempts
-   without background reconcilers or paid retries, resetting when state
-   advances. When per-PR Actions concurrency displaces a pending run, emit an
-   explicit `ReplacedQueueNotice` naming the superseded run and exact recovery
-   command instead of silently dropping accepted intent.
+   Model reconciliation of admitted events and manual recovery actions against
+   a supplied authenticated live pull-request `(base_sha, head_sha)` target
+   (`LivePullRequestTarget`) and supplied `AcceptedOperationRecord` history,
+   rather than assuming durable FIFO webhook delivery. The classifier assigns
+   explicit ownership (`RECONCILIATION_OWNERS`) and enforces a finite no-progress
+   stop (`MAX_NO_PROGRESS_RECONCILIATION_ATTEMPTS = 2`,
+   `finite_no_progress_stop`) when that history proves repeated unchanged
+   non-progressing attempts, resetting when the supplied state advances. It
+   launches no background reconcilers or paid retries. The deterministic
+   `simulate_actions_concurrency_queue` helper returns `ReplacedQueueNotice`
+   values naming displaced pending runs and recovery commands; the convergence
+   classifier holds when supplied `was_queued_replaced=True`. Neither helper
+   detects real Actions queue replacement or publishes a notice from a displaced
+   run. Durable history/progress inputs and live queue-replacement observation
+   remain integration requirements, not guarantees of the installed caller.
 3. **Explicit `merge_group` unsupported boundary and snapshot certification
    (`G07`):** Reject `merge_group` (`checks_requested`, `destroyed`) events
    deterministically with `merge_group_unsupported` across `trigger.py`,
@@ -124,20 +129,71 @@ adapters do not make receipt observation into completed-operation authority.
 
 A duplicate delivery flag alone cannot declare convergence or suppress admission:
 a caller can fail after receiving a route and before accepting the operation.
-Redelivery therefore re-evaluates current source/session state and accepted
-operation history. Completed matching work is reused, pending/uncertain work
-holds, and unadmitted work may reach the existing admission gate. Route selection
-never itself dispatches inference or establishes terminal native completion.
+Redelivery therefore re-evaluates the supplied current source/session state
+rather than trusting the delivery flag. Where matching accepted-operation
+history is supplied to the convergence classifier, completed work is reused,
+pending/uncertain work holds, and unadmitted work may reach the existing
+admission gate. This is not proof that ordinary cold-process routing reconstructs
+all prior accepted operations. Route selection never itself dispatches inference
+or establishes terminal native completion.
 This correction does not introduce durable webhook processing storage, relax
 original budgets, or replace the G02/G08 writer fence and G13 durable-history
 integration requirements. Legacy installation/setup verification is unchanged.
 
+### Current-root accepted action observation (G13/G32 partial slice)
+
+The existing `ApiRunRequestTransport.admit_action`, execution-entry checkpoint
+and terminal-result writer are the durable producer for ordinary command/reply
+actions. `accepted_action` now provides a typed observation of those exact
+accounting bytes, source revision, operation key, head, phase, uncertainty and
+terminal outcome. Ordinary source lifecycle classification consumes the same
+normalizer rather than independently interpreting the action mapping. The
+selected record is locally integrity-checked and detached before normalization:
+post-construction mutation of its nested accounting cannot retain the old root
+hash while changing the observation. The accounting digest hashes the canonical
+stored mapping directly, not a second model serialization. Neither check
+authenticates an arbitrary copied/evolved record or establishes native freshness.
+Terminal normalization uses the existing retained-result decoder and exact
+operation / producer binding before returning a result digest.
+
+`read_current_action` is a separate read-only entry point for a fresh process.
+It requires configured Bot ownership and the existing native read budget, loads
+one current root and refuses missing/invalid authority. An authenticated
+actionless root means only that this root contains no action. It does not mean
+that earlier accepted operations are absent. Selected-root normalization adds no
+HTTP requests to the ordinary lifecycle, while explicit current-root reads
+consume the existing ledger budget. Neither entry point follows ancestors,
+changes census/storage limits, writes state, or issues a replacement allowance.
+
+An observation is not an execution or settlement capability and does not make a
+stale selected root current. Existing live source, caller ownership, uncertainty,
+positive non-dispatch and cessation/fencing checks remain mandatory. In
+particular `execution_started=false` never becomes `NoBusinessDispatchEvidence`.
+The action intent does not retain a review base or full finding-state inventory.
+Consequently these observations deliberately cannot be converted into G13
+`AcceptedOperationRecord.made_progress` receipts: even an explicit no-op may
+have performed native finalization. No no-progress count is inferred from
+request counts, an outcome label or a changed root hash.
+
+This qualifies only cold reconstruction of one existing action observation and
+its ordinary source-lifecycle consumption using synthetic native HTTP. Full
+accepted-operation history production/consumption, durable semantic-progress
+receipts, queue-replacement observation, cross-process non-dispatch/cessation
+and installed/deployed qualification remain open. It closes neither G13 nor
+G32 and settles no historical obligation.
+
 ## Consequences
 
-Every GitHub pull-request lifecycle event has a deterministic, tested outcome
-with zero unapproved inference spend. Duplicate, delayed, or out-of-order
-deliveries cannot trigger redundant paid analysis, and merge-queue commits
-cannot inherit false certification from ordinary PR-head reviews. Operators must
+The event decision table gives each covered GitHub pull-request lifecycle
+event a deterministic, tested classification without dispatching inference.
+With the required live target and accepted-operation history supplied, the
+convergence classifier rejects stale events, reuses matching retained work and
+holds uncertain work without scheduling redundant inference. This modeled
+behavior is not an end-to-end guarantee that duplicate, delayed, or out-of-order
+deliveries cannot cause repeated paid analysis in an installed caller: full
+durable-history production/consumption and queue-replacement observation remain
+open. Merge-queue commits cannot inherit certification from ordinary PR-head
+receipts under the exact-snapshot certification boundary. Operators must
 invoke the documented bounded recovery command (`@reviewsensei verify`,
 `@reviewsensei review status`, `@reviewsensei rescan`,
 `@reviewsensei review remaining`, or `workflow_dispatch`) after unsubscribed
@@ -162,7 +218,8 @@ Actions queue replacement.
 ## Validation
 
 Focused unit and integration-style provider-free suites qualify each slice:
-`tests/test_trigger_coverage_g01.py`, `tests/test_event_convergence_g13.py`,
+`tests/test_accepted_action.py`, `tests/test_trigger_coverage_g01.py`,
+`tests/test_event_convergence_g13.py`,
 `tests/test_merge_queue_boundary_g07.py`,
 `tests/test_thread_resolution_convergence_g26.py`, and
 `tests/test_human_review_independence_g28.py`, alongside existing setup,
