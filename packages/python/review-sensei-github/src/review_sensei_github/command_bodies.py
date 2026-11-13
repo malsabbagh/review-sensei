@@ -1962,3 +1962,8 @@ report_broker_failure = _report_broker_failure
 run_github = _run_github
 run_host_plan = _run_host_plan_command
 resolve_hosted_openrouter_parser = _resolve_hosted_openrouter_parser
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

@@ -223,7 +223,7 @@ def _install_transport_source(source_class):
                 require_source()
                 route.require_accounting()
                 if (
-                    route.count != 3
+                    route.count != route.expected_count
                     or run.caller.accounting.action["phase"] != "terminal"
                 ):
                     raise ReviewInputError("trust status route did not finish")

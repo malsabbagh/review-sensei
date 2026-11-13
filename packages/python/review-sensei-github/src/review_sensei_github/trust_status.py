@@ -52,11 +52,15 @@ class _StatusRoute:
         command = parse_maintainer_command(
             args.comment_body, actor=original["actor"]["login"]
         )
-        if command is None or command.action != "status":
+        if command is None or command.action not in {"status", "pause", "continue"}:
             raise ReviewInputError(
                 "trust status complete route does not admit other commands"
             )
-        caller.budget_view.preflight(STATUS_WORK_CALLS)
+        self.action = command.action
+        extra = (NATIVE_OPERATION_REQUESTS + 1) if self.action != "status" else 0
+        # Continue reads the current collaborator permission exactly once.
+        extra += int(self.action == "continue")
+        caller.budget_view.preflight(STATUS_WORK_CALLS + extra)
         terminal = next(
             (
                 b
@@ -88,7 +92,24 @@ class _StatusRoute:
             or record.reservation_id is not None
         ):
             raise ReviewInputError("trust status retained route is unsupported")
+        from review_sensei.convergence import DEFAULT_MAX_FAILED_ATTEMPTS
+        from review_sensei.session import failed_attempts_for_head
+
+        if (
+            self.action == "continue"
+            and failed_attempts_for_head(record, run.head_sha)
+            >= DEFAULT_MAX_FAILED_ATTEMPTS
+        ):
+            raise ReviewInputError("trust continue successor route is unsupported")
         compare_current_observation(profile.broker, profile.session, record)
+        self.target_paused = self.action == "pause"
+        self.changes_pause = self.action != "status" and (
+            record.operator_paused != self.target_paused
+        )
+        self.expected_count = 3 + int(self.changes_pause)
+        changed = json.loads(self.business(record))
+        changed["operator_paused"] = self.target_paused
+        self.changed_business = canonical_bytes(changed)
         self.run, self.profile, self.require_source = run, profile, require_source
         self.baseline = self.business(record)
         self.initial_root = record.record_sha256
@@ -202,7 +223,11 @@ class _StatusRoute:
         self.require_accounting()
         run, profile = self.run, self.profile
         candidate = caller._checkpoint
-        if caller is not run.caller or self.count >= 3 or candidate is None:
+        if (
+            caller is not run.caller
+            or self.count >= self.expected_count
+            or candidate is None
+        ):
             raise ReviewInputError("trust status native stage is unavailable")
         try:
             parsed = parse_session_comment(
@@ -220,7 +245,12 @@ class _StatusRoute:
             or request.get_header("Authorization") != f"Bearer {profile.session.token}"
             or parsed is None
             or canonical_bytes(parsed.to_dict()) != canonical_bytes(candidate.to_dict())
-            or self.business(parsed) != self.baseline
+            or self.business(parsed)
+            != (
+                self.changed_business
+                if self.changes_pause and self.count >= 2
+                else self.baseline
+            )
             or parsed.generation != self.generation + self.count + 1
             or run.ledger.token != profile.session.token
         ):
@@ -256,11 +286,22 @@ class _StatusRoute:
             action["phase"] != "pending" or not action["execution_started"]
         ):
             raise ReviewInputError("trust status entry transition changed")
-        if self.count == 2:
+        if (
+            self.changes_pause
+            and self.count == 2
+            and (action["phase"] != "pending" or not action["execution_started"])
+        ):
+            raise ReviewInputError("trust pause business transition changed")
+        if self.count == self.expected_count - 1:
             proof = caller._action_result_proof
             if (
                 action["phase"] != "terminal"
-                or action["outcome"] != {"kind": "explicit_noop", "reason": "status"}
+                or action["outcome"]
+                != (
+                    {"kind": "explicit_noop", "reason": "status"}
+                    if self.action == "status"
+                    else {"kind": "applied", "reason": None}
+                )
                 or proof is None
                 or action["result"] != proof.manifest
             ):

@@ -14,6 +14,8 @@ import importlib
 # finding/assessment/refinalization routes are not admitted by this contract.
 _MODULES = (
     "review_sensei_github.action_run",
+    "review_sensei_github.commands",
+    "review_sensei_github.command_bodies",
     "review_sensei_github.review_run",
     "review_sensei_github.application",
     "review_sensei_github.action_representability",
