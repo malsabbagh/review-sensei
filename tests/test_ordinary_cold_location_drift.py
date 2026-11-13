@@ -1,5 +1,6 @@
 """Real diff-derived cold location drift, without supplied drift descriptors."""
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -7,8 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from review_sensei_github.publication import NativeFindingReceipt
 from test_review_run import EntryFixture
 
+from review_sensei.bounded_evidence import canonical_bytes
 from tests.test_ordinary_native_recovery_cold import subprocess_environment
 
 CHILD = r"""
@@ -40,7 +43,7 @@ state=seen[-1][0]._drift_states.get((123,7)) if seen else None
 initial=decode_lifecycle_state(next(doc for _,doc in seen if doc is not None)['lifecycle']).state if any(doc is not None for _,doc in seen) else None
 def describe(s):
     return None if s is None else {'obligations':[asdict(o) for o in s.inventory.obligations],'slots':[asdict(x) for x in s.slots]}
-Path(sys.argv[3]).write_text(json.dumps({'code':code,'error':f.error,'initial_document':next((doc for _,doc in seen if doc is not None),None),'initial':describe(initial),'state':describe(state),'threads':f.threads,'reviews':f.reviews,'provider_calls':f.provider_calls,'remote':{k:getattr(f,k) for k in p['remote']}}))
+Path(sys.argv[3]).write_text(json.dumps({'record':parse_session_comment(f.comment['body'],identity=IDENTITY).to_dict(),'code':code,'error':f.error,'initial_document':next((doc for _,doc in seen if doc is not None),None),'initial':describe(initial),'state':describe(state),'threads':f.threads,'reviews':f.reviews,'receipts':seen[-1][0].native_finding_receipts(repository_id=123,pull_request=7) if seen else [],'provider_calls':f.provider_calls,'remote':{k:getattr(f,k) for k in p['remote']}}))
 """
 
 
@@ -119,9 +122,6 @@ class OrdinaryColdLocationDriftTests(unittest.TestCase):
             initial = result["initial"]["obligations"][0]
             # This is the actual authenticated pre-transition carrier, not an
             # expected model assembled from the later conservative projection.
-            original_document_bytes = json.dumps(
-                result["initial_document"], sort_keys=True
-            )
             self.assertFalse(initial["criterion"]["blocking"])
             self.assertTrue(initial["criterion"]["needs_human"])
             self.assertFalse(initial["latest_comment"]["effective_blocking"])
@@ -176,6 +176,7 @@ class OrdinaryColdLocationDriftTests(unittest.TestCase):
                 self.assertEqual(done.returncode, 0, done.stderr)
                 partial = json.loads(output.read_text())
                 self.assertEqual(partial["code"], 0, partial["error"])
+                self.assertEqual(len(partial["state"]["obligations"]), 1)
                 held = partial["state"]["obligations"][0]
                 self.assertEqual(held["criterion"], current["criterion"])
                 self.assertEqual(held["lifecycle_state"], "ambiguous-multi-target")
@@ -186,12 +187,73 @@ class OrdinaryColdLocationDriftTests(unittest.TestCase):
                 self.assertIsNone(held["resolution_proof_sha256"])
                 self.assertNotEqual(held["thread_binding"]["slot_state"], "released")
                 self.assertEqual(len(partial["threads"]), 1)
-                self.assertFalse(
-                    any(r["state"] == "APPROVED" for r in partial["reviews"])
+                self.assertFalse(partial["threads"][0]["isResolved"])
+                self.assertEqual(
+                    partial["threads"][0]["id"], current["thread_binding"]["thread_id"]
                 )
                 self.assertEqual(
-                    json.dumps(result["initial_document"], sort_keys=True),
-                    original_document_bytes,
+                    {
+                        k: v
+                        for k, v in held["thread_binding"].items()
+                        if k != "proof_sha256"
+                    },
+                    {
+                        k: v
+                        for k, v in current["thread_binding"].items()
+                        if k != "proof_sha256"
+                    },
+                )
+                # Fresh logical head changes the projection hash. Separately
+                # validate the retained physical receipt against native bytes.
+                for phase, obligation, head in (
+                    (result, current, "d" * 40),
+                    (partial, held, "e" * 40),
+                ):
+                    matching = []
+                    for raw in phase["receipts"]:
+                        receipt = NativeFindingReceipt(
+                            **{k: v for k, v in raw.items() if k != "schema_version"}
+                        )
+                        if (
+                            receipt.thread_id
+                            == obligation["thread_binding"]["thread_id"]
+                        ):
+                            matching.append(receipt)
+                    self.assertEqual(len(matching), 1)
+                    receipt = matching[0]
+                    native = phase["threads"][0]["comments"]["nodes"][0]
+                    # Core's retained-binding hash is a logical projection
+                    # commitment, not a new source-issued native receipt.
+                    projected_proof = hashlib.sha256(
+                        canonical_bytes(
+                            {
+                                "thread_id": receipt.thread_id,
+                                "head_sha": head,
+                                "obligation_id": obligation["criterion"][
+                                    "obligation_id"
+                                ],
+                                "placement": obligation["thread_binding"]["placement"],
+                            }
+                        )
+                    ).hexdigest()
+                    self.assertEqual(
+                        obligation["thread_binding"]["proof_sha256"], projected_proof
+                    )
+                    self.assertEqual(
+                        receipt.native_head_sha or receipt.head_sha,
+                        native["commit"]["oid"],
+                    )
+                    self.assertEqual(receipt.thread_id, phase["threads"][0]["id"])
+                    self.assertEqual(receipt.comment_id, native["databaseId"])
+                    self.assertEqual(
+                        receipt.producer_id, native["author"]["databaseId"]
+                    )
+                    self.assertEqual(
+                        receipt.body_sha256,
+                        hashlib.sha256(native["body"].encode()).hexdigest(),
+                    )
+                self.assertFalse(
+                    any(r["state"] == "APPROVED" for r in partial["reviews"])
                 )
             else:
                 self.assertEqual(current["present_anchor"]["path"], "src/renamed.py")
