@@ -6,6 +6,7 @@ Only the actual module loader's executing definition may register itself once.
 
 from __future__ import annotations
 
+import copyreg
 import inspect
 import sys
 from types import ModuleType
@@ -88,6 +89,14 @@ def _build_registry():
                 continue
             bindings.append((module, key, value, getattr(value, "__code__", None)))
             if inspect.isclass(value) and value.__module__ == name:
+                # copy.copy lazily materializes this stdlib metadata on the
+                # class. Compute it at definition time, without constructing or
+                # copying an application object, then seal its binding/content.
+                slot_names = getattr(copyreg, "_slotnames")(value)
+                if type(slot_names) is not list or any(
+                    not isinstance(slot, str) for slot in slot_names
+                ):
+                    raise ReviewInputError("original class slot metadata is invalid")
                 members: list[tuple[Any, str, Any, Any]] = []
                 original_methods = {}
                 executable = set()
@@ -121,6 +130,7 @@ def _build_registry():
                     frozenset(executable),
                     tuple(members),
                     original_methods,
+                    (slot_names, tuple(slot_names)),
                 )
                 bindings.extend(members)
         for _owner, _name, original, _code in bindings:
@@ -151,11 +161,15 @@ def _build_registry():
         original = classes.get(cls)
         if original is None:
             raise ReviewInputError("original source class is unavailable")
-        module, name, namespace, executable, bindings, _methods = original
+        module, name, namespace, executable, bindings, _methods, slots = original
+        slot_values = slots[0]
         if (
             sys.modules.get(module.__name__) is not module
             or getattr(module, name, None) is not cls
             or frozenset(vars(cls)) != namespace
+            or vars(cls).get("__slotnames__") is not slots[0]
+            or type(slot_values) is not list
+            or tuple(slot_values) != slots[1]
             or frozenset(
                 name
                 for name in dir(cls)

@@ -91,3 +91,31 @@ class SourceRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ReviewInputError, "source changed"):
                 require_module_seal(http)
         require_module_seal(http)
+
+    def test_stdlib_copy_preserves_original_class_and_slot_cache_is_pinned(self):
+        import copy
+
+        from review_sensei_github.publication import ReviewPublisher
+
+        from review_sensei.source_registry import require_instance_source
+
+        instance = object.__new__(ReviewPublisher)
+        require_instance_source(instance, methods=())
+        original = ReviewPublisher.__slotnames__
+        clone = copy.copy(instance)
+        self.assertIs(ReviewPublisher.__slotnames__, original)
+        require_instance_source(instance, methods=())
+        require_instance_source(clone, methods=())
+        with patch.object(ReviewPublisher, "__slotnames__", list(original)):
+            with self.assertRaisesRegex(ReviewInputError, "class source changed"):
+                require_instance_source(instance, methods=())
+        original.append("injected_slot")
+        try:
+            with self.assertRaisesRegex(ReviewInputError, "class source changed"):
+                require_instance_source(instance, methods=())
+        finally:
+            original.pop()
+        with patch.object(ReviewPublisher, "publish", lambda *a, **k: None):
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_instance_source(instance, methods=())
+        require_instance_source(instance, methods=())
