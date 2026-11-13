@@ -45,8 +45,8 @@ def _unavailable(*args, **kwargs):
 
 
 enable = verification_profile = verification_calls = before_request = consume = (
-    _unavailable
-)
+    require_native_attempt
+) = _unavailable
 
 
 def _install_transport_source(source_class):
@@ -56,7 +56,8 @@ def _install_transport_source(source_class):
         verification_profile, \
         verification_calls, \
         before_request, \
-        consume
+        consume, \
+        require_native_attempt
     from .api_run_requests import ApiRunRequestTransport
 
     if _source is not None or source_class is not ApiRunRequestTransport:
@@ -66,6 +67,7 @@ def _install_transport_source(source_class):
     _profiles: WeakKeyDictionary = WeakKeyDictionary()
     _pending: WeakKeyDictionary = WeakKeyDictionary()
     _receipts: WeakKeyDictionary = WeakKeyDictionary()
+    _attempts: WeakKeyDictionary = WeakKeyDictionary()
     _admitted_routes: WeakKeyDictionary = WeakKeyDictionary()
     _initializing: WeakKeyDictionary = WeakKeyDictionary()
     initialize_source = source_class.initialize_and_activate
@@ -372,3 +374,56 @@ def _install_transport_source(source_class):
         binding["sequence"] -= 1
         if receipt[0] is not profile or receipt[1] != canonical_bytes(binding):
             raise ReviewInputError("trust effect fresh receipt changed or was reused")
+
+        # Capture only a fully consumed, exact fresh receipt after Caller.open's
+        # physical debit. A later lost response cannot confuse the preceding
+        # broker refresh POST with this native attempt.
+        observation = caller.observations[-1]
+        if not observation.get("mutation") or not isinstance(
+            observation.get("request_id"), str
+        ):
+            raise ReviewInputError("trust native attempt debit is unavailable")
+        _attempts.setdefault(caller, []).append(
+            (
+                len(caller.observations) - 1,
+                observation,
+                observation["request_id"],
+                receipt[1],
+            )
+        )
+
+    def require_native_attempt(caller, *, observations_start, method, url, body):
+        """Return one exact source-consumed native ID, never refund its charge."""
+        profile = verification_profile(caller)
+        if (
+            profile is None
+            or type(observations_start) is not int
+            or not 0 <= observations_start <= len(caller.observations)
+        ):
+            raise ReviewInputError("trust native attempt scope is unavailable")
+        rows = [
+            row for row in _attempts.get(caller, ()) if row[0] >= observations_start
+        ]
+        if len(rows) != 1:
+            raise ReviewInputError("trust native attempt identity is ambiguous")
+        index, observation, identifier, raw = rows[0]
+        for extra in caller.observations[observations_start:]:
+            if not extra.get("mutation") or extra is observation:
+                continue
+            control = caller._confirmed_control_writes.get(extra.get("request_id"))
+            if control != ("broker_authentication", str(caller.run.run_id)):
+                raise ReviewInputError("trust native attempt identity is ambiguous")
+        binding = json.loads(raw)
+        if (
+            caller.observations[index] is not observation
+            or observation.get("request_id") != identifier
+            or observation.get("mutation") is not True
+            or binding["method"] != method
+            or binding["url"] != url
+            or binding["body_sha256"] != hashlib.sha256(body).hexdigest()
+            or binding["original_sha256"]
+            != hashlib.sha256(profile.original).hexdigest()
+            or binding["grant_sha256"] != profile.grant_sha256
+        ):
+            raise ReviewInputError("trust native attempt binding changed")
+        return identifier

@@ -119,13 +119,30 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
                 raise ReviewInputError("current command receipt is unconfirmed")
             authority.fence()
             if unknown:
-                attempts = run.caller.observations[observation_index:]
-                writes = [item for item in attempts if item.get("mutation")]
-                if len(writes) != 1:
-                    raise ReviewInputError(
-                        "command receipt write identity is ambiguous"
+                if profile is not None:
+                    import json
+
+                    from .trust_effects import require_native_attempt
+
+                    request_id = require_native_attempt(
+                        run.caller,
+                        observations_start=observation_index,
+                        method="PATCH" if previous else "POST",
+                        url=run.http.api_url + target,
+                        body=json.dumps({"body": text}, separators=(",", ":")).encode(
+                            "utf-8"
+                        ),
                     )
-                # This settles the business outcome only. Accounting retains the
-                # original uncertain dispatch and every physical readback charge.
-                run.caller._reconciled_mutations.add(str(writes[0]["request_id"]))
+                else:
+                    attempts = run.caller.observations[observation_index:]
+                    writes = [item for item in attempts if item.get("mutation")]
+                    if len(writes) != 1:
+                        raise ReviewInputError(
+                            "command receipt write identity is ambiguous"
+                        )
+                    request_id = str(writes[0]["request_id"])
+                # This settles the business outcome only. Accounting retains
+                # both the refresh and original uncertain native debit.
+                run.caller._reconciled_mutations.add(request_id)
+
         allocation.confirmed = True

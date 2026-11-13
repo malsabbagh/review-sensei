@@ -115,6 +115,43 @@ class TrustInitializationTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
 
+    def test_source_native_attempt_distinguishes_refresh_after_lost_post(self):
+        from review_sensei_github.trust_effects import require_native_attempt
+
+        f = InitialEffectFixture(self.directory.name)
+        f.lost_post = True
+        start = len(f.caller.observations)
+        with self.assertRaises(GitHubPublicationTransientError):
+            f.initialize()
+        request = next(r for r, _ in f.native_requests if r.get_method() == "POST")
+        kwargs = dict(
+            observations_start=start,
+            method="POST",
+            url=request.full_url,
+            body=request.data,
+        )
+        identifier = require_native_attempt(f.caller, **kwargs)
+        observation = next(
+            o for o in f.caller.observations if o["request_id"] == identifier
+        )
+        self.assertEqual(observation["outcome"], "unknown")
+        self.assertEqual(
+            sum(o.get("mutation", False) for o in f.caller.observations[start:]), 2
+        )
+        for key, changed in (
+            ("method", "PATCH"),
+            ("url", request.full_url + "1"),
+            ("body", b"{}"),
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "binding changed"):
+                require_native_attempt(f.caller, **{**kwargs, key: changed})
+        f.caller.observations.append(
+            {"request_id": "foreign-native", "mutation": True, "outcome": "unknown"}
+        )
+        with self.assertRaisesRegex(ReviewInputError, "identity is ambiguous"):
+            require_native_attempt(f.caller, **kwargs)
+        self.assertNotIn(identifier, f.caller._reconciled_mutations)
+
     def test_real_initializer_refreshes_exact_root_once_before_post(self):
         f = InitialEffectFixture(self.directory.name)
         result = f.initialize()
