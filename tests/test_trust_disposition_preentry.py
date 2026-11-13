@@ -96,3 +96,91 @@ class PreentryIntentTests(unittest.TestCase):
                 self.assertEqual(f.caller._root, root)
                 self.assertEqual(len(f.caller.observations), count)
                 self.assertIsNone(f.caller.accounting.action)
+
+    def test_actual_retained_finding_preview_does_not_admit_or_write(self):
+        from dataclasses import replace
+
+        from review_sensei_github import action_run
+        from review_sensei_github.broker_client import BrokerClient
+        from review_sensei_github.publication import parse_finding_index
+        from review_sensei_github.trust_disposition import prepare_source_preview
+        from review_sensei_github.trust_effects import enable
+
+        from review_sensei.errors import ReviewInputError
+        from tests.test_trust_pause_cold import CurrentRoleEntryFixture
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentRoleEntryFixture(directory)
+            f.provider_comments = [
+                dict(
+                    path="src/app.py",
+                    line=2,
+                    side="RIGHT",
+                    body="Confirm this exact interface assumption.",
+                    severity="high",
+                    blocking=False,
+                    needs_human=True,
+                )
+            ]
+            self.assertEqual(f.opted(f.invoke), 0, f.error)
+            index = parse_finding_index(
+                f.reviews[-1]["body"],
+                repository_id=123,
+                pull_request=7,
+                head_sha=f.requested_head,
+            )
+            finding = "RS-" + index.entries[0].instance[:6].upper()
+            f.select_command(
+                "@reviewsensei override " + finding + " acceptable risk", new_run=True
+            )
+            captured = []
+            with patch.object(
+                action_run,
+                "execute_command",
+                lambda run, args: captured.append((run, args)) or 0,
+            ):
+                self.assertEqual(f.opted(f.invoke_command), 0, f.error)
+            run, args = captured[0]
+            broker = BrokerClient(
+                broker_url=run.broker.broker_url,
+                control=run.broker.control,
+                opener=run.caller.open,
+                authority={**run.broker.authority, "version": 4},
+            )
+            session = broker.open_session(
+                "synthetic-oidc",
+                repository_id=123,
+                pull_request=7,
+                head_sha=run.head_sha,
+                observe_actor_role=True,
+            )
+            run = replace(
+                run, session_authority=session.attestation, session_grant=session.grant
+            )
+            enable(run.caller, broker, session, api_url=run.http.api_url)
+            before, root, start = (
+                copy.deepcopy(f.comment),
+                run.caller._root,
+                len(f.trace),
+            )
+            provider_calls = f.provider_calls
+            result, preview, report, details = prepare_source_preview(run, args)
+            self.assertEqual(f.provider_calls, provider_calls)
+            self.assertTrue(report.representable)
+            self.assertTrue(result.applied)
+            self.assertEqual(len(result.receipts), 1)
+            self.assertEqual(result.receipts[0].reference, finding)
+            self.assertEqual(f.comment, before)
+            self.assertEqual(run.caller._root, root)
+            self.assertIsNone(run.caller.accounting.action)
+            self.assertFalse(
+                any(
+                    method != "GET" and path.startswith("/repos/")
+                    for _, method, path in f.trace[start:]
+                )
+            )
+            self.assertEqual(run.caller.accounting.configuration.limit, 512)
+            # A truthful detached preview never creates a native permit.
+            with self.assertRaises(ReviewInputError):
+                execute_command(run, args)
+            self.assertEqual(f.comment, before)

@@ -39,6 +39,7 @@ _MODULES = (
     "review_sensei_github.conversation",
     "review_sensei_github.learning_pr",
     "review_sensei_github.trust_status",
+    "review_sensei_github.trust_disposition",
     "review_sensei_github.trust_status_source",
     "review_sensei.disposition",
     "review_sensei.schemas",
