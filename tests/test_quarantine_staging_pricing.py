@@ -52,6 +52,19 @@ class QuarantineStagingPricingTests(unittest.TestCase):
             consume = core._consume_checkpoint_pricing
 
             def staging(*args, **kwargs):
+                if inline and not selected:
+                    before_pricing = len(fixture.trace)
+                    measured = core.preflight_finding_lifecycle(
+                        *args, future_documents=(kwargs["document"],), **kwargs
+                    )
+                    scope = census.lifecycle_capacity_plan(
+                        args[0], args[1].identity(), added_parts=0
+                    )
+                    self.assertEqual(
+                        measured["conditional_calls"],
+                        2 * (scope.plan.worst_read_calls() + 6),
+                    )
+                    self.assertEqual(len(fixture.trace), before_pricing)
                 current_tail.append(kwargs.get("reserved_tail_calls", 0))
                 try:
                     return stage(*args, **kwargs)
@@ -66,6 +79,11 @@ class QuarantineStagingPricingTests(unittest.TestCase):
                         return
                     budget = scope.caller.budget_view
                     quoted = scope.plan.worst_read_calls() + 6 + 2 * scope.parts
+                    if inline:
+                        before_pricing = len(fixture.trace)
+                        measured = core._remote_inline_plan(scope.ledger, scope.record)
+                        self.assertEqual(measured["conditional_calls"], quoted)
+                        self.assertEqual(len(fixture.trace), before_pricing)
                     tail = current_tail[-1]
                     original_hold = budget._ordinary_hold
                     remaining = budget.ordinary_remaining()

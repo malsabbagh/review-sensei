@@ -856,9 +856,11 @@ def _remote_inline_plan(ledger: Any, record: Any) -> Mapping[str, object] | None
         plan = {
             key: value for key, value in plan.items() if key != "checkpoint_pricing"
         }
-        # These counts come only from the consumed source/root-bound proof.
-        # The core's outer stage has already supplied the initial read.
-        plan["conditional_calls"] = prices[0] - 1
+        # Plain pricing includes its separately supplied initial observation.
+        # Quarantine preparation is pure: its complete census is still unpaid.
+        plan["conditional_calls"] = prices[0] - (
+            0 if issued[9] == "quarantine-inline-v1" else 1
+        )
         if issued[9] not in {
             "plain-v1",
             "plain-trust-inline-v1",
