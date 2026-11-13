@@ -1254,7 +1254,18 @@ os._exit(92)
                 )
                 self.assertEqual(f.accounted._terminal_reason, "publication-completion")
                 self.assertEqual(f.provider_calls, 1)
-                self.assertEqual(len(f.trace), 103 if human else 110)
+                # Source-owned selected-root reuse removes duplicate reads;
+                # every actual dispatch still appears in original accounting.
+                self.assertEqual(len(f.trace), 99 if human else 105)
+                measurement = caller_measurement(f)
+                self.assertEqual(measurement["configured_limit"], 512)
+                self.assertEqual(measurement["physical_attempts"], len(f.trace))
+                self.assertEqual(
+                    sum(measurement["physical_attempts_by_phase"].values()),
+                    len(f.trace),
+                )
+                self.assertEqual(measurement["observed_unknown_responses"], 0)
+                self.assertFalse(measurement["unconfirmed_native_mutation"])
                 from review_sensei_github.session_ledger import parse_session_comment
 
                 persisted = parse_session_comment(f.comment["body"], identity=IDENTITY)
