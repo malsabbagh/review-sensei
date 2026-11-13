@@ -87,6 +87,56 @@ def semantic_snapshot(state, journal):
     }
 
 
+def historical_snapshot(snapshot, ledger, record):
+    """Observe complete authenticated origin obligations, never cursor churn."""
+    if record.quarantine_lineage is None:
+        return snapshot
+    from .quarantine_origin import _AUTHENTICATED, AuthenticatedQuarantine
+
+    authenticated = getattr(ledger, "_quarantine_authenticated", None)
+    if (
+        type(authenticated) is not AuthenticatedQuarantine
+        or authenticated not in _AUTHENTICATED
+        or authenticated.lineage != record.quarantine_lineage
+        or authenticated.original_identity != record.identity()
+    ):
+        _hold("authenticated_historical_inventory_required")
+    if authenticated.record_sha256 != record.record_sha256:
+        from .quarantine_checkpoint import confirmed_checkpoint_capacity
+
+        caller = getattr(ledger, "caller", None)
+        if caller is None or authenticated.original_caller is not caller:
+            _hold("authenticated_historical_inventory_required")
+        receipt = confirmed_checkpoint_capacity(caller, ledger, record.identity())
+        if receipt.record.to_dict() != record.to_dict():
+            _hold("authenticated_historical_inventory_required")
+        # This exact owned GET proves the current root retained the identical
+        # complete lineage (including the decision-state manifest). The earlier
+        # authenticated observation stays attached to its original source root;
+        # neither its registration nor any serialized authority is rewritten.
+    # pending validates complete inventory digests, all origin memberships and
+    # each retained individual decision. No transport references count as work.
+    pending = authenticated.pending
+    return {
+        **snapshot,
+        "inventory_sha256": _digest(
+            {
+                "domain": "current-and-authenticated-historical-obligations-v1",
+                "current": snapshot["inventory_sha256"],
+                "historical": authenticated.inventories,
+            }
+        ),
+        "unresolved_sha256": _digest(
+            {
+                "domain": "current-and-authenticated-historical-unresolved-v1",
+                "current": snapshot["unresolved_sha256"],
+                "historical": sorted(pending),
+            }
+        ),
+        "unresolved_count": snapshot["unresolved_count"] + len(pending),
+    }
+
+
 def semantic_advancement(before, after):
     """Positive semantic progress, never arbitrary changed bytes or bookkeeping."""
     same_snapshot = (before["base_sha"], before["head_sha"]) == (
@@ -266,7 +316,7 @@ def append_history(previous, identity, intent, before, after, *, target_base_sha
     return validate_history(value, identity)
 
 
-def capture_selected(ledger, identity):
+def capture_selected(ledger, identity, *, include_historical=True):
     from review_sensei.finding_lifecycle import decode_lifecycle_state
     from review_sensei.finding_lifecycle_store import select_finding_lifecycle
 
@@ -295,7 +345,12 @@ def capture_selected(ledger, identity):
             and str(receipt["producer_id"]) != producer.split(":", 1)[1]
         ):
             _hold("receipt_scope_conflict")
-    return record, semantic_snapshot(state, document)
+    snapshot = semantic_snapshot(state, document)
+    return record, (
+        historical_snapshot(snapshot, ledger, record)
+        if include_historical
+        else snapshot
+    )
 
 
 @dataclass(frozen=True)
@@ -305,6 +360,7 @@ class SemanticContext:
     identity: Any
     reference_sha256: str
     target_base_sha: str
+    finding_before: dict[str, Any] | None = None
 
 
 def _prepare_action(run):
@@ -313,7 +369,10 @@ def _prepare_action(run):
 
     from .api_run_history import read_action_result, read_previous_run
 
-    record, snapshot = capture_selected(run.ledger, run.identity)
+    record, finding_before = capture_selected(
+        run.ledger, run.identity, include_historical=False
+    )
+    snapshot = historical_snapshot(finding_before, run.ledger, record)
     if record.record_sha256 != run.caller._root:
         _hold("selected_root_changed")
     state = ApiRunAccounting.from_document(record.api_run_accounting)
@@ -358,6 +417,7 @@ def _prepare_action(run):
         run.identity,
         _digest(record.finding_lifecycle),
         run.base_sha,
+        finding_before,
     )
 
 
@@ -417,7 +477,11 @@ def enrich_settlement(caller, ledger, identity, intent, result):
         _hold("selected_root_changed")
     observation = getattr(caller, "_accepted_semantic_checkpoint", None)
     if _digest(record.finding_lifecycle) == context.reference_sha256:
-        after = context.before
+        after = (
+            context.finding_before
+            if context.finding_before is not None
+            else context.before
+        )
     elif (
         isinstance(observation, CheckpointSemantics)
         and observation.identity == identity
@@ -457,6 +521,7 @@ def enrich_settlement(caller, ledger, identity, intent, result):
             _hold("snapshot_binding_conflict")
         _require_effect_scope(document, identity, state.head_sha)
         after = semantic_snapshot(state, document)
+    after = historical_snapshot(after, ledger, record)
     # The existing close_action fresh expected-root CAS and readback authenticates
     # this exact internally issued checkpoint. This is reviewed carrier state,
     # not a claim that mutable native effects have been independently reread.
