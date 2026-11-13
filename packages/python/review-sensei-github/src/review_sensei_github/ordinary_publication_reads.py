@@ -7,7 +7,7 @@ still reaches the existing charged transport and every source validator runs.
 from __future__ import annotations
 
 import re
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -118,6 +118,61 @@ def _source_guard(publisher, journal):
     ):
         raise ReviewInputError("ordinary publication callback route is unqualified")
     return owners[:3]
+
+
+def _require_reader_profile(publisher):
+    from .application import GitHubApplication
+
+    factories = {
+        "human_inventory_reader_factory": GitHubApplication._human_inventory_reader,
+        "quarantine_reader_factory": GitHubApplication._quarantine_hold_reader,
+    }
+    for name, source in factories.items():
+        factory = getattr(publisher.finalizer, name)
+        if factory is not None and (
+            type(getattr(factory, "__self__", None)) is not GitHubApplication
+            or getattr(factory, "__func__", None) is not source
+        ):
+            raise ReviewInputError("ordinary publication reader factory is unqualified")
+    if (
+        publisher.finalizer.historical_assessment_reader_factory is not None
+        or publisher.finalizer.native_union_reader_factory is not None
+        or publisher.finalizer.prior_publication_reader_factory is not None
+    ):
+        raise ReviewInputError("ordinary publication extended reader is unqualified")
+
+
+def select_publication_observation(publisher, journal, *, result):
+    """Choose an optional profile before issuing any observer or read quote.
+
+    Unsupported initial implementations retain the conservative route. Once an
+    observer exists, its original checks remain strict: this is not recovery
+    from changed custody, failed qualification or an unfunded plan.
+    """
+    if any(
+        active.publisher is publisher or active.journal is journal for active in _ACTIVE
+    ):
+        raise ReviewInputError("ordinary publication profile is already active")
+    if _SOURCE is None or journal.reviewer is not publisher:
+        raise ReviewInputError("ordinary publication journal source is unavailable")
+    if result.provider == "openrouter":
+        return nullcontext(None)
+    try:
+        owners = _source_guard(publisher, journal)
+        _require_reader_profile(publisher)
+        budget = (
+            journal._native_budget
+            or publisher.finalizer.evidence_budget
+            or publisher.finalizer._operation_budget
+        )
+        if budget is None:
+            return nullcontext(None)
+        for owner in (*owners, journal):
+            transport = owner._readback_http if owner is journal else owner.http
+            _transport_signature(transport, journal, budget)
+    except ReviewInputError:
+        return nullcontext(None)
+    return observe_publication(publisher, journal)
 
 
 def unbound_population(journal, result, state):
@@ -275,6 +330,7 @@ class _Observation:
         if self.witness is not issued_witness:
             raise ReviewInputError("ordinary publication issued witness changed")
         _source_guard(publisher, journal)
+        _require_reader_profile(publisher)
         for owner, attr, old, wrapper, signature in self.bindings:
             if (
                 getattr(owner, attr) is not wrapper
@@ -349,27 +405,8 @@ class _Observation:
             raise ReviewInputError("ordinary_publication_read_tail_unqualified")
         from review_sensei.finding_lifecycle import decode_lifecycle_state
 
-        from .application import GitHubApplication
-
-        factories = {
-            "human_inventory_reader_factory": GitHubApplication._human_inventory_reader,
-            "quarantine_reader_factory": GitHubApplication._quarantine_hold_reader,
-        }
-        for name, source in factories.items():
-            factory = getattr(self.publisher.finalizer, name)
-            if factory is not None and (
-                type(getattr(factory, "__self__", None)) is not GitHubApplication
-                or getattr(factory, "__func__", None) is not source
-            ):
-                raise ReviewInputError(
-                    "ordinary publication reader factory is unqualified"
-                )
-        if (
-            self.publisher.finalizer.historical_assessment_reader_factory is not None
-            or self.publisher.finalizer.native_union_reader_factory is not None
-            or self.publisher.finalizer.prior_publication_reader_factory is not None
-            or eligibility.facts.provider == "openrouter"
-        ):
+        _require_reader_profile(self.publisher)
+        if eligibility.facts.provider == "openrouter":
             raise ReviewInputError(
                 "ordinary publication extended reader is unqualified"
             )

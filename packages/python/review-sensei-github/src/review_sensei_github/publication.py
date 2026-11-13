@@ -8716,7 +8716,7 @@ class ReviewPublisher:
 
                 def publish_impl(**arguments):
                     from .ordinary_publication_reads import (
-                        observe_publication,
+                        select_publication_observation,
                         unbound_population,
                     )
 
@@ -8757,7 +8757,9 @@ class ReviewPublisher:
                     with (
                         lifecycle_journal.transports(),
                         (
-                            observe_publication(self, lifecycle_journal)
+                            select_publication_observation(
+                                self, lifecycle_journal, result=result
+                            )
                             if closed_fresh_route
                             else nullcontext(None)
                         ) as observation,
