@@ -1066,3 +1066,13 @@ Known-marker reads are reused within existing bounds, with no extra census,
 storage or allowance. Bound transaction validation is unchanged. This correction
 does not supply durable slot/effect restoration or close G10/G14/G16. See
 [ADR 0134](adr/0134-bounded-active-findings-and-artifact-authority.md).
+
+### Candidate epoch contention preserves durable evidence
+
+The default-disabled contained-writer candidate revokes only its own local grant
+when enrollment or successor activation fails. Epoch keys are shared across
+independent contenders, so failure cannot authorize deleting their canonical
+root, history, or frontier. Partially initialized epochs stay held rather than
+being reset for retry. Independent-process synthetic regressions cover winner
+preservation and post-persistence failure; they do not establish deployed
+all-writer containment. See [ADR 0132](adr/0132-writer-fencing-and-unstarted-action-recovery.md#contending-epoch-initialization-retains-evidence-2026-11-13).
