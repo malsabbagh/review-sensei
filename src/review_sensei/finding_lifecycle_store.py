@@ -375,7 +375,7 @@ def _consume_checkpoint_pricing(proof, ledger, record, checkpoint_parts):
             )
             or (
                 profile == "quarantine-complete-census-v1"
-                and (n < 0 or page < 3 or price != page + 6 + 2 * n)
+                and (n < 0 or page < 3 or price != (17 if n == 0 else page + 6 + 2 * n))
             )
             for n, price, page in zip(checkpoint_parts, prices, pages)
         )
@@ -717,9 +717,11 @@ def _remote_inline_plan(ledger: Any, record: Any) -> Mapping[str, object] | None
         # These counts come only from the consumed source/root-bound proof.
         # The core's outer stage has already supplied the initial read.
         plan["conditional_calls"] = prices[0] - 1
-        plan["post_mutator_calls"] = (
-            6 if issued[9] == "quarantine-complete-census-v1" else 3 + 2 * (pages - 1)
-        )
+        if issued[9] != "plain-v1":
+            raise ReviewInputError(
+                "finding lifecycle inline checkpoint profile is unsupported"
+            )
+        plan["post_mutator_calls"] = 3 + 2 * (pages - 1)
         if (
             set(plan)
             != {"conditional_calls", "post_mutator_calls", "page_size", "sealed"}

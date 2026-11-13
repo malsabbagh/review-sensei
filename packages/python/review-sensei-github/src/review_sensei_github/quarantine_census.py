@@ -613,7 +613,7 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
     if (
         type(ledger) not in {ApiRunSessionLedger, ActionRunLedger, ReviewRunLedger}
         or type(added_parts) is not int
-        or not 0 <= added_parts <= 256
+        or not 0 < added_parts <= 256
     ):
         raise ReviewInputError("quarantine lifecycle capacity source is unsupported")
     caller = ledger.caller
@@ -818,6 +818,7 @@ def lifecycle_checkpoint_pricing(
         or ledger._broker is not None
         or type(reader) is not QuarantineOriginReader
         or type(reader.current_scope) is not CurrentReadScope
+        or not any(checkpoint_parts)
         or any(type(n) is not int or n < 0 for n in checkpoint_parts)
         or record.assessment_queue is not None
         or record.disposition_snapshot is not None
@@ -893,7 +894,7 @@ def lifecycle_checkpoint_pricing(
         record,
         checkpoint_parts=checkpoint_parts,
         capacity=capacity,
-        calls=tuple(pages + 6 + 2 * n for n in checkpoint_parts),
+        calls=tuple(17 if n == 0 else pages + 6 + 2 * n for n in checkpoint_parts),
         validate=validate,
         page_counts=tuple(pages for _ in checkpoint_parts),
         profile="quarantine-complete-census-v1",

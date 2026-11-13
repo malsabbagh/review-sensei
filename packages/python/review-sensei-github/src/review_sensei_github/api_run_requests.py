@@ -2319,7 +2319,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             or type(added_bytes) is not int
             or not 0 <= added_parts <= MAX_STORED_PARTS
             or added_bytes < 0
-            or (added_parts == 0 and added_bytes != 0)
+            or (added_parts == 0 and (added_bytes != 0 or self._quarantine_required))
             or (added_parts > 0 and added_bytes == 0)
             or not self._inventory_complete
             or self.caller._terminal_reason is not None
@@ -2556,8 +2556,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             "conditional_calls": 4,
             "post_mutator_calls": 3,
             "page_size": 100,
-            "sealed": bool(getattr(self, "_plain_finding_scope_active", False))
-            or getattr(self, "_quarantine_lifecycle_capacity", None) is not None,
+            "sealed": bool(getattr(self, "_plain_finding_scope_active", False)),
         }
 
     def replace_finding_lifecycle_inline(self, identity, mutate, *, record):

@@ -89,9 +89,13 @@ class CheckpointPricingIssuerTests(unittest.TestCase):
             issued = core._CHECKPOINT_PRICING.get(proof)
             if issued is not None and issued[9] == "quarantine-complete-census-v1":
                 self.assertTrue(all(3 <= pages <= 10 for pages in issued[8]))
+                self.assertIsNone(ledger.preflight_finding_lifecycle_inline(record))
                 self.assertEqual(
                     issued[5],
-                    tuple(pages + 6 + 2 * n for pages, n in zip(issued[8], parts)),
+                    tuple(
+                        17 if n == 0 else pages + 6 + 2 * n
+                        for pages, n in zip(issued[8], parts)
+                    ),
                 )
                 prices.append(issued[5])
             return consume(proof, ledger, record, parts)
