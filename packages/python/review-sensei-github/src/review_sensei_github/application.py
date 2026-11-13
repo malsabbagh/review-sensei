@@ -1300,6 +1300,7 @@ class GitHubApplication:
         transaction_record = None
         check_context = None
         transaction_ledger: SessionLedger | None = None
+        preflight_source_ledger: SessionLedger | None = None
         expected_configuration_digest: str | None = None
         expected_evidence_digest: str | None = None
 
@@ -1370,7 +1371,8 @@ class GitHubApplication:
                     "review transaction evidence validation failed"
                 ) from exc
             if self.session_ledger is not None:
-                transaction_ledger = self.session_ledger
+                preflight_source_ledger = self.session_ledger
+                transaction_ledger = preflight_source_ledger
                 if budget is not None:
                     from .publication_recovery import publication_session_ledger
 
@@ -1446,19 +1448,44 @@ class GitHubApplication:
             )
         if budget is not None:
             budget.check()
-        # Reuse this invocation's already-bound injected ledger. Rewrapping
-        # the identical authority would lose identity and force a second load
-        # even when the selected transaction has no lifecycle carrier.
-        ledger = (
-            transaction_ledger
-            if self.session_ledger is not None and transaction_ledger is not None
-            else self._session_ledger_for_token(
-                session_token if session_token is not None else token,
-                options=options,
-                app_slug=app_slug,
-                evidence_budget=budget,
-            )
+        # Token exchange may select a different durable authority than the
+        # injected preflight ledger. Always consult that selector; identity
+        # checks below decide whether the selected transaction must be reloaded.
+        select_ledger = self._session_ledger_for_token
+        ledger = select_ledger(
+            session_token if session_token is not None else token,
+            options=options,
+            app_slug=app_slug,
+            evidence_budget=budget,
         )
+        from .publication_recovery import _PaginationObservationHttp
+
+        same_selected_authority = ledger is transaction_ledger or (
+            type(ledger) is GitHubIssueCommentSessionLedger
+            and type(transaction_ledger) is GitHubIssueCommentSessionLedger
+            and type(ledger.http) is _PaginationObservationHttp
+            and type(transaction_ledger.http) is _PaginationObservationHttp
+            and ledger.evidence_budget is budget
+            and transaction_ledger.evidence_budget is budget
+            and ledger.http.transport is transaction_ledger.http.transport
+            and vars(ledger.http) == vars(transaction_ledger.http)
+            and (vars(ledger) | {"http": None})
+            == (vars(transaction_ledger) | {"http": None})
+        )
+        if (
+            same_selected_authority
+            and preflight_source_ledger is not None
+            and self.session_ledger is preflight_source_ledger
+            and transaction_ledger is not None
+            and getattr(select_ledger, "__self__", None) is self
+            and getattr(select_ledger, "__func__", None)
+            is GitHubApplication._session_ledger_for_token
+        ):
+            # The built-in selector returns this exact injected authority,
+            # possibly with a fresh metering wrapper. Keep the already-metered
+            # identity only after selection succeeds. Custom/token-bound
+            # selectors are never covered by this optimization.
+            ledger = transaction_ledger
         if ledger is not None:
             self._finding_lifecycle_contexts[(repository_id, pull_request)] = (
                 ledger,
@@ -1536,21 +1563,6 @@ class GitHubApplication:
         if (
             isinstance(reviewer, ReviewPublisher)
             and ledger is not None
-            and getattr(ledger, "enable_finding_lifecycle_writes", False)
-            and (effective_max_active is not None or effective_drift)
-            and result.transaction is None
-        ):
-            # A legacy unbound review still needs its real effective settings
-            # before admission can create a durable lifecycle operation. Refuse
-            # before reserving a round, not after publishing native effects.
-            if configuration_context is None:
-                raise GitHubPublicationError(
-                    "finding lifecycle publication requires trusted configuration context"
-                )
-            ReviewTransaction.compute_configuration_digest(configuration_context)
-        if (
-            isinstance(reviewer, ReviewPublisher)
-            and ledger is not None
             and result.transaction is None
         ):
             # An unbound "full" result can omit every caller-supplied hint of
@@ -1602,6 +1614,21 @@ class GitHubApplication:
                         status="handoff",
                         diagnostic="durable_finding_inventory_recovery_required",
                     )
+        if (
+            isinstance(reviewer, ReviewPublisher)
+            and ledger is not None
+            and getattr(ledger, "enable_finding_lifecycle_writes", False)
+            and (effective_max_active is not None or effective_drift)
+            and result.transaction is None
+        ):
+            # A legacy unbound review still needs its real effective settings
+            # before admission can create a durable lifecycle operation. Refuse
+            # before reserving a round, not after publishing native effects.
+            if configuration_context is None:
+                raise GitHubPublicationError(
+                    "finding lifecycle publication requires trusted configuration context"
+                )
+            ReviewTransaction.compute_configuration_digest(configuration_context)
         if (
             transaction_record is None
             and ledger is not None
