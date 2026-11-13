@@ -34,11 +34,12 @@ class _Observation:
 
 _SOURCE_INSTALLED = False
 _observation_lookup = None
+_refresh_observation = None
 
 
 def _install_observation_source(source_class):
     """One-time binding; only the captured real exchange can issue a receipt."""
-    global _SOURCE_INSTALLED, _observation_lookup
+    global _SOURCE_INSTALLED, _observation_lookup, _refresh_observation
     if _SOURCE_INSTALLED:
         raise ReviewInputError("trust observation source already installed")
     from .broker_client import BrokerClient
@@ -46,6 +47,7 @@ def _install_observation_source(source_class):
     if source_class is not BrokerClient:
         raise ReviewInputError("trust observation source class is unsupported")
     source, post = source_class.open_session, source_class._post
+    refresh = source_class.refresh_session_observation
     issued: weakref.WeakSet[_Observation] = weakref.WeakSet()
 
     @wraps(source)
@@ -88,6 +90,24 @@ def _install_observation_source(source_class):
             raise ReviewInputError("trust current observation requires source issuance")
         return receipt
 
+    def refresh_source(broker, session, effect_sha256):
+        current_observation(broker, session)
+        if (
+            type(broker) is not source_class
+            or getattr(broker.open_session, "__func__", None) is not exchange
+            or getattr(broker._post, "__func__", None) is not post
+            or getattr(broker.refresh_session_observation, "__func__", None)
+            is not refresh
+            or source_class.open_session is not exchange
+            or source_class._post is not post
+            or source_class.refresh_session_observation is not refresh
+        ):
+            raise ReviewInputError("trust refresh source dispatch changed")
+        result = refresh(broker, session.grant, session.attestation, effect_sha256)
+        current_observation(broker, session)
+        return result
+
+    _refresh_observation = refresh_source
     _SOURCE_INSTALLED = True
     _observation_lookup = lookup
     setattr(source_class, "open_session", exchange)
@@ -104,6 +124,12 @@ def current_observation(broker, session):
     if authority != session.attestation or document["app_id"] != session.app_id:
         raise ReviewInputError("trust current observation changed")
     return document
+
+
+def refresh_current_observation(broker, session, effect_sha256):
+    if _refresh_observation is None:
+        raise ReviewInputError("trust refresh source is unavailable")
+    return _refresh_observation(broker, session, effect_sha256)
 
 
 def prepare_original_enrollment(broker, session, record):

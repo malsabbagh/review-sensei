@@ -780,6 +780,8 @@ class ApiRunRequestTransport:
         from .quarantine_creation_census import before_creation_request
 
         before_creation_request(self, request)
+        from .trust_effects import before_request as before_trust_request
+
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))
@@ -787,6 +789,7 @@ class ApiRunRequestTransport:
             or not 0 < timeout <= 60
         ):
             raise ReviewInputError("caller request deadline is invalid")
+        trust_verification = before_trust_request(self, request)
         deadline = int((self._clock() + timeout) * 1000)
         request_deadline = self._monotonic() + timeout
         self._sequence += 1
@@ -815,7 +818,7 @@ class ApiRunRequestTransport:
             request_id = f"startup-{self.run.repository_id}-{self.run.run_id}-{self.attempt}-{self._sequence}"
         else:
             if self._active_operation is not None:
-                mutation = is_mutation
+                mutation = is_mutation and not trust_verification
                 if self._staged_part_operation is not None:
                     self._staged_part_operation.consume(mutation=mutation)
                     # The root allocation is not replenished by a child write.
@@ -977,6 +980,9 @@ class ApiRunRequestTransport:
 
         # The debit/intent above happens before the physical opener. Exceptions
         # preserve the charge; read/parse/status failures never refund it.
+        from .trust_effects import consume as consume_trust_receipt
+
+        consume_trust_receipt(self, request)
         try:
             response = self._opener(request, timeout=timeout)
         except HTTPError as error:
@@ -3370,3 +3376,11 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
 _install_checkpoint_pricer(
     ApiRunSessionLedger.preflight_finding_lifecycle_checkpoint_pricing
 )
+
+
+# Pin the ordinary physical dispatch implementation before any mode can issue
+# a trust-effect profile. The default path retains zero extra requests.
+from .trust_effects import _install_transport_source  # noqa: E402
+
+_install_transport_source(ApiRunRequestTransport)
+del _install_transport_source

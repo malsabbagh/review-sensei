@@ -1,0 +1,263 @@
+"""Closed, default-off source binding for freshly observed native mutations.
+
+The profile is a pricing subject, never a replacement budget or durable grant.
+Only actual synchronous broker refresh can create a one-use dispatch receipt.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
+
+from review_sensei.bounded_evidence import canonical_bytes
+from review_sensei.errors import ReviewInputError
+
+from .trust_enrollment import current_observation, refresh_current_observation
+
+
+@dataclass(frozen=True, eq=False)
+class _Profile:
+    caller: object
+    broker: object
+    session: object
+    original: bytes
+    grant_sha256: str
+    api_origin: str
+    broker_url: str
+    native_opener: object
+
+
+_source = None
+
+
+def _unavailable(*args, **kwargs):
+    raise ReviewInputError("trust effect source registration is unavailable")
+
+
+enable = verification_profile = verification_calls = before_request = consume = (
+    _unavailable
+)
+
+
+def _install_transport_source(source_class):
+    global \
+        _source, \
+        enable, \
+        verification_profile, \
+        verification_calls, \
+        before_request, \
+        consume
+    from .api_run_requests import ApiRunRequestTransport
+
+    if _source is not None or source_class is not ApiRunRequestTransport:
+        raise ReviewInputError("trust effect transport source registration is invalid")
+    _source = (source_class, source_class.open)
+    source = _source
+    _profiles: WeakKeyDictionary = WeakKeyDictionary()
+    _pending: WeakKeyDictionary = WeakKeyDictionary()
+    _receipts: WeakKeyDictionary = WeakKeyDictionary()
+    _admitted_routes: WeakKeyDictionary = WeakKeyDictionary()
+
+    def bound_to(opener, owner):
+        return (
+            getattr(opener, "__self__", None) is owner
+            and getattr(opener, "__func__", None) is source[1]
+        )
+
+    def enable(caller: Any, broker, session, *, api_url):
+        """Install source mode after admission checks, before the first native write.
+
+        This only establishes the quote subject. Actual route admission remains with
+        the source-priced lifecycle producers; unsupported routes must refuse there.
+        """
+        if caller is None or type(caller) is not source[0] or caller in _profiles:
+            raise ReviewInputError(
+                "trust effect source is unsupported or already installed"
+            )
+        document = current_observation(broker, session)
+        authority = document["authority"]
+        observation = authority["current_observation"]
+        if (
+            observation["schema_version"] != "current-observation-v2"
+            or not bound_to(broker.opener, caller)
+            or authority["repository_id"] != caller.run.repository_id
+            or authority["run_id"] != str(caller.run.run_id)
+            or authority["run_attempt"] != caller.attempt
+            or authority["job"] != caller.job
+            or getattr(caller, "_controlled_restart_admission", None) is not None
+            or caller._physical_mutation_ids - caller._confirmed_control_writes.keys()
+        ):
+            raise ReviewInputError("trust effect original source scope is unavailable")
+        url = urlsplit(api_url)
+        if (
+            url.scheme != "https"
+            or not url.netloc
+            or url.path
+            or url.query
+            or url.fragment
+        ):
+            raise ReviewInputError("trust effect native origin is invalid")
+        profile = _Profile(
+            caller,
+            broker,
+            session,
+            canonical_bytes(document),
+            hashlib.sha256(session.grant.encode()).hexdigest(),
+            api_url,
+            broker.broker_url,
+            caller._opener,
+        )
+        _profiles[caller] = profile
+        return verification_profile(caller)
+
+    def verification_profile(caller):
+        profile = _profiles.get(caller)
+        if profile is None:
+            return None
+        if (
+            _source is None
+            or type(caller) is not source[0]
+            or source[0].open is not source[1]
+            or getattr(caller.open, "__func__", None) is not source[1]
+            or canonical_bytes(current_observation(profile.broker, profile.session))
+            != profile.original
+            or hashlib.sha256(profile.session.grant.encode()).hexdigest()
+            != profile.grant_sha256
+        ):
+            raise ReviewInputError("trust effect source binding changed")
+        authority = json.loads(profile.original)["authority"]
+        if (
+            authority["repository_id"] != caller.run.repository_id
+            or authority["run_id"] != str(caller.run.run_id)
+            or authority["run_attempt"] != caller.attempt
+            or authority["job"] != caller.job
+            or profile.broker.broker_url != profile.broker_url
+            or not bound_to(profile.broker.opener, caller)
+            or caller._opener is not profile.native_opener
+        ):
+            raise ReviewInputError("trust effect current caller source changed")
+        return profile
+
+    def verification_calls(caller):
+        return int(verification_profile(caller) is not None)
+
+    def _binding(profile, request, *, sequence=None):
+        # No token bytes are retained or sent. Conditional headers and exact bytes,
+        # including GraphQL operation/variables, are part of the effect identity.
+        return canonical_bytes(
+            {
+                "schema_version": "native-trust-effect-v1",
+                "method": request.get_method(),
+                "url": request.full_url,
+                "body_sha256": hashlib.sha256(request.data or b"").hexdigest(),
+                "authorization_sha256": hashlib.sha256(
+                    str(request.get_header("Authorization") or "").encode("utf-8")
+                ).hexdigest(),
+                "content_type": request.get_header("Content-type"),
+                "accept": request.get_header("Accept"),
+                "api_version": request.get_header("X-github-api-version"),
+                "if_match": request.get_header("If-match"),
+                "if_none_match": request.get_header("If-none-match"),
+                "original_sha256": hashlib.sha256(profile.original).hexdigest(),
+                "grant_sha256": profile.grant_sha256,
+                "sequence": profile.caller._sequence + 1
+                if sequence is None
+                else sequence,
+            }
+        )
+
+    def before_request(caller, request):
+        """Return true only for the single nested, source-owned verification POST."""
+        profile = verification_profile(caller)
+        if profile is None:
+            return False
+        pending = _pending.get(caller)
+        if pending is not None:
+            digest, used = pending
+            try:
+                body = json.loads(request.data)
+            except (ValueError, TypeError):
+                raise ReviewInputError(
+                    "trust effect verification request is invalid"
+                ) from None
+            if (
+                used
+                or request.get_method() != "POST"
+                or request.full_url
+                != profile.broker.broker_url.removesuffix("/token") + "/session-grant"
+                or set(body)
+                - {
+                    "session_grant",
+                    "session_attestation",
+                    "refresh_effect_sha256",
+                    "control_budget",
+                }
+                or body.get("session_grant") != profile.session.grant
+                or body.get("session_attestation") != profile.session.attestation
+                or body.get("refresh_effect_sha256") != digest
+            ):
+                raise ReviewInputError("trust effect verification dispatch changed")
+            _pending[caller] = (digest, True)
+            return True
+        url = urlsplit(request.full_url)
+        origin = f"{url.scheme}://{url.netloc}"
+        if request.get_method() not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return False
+        if request.full_url in caller._authentication_endpoints:
+            return False
+        if origin != profile.api_origin:
+            raise ReviewInputError("trust effect native destination is unsupported")
+        from .quarantine_census import is_readonly_census
+
+        if is_readonly_census(request, caller._quarantine_census_api_url):
+            return False
+        # Stronger routes are deliberately not inferred from this transport mode.
+        if getattr(caller, "_controlled_restart_admission", None) is not None:
+            raise ReviewInputError("trust effect restart pricing is unsupported")
+        if profile not in _admitted_routes:
+            raise ReviewInputError("trust effect complete route admission unavailable")
+        bound = _binding(profile, request, sequence=caller._sequence + 2)
+        digest = hashlib.sha256(bound).hexdigest()
+        _pending[caller] = (digest, False)
+        try:
+            refresh_current_observation(profile.broker, profile.session, digest)
+            if _pending.get(caller) != (digest, True):
+                raise ReviewInputError(
+                    "trust effect refresh lacked physical source dispatch"
+                )
+        finally:
+            _pending.pop(caller, None)
+        # Exactly one verification dispatch must lead to the precommitted
+        # native sequence. Never substitute a different locally recomputed
+        # digest for the one actually refreshed by the broker.
+        if _binding(profile, request) != bound:
+            raise ReviewInputError("trust effect verification sequence changed")
+        _receipts[request] = (profile, bound)
+        return False
+
+    def consume(caller, request):
+        profile = verification_profile(caller)
+        if profile is None:
+            return
+        receipt = _receipts.pop(request, None)
+        if receipt is None:
+            # Non-native requests were not candidates for a receipt.
+            url = urlsplit(request.full_url)
+            from .quarantine_census import is_readonly_census
+
+            if (
+                request.get_method() in {"POST", "PUT", "PATCH", "DELETE"}
+                and f"{url.scheme}://{url.netloc}" == profile.api_origin
+                and not is_readonly_census(request, caller._quarantine_census_api_url)
+            ):
+                raise ReviewInputError("trust effect fresh receipt is unavailable")
+            return
+        # Caller.open increments its own physical sequence before this boundary.
+        binding = json.loads(_binding(profile, request))
+        binding["sequence"] -= 1
+        if receipt[0] is not profile or receipt[1] != canonical_bytes(binding):
+            raise ReviewInputError("trust effect fresh receipt changed or was reused")
