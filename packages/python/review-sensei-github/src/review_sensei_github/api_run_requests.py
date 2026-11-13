@@ -34,7 +34,7 @@ from review_sensei.api_work import (
     initial_accounting,
 )
 from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
-from review_sensei.finding_lifecycle_store import _register_checkpoint_pricer
+from review_sensei.finding_lifecycle_store import _checkpoint_pricer
 from review_sensei.models import ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
 
@@ -2157,6 +2157,14 @@ class ApiRunRequestTransport:
                 if self._terminal_reason is None
                 else QUARANTINE_CHECKPOINT_REQUESTS
             )
+        if quarantine:
+            from .quarantine_census import lifecycle_checkpoint_operation
+
+            specialized_quarantine = lifecycle_checkpoint_operation(
+                ledger, self, identity
+            )
+            if specialized_quarantine is not None:
+                capacity = specialized_quarantine
         confirmation_tail = WRITE_CONFIRMATION_TAIL
         if not quarantine and isinstance(ledger, ApiRunSessionLedger):
             if (
@@ -2311,7 +2319,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             or type(added_bytes) is not int
             or not 0 <= added_parts <= MAX_STORED_PARTS
             or added_bytes < 0
-            or (added_parts == 0 and (added_bytes != 0 or self._quarantine_required))
+            or (added_parts == 0 and added_bytes != 0)
             or (added_parts > 0 and added_bytes == 0)
             or not self._inventory_complete
             or self.caller._terminal_reason is not None
@@ -2357,12 +2365,29 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             "retained_bytes": retained_bytes,
         }
 
+    @_checkpoint_pricer
     def preflight_finding_lifecycle_checkpoint_pricing(
-        self, record, *, added_parts, added_bytes, checkpoint_parts
+        self,
+        record,
+        *,
+        added_parts,
+        added_bytes,
+        checkpoint_parts,
+        _checkpoint_factory=None,
     ):
-        """Issue a sealed price only for the exact already-owned plain writer."""
+        """Issue a sealed price only for an exact source-owned checkpoint writer."""
+        if self._quarantine_required:
+            from .quarantine_census import lifecycle_checkpoint_pricing
+
+            return lifecycle_checkpoint_pricing(
+                self,
+                record,
+                added_parts=added_parts,
+                added_bytes=added_bytes,
+                checkpoint_parts=checkpoint_parts,
+                factory=_checkpoint_factory,
+            )
         from review_sensei.bounded_evidence import canonical_bytes
-        from review_sensei.finding_lifecycle_store import _issue_checkpoint_pricing
 
         from .review_run import ActionRunLedger, ReviewRunLedger
         from .run_authority import VerifiedRunAction
@@ -2493,7 +2518,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             raise ReviewInputError(
                 "finding lifecycle checkpoint pricing source changed"
             )
-        return _issue_checkpoint_pricing(
+        return _checkpoint_factory(
             self,
             record,
             checkpoint_parts=checkpoint_parts,
@@ -2531,7 +2556,8 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             "conditional_calls": 4,
             "post_mutator_calls": 3,
             "page_size": 100,
-            "sealed": bool(getattr(self, "_plain_finding_scope_active", False)),
+            "sealed": bool(getattr(self, "_plain_finding_scope_active", False))
+            or getattr(self, "_quarantine_lifecycle_capacity", None) is not None,
         }
 
     def replace_finding_lifecycle_inline(self, identity, mutate, *, record):
@@ -3273,7 +3299,3 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
 
 
 # Register the exact source implementation, not a generic cheaper-count hook.
-
-_register_checkpoint_pricer(
-    ApiRunSessionLedger.preflight_finding_lifecycle_checkpoint_pricing
-)
