@@ -627,6 +627,8 @@ def _bind_cleanup_prefixes(plan, instances):
 
     if not isinstance(instances, frozenset):
         raise ReviewInputError("command cleanup inventory is not source bounded")
+    if not instances:
+        return  # No cleanup or release capability is needed for this plan.
     journal = plan.journal
     payload = json.loads(plan.payload)
     requests = payload["cleanup_requests"]
@@ -810,6 +812,8 @@ def retained_review_frontier(journal, reviews, *, producer, app_slug):
         if not isinstance(body, dict) or set(body) != {"$body_sha256", "utf8_bytes"}:
             return None
         expected[review_id] = body
+    if not expected:
+        return None  # A two-frame proof needs actual retained native writes.
     originals = {
         r["review_id"]
         for r in journal.reviewer.native_finding_receipts(

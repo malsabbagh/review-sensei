@@ -235,6 +235,30 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
                 self.assertEqual(fixture.review_put_attempts, 0)
                 self.assertEqual(fixture.resolved_threads, set())
 
+    def test_empty_cleanup_retains_check_plan_and_original_source_guard(self):
+        from review_sensei_github.command_finalization_plan import (
+            _CLEANUP,
+            cleanup_capacity_states,
+        )
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from review_sensei.errors import ReviewInputError
+        from tests.test_command_finalization_plan import CommandFinalizationPlanTests
+        from tests.test_plain_cleanup_fence import PlainCleanupFenceTests
+
+        state, finalizer, args, calls = PlainCleanupFenceTests().fixture()
+        finalizer.evidence_budget = EvidenceReadBudget()
+        original = copy.deepcopy(state.reviews)
+        plan = CommandFinalizationPlanTests().prepare(finalizer, args)
+        self.assertEqual(json.loads(plan.payload)["cleanup_requests"], [])
+        self.assertIsNotNone(json.loads(plan.payload)["check_request"])
+        self.assertNotIn(plan, _CLEANUP)
+        self.assertEqual(cleanup_capacity_states(plan), plan.states)
+        self.assertEqual(state.reviews, original)
+        self.assertTrue(all(method == "GET" for method, _ in calls))
+        with self.assertRaises(ReviewInputError):
+            copy.copy(plan).require(plan.journal, http=plan.http, budget=plan.budget)
+
     def test_actual_one_short_new_command_preserves_original_producer_history(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture, original, _, _ = self.fixture(directory, reopened=True)

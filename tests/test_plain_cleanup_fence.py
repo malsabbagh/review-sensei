@@ -39,6 +39,8 @@ class PlainCleanupFenceTests(unittest.TestCase):
         ledger = object.__new__(GitHubIssueCommentSessionLedger)
         ledger.app_slug, ledger._evidence_author_id = APP, 99
         journal = object.__new__(FindingLifecycleJournal)
+        journal._planned = None  # Constructor default: no projected lifecycle state.
+        journal.effects = []  # No authenticated native writes in this unit fixture.
         journal.ledger, journal.identity, journal.head_sha = ledger, identity, HEAD
         journal.operation_id = "test-operation"
         journal._record = SimpleNamespace(
