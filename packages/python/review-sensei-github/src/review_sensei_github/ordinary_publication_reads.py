@@ -120,6 +120,31 @@ def _source_guard(publisher, journal):
     return owners[:3]
 
 
+def unbound_population(journal, result, state):
+    """Select only exact original criteria with no prior native finding target.
+
+    This is a negative route selector, not authority. Qualification still binds
+    the original transaction and source, and every replay reads native state.
+    """
+    from .lifecycle_admission import (
+        initial_check_effects,
+        restore_original_lifecycle_admission,
+    )
+
+    try:
+        restore_original_lifecycle_admission(
+            result, state, head_sha=journal.head_sha, base_sha=journal.base_sha
+        )
+    except (ReviewInputError, AttributeError):
+        return False
+    if journal.reviewer.native_finding_receipts(
+        repository_id=journal.identity.repository_id,
+        pull_request=journal.identity.pull_request,
+    ):
+        return False
+    return initial_check_effects(journal.effects, journal.identity.repository)
+
+
 def _transport_signature(http, journal, budget):
     from .finding_lifecycle import _JournalTransport
     from .publication_recovery import PublicationBudgetHttp, _PaginationObservationHttp
@@ -356,14 +381,18 @@ class _Observation:
         if populated and (
             not 0 < len(result.comments) <= 2
             or getattr(
-                getattr(state, "display_active_findings", None),
+                state,
                 "max_active_findings",
-                None,
+                getattr(
+                    getattr(state, "display_active_findings", None),
+                    "max_active_findings",
+                    None,
+                ),
             )
             != 1
             or inventory is None
             or len(inventory.obligations) != len(result.comments)
-            or journal.effects
+            or not unbound_population(journal, result, state)
             or journal.reviewer.native_finding_receipts(
                 repository_id=journal.identity.repository_id,
                 pull_request=journal.identity.pull_request,

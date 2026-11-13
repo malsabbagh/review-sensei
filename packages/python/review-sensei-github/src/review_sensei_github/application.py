@@ -2226,7 +2226,7 @@ class GitHubApplication:
                     build_human_inventory_context,
                 )
                 from .default_human_reader import (
-                    restore_admitted_result,
+                    restore_admitted_document,
                     transaction_publication_digest,
                 )
 
@@ -2278,7 +2278,60 @@ class GitHubApplication:
                     and not empty_original_with_retained_lifecycle
                 ):
                     admission_recovery_held = True
-                    result = restore_admitted_result(result, admitted_inventory_store)
+                    from .lifecycle_admission import initial_check_effects
+
+                    available_admission = admitted_inventory_store.read_available()
+                    if available_admission is not None:
+                        result = restore_admitted_document(
+                            result, admitted_inventory_store, available_admission[1]
+                        )
+                    elif (
+                        validated_transaction_recovery
+                        and 0 < len(result.comments) <= 2
+                        and lifecycle_document is not None
+                        and lifecycle_record is not None
+                        and lifecycle_record.finding_lifecycle is not None
+                        and lifecycle_record.transaction is not None
+                        and transaction_record is not None
+                        and transaction_record.transaction is not None
+                        and transaction_record.finding_lifecycle
+                        == lifecycle_record.finding_lifecycle
+                        and transaction_record.transaction.result_sha256
+                        == result.content_digest()
+                        and lifecycle_record.transaction.logical_identity_matches(
+                            transaction_record.transaction
+                        )
+                        and lifecycle_record.transaction.result_sha256
+                        == transaction_record.transaction.result_sha256
+                        and result.transaction.logical_identity_matches(
+                            transaction_record.transaction
+                        )
+                        and not lifecycle_document["unknown_trust_effect"]
+                        and not lifecycle_document["native_receipts"]
+                        and initial_check_effects(
+                            lifecycle_document["effects"], repository
+                        )
+                    ):
+                        from review_sensei.finding_lifecycle import (
+                            decode_lifecycle_state,
+                        )
+
+                        from .lifecycle_admission import (
+                            restore_original_lifecycle_admission,
+                        )
+
+                        result = restore_original_lifecycle_admission(
+                            result,
+                            decode_lifecycle_state(
+                                lifecycle_document["lifecycle"]
+                            ).state,
+                            head_sha=head_sha,
+                            base_sha=base_sha,
+                        )
+                    else:
+                        raise ReviewInputError(
+                            "complete publication admission evidence is missing; retain the original result and do not infer clean obligations"
+                        )
                     admission_recovery_held = False
             prepared_publishable: PublishableReview | None = None
             if (

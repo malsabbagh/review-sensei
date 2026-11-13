@@ -8709,7 +8709,10 @@ class ReviewPublisher:
             if lifecycle_journal is not None:
 
                 def publish_impl(**arguments):
-                    from .ordinary_publication_reads import observe_publication
+                    from .ordinary_publication_reads import (
+                        observe_publication,
+                        unbound_population,
+                    )
 
                     key = (repository_id, pull_request)
                     retained_state = self._drift_states.get(
@@ -8726,7 +8729,6 @@ class ReviewPublisher:
                     supported_population = (
                         0 < len(result.comments) <= 2
                         and max_active_findings == 1
-                        and not enable_drift_tracking
                         and not uses_grouped_publication(self.http, result)
                     )
                     closed_fresh_route = (
@@ -8736,7 +8738,14 @@ class ReviewPublisher:
                         is not None
                         and lifecycle_journal._record.quarantine_lineage is None
                         and lifecycle_journal._record.historical_assessments is None
-                        and (inventory is None or not inventory.obligations)
+                        and (
+                            inventory is None
+                            or not inventory.obligations
+                            or supported_population
+                            and unbound_population(
+                                lifecycle_journal, result, retained_state
+                            )
+                        )
                         and retained_eligibility is None
                     )
                     with (
