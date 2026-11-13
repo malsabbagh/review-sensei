@@ -644,18 +644,6 @@ def restore_finding_lifecycle(
     key = (identity.repository_id, identity.pull_request)
     from review_sensei.active_finding_window import ActiveWindowRoundState
 
-    if isinstance(state, ActiveWindowRoundState):
-        reviewer._active_window_states[key] = state
-        reviewer._drift_states.pop(key, None)
-        if restored.input_identity is not None:
-            reviewer._active_window_inputs[key] = restored.input_identity
-    else:
-        reviewer._drift_states[key] = state
-        reviewer._active_window_states.pop(key, None)
-        if restored.input_identity is not None:
-            reviewer._drift_inputs[key] = restored.input_identity
-        for obligation, concerns in restored.concern_history.items():
-            reviewer._drift_concern_history[(*key, obligation)] = concerns
     expected_producer = binding["producer"]
     for receipt in document["native_receipts"]:
         if (receipt["repository_id"], receipt["pull_request"]) != key or (
@@ -672,6 +660,32 @@ def restore_finding_lifecycle(
         from .accepted_semantic_history import validate_history
 
         validate_history(history, identity)
+    from .quarantine_namespace import inherited_namespace_is_historical
+
+    if inherited_namespace_is_historical(ledger, record, state, document):
+        if (
+            key in reviewer._active_window_states
+            or key in reviewer._drift_states
+            or key in reviewer._unknown_effect_holds
+        ):
+            raise ReviewInputError(
+                "quarantine finding namespace requires an independent current projection"
+            )
+        # The exact old reference and all effects remain in the immutable
+        # predecessor/origin. They are not fresh findings or replay authority.
+        return record, None
+    if isinstance(state, ActiveWindowRoundState):
+        reviewer._active_window_states[key] = state
+        reviewer._drift_states.pop(key, None)
+        if restored.input_identity is not None:
+            reviewer._active_window_inputs[key] = restored.input_identity
+    else:
+        reviewer._drift_states[key] = state
+        reviewer._active_window_states.pop(key, None)
+        if restored.input_identity is not None:
+            reviewer._drift_inputs[key] = restored.input_identity
+        for obligation, concerns in restored.concern_history.items():
+            reviewer._drift_concern_history[(*key, obligation)] = concerns
     reviewer._accepted_semantic_histories = getattr(
         reviewer, "_accepted_semantic_histories", {}
     )

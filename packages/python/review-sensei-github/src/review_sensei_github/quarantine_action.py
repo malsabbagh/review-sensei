@@ -162,7 +162,49 @@ def decision_authority(run, authority):
     return role
 
 
-def _current_publication_digest(ledger, record):
+def _current_collision_pairs(retained, state, head_sha):
+    """Pure identity projection; caller must authenticate result and full state."""
+    from review_sensei.active_finding_window import (
+        ActiveWindowRoundState,
+        obligation_from_comment,
+    )
+    from review_sensei.context import finding_lifecycle_for_comment
+    from review_sensei.finding_drift import drift_obligation_from_comment
+    from review_sensei.human_assessment import finding_instance_fingerprint
+
+    window = isinstance(state, ActiveWindowRoundState)
+    if isinstance(state, ActiveWindowRoundState):
+        unresolved = {
+            (item.obligation_id, item.resolution_criterion)
+            for item in state.authoritative_decision_inventory.obligations
+            if item.unresolved
+        }
+    else:
+        unresolved = {
+            (item.criterion.obligation_id, item.criterion.resolution_criterion)
+            for item in state.inventory.obligations
+            if item.unresolved
+        }
+    # Full immutable state includes hidden and omitted original obligations.
+    # Latest provider output is not a complete inventory and cannot erase them.
+    pairs: set[tuple[str, str | None]] = set(unresolved)
+    for comment in retained.comments:
+        criterion = (
+            obligation_from_comment(comment)
+            if window
+            else drift_obligation_from_comment(comment, head_sha=head_sha).criterion
+        )
+        if (criterion.obligation_id, criterion.resolution_criterion) in unresolved:
+            pairs.add(
+                (
+                    finding_instance_fingerprint(comment),
+                    finding_lifecycle_for_comment(comment).concern,
+                )
+            )
+    return pairs
+
+
+def _current_publication_digest(ledger, record, *, _collision_pairs=None):
     """Bind a current display projection to its independently retained analysis.
 
     This is not a historical-origin selector. A command without a current
@@ -216,12 +258,22 @@ def _current_publication_digest(ledger, record):
     state = decode_lifecycle_state(document["lifecycle"]).state
     if state.head_sha != transaction.head_sha or state.base_sha != transaction.base_sha:
         raise ReviewInputError("current quarantine lifecycle state scope conflicts")
+    if _collision_pairs is not None:
+        _collision_pairs.extend(
+            _current_collision_pairs(retained, state, transaction.head_sha)
+        )
     original = replace(retained, transaction=transaction)
     projected = (
         project_display_review_result(original, state)
         if isinstance(state, ActiveWindowRoundState)
         else project_drift_review_result(original, state)
     )
+    # Decoding native placement state may reconstruct internal comment values
+    # differently while preserving every canonical result field. The producer
+    # retains its transaction when publication content is unchanged; do not
+    # turn that same authenticated content into an unbound digest on cold load.
+    if projected.content_digest() == original.content_digest():
+        return review_result_digest(original)
     return review_result_digest(projected)
 
 
@@ -307,9 +359,13 @@ def prepare_quarantine_target(run, authority, command, app, permission):
         )
     reader.require(eligibility, head_sha=run.head_sha)
     record = reader.record_after_read()
+    collision_pairs: list[tuple[str, str | None]] = []
     if (
         record.transaction is None
-        or eligibility.result_digest != _current_publication_digest(run.ledger, record)
+        or eligibility.result_digest
+        != _current_publication_digest(
+            run.ledger, record, _collision_pairs=collision_pairs
+        )
     ):
         raise ReviewInputError(
             "current quarantine assessment publication transaction conflicts"
@@ -324,11 +380,15 @@ def prepare_quarantine_target(run, authority, command, app, permission):
         raise ReviewInputError(
             "current quarantine assessment finding index is unavailable"
         )
-    if authenticated.lineage[
-        "schema_version"
-    ] != "quarantine-published-tail-v1" and any(
-        item.instance == instance or item.lifecycle == members[0]["concern"]
-        for item in index.entries
+    if authenticated.lineage["schema_version"] != "quarantine-published-tail-v1" and (
+        any(
+            item.instance == instance or item.lifecycle == members[0]["concern"]
+            for item in index.entries
+        )
+        or any(
+            original_instance == instance or original_concern == members[0]["concern"]
+            for original_instance, original_concern in collision_pairs
+        )
     ):
         raise QuarantineTargetRefusal(
             "quarantine assessment collides with a fresh finding; no decision applied"
