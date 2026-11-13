@@ -304,6 +304,24 @@ def fetch_comments(
 ):
     """Complete bounded census; every failed adaptive attempt spends a call."""
     from .publication_recovery import _publication_transport
+    from .quarantine_creation_census import selected_plan
+
+    creation = selected_plan(ledger, identity)
+    if creation is not None:
+        from .packed_comment_census import fetch_packed_comments
+
+        return fetch_packed_comments(
+            ledger,
+            identity,
+            plan=creation,
+            max_requests=min(
+                creation.worst_read_calls(),
+                10 if max_requests is None else max_requests,
+            ),
+            timeout_seconds=timeout_seconds,
+            before_read=before_read,
+            observe_request=observe_request,
+        )
 
     lifecycle = getattr(ledger, "_quarantine_lifecycle_capacity", None)
     if lifecycle is not None:
