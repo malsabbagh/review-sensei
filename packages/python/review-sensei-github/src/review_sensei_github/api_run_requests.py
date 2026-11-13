@@ -58,6 +58,7 @@ class _PlainFindingPagePlan:
     inventory_bytes: bytes
     page_size: int
     page_bounds: tuple[int, ...]
+    page_requests: tuple[tuple[int, int], ...]
     maximum_items: int
     checkpoint_parts: tuple[int, ...]
     root_calls: int
@@ -87,6 +88,7 @@ def _plain_page_signature(plan):
         plan.inventory_bytes,
         plan.page_size,
         plan.page_bounds,
+        plan.page_requests,
         plan.maximum_items,
         plan.checkpoint_parts,
         plan.root_calls,
@@ -2800,31 +2802,42 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             from review_sensei.bounded_evidence import MAX_PART_BYTES
 
             bounds.extend([MAX_PART_BYTES + 512 + 4096] * added_parts)
-            page_size = 0
-            page_bounds: tuple[int, ...] = ()
-            for size in (100, 20, 10, 5, 1):
-                candidates = tuple(
-                    2
-                    + sum(bounds[start : start + size])
-                    + max(0, len(bounds[start : start + size]) - 1)
-                    for start in range(0, len(bounds) + 1, size)
-                )
-                if len(candidates) <= 10 and all(
-                    value < 512 * 1024 for value in candidates
-                ):
-                    page_size, page_bounds = size, candidates
-                    break
-            if not page_size:
-                raise ReviewInputError("finding lifecycle page capacity exceeded")
+            # Seal contiguous native offsets, not one pessimistic page size
+            # for the entire frontier. Sizes may grow only at aligned offsets;
+            # no response-driven retry or unobserved inventory is introduced.
+            requests: list[tuple[int, int]] = []
+            response_bounds: list[int] = []
+            offset = 0
+            while offset <= len(bounds):
+                for size in (100, 20, 10, 5, 1):
+                    if offset % size:
+                        continue
+                    members = bounds[offset : offset + size]
+                    bound = 2 + sum(members) + max(0, len(members) - 1)
+                    if bound < 512 * 1024:
+                        requests.append((size, offset // size + 1))
+                        response_bounds.append(bound)
+                        offset += size
+                        break
+                else:
+                    raise ReviewInputError("finding lifecycle page capacity exceeded")
+                if len(requests) > 10:
+                    raise ReviewInputError("finding lifecycle page capacity exceeded")
+            page_requests = tuple(requests)
+            page_size = page_requests[0][0]
+            page_bounds = tuple(response_bounds)
+            if self.caller._root != selected.record_sha256:
+                raise ReviewInputError("finding lifecycle page plan root changed")
             plan = _PlainFindingPagePlan(
                 self.caller,
-                self.caller._root,
+                selected.record_sha256,
                 selected,
                 canonical_bytes(selected.to_dict()),
                 ids,
                 canonical_bytes(items),
                 page_size,
                 page_bounds,
+                page_requests,
                 len(bounds),
                 checkpoints,
                 root_calls,
@@ -2911,15 +2924,15 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         if self._inventory_complete and not self._list_refresh:
             return self._cached_comments()
         collected = []
-        for page, bound in enumerate(plan.page_bounds, 1):
-            path = (
-                f"{self._comments_path(identity)}?per_page={plan.page_size}&page={page}"
-            )
+        for (page_size, page), bound in zip(
+            plan.page_requests, plan.page_bounds, strict=True
+        ):
+            path = f"{self._comments_path(identity)}?per_page={page_size}&page={page}"
             status, payload = self._request("GET", path)
             if (
                 status != 200
                 or not isinstance(payload, list)
-                or len(payload) > plan.page_size
+                or len(payload) > page_size
                 or any(not isinstance(item, dict) for item in payload)
                 or len(canonical_bytes(payload)) > bound
             ):
@@ -2927,7 +2940,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             collected.extend(payload)
             if len(collected) > plan.maximum_items:
                 raise ReviewInputError("finding lifecycle planned frontier grew")
-            if len(payload) < plan.page_size:
+            if len(payload) < page_size:
                 observed_ids = tuple(item.get("id") for item in collected)
                 if (
                     any(type(value) is not int or value <= 0 for value in observed_ids)
