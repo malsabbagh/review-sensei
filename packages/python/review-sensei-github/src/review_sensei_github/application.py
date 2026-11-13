@@ -667,10 +667,55 @@ class GitHubApplication:
                 evidence_budget=evidence_budget,
             )  # Read-only: no session mutation grant or writer is invented.
         identity = SessionIdentity(repository, pull_request, repository_id)
+        selected = None
         if repository_id is None:
             selected = ledger.load(identity)
             if selected.record is not None:
                 identity = selected.record.identity()
+        from review_sensei.session import LocalSessionLedger
+
+        # Match the producer's explicit standalone/local legacy profile. A local
+        # transaction is not itself enrollment in active-window/drift storage.
+        # Keep its ledger and existing human-inventory/finalizer authority; this
+        # selects no lifecycle, reconstructs nothing and grants no new writer.
+        # An existing reference or in-memory lifecycle state always wins over
+        # disabled writes, so read-only callers cannot downgrade an enrollment.
+        if (
+            type(ledger) is LocalSessionLedger
+            and type(self.reviewer) is ReviewPublisher
+            and type(finalizer) is ReviewApprovalFinalizer
+            and not options.github_session_ledger
+            and ledger.enable_finding_lifecycle_writes is False
+            and options.max_active_findings is None
+            and not options.enable_drift_tracking
+            and not any(
+                getattr(owner, name, None)
+                for owner in (self.reviewer, finalizer)
+                for name in (
+                    "_active_window_states",
+                    "_active_window_inputs",
+                    "_drift_states",
+                    "_drift_inputs",
+                    "_drift_concern_history",
+                    "_native_finding_receipt_records",
+                    "_trust_snapshots",
+                    "_trust_decisions",
+                    "_unknown_effect_holds",
+                    "_response_loss_holds",
+                    "_artifact_decisions",
+                    "_finding_lifecycle_journal",
+                    "_finding_lifecycle_consumer",
+                )
+            )
+        ):
+            selected = selected if selected is not None else ledger.load(identity)
+            if selected.status not in {"ok", "migrated", "missing"}:
+                raise ReviewInputError(
+                    "finding lifecycle selected session is unavailable: "
+                    + selected.status
+                )
+            if selected.record is None or selected.record.finding_lifecycle is None:
+                return None
         from .finding_lifecycle_consumers import finding_lifecycle_consumer
 
         consumer = finding_lifecycle_consumer(
