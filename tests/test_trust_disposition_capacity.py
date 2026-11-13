@@ -79,6 +79,21 @@ class PreentryCapacityTests(unittest.TestCase):
                 run.caller._root,
                 len(f.trace),
             )
+            invoked = []
+
+            def forged_intent(**kwargs):
+                invoked.append(True)
+                return {"purpose": "forged"}
+
+            with patch.object(run.caller, "action_intent_document", forged_intent):
+                with self.assertRaises(ReviewInputError):
+                    prepare_source_disposition(run, args)
+            self.assertEqual(invoked, [])
+            self.assertEqual(f.comment, before)
+            self.assertEqual(run.caller._root, root)
+            self.assertIsNone(run.caller.accounting.action)
+            # Separate paid collection for the subsequent actual source receipt.
+            start = len(f.trace)
             provider_calls = f.provider_calls
             observation_start = len(run.caller.observations)
             receipt = prepare_source_disposition(run, args)

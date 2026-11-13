@@ -137,6 +137,9 @@ def _build_preparation():
                 }
             )
         ).hexdigest()
+        from review_sensei.source_registry import require_instance_source
+
+        require_instance_source(caller, methods=("action_intent_document",))
         intent = caller.action_intent_document(
             purpose="command",
             source=source,
