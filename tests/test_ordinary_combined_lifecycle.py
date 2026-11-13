@@ -13,6 +13,7 @@ from tests.test_ordinary_native_recovery_cold import subprocess_environment
 
 CHILD = r"""
 import copy,json,sys
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 from test_action_reply_entry import ReplyEntryFixture
@@ -50,7 +51,7 @@ def capture(*a,**kw):
 with patch.object(lifecycle,'restore_finding_lifecycle',capture): code=f.invoke_reply()
 record=parse_session_comment(f.comment['body'],identity=IDENTITY)
 state=observed[-1][0]._drift_states.get((123,7)) if observed else None
-state_summary=None if state is None else {'obligations':[{'id':o.obligation_id,'criterion':o.criterion.resolution_criterion,'status':o.lifecycle_state,'binding':str(o.thread_binding)} for o in state.inventory.obligations],'slots':[str(x) for x in state.slots]}
+state_summary=None if state is None else {'obligations':[{'id':o.obligation_id,'criterion':o.criterion.resolution_criterion,'status':o.lifecycle_state,'binding':asdict(o.thread_binding) if o.thread_binding else None} for o in state.inventory.obligations],'slots':[asdict(x) for x in state.slots]}
 
 from review_sensei.finding_lifecycle import decode_lifecycle_state
 initial=decode_lifecycle_state(next(doc for _,doc in observed if doc is not None)['lifecycle']).state
@@ -63,6 +64,7 @@ Path(sys.argv[3]).write_text(json.dumps(result))
 
 PROMOTE = r"""
 import copy,json,sys
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 from test_review_run import EntryFixture
@@ -87,7 +89,7 @@ def capture(*a,**kw):
     result=original(*a,**kw); owners.append(a[0]); return result
 with patch.object(lifecycle,'restore_finding_lifecycle',capture): code=f.invoke()
 state=owners[-1]._drift_states.get((123,7)) if owners else None
-summary=None if state is None else {'obligations':[{'id':o.obligation_id,'criterion':o.criterion.resolution_criterion,'status':o.lifecycle_state,'binding':str(o.thread_binding)} for o in state.inventory.obligations],'slots':[str(x) for x in state.slots]}
+summary=None if state is None else {'obligations':[{'id':o.obligation_id,'criterion':o.criterion.resolution_criterion,'status':o.lifecycle_state,'binding':asdict(o.thread_binding) if o.thread_binding else None} for o in state.inventory.obligations],'slots':[asdict(x) for x in state.slots]}
 Path(sys.argv[3]).write_text(json.dumps({'code':code,'error':f.error,'provider_calls':f.provider_calls,'state':summary,'reviews':len(f.reviews),'threads':f.threads,'remote':{k:getattr(f,k) for k in p['remote']},'terminal':parse_session_comment(f.comment['body'],identity=IDENTITY).api_run_accounting}))
 """
 
@@ -117,6 +119,9 @@ class OrdinaryCombinedLifecycleTests(unittest.TestCase):
             ]
             self.assertEqual(f.invoke(), 0, f.error)
             self.assertEqual(len(f.threads), 1)
+            original_thread = f.threads[0]["id"]
+            original_comment = f.threads[0]["comments"]["nodes"][0]["databaseId"]
+            self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
             packet = root / "remote.json"
             packet.write_text(
                 json.dumps(
@@ -153,6 +158,9 @@ class OrdinaryCombinedLifecycleTests(unittest.TestCase):
             self.assertEqual(done.returncode, 0, done.stderr)
             result = json.loads(output.read_text())
             self.assertEqual(result["limit"], 512)
+            self.assertFalse(
+                any(r["state"] == "APPROVED" for r in result["remote"]["reviews"])
+            )
             self.assertEqual(result["visible"], 1)
             self.assertEqual(
                 result["initial_pairs"],
@@ -165,14 +173,19 @@ class OrdinaryCombinedLifecycleTests(unittest.TestCase):
                 self.assertEqual(len(result["state"]["obligations"]), 2)
                 self.assertFalse(
                     any(
-                        "slot_state='released'" in x["binding"]
+                        x["binding"] is not None
+                        and x["binding"]["slot_state"] == "released"
                         for x in result["state"]["obligations"]
                     )
                 )
                 return
             self.assertEqual(result["code"], 0, result)
             self.assertEqual(result["provider_calls"], 1)
-            self.assertEqual(len(result["resolved"]), 1, result)
+            self.assertEqual(result["resolved"], [original_thread], result)
+            self.assertEqual(
+                [t["id"] for t in result["remote"]["threads"] if t["isResolved"]],
+                [original_thread],
+            )
             original_packet = json.loads(packet.read_text())
             original_packet["remote"] = result["remote"]
             packet.write_text(json.dumps(original_packet))
@@ -207,7 +220,25 @@ class OrdinaryCombinedLifecycleTests(unittest.TestCase):
             hidden = next(k for k in before if k not in released)
             self.assertEqual(after[released[0]]["status"], "verified-fixed")
             self.assertEqual(after[hidden]["status"], "omitted-uncertain")
-            self.assertIn("slot_state='active'", after[hidden]["binding"])
+            old_binding = before[released[0]]["binding"]
+            self.assertEqual(old_binding["thread_id"], original_thread)
+            self.assertEqual(old_binding["comment_id"], original_comment)
+            self.assertEqual(old_binding["slot_state"], "released")
+            self.assertTrue(old_binding["proof_sha256"])
+            self.assertEqual(after[released[0]]["binding"], old_binding)
+            new_binding = after[hidden]["binding"]
+            self.assertEqual(new_binding["slot_state"], "active")
+            self.assertTrue(new_binding["proof_sha256"])
+            self.assertNotEqual(new_binding["thread_id"], original_thread)
+            unresolved = [t for t in promoted["threads"] if not t["isResolved"]]
+            self.assertEqual([t["id"] for t in unresolved], [new_binding["thread_id"]])
+            self.assertEqual(
+                unresolved[0]["comments"]["nodes"][0]["databaseId"],
+                new_binding["comment_id"],
+            )
+            self.assertFalse(
+                any(r["state"] == "APPROVED" for r in promoted["remote"]["reviews"])
+            )
             self.assertEqual(sum(not x["isResolved"] for x in promoted["threads"]), 1)
             self.assertIsNotNone(promoted["terminal"]["terminal_transaction"])
             replay_packet = dict(
@@ -234,6 +265,9 @@ class OrdinaryCombinedLifecycleTests(unittest.TestCase):
             replay = json.loads(output.read_text())
             self.assertEqual(replay["code"], 0, replay["error"])
             self.assertEqual(replay["provider_calls"], 0)
+            self.assertFalse(
+                any(r["state"] == "APPROVED" for r in replay["remote"]["reviews"])
+            )
             for name in ("reviews", "inline", "threads", "check_runs"):
                 self.assertEqual(replay["remote"][name], promoted["remote"][name])
 
