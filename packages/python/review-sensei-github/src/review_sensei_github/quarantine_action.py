@@ -162,6 +162,69 @@ def decision_authority(run, authority):
     return role
 
 
+def _current_publication_digest(ledger, record):
+    """Bind a current display projection to its independently retained analysis.
+
+    This is not a historical-origin selector. A command without a current
+    publication transaction must establish that authority elsewhere, not borrow
+    a predecessor's lifecycle as its current root.
+    """
+    transaction = record.transaction
+    if transaction is None:
+        raise ReviewInputError("current quarantine publication transaction is absent")
+    if record.finding_lifecycle is None:
+        return transaction_publication_digest(transaction)
+    from dataclasses import replace
+
+    from review_sensei.active_finding_window import (
+        ActiveWindowRoundState,
+        project_display_review_result,
+    )
+    from review_sensei.finding_drift import project_drift_review_result
+    from review_sensei.finding_lifecycle import decode_lifecycle_state
+    from review_sensei.finding_lifecycle_store import read_finding_lifecycle
+    from review_sensei.models import ReviewResult
+
+    from .finding_lifecycle import _require_effect_scope, _unpack_journal, _validate
+    from .finding_lifecycle_dictionary import resolve_stored
+    from .publication import review_result_digest
+
+    load = getattr(ledger, "load_retained_checkpoint_result", None)
+    retained = (
+        load(record.identity(), transaction=transaction, head_sha=transaction.head_sha)
+        if callable(load)
+        else None
+    )
+    if (
+        not isinstance(retained, ReviewResult)
+        or retained.transaction is None
+        or not retained.transaction.logical_identity_matches(transaction)
+        or retained.content_digest() != transaction.result_sha256
+    ):
+        raise ReviewInputError(
+            "current quarantine retained publication source conflicts"
+        )
+    binding = record.finding_lifecycle["manifest"]["binding"]
+    if any(
+        binding[name] != getattr(transaction, name)
+        for name in ("head_sha", "base_sha", "policy_digest", "configuration_digest")
+    ):
+        raise ReviewInputError("current quarantine lifecycle source scope conflicts")
+    stored = read_finding_lifecycle(ledger, record)
+    document = _validate(_unpack_journal(resolve_stored(ledger, record, stored)))
+    _require_effect_scope(document, record.identity(), transaction.head_sha)
+    state = decode_lifecycle_state(document["lifecycle"]).state
+    if state.head_sha != transaction.head_sha or state.base_sha != transaction.base_sha:
+        raise ReviewInputError("current quarantine lifecycle state scope conflicts")
+    original = replace(retained, transaction=transaction)
+    projected = (
+        project_display_review_result(original, state)
+        if isinstance(state, ActiveWindowRoundState)
+        else project_drift_review_result(original, state)
+    )
+    return review_result_digest(projected)
+
+
 def prepare_quarantine_target(run, authority, command, app, permission):
     if not authorized_override(
         association=authority.document["actor"]["association"], permission=permission
@@ -246,8 +309,7 @@ def prepare_quarantine_target(run, authority, command, app, permission):
     record = reader.record_after_read()
     if (
         record.transaction is None
-        or eligibility.result_digest
-        != transaction_publication_digest(record.transaction)
+        or eligibility.result_digest != _current_publication_digest(run.ledger, record)
     ):
         raise ReviewInputError(
             "current quarantine assessment publication transaction conflicts"

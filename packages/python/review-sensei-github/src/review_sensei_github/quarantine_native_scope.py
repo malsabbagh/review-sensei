@@ -57,6 +57,43 @@ class NativeScope:
         return selected
 
 
+def _authenticated_origin_digest(source, record):
+    """Project only a process-authenticated source's original native identity.
+
+    The caller has authenticated these exact bytes through QuarantineOriginReader.
+    This pure check neither selects historical roots as current nor authenticates
+    arbitrary dictionaries on its own.
+    """
+    transaction = record.transaction
+    if transaction is None:
+        raise ReviewInputError("quarantine native scope publication is absent")
+    if (
+        source["schema_version"]
+        != "quarantine-lifecycle-published-assessment-source-v1"
+    ):
+        if (
+            source["schema_version"] != "quarantine-published-assessment-source-v1"
+            or record.finding_lifecycle is not None
+        ):
+            raise ReviewInputError(
+                "quarantine native scope lifecycle source version conflicts"
+            )
+        return transaction_publication_digest(transaction)
+    from .publication import parse_finding_index
+
+    if record.finding_lifecycle is None or record.repository_id is None:
+        raise ReviewInputError("quarantine native scope lifecycle source is absent")
+    index = parse_finding_index(
+        source["review_body"],
+        repository_id=record.repository_id,
+        pull_request=record.pull_request,
+        head_sha=transaction.head_sha,
+    )
+    if index is None or index.base_sha != transaction.base_sha:
+        raise ReviewInputError("quarantine native scope original publication conflicts")
+    return index.result_digest
+
+
 def bind_native_scope(ledger, identity, authenticated):
     from .quarantine_origin import _AUTHENTICATED, AuthenticatedQuarantine
 
@@ -83,7 +120,7 @@ def bind_native_scope(ledger, identity, authenticated):
             (
                 record.transaction.head_sha,
                 record.transaction.base_sha,
-                transaction_publication_digest(record.transaction),
+                _authenticated_origin_digest(source, record),
             )
         )
     scope = NativeScope(
