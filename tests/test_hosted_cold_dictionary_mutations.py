@@ -1,8 +1,10 @@
-"""Cold dictionary authority corruption under the existing producer's allowance.
+"""Cold authenticated dictionary reader corruption, not end-to-end commands.
 
 The existing FindingDictionaryRestartTests producer predates this slice and has
 an original 1024-call configuration. These negatives do not qualify ordinary
-512-call publication. No optional caller-supplied archive_chain is injected.
+512-call publication. The bootstrap hook explicitly invokes the authenticated
+reader; the pending command otherwise holds before ordinary consumption. No
+optional caller-supplied archive_chain is injected.
 """
 
 import base64
@@ -37,9 +39,9 @@ with tempfile.TemporaryDirectory() as fresh:
     f.resolved_threads=set(saved['resolved_threads']);f.attempt=2
     observation={}
     def inspect(run):
+        observation['limit']=run.caller.accounting.configuration.limit
         selected,stored=select_finding_lifecycle(run.ledger,run.identity)
         observation['selected_carrier']=stored['schema_version']
-        observation['limit']=run.caller.accounting.configuration.limit
         reviewer=ReviewPublisher(http=run.http)
         record,document=restore_finding_lifecycle(reviewer,run.ledger,run.identity,loaded=selected)
         observation['restored']=document is not None
@@ -53,6 +55,12 @@ with tempfile.TemporaryDirectory() as fresh:
 
 class HostedColdDictionaryMutationTests(unittest.TestCase):
     def test_required_original_dictionary_corruption_holds_without_repost(self):
+        self._assert_mutations("dictionary")
+
+    def test_required_outer_lifecycle_corruption_holds_without_repost(self):
+        self._assert_mutations("lifecycle")
+
+    def _assert_mutations(self, target_kind):
         for mode in ("deleted", "edited", "foreign-producer"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -94,7 +102,11 @@ class HostedColdDictionaryMutationTests(unittest.TestCase):
                 self.assertEqual(
                     carrier["schema_version"], "finding-lifecycle-packed-v4"
                 )
-                manifest = carrier["dictionary_manifest"]
+                manifest = (
+                    carrier["dictionary_manifest"]
+                    if target_kind == "dictionary"
+                    else outer
+                )
                 self.assertEqual(manifest["encoding"], "partitioned-json-v1")
                 target = str(manifest["parts"][0]["storage_id"])
                 self.assertIn(target, before["extra_comments"])
@@ -124,11 +136,14 @@ class HostedColdDictionaryMutationTests(unittest.TestCase):
                 after = json.loads((root / "after.json").read_text())
                 self.assertNotEqual(outcome["code"], 0, outcome)
                 self.assertFalse(outcome.get("restored"), outcome)
-                self.assertEqual(
-                    outcome.get("selected_carrier"),
-                    "finding-lifecycle-packed-v4",
-                    outcome,
-                )
+                if target_kind == "dictionary":
+                    self.assertEqual(
+                        outcome.get("selected_carrier"),
+                        "finding-lifecycle-packed-v4",
+                        outcome,
+                    )
+                else:
+                    self.assertNotIn("selected_carrier", outcome)
                 self.assertEqual(outcome.get("limit"), 1024, outcome)
                 retained = parse_session_comment(
                     after["comment"]["body"], identity=IDENTITY
