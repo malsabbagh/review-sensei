@@ -470,3 +470,12 @@ head, started work or landed business effects. Terminal second-attempt entry is
 an ordinary already-terminal bootstrap refusal, not a newly supported replay.
 Stopping a test interpreter supplies no production cancellation, cessation or
 non-dispatch authority. Reply-source composition remains separately qualified.
+
+Worker-backed disposition snapshots distinguish historical and current carriers.
+The historical 25-decision fault matrix uses five commands of five decisions at
+the original 512-call allowance per run; ten-at-once no longer fits its complete
+semantic terminal-carrier reserve. The current lifecycle remains enabled in its
+separate two-decision command and cold-verify qualification. A current 25-finding,
+ten-decision command at 512 refuses its complete operation before business
+writes, preserving the inventory and accepted semantic history. The historical
+snapshot result is not evidence that this larger current-lifecycle command fits.
