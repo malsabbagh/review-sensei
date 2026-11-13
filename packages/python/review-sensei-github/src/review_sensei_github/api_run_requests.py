@@ -137,40 +137,43 @@ class _AccountedResponse:
         self._read = False
 
     def __getattr__(self, name: str) -> Any:
+        validate, response = self._validate_return, self._response
         try:
-            return getattr(self._response, name)
+            return getattr(response, name)
         finally:
-            self._require_return()
-
-    def _require_return(self) -> None:
-        if self._validate_return is not None:
-            self._validate_return()
+            if validate is not None:
+                validate()
 
     def __enter__(self) -> _AccountedResponse:
+        validate, response = self._validate_return, self._response
         try:
-            self._response.__enter__()
-            self._require_return()
+            response.__enter__()
+            if validate is not None:
+                validate()
         except BaseException:
-            # A failed __enter__ is not followed by the caller's __exit__.
-            self._response.__exit__(*sys.exc_info())
+            response.__exit__(*sys.exc_info())
             raise
         return self
 
     def __exit__(self, *args: Any) -> Any:
+        validate, response = self._validate_return, self._response
         try:
-            return self._response.__exit__(*args)
+            return response.__exit__(*args)
         finally:
-            self._require_return()
+            if validate is not None:
+                validate()
 
     def read(self, size: int) -> Any:
+        validate, response = self._validate_return, self._response
+        confirmed, already_read = self._confirmed, self._read
         try:
-            value = self._response.read(size)
-            if not self._read:
-                # Physical completion is retained even if source custody was
-                # changed by response code. A hold never refunds this request.
-                self._confirmed()
+            value = response.read(size)
+            if not already_read:
+                # Physical completion survives a subsequent source-custody hold.
+                confirmed()
         finally:
-            self._require_return()
+            if validate is not None:
+                validate()
         if not self._read:
             if self._observed is not None:
                 self._observed(value)
@@ -1030,6 +1033,10 @@ class ApiRunRequestTransport:
             raise
         try:
             validate_trust_return(self)
+            try:
+                observed_status = getattr(response, "status", None)
+            finally:
+                validate_trust_return(self)
         except BaseException:
             close = getattr(response, "close", None)
             if callable(close):
@@ -1037,7 +1044,6 @@ class ApiRunRequestTransport:
             else:
                 response.__exit__(*sys.exc_info())
             raise
-        observed_status = getattr(response, "status", None)
         return _AccountedResponse(
             response,
             confirmed,

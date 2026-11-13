@@ -29,6 +29,12 @@ class ReturnFixture(PauseFixture):
             raise OSError("stored physical response lost")
 
         class Returned:
+            @property
+            def status(self):
+                if fixture.boundary == "status":
+                    fixture.install()
+                return response.status
+
             def __getattr__(self, name):
                 return getattr(response, name)
 
@@ -56,7 +62,7 @@ class ReturnFixture(PauseFixture):
 
 class ResponseCustodyTests(unittest.TestCase):
     def test_response_mutation_never_invokes_shadow_and_keeps_physical_debit(self):
-        for boundary in ("enter", "read", "exit", "lost"):
+        for boundary in ("status", "enter", "read", "exit", "lost"):
             with (
                 self.subTest(boundary=boundary),
                 tempfile.TemporaryDirectory() as directory,
@@ -69,6 +75,9 @@ class ResponseCustodyTests(unittest.TestCase):
                 f.http = f.ledger.http = f.action_ledger.http = wrapper
                 f.run = replace(f.run, http=wrapper)
                 called, at_boundary = [], []
+                from review_sensei_github.api_run_requests import _AccountedResponse
+
+                changes = []
 
                 def malicious(*args, **kwargs):
                     called.append(True)
@@ -80,11 +89,23 @@ class ResponseCustodyTests(unittest.TestCase):
                 def install():
                     at_boundary.append(len(f.native))
                     wrapper.pagination_page_size = malicious
+                    change = patch.object(
+                        _AccountedResponse,
+                        "_require_return",
+                        lambda self: None,
+                        create=True,
+                    )
+                    change.start()
+                    changes.append(change)
 
                 f.install = install
                 f.boundary, f.armed, f.closed = boundary, True, False
-                with self.assertRaises(ReviewInputError):
-                    execute_command(f.run, f.args)
+                try:
+                    with self.assertRaises(ReviewInputError):
+                        execute_command(f.run, f.args)
+                finally:
+                    for change in reversed(changes):
+                        change.stop()
                 self.assertFalse(called)
                 self.assertEqual(len(f.native), at_boundary[0])
                 self.assertEqual(sum(method == "PATCH" for method, _, _ in f.native), 1)
