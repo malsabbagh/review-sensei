@@ -750,11 +750,14 @@ class QuarantineFullAnalysisRecoveryTests(unittest.TestCase):
                 self.assertIsNone(current.api_run_accounting["terminal_transaction"])
                 self.assertIsNone(old.api_run_accounting["terminal_transaction"])
 
-    def test_failed_first_full_pass_recovers_exact_context_without_another_provider_call(
+    def test_legacy_failed_first_full_pass_recovers_exact_context_without_another_provider_call(
         self,
     ):
         with tempfile.TemporaryDirectory() as directory:
             fixture = JourneyFixture(directory)
+            # This retry predates durable native-effect journalling. Current
+            # uncertain publication is separately required to remain pending.
+            fixture.legacy_publication_fixture = True
             old, registration = fixture.original_origins()
             fixture.allow_publication = False
             with registered_resource([registration]):
