@@ -2153,7 +2153,27 @@ class GitHubApplication:
                 admitted_inventory_store = HumanInventoryStore(
                     transport, token, ledger, context
                 )
-                if not may_start_human_inventory:
+                # An independently selected, digest-matched empty original
+                # contains no per-comment admission flags to reconstruct. The
+                # authenticated lifecycle is still required: its prior hidden
+                # obligations must not be inferred empty from this new result.
+                empty_original_with_retained_lifecycle = (
+                    validated_transaction_recovery
+                    and not result.comments
+                    and lifecycle_document is not None
+                    and lifecycle_record is not None
+                    and lifecycle_record.finding_lifecycle is not None
+                    and transaction_record is not None
+                    and transaction_record.transaction is not None
+                    and transaction_record.finding_lifecycle
+                    == lifecycle_record.finding_lifecycle
+                    and transaction_record.transaction.result_sha256
+                    == result.content_digest()
+                )
+                if (
+                    not may_start_human_inventory
+                    and not empty_original_with_retained_lifecycle
+                ):
                     admission_recovery_held = True
                     result = restore_admitted_result(result, admitted_inventory_store)
                     admission_recovery_held = False

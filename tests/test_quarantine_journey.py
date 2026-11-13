@@ -711,6 +711,45 @@ class QuarantineConsumerFaultTests(unittest.TestCase):
 
 
 class QuarantineFullAnalysisRecoveryTests(unittest.TestCase):
+    def test_current_empty_original_retry_preserves_projected_obligations_and_hold(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = JourneyFixture(directory)
+            old, registration = fixture.original_origins()
+            self.assertFalse(fixture.legacy_publication_fixture)
+            fixture.allow_publication = False
+            with registered_resource([registration]):
+                self.assertEqual(fixture.invoke(), 1)
+                failed = fixture.current_record()
+                self.assertIsNotNone(failed.finding_lifecycle)
+                self.assertEqual(failed.transaction.phase, "publication_failed")
+                calls, reviews = fixture.provider_calls, len(fixture.reviews)
+                fixture.quarantine_predecessor_comment_id = None
+                fixture.attempt, fixture.allow_publication = 2, True
+                self.assertEqual(fixture.invoke(), 1)
+                self.assertIn("reconciliation of retained explanations", fixture.error)
+                self.assertNotIn(
+                    "publication admission evidence is missing", fixture.error
+                )
+                current = fixture.current_record()
+                self.assertEqual(fixture.provider_calls, calls)
+                self.assertEqual(len(fixture.reviews), reviews)
+                self.assertEqual(
+                    current.transaction.transaction_id,
+                    failed.transaction.transaction_id,
+                )
+                self.assertIsNotNone(current.finding_lifecycle)
+                self.assertEqual(current.quarantine_lineage, failed.quarantine_lineage)
+                self.assertEqual(
+                    len(fixture.selected.ledger._quarantine_authenticated.pending), 2
+                )
+                self.assertEqual(
+                    current.api_run_accounting["configuration"]["limit"], 512
+                )
+                self.assertIsNone(current.api_run_accounting["terminal_transaction"])
+                self.assertIsNone(old.api_run_accounting["terminal_transaction"])
+
     def test_failed_first_full_pass_recovers_exact_context_without_another_provider_call(
         self,
     ):
