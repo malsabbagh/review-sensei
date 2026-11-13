@@ -160,7 +160,15 @@ def _install_transport_source(source_class):
 
             def require_http_source():
                 if type(http) is _PaginationObservationHttp:
-                    require_instance_source(http, methods=("request", "paginate"))
+                    require_instance_source(
+                        http,
+                        methods=tuple(
+                            name
+                            for name in dir(_PaginationObservationHttp)
+                            if not name.startswith("__")
+                            and callable(getattr(_PaginationObservationHttp, name))
+                        ),
+                    )
                     if (
                         http.transport is not base_http
                         or http.observation_budget is not run.caller.budget_view

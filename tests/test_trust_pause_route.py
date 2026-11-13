@@ -149,7 +149,14 @@ class TrustPauseRouteTests(unittest.TestCase):
 
         from review_sensei.errors import ReviewInputError
 
-        for fault in ("nested", "budget", "request", "foreign-class"):
+        for fault in (
+            "nested",
+            "budget",
+            "request",
+            "_paginate",
+            "pagination_page_size",
+            "foreign-class",
+        ):
             for after_first in (False, True):
                 with (
                     self.subTest(fault=fault, after_first=after_first),
@@ -177,7 +184,17 @@ class TrustPauseRouteTests(unittest.TestCase):
                                 "ForeignWrapper", (_PaginationObservationHttp,), {}
                             )
                         else:
-                            wrapper.request = lambda *a, **k: (200, {})
+
+                            def injected(*args, **kwargs):
+                                # Even when consulted between request boundaries,
+                                # a substituted helper cannot dispatch extra I/O.
+                                return base.request(
+                                    "GET",
+                                    "/repos/owner/repo/pulls/7",
+                                    token=f.session.token,
+                                )
+
+                            setattr(wrapper, fault, injected)
 
                     if after_first:
                         f.after_root = tamper
