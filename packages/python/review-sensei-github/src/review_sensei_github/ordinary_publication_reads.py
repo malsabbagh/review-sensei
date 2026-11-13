@@ -1,4 +1,4 @@
-"""Negative, invocation-local read bounds for the fresh empty review route.
+"""Negative, invocation-local read bounds for qualified fresh ordinary routes.
 
 The observation never supplies response bytes or native authority. Every read
 still reaches the existing charged transport and every source validator runs.
@@ -38,6 +38,7 @@ _SOURCE: tuple[Any, ...] | None = None
 _TRANSPORT_METHODS: dict[Any, Any] = {}
 _ACTIVE: WeakKeyDictionary = WeakKeyDictionary()
 _WITNESSES: WeakKeyDictionary = WeakKeyDictionary()
+_WITNESS_SHAPES: WeakKeyDictionary = WeakKeyDictionary()
 _OBSERVED: WeakKeyDictionary = WeakKeyDictionary()
 _REMAINING: WeakKeyDictionary = WeakKeyDictionary()
 _QUALIFIED: WeakKeyDictionary = WeakKeyDictionary()
@@ -184,7 +185,10 @@ class OrdinaryPublicationReadWitness:
 
     def require(self, journal, publisher):
         observation = _WITNESSES.get(self)
-        if observation is None or self.read_roles != _ROLES or self.read_calls != 16:
+        if observation is None or _WITNESS_SHAPES.get(self) != (
+            self.read_roles,
+            self.read_calls,
+        ):
             raise ReviewInputError(
                 "ordinary publication read witness is unissued or changed"
             )
@@ -301,11 +305,6 @@ class _Observation:
             or record.transaction is None
             or not result.transaction.logical_identity_matches(record.transaction)
             or result.content_digest() != record.transaction.result_sha256
-            or result.comments
-            or projected_result.comments
-            or assembled.inline_comments
-            or assembled.body_explanations
-            or assembled.index_entries
             or cleanup_targets
             or grouped
             or type(checks_enabled) is not bool
@@ -353,7 +352,30 @@ class _Observation:
         inventory = getattr(state, "inventory", None) or getattr(
             state, "authoritative_decision_inventory", None
         )
-        if inventory is not None and inventory.obligations:
+        populated = bool(result.comments)
+        if populated and (
+            not 0 < len(result.comments) <= 2
+            or getattr(
+                getattr(state, "display_active_findings", None),
+                "max_active_findings",
+                None,
+            )
+            != 1
+            or inventory is None
+            or len(inventory.obligations) != len(result.comments)
+            or journal.effects
+            or journal.reviewer.native_finding_receipts(
+                repository_id=journal.identity.repository_id,
+                pull_request=journal.identity.pull_request,
+            )
+            or getattr(journal.reviewer, "_native_finding_context", {}).get(
+                "existing_bindings"
+            )
+        ):
+            raise ReviewInputError(
+                "ordinary publication retained native route is unqualified"
+            )
+        if not populated and inventory is not None and inventory.obligations:
             raise ReviewInputError("ordinary_publication_read_tail_nonempty_inventory")
         self.record, self.record_bytes = record, canonical_bytes(record.to_dict())
         self.result, self.result_bytes = result, canonical_bytes(result.to_dict())
@@ -369,9 +391,30 @@ class _Observation:
             self.projected,
             self.projected_bytes,
         )
-        _REMAINING[self] = dict(_ROLES)
-        self.witness = OrdinaryPublicationReadWitness(_ROLES, 16)
+        roles = (
+            tuple(
+                (
+                    role,
+                    4
+                    if role == "threads"
+                    else 3
+                    if role == "review_comments"
+                    else calls,
+                )
+                for role, calls in _ROLES
+            )
+            if populated
+            else _ROLES
+        )
+        _REMAINING[self] = dict(roles)
+        self.witness = OrdinaryPublicationReadWitness(
+            roles, sum(calls for _, calls in roles)
+        )
         _WITNESSES[self.witness] = self
+        _WITNESS_SHAPES[self.witness] = (
+            self.witness.read_roles,
+            self.witness.read_calls,
+        )
         _ISSUED_WITNESS[self] = self.witness
         return self.witness
 
@@ -554,6 +597,9 @@ def observe_publication(publisher, journal):
         _OBSERVED.pop(observation, None)
         _REMAINING.pop(observation, None)
         _QUALIFIED.pop(observation, None)
-        _ISSUED_WITNESS.pop(observation, None)
+        issued = _ISSUED_WITNESS.pop(observation, None)
+        if issued is not None:
+            _WITNESSES.pop(issued, None)
+            _WITNESS_SHAPES.pop(issued, None)
         for owner, attr, old, wrapper, _ in reversed(observation.bindings):
             setattr(owner, attr, old)

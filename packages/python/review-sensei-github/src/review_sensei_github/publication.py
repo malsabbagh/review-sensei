@@ -8718,8 +8718,19 @@ class ReviewPublisher:
                     inventory = getattr(retained_state, "inventory", None) or getattr(
                         retained_state, "authoritative_decision_inventory", None
                     )
-                    closed_empty_route = (
-                        not result.comments
+                    # Extend admission only for the qualified fresh small
+                    # active-window family. Larger/grouped/drift routes retain
+                    # their existing path until their own full tail is priced.
+                    from .checkpoint_result_store import uses_grouped_publication
+
+                    supported_population = (
+                        0 < len(result.comments) <= 2
+                        and max_active_findings == 1
+                        and not enable_drift_tracking
+                        and not uses_grouped_publication(self.http, result)
+                    )
+                    closed_fresh_route = (
+                        (not result.comments or supported_population)
                         and result.transaction is not None
                         and getattr(lifecycle_journal.ledger, "caller", None)
                         is not None
@@ -8732,7 +8743,7 @@ class ReviewPublisher:
                         lifecycle_journal.transports(),
                         (
                             observe_publication(self, lifecycle_journal)
-                            if closed_empty_route
+                            if closed_fresh_route
                             else nullcontext(None)
                         ) as observation,
                     ):

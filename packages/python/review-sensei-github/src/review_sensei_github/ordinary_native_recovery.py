@@ -46,6 +46,7 @@ def install_sources(caller_class, journal_class, check_class):
     from .api_run_requests import ApiRunRequestTransport
     from .checks import ReviewCheckPublisher
     from .finding_lifecycle import FindingLifecycleJournal
+    from .publication import _REVIEW_THREADS_QUERY
 
     if _SOURCE is not None or (caller_class, journal_class, check_class) != (
         ApiRunRequestTransport,
@@ -68,6 +69,7 @@ def install_sources(caller_class, journal_class, check_class):
             name: getattr(check_class, name)
             for name in ("_create", "_update", "_request")
         },
+        _REVIEW_THREADS_QUERY,
     )
 
 
@@ -136,6 +138,7 @@ class _Capture:
             journal_methods,
             check_type,
             check_methods,
+            _thread_query,
         ) = _SOURCE
         journal, caller = self.journal, self.caller
         if (
@@ -236,12 +239,34 @@ def dispatch(caller, request, observation):
         _MUTATIONS[capture] = observation
         _PHYSICAL[capture] = ((observation, _physical_identity(observation)),)
         return
+    graph_read = False
+    if method == "POST" and parsed.path == urlsplit(capture.api_url).path + "/graphql":
+        try:
+            body = json.loads(request.data or b"{}")
+        except (ValueError, TypeError):
+            body = {}
+        owner, name = capture.journal.identity.repository.split("/", 1)
+        graph_read = (
+            isinstance(body, dict)
+            and set(body) == {"operationName", "query", "variables"}
+            and body.get("operationName") == "ReviewThreads"
+            and body.get("query") == _SOURCE[-1]
+            and body.get("variables")
+            == {
+                "owner": owner,
+                "name": name,
+                "number": capture.journal.identity.pull_request,
+                "after": None,
+                "first": 100,
+            }
+            and bool(capture.effect["request"].get("comments"))
+        )
     if (
-        method != "GET"
-        or observation.get("mutation")
+        (method != "GET" and not graph_read)
+        or (observation.get("mutation") and not graph_read)
         or (parsed.scheme, parsed.netloc)
         != (urlsplit(capture.api_url).scheme, urlsplit(capture.api_url).netloc)
-        or len(capture.reads) >= 2
+        or len(capture.reads) >= (3 if capture.effect["request"].get("comments") else 2)
     ):
         capture.invalid = True
         _INVALID[capture] = True
@@ -288,6 +313,8 @@ def recover(capture, *, token):
                 {"per_page": ["100"], "page": ["1"]},
             ),
         )
+        if effect["request"].get("comments"):
+            expected = (*expected, (api_path + "/graphql", {}))
     elif capture.method == "POST" and capture.path.endswith("/check-runs"):
         expected = (
             (
