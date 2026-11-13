@@ -1069,10 +1069,7 @@ does not supply durable slot/effect restoration or close G10/G14/G16. See
 
 ### Candidate epoch contention preserves durable evidence
 
-The default-disabled contained-writer candidate revokes only its own local grant
-when enrollment or successor activation fails. Epoch keys are shared across
-independent contenders, so failure cannot authorize deleting their canonical
-root, history, or frontier. Partially initialized epochs stay held rather than
-being reset for retry. Independent-process synthetic regressions cover winner
-preservation and post-persistence failure; they do not establish deployed
-all-writer containment. See [ADR 0132](adr/0132-writer-fencing-and-unstarted-action-recovery.md#contending-epoch-initialization-retains-evidence-2026-11-13).
+On failure, revoke own grant only; preserve shared epochs.
+Partial epochs stay held, not reset. Independent-process tests cover winner
+preservation and post-persistence failure, not deployed all-writer containment.
+The contained-writer candidate remains disabled. See [ADR 0132](adr/0132-writer-fencing-and-unstarted-action-recovery.md).
