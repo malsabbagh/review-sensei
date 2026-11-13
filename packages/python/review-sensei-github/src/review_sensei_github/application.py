@@ -4839,6 +4839,7 @@ class GitHubApplication:
         # broker exchange minted. Never a caller-supplied token.
         _prepared_review_capability: _PreparedReviewCapability | None = None,
         _capacity_plan=None,
+        _quarantine_lifecycle_transfer: Any = None,
     ) -> object:
         """Re-check approval after a hosted override. A failed check leaves the ledger write."""
 
@@ -4962,7 +4963,10 @@ class GitHubApplication:
                     )
                 else:
                     selected_record, retained_journal = restore_finding_lifecycle(
-                        self.reviewer, ledger, record.identity()
+                        self.reviewer,
+                        ledger,
+                        record.identity(),
+                        _retained=_quarantine_lifecycle_transfer,
                     )
                 if (
                     selected_record is None

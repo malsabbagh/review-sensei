@@ -104,6 +104,7 @@ class QuarantineTarget:
     authenticated: object
     instance: str
     permission: str
+    lifecycle_transfer: object | None = None
 
 
 def decision_authority(run, authority):
@@ -327,7 +328,9 @@ def _current_collision_pairs(retained, state, head_sha):
     return pairs
 
 
-def _current_publication_digest(ledger, record, *, _collision_pairs=None):
+def _current_publication_digest(
+    ledger, record, *, _collision_pairs=None, _capture=None, _transfer_capture=None
+):
     """Bind a current display projection to its independently retained analysis.
 
     This is not a historical-origin selector. A command without a current
@@ -385,6 +388,8 @@ def _current_publication_digest(ledger, record, *, _collision_pairs=None):
         _collision_pairs.extend(
             _current_collision_pairs(retained, state, transaction.head_sha)
         )
+    if _transfer_capture is not None:
+        _transfer_capture(document)
     original = replace(retained, transaction=transaction)
     projected = (
         project_display_review_result(original, state)
@@ -483,11 +488,15 @@ def prepare_quarantine_target(run, authority, command, app, permission):
     reader.require(eligibility, head_sha=run.head_sha)
     record = reader.record_after_read()
     collision_pairs: list[tuple[str, str | None]] = []
+    lifecycle_capture: list[Any] = []
     if (
         record.transaction is None
         or eligibility.result_digest
         != _current_publication_digest(
-            run.ledger, record, _collision_pairs=collision_pairs
+            run.ledger,
+            record,
+            _collision_pairs=collision_pairs,
+            _capture=lifecycle_capture,
         )
     ):
         raise ReviewInputError(
@@ -520,7 +529,17 @@ def prepare_quarantine_target(run, authority, command, app, permission):
     # event changes only that origin's hold, never ordinary dispositions or a
     # fresh thread. A recurrence therefore retains its independent fresh gate.
     actual_permission = decision_authority(run, authority)
-    return QuarantineTarget(reader, authenticated, instance, actual_permission)
+    target = QuarantineTarget(
+        reader,
+        authenticated,
+        instance,
+        actual_permission,
+        lifecycle_capture[0] if lifecycle_capture else None,
+    )
+    from .quarantine_lifecycle_transfer import bind_target
+
+    bind_target(target.lifecycle_transfer, target)
+    return target
 
 
 def _stage_decision_event(run, authority, event, binding):
@@ -746,6 +765,18 @@ def apply_quarantine_target(run, authority, command, target, app):
             ),
         ),
     )
+    from .quarantine_lifecycle_transfer import confirmed_transfer
+
+    lifecycle_transfer = (
+        confirmed_transfer(
+            target,
+            run,
+            confirmed,
+            decision_permit=getattr(run.ledger, "_quarantine_decision_permit", None),
+        )
+        if existing is None
+        else None
+    )
     decision_authority(run, authority)
     return app._refinalize_command(
         result,
@@ -760,6 +791,7 @@ def apply_quarantine_target(run, authority, command, target, app):
         ledger=run.ledger,
         evidence_budget=run.caller.budget_view,
         policy_digest=run.caller.accounting.configuration.digest,
+        _quarantine_lifecycle_transfer=lifecycle_transfer,
     )
 
 
@@ -858,6 +890,12 @@ def require_native_decision(ledger, before, after):
     ):
         raise ReviewInputError("quarantine individual decision reference conflicts")
     object.__setattr__(permit, "consumed", True)
+
+
+from .quarantine_lifecycle_transfer import install_source as _install_lifecycle_transfer  # noqa: E402
+
+_current_publication_digest = _install_lifecycle_transfer(_current_publication_digest)
+del _install_lifecycle_transfer
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

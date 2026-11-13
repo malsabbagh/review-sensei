@@ -107,6 +107,7 @@ class CurrentReadScope:
         if status != 200:
             raise ReviewInputError("quarantine current evidence scope changed")
         self.validate_pull(pull)
+        return pull
 
     def validate_pull(self, pull):
         """Pure additional facts on a fresh action-owned PR observation.
@@ -838,3 +839,9 @@ def read_published_tail_sources(
     if earlier is None:
         raise ReviewInputError("published-tail earlier publication is absent")
     return {"published-current": current, "published-earlier": earlier}
+
+
+from .quarantine_pr_observation import install_reader as _install_pr_reader  # noqa: E402
+
+setattr(CurrentReadScope, "require", _install_pr_reader(CurrentReadScope))
+del _install_pr_reader

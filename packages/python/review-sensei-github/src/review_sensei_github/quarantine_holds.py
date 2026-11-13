@@ -140,3 +140,9 @@ def remove_hold_notice(text):
         text,
         flags=re.DOTALL,
     )
+
+
+from .quarantine_pr_observation import install_hold_reader as _install_pr_hold  # noqa: E402
+
+_install_pr_hold(QuarantineHoldReader)
+del _install_pr_hold

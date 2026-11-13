@@ -608,7 +608,7 @@ def _require_effect_scope(document, identity, head_sha):
 
 
 def restore_finding_lifecycle(
-    reviewer, ledger, identity: SessionIdentity, *, loaded=None
+    reviewer, ledger, identity: SessionIdentity, *, loaded=None, _retained=None
 ):
     """Read only from the independently selected current session root."""
     from review_sensei.finding_lifecycle_store import (
@@ -616,23 +616,33 @@ def restore_finding_lifecycle(
         select_finding_lifecycle,
     )
 
-    if loaded is None:
-        selected, stored = select_finding_lifecycle(ledger, identity)
-    else:
-        selected, stored = loaded, None
-    if selected.status not in {"ok", "migrated", "missing"}:
-        raise ReviewInputError(
-            "finding lifecycle selected session is unavailable: " + selected.status
-        )
-    record = selected.record
-    if record is None or record.finding_lifecycle is None:
-        return record, None
-    if loaded is not None:
-        stored = read_finding_lifecycle(ledger, record, _selected_load=selected)
-    from .finding_lifecycle_dictionary import resolve_stored
+    if _retained is not None:
+        if loaded is not None:
+            raise ReviewInputError(
+                "quarantine lifecycle transfer cannot combine sources"
+            )
+        from .quarantine_lifecycle_transfer import consume
 
-    stored = resolve_stored(ledger, record, stored)
-    document = _validate(_unpack_journal(stored))
+        record, document = consume(_retained, ledger, identity)
+        document = _validate(document)
+    else:
+        if loaded is None:
+            selected, stored = select_finding_lifecycle(ledger, identity)
+        else:
+            selected, stored = loaded, None
+        if selected.status not in {"ok", "migrated", "missing"}:
+            raise ReviewInputError(
+                "finding lifecycle selected session is unavailable: " + selected.status
+            )
+        record = selected.record
+        if record is None or record.finding_lifecycle is None:
+            return record, None
+        if loaded is not None:
+            stored = read_finding_lifecycle(ledger, record, _selected_load=selected)
+        from .finding_lifecycle_dictionary import resolve_stored
+
+        stored = resolve_stored(ledger, record, stored)
+        document = _validate(_unpack_journal(stored))
     restored = decode_lifecycle_state(document["lifecycle"])
     state = restored.state
     binding = record.finding_lifecycle["manifest"]["binding"]

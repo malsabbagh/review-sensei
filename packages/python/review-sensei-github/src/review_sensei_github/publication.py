@@ -2324,6 +2324,9 @@ class ReviewApprovalFinalizer:
         )
         if type(reader) is not QuarantineHoldReader:
             raise ReviewInputError("quarantine assessment reader is unsupported")
+        from .quarantine_pr_observation import validate_hold_reader
+
+        validate_hold_reader(reader)
         return reader
 
     def attach_quarantine(
@@ -2585,8 +2588,13 @@ class ReviewApprovalFinalizer:
                         diagnostic="quarantine_assessment_unverified",
                     )
                 )
-            if quarantine_reader is not None:
-                eligibility = quarantine_reader.require(eligibility, head_sha=head_sha)
+            with _capture_quarantine_pr(
+                self, quarantine_reader, token=token
+            ) as quarantine_pr:
+                if quarantine_reader is not None:
+                    eligibility = quarantine_reader.require(
+                        eligibility, head_sha=head_sha
+                    )
             # Body-placed blockers stay in the persisted flag. Inline blockers are
             # not settled by that flag: a caller that just published them says they
             # are unresolved, and a later finalizer requires a resolved thread.
@@ -2668,13 +2676,27 @@ class ReviewApprovalFinalizer:
                         status="approval_withheld", diagnostic="approval_withheld"
                     )
             self._observe_stage("approval.preflight")
-            preflight = self._preflight(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
+            preflight = (
+                None
+                if _before_approval is not None
+                else _consume_quarantine_pr(
+                    quarantine_pr,
+                    self,
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
             )
+            if preflight is None:
+                preflight = self._preflight(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
             if preflight.result is not None:
                 return preflight.result
             if preflight.app_authored:
@@ -3481,13 +3503,14 @@ class ReviewApprovalFinalizer:
             adjusted,
             facts=replace(adjusted.facts, has_blocking_findings=has_blocking),
         )
-        adjusted = self.attach_carried(
-            adjusted,
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-        )
+        with _capture_quarantine_pr(self, token=token) as quarantine_pr:
+            adjusted = self.attach_carried(
+                adjusted,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )
         has_human = adjusted.facts.has_human_adjudication_findings
         if window_state is not None and window_state.head_sha == head_sha:
             if any(
@@ -3623,13 +3646,27 @@ class ReviewApprovalFinalizer:
                     status="gate_reevaluation_failed",
                     diagnostic="command_body_capacity_unverifiable",
                 )
-        live = self._preflight(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            app_slug=app_slug,
+        live = (
+            None
+            if compacted
+            else _consume_quarantine_pr(
+                quarantine_pr,
+                self,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
         )
+        if live is None:
+            live = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
         if live.result is not None:
             return live.result
         if live.base_sha != index.base_sha or live.repository_id != repository_id:
@@ -4510,6 +4547,17 @@ class ReviewApprovalFinalizer:
             raise GitHubPublicationError("review target was not found")
         if status < 200 or status >= 300:
             raise GitHubPublicationError("approval finalization preflight failed")
+        return self._preflight_payload(
+            payload,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+        )
+
+    def _preflight_payload(
+        self, payload, *, repository, pull_request, head_sha, app_slug
+    ):
         trust_dec = self._evaluate_live_pr_trust_boundary(
             payload,
             repository=repository,
@@ -12249,6 +12297,14 @@ from .ordinary_publication_reads import _install_publication_source  # noqa: E40
 
 _install_publication_source(ReviewPublisher)
 del _install_publication_source
+
+from .quarantine_pr_observation import install_finalizer as _install_pr_finalizer  # noqa: E402
+
+_capture_quarantine_pr, _consume_quarantine_pr = _install_pr_finalizer(
+    ReviewApprovalFinalizer
+)
+del _install_pr_finalizer
+
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
 
