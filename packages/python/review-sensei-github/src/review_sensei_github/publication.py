@@ -3192,6 +3192,7 @@ class ReviewApprovalFinalizer:
                     "_human_reader_for_scope",
                     "_decided_cleanup_inputs",
                     "_plain_cleanup_frontier",
+                    "_native_thread_nodes",
                 )
             )
         ):
@@ -3849,8 +3850,27 @@ class ReviewApprovalFinalizer:
                 raise ReviewInputError(
                     "command finalization planning source tail is unqualified"
                 )
+            from .command_finalization_plan import checked_cleanup_discovery
+
+            resolver = FindingThreadResolver(self.http)
+            roots = ()
+            if cleanup_instances:
+                roots = checked_cleanup_discovery(
+                    journal,
+                    resolver._discover_candidates(
+                        token=token,
+                        repository=repository,
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=index.base_sha,
+                        app_slug=app_slug,
+                        instances=cleanup_instances,
+                    ),
+                    cleanup_instances,
+                )
             requests, cleanup_calls = (
-                FindingThreadResolver(self.http).plan_capacity(
+                resolver.plan_capacity(
                     token=token,
                     repository=repository,
                     repository_id=repository_id,
@@ -3862,6 +3882,7 @@ class ReviewApprovalFinalizer:
                     records=records,
                     batch_fence_calls=2,
                     cleanup_capability_required=True,
+                    root_reader=lambda: roots,
                 )
                 if cleanup_instances
                 else ((), 0)
@@ -3956,6 +3977,7 @@ class ReviewApprovalFinalizer:
                     },
                     states=update_capacity_states,
                     check_token=check_token,
+                    cleanup_instances=cleanup_instances,
                 )
             )
 
@@ -4234,6 +4256,12 @@ class ReviewApprovalFinalizer:
                     coverage_uncertainty_accepted=coverage_accepted,
                 )
             )
+        from .command_finalization_plan import apply_command_confirmed_release
+
+        apply_command_confirmed_release(
+            getattr(self, "_finding_lifecycle_journal", None),
+            set(resolution.resolved) - set(resolution.unconfirmed),
+        )
         check_confirmed = (
             check_result is not None
             and check_result.status in {"created", "updated"}
@@ -4720,6 +4748,40 @@ class ReviewApprovalFinalizer:
             or binding.get("pull_request") != pull_request
         ):
             return None
+        # A multi-contingent release cannot use a newer approval to hide an
+        # edited original authority frame. This strict source envelope is only
+        # needed for the newly qualified fixed-prefix path; older unrelated
+        # histories retain their existing conservative behavior.
+        key = (repository_id, pull_request)
+        state = (
+            journal._planned
+            or self._drift_states.get(key)
+            or self._active_window_states.get(key)
+        )
+        inventory = getattr(state, "inventory", None) or getattr(
+            state, "authoritative_decision_inventory", None
+        )
+        fixed = []
+        for obligation in getattr(inventory, "obligations", ()):
+            target_state = getattr(obligation, "target_state", None)
+            binding = getattr(obligation, "thread_binding", None)
+            if binding is not None:
+                target_state = binding.slot_state
+            if (
+                obligation.lifecycle_state == "verified-fixed"
+                and obligation.resolution_proof_sha256 is not None
+                and target_state == "contingent"
+            ):
+                fixed.append(obligation)
+        from .command_finalization_plan import retained_review_frontier
+
+        source_frames = None
+        if len(fixed) > 1:
+            source_frames = retained_review_frontier(
+                journal, reviews, producer=producer, app_slug=app_slug
+            )
+            if source_frames is None:
+                return None
         matches = []
         for review in reviews:
             user = review.get("user")
@@ -4747,6 +4809,65 @@ class ReviewApprovalFinalizer:
                 == index
             ):
                 matches.append(review)
+        if not matches:
+            # Genuine assessment frames need not duplicate the original index.
+            # Both whole bodies must match independently retained native writes.
+            owned = (
+                source_frames
+                if source_frames is not None
+                else retained_review_frontier(
+                    journal, reviews, producer=producer, app_slug=app_slug
+                )
+            )
+            if owned is None:
+                return None
+            frames = [
+                r for r in owned if APPROVAL_ELIGIBILITY_MARKER_PREFIX in r["body"]
+            ]
+            indexes = [
+                r
+                for r in reviews
+                if r.get("commit_id") == head_sha
+                and FINDING_INDEX_MARKER_PREFIX in str(r.get("body", ""))
+                and parse_finding_index(
+                    r.get("body"),
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                )
+                == index
+            ]
+            if (
+                not frames
+                or len(indexes) != 1
+                or not any(indexes[0] is r for r in owned)
+                or len({r["id"] for r in owned}) != len(owned)
+                or len({r["body"] for r in owned}) != len(owned)
+            ):
+                return None
+            original = approval_eligibility_from_body(indexes[0]["body"])
+            if (
+                approval_eligibility_from_body(frames[-1]["body"]) != eligibility
+                or original is None
+                or original.head_sha != eligibility.head_sha
+                or original.human_review is None
+                or eligibility.human_review is None
+                or original.human_review.base_sha != index.base_sha
+                or eligibility.human_review.base_sha != index.base_sha
+                or original.result_digest != eligibility.result_digest
+                or original.partitioned_root is not None
+                or original.human_inventory_reference is not None
+                or original.native_union is not None
+                or parse_finding_index(
+                    indexes[0]["body"],
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                )
+                != index
+            ):
+                return None
+            matches = indexes
         if len(matches) != 1:
             return None
         return canonical_bytes(list(reviews))
@@ -5041,7 +5162,10 @@ class ReviewApprovalFinalizer:
                 return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
         try:
             try:
-                resolution = FindingThreadResolver(self.http).resolve(
+                from .command_finalization_plan import execution_cleanup_roots
+
+                resolver = FindingThreadResolver(self.http)
+                resolution = resolver.resolve(
                     token=token,
                     repository=repository,
                     repository_id=repository_id,
@@ -5054,12 +5178,24 @@ class ReviewApprovalFinalizer:
                     fence=fence,
                     batch_fence_calls=batch_fence_calls,
                     skip_resolved=_skip_resolved,
-                    root_reader=lambda: self._native_thread_nodes(
+                    root_reader=lambda: execution_cleanup_roots(
+                        getattr(self, "_finding_lifecycle_journal", None),
+                        resolver,
                         token=token,
                         repository=repository,
+                        repository_id=repository_id,
                         pull_request=pull_request,
                         head_sha=head_sha,
+                        base_sha=index.base_sha,
                         app_slug=app_slug,
+                        instances=instances,
+                        root_reader=lambda: self._native_thread_nodes(
+                            token=token,
+                            repository=repository,
+                            pull_request=pull_request,
+                            head_sha=head_sha,
+                            app_slug=app_slug,
+                        ),
                     ),
                     observer=self._operation_observer,
                     cleanup_token_provider=self._thread_cleanup_token_provider,
@@ -5079,6 +5215,19 @@ class ReviewApprovalFinalizer:
                     )
                     if resolution.unconfirmed:
                         stop_reply_cleanup(reply_journal)
+                from .command_finalization_plan import (
+                    apply_command_confirmed_release,
+                    restrict_command_release,
+                )
+
+                resolved_instances = restrict_command_release(
+                    getattr(self, "_finding_lifecycle_journal", None),
+                    resolved_instances,
+                )
+                apply_command_confirmed_release(
+                    getattr(self, "_finding_lifecycle_journal", None),
+                    resolved_instances,
+                )
                 if consumer is not None:
                     consumer.release_confirmed_slots(
                         head_sha=head_sha,

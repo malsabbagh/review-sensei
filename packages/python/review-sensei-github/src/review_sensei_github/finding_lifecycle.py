@@ -1321,7 +1321,12 @@ class FindingLifecycleJournal:
         shadow = copy.copy(self)
         shadow.reviewer = copy.copy(self.reviewer)
         shadow.effects = copy.deepcopy(self.effects)
-        shadow._finalizer_capacity_states = tuple(plan.states)
+        from .command_finalization_plan import (
+            cleanup_capacity_states,
+            command_preconfirmed_instances,
+        )
+
+        shadow._finalizer_capacity_states = cleanup_capacity_states(plan)
         receipts = list(
             self.reviewer.native_finding_receipts(
                 repository_id=self.identity.repository_id,
@@ -1338,6 +1343,7 @@ class FindingLifecycleJournal:
         predictable = True
         seen = {effect["request_sha256"] for effect in self.effects}
         confirmed_instances: set[str] = set()
+        preconfirmed_instances = command_preconfirmed_instances(plan)
         key = (self.identity.repository_id, self.identity.pull_request)
         initial_state = (
             shadow._planned
@@ -1345,7 +1351,9 @@ class FindingLifecycleJournal:
             or self.reviewer._active_window_states.get(key)
         )
         states = tuple(
-            state for state in (initial_state, *plan.states) if state is not None
+            state
+            for state in (initial_state, *cleanup_capacity_states(plan))
+            if state is not None
         )
         cleanup_complete = False
         for method, path, raw in requests:
@@ -1365,7 +1373,7 @@ class FindingLifecycleJournal:
                     projected_success = shadow._updated_binding_proof_state(
                         projected_success, old, updated
                     )
-                if confirmed_instances:
+                if confirmed_instances or preconfirmed_instances:
                     from .finding_lifecycle_consumers import (
                         project_confirmed_slot_release,
                     )
@@ -1374,18 +1382,23 @@ class FindingLifecycleJournal:
                         projected_success,
                         key=key,
                         receipts={r["instance"]: r for r in receipts},
-                        instances=confirmed_instances,
+                        instances=confirmed_instances | preconfirmed_instances,
                         head_sha=self.head_sha,
                     )
                 shadow._planned = projected_success
-            if path != "/graphql" and confirmed_instances and not cleanup_complete:
+            if (
+                path != "/graphql"
+                and (confirmed_instances or preconfirmed_instances)
+                and not cleanup_complete
+                and [method, path, raw] != payload.get("review_update")
+            ):
                 from .finding_lifecycle_consumers import project_confirmed_slot_release
 
                 shadow._planned = project_confirmed_slot_release(
                     shadow._planned or initial_state,
                     key=key,
                     receipts={r["instance"]: r for r in receipts},
-                    instances=confirmed_instances,
+                    instances=confirmed_instances | preconfirmed_instances,
                     head_sha=self.head_sha,
                 )
                 cleanup_complete = True
@@ -1699,6 +1712,14 @@ class FindingLifecycleJournal:
                 and target in targets
             }
             if len(release_targets) > 1:
+                from .command_finalization_plan import command_cleanup_capacity_states
+
+                qualified = command_cleanup_capacity_states(
+                    self, states, cleanup_instances
+                )
+                if qualified is not None:
+                    self._finalizer_capacity_states = qualified
+                    return
                 # Partial native success can release an arbitrary subset. The
                 # all-or-none override endpoints do not bound that compression.
                 raise ReviewInputError(

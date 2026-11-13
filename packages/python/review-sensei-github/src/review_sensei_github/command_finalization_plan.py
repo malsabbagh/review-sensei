@@ -20,6 +20,7 @@ _RETAINED: WeakKeyDictionary = WeakKeyDictionary()
 _DICTIONARY: WeakKeyDictionary = WeakKeyDictionary()
 _CHECK_CREDENTIALS: WeakKeyDictionary = WeakKeyDictionary()
 _JOURNAL_TRANSPORTS: WeakKeyDictionary = WeakKeyDictionary()
+_CLEANUP: WeakKeyDictionary = WeakKeyDictionary()
 
 
 @dataclass(frozen=True, eq=False)
@@ -242,7 +243,7 @@ class CapacityPrepared(Exception):
         super().__init__("capacity-only command preparation complete")
 
 
-def issue_plan(finalizer, *, payload, states, check_token):
+def issue_plan(finalizer, *, payload, states, check_token, cleanup_instances=None):
     journal = finalizer._finding_lifecycle_journal
     plan = CommandFinalizationPlan(
         journal=journal,
@@ -259,6 +260,8 @@ def issue_plan(finalizer, *, payload, states, check_token):
         ),
     )
     _ISSUED.add(plan)
+    if cleanup_instances is not None:
+        _bind_cleanup_prefixes(plan, cleanup_instances)
     from hashlib import sha256
 
     _CHECK_CREDENTIALS[plan] = sha256(check_token.encode()).digest()
@@ -613,3 +616,290 @@ def pack_authorized_pending(journal, logical_document):
         manifest=json.loads(context[1]),
         current_binding=journal._record.finding_lifecycle["manifest"]["binding"],
     )
+
+
+def _bind_cleanup_prefixes(plan, instances):
+    """Price finite source-discovered releases; never install them as authority."""
+    import json
+
+    from .finding_lifecycle import MAX_EFFECTS
+    from .finding_lifecycle_consumers import project_confirmed_slot_release
+
+    if not isinstance(instances, frozenset):
+        raise ReviewInputError("command cleanup inventory is not source bounded")
+    journal = plan.journal
+    payload = json.loads(plan.payload)
+    requests = payload["cleanup_requests"]
+    if len(requests) > MAX_EFFECTS:
+        raise ReviewInputError("command cleanup prefix exceeds effect capacity")
+    receipts = journal.reviewer.native_finding_receipts(
+        repository_id=journal.identity.repository_id,
+        pull_request=journal.identity.pull_request,
+    )
+    selected = {r["instance"]: r for r in receipts if r["instance"] in instances}
+    if set(selected) != set(instances):
+        raise ReviewInputError("command cleanup has no complete native binding")
+    ordered = []
+    for method, path, body in requests:
+        if (
+            method != "POST"
+            or path != "/graphql"
+            or body.get("operationName") != "ResolveReviewThread"
+        ):
+            raise ReviewInputError("command cleanup prefix is not a resolve sequence")
+        target = body["variables"]["input"]["threadId"]
+        matches = [r["instance"] for r in selected.values() if r["thread_id"] == target]
+        if len(matches) != 1 or matches[0] in ordered:
+            raise ReviewInputError("command cleanup prefix binding is ambiguous")
+        ordered.append(matches[0])
+    preconfirmed = instances - frozenset(ordered)
+    key = (journal.identity.repository_id, journal.identity.pull_request)
+    initial = (
+        journal._planned
+        or journal.reviewer._drift_states.get(key)
+        or journal.reviewer._active_window_states.get(key)
+    )
+    sources = tuple(state for state in (initial, *plan.states) if state is not None)
+    projections = {}
+    for count in range(len(ordered) + 1):
+        prefix = frozenset(ordered[:count])
+        for allowed in (prefix, prefix | preconfirmed):
+            for state in sources:
+                projected = project_confirmed_slot_release(
+                    state,
+                    key=key,
+                    receipts=selected,
+                    instances=allowed,
+                    head_sha=journal.head_sha,
+                )
+                projections[canonical_bytes(encode_lifecycle_state(projected))] = (
+                    projected
+                )
+    values = tuple(projections.values())
+    _CLEANUP[plan] = (
+        _dictionary_plan_scope(plan),
+        instances,
+        tuple(ordered),
+        preconfirmed,
+        values,
+        canonical_bytes([encode_lifecycle_state(s) for s in values]),
+    )
+
+
+def cleanup_capacity_states(plan):
+    context = _CLEANUP.get(plan)
+    if context is None:
+        return tuple(plan.states)
+    if context[0] != _dictionary_plan_scope(plan) or context[5] != canonical_bytes(
+        [encode_lifecycle_state(s) for s in context[4]]
+    ):
+        raise ReviewInputError("command cleanup capacity observation changed")
+    return context[4]
+
+
+def _executing_cleanup(journal):
+    try:
+        plan = _EXECUTION_JOURNALS.get(journal)
+    except TypeError:
+        return None
+    if plan is None or plan not in _CLEANUP:
+        return None
+    if (
+        plan not in _ISSUED
+        or plan not in _EXECUTED
+        or journal.ledger is not plan.journal.ledger
+        or journal.identity != plan.journal.identity
+        or journal.operation_id != plan.operation_id
+        or journal.head_sha != plan.head_sha
+    ):
+        raise ReviewInputError("command cleanup execution custody changed")
+    cleanup_capacity_states(plan)
+    return plan
+
+
+def command_cleanup_capacity_states(journal, states, instances):
+    plan = _executing_cleanup(journal)
+    if plan is None:
+        return None
+    context = _CLEANUP[plan]
+    if (
+        instances != context[1]
+        or canonical_bytes([encode_lifecycle_state(s) for s in states])
+        != plan.state_bytes
+    ):
+        raise ReviewInputError("command cleanup projection scope changed")
+    return cleanup_capacity_states(plan)
+
+
+def restrict_command_release(journal, instances):
+    plan = _executing_cleanup(journal)
+    if plan is None:
+        return instances
+    import json
+
+    from .finding_lifecycle import _digest, _request_identity
+
+    context = _CLEANUP[plan]
+    allowed = set(context[3]) if context[3] <= set(instances) else set()
+    for instance, (method, path, raw) in zip(
+        context[2], json.loads(plan.payload)["cleanup_requests"], strict=True
+    ):
+        key = _digest(
+            {"method": method, "path": path, "request": _request_identity(raw)}
+        )
+        retained = [
+            effect for effect in journal.effects if effect["request_sha256"] == key
+        ]
+        if len(retained) != 1 or retained[0]["status"] != "confirmed":
+            break
+        allowed.add(instance)
+    return set(instances) & allowed
+
+
+def apply_command_confirmed_release(journal, instances):
+    """Consume actual resolver observations, never the capacity projection."""
+    if _executing_cleanup(journal) is None:
+        return
+    from .finding_lifecycle_consumers import project_confirmed_slot_release
+
+    instances = restrict_command_release(journal, instances)
+    key = (journal.identity.repository_id, journal.identity.pull_request)
+    receipts = journal.reviewer._native_finding_receipt_records.get(key, {})
+    for attr in ("_active_window_states", "_drift_states"):
+        states = getattr(journal.reviewer, attr)
+        state = states.get(key)
+        if state is not None:
+            states[key] = project_confirmed_slot_release(
+                state,
+                key=key,
+                receipts=receipts,
+                instances=instances,
+                head_sha=journal.head_sha,
+            )
+
+
+def retained_review_frontier(journal, reviews, *, producer, app_slug):
+    """Select whole frames from authenticated native receipts, not matching text."""
+    import hashlib
+
+    path = f"/repos/{journal.identity.repository}/pulls/{journal.identity.pull_request}/reviews"
+    expected = {}
+    for effect in journal.effects:
+        if not (
+            effect["method"] == "POST"
+            and effect["path"] == path
+            or effect["method"] == "PUT"
+            and effect["path"].startswith(path + "/")
+        ):
+            continue
+        response = effect.get("response")
+        if (
+            effect["status"] != "confirmed"
+            or not isinstance(response, (list, tuple))
+            or len(response) != 2
+            or not isinstance(response[1], dict)
+        ):
+            return None
+        review_id = response[1].get("id")
+        if (
+            type(review_id) is not int
+            or producer != f"github-bot:{response[1].get('producer_id')}"
+        ):
+            return None
+        body = effect["request"].get("body")
+        if not isinstance(body, dict) or set(body) != {"$body_sha256", "utf8_bytes"}:
+            return None
+        expected[review_id] = body
+    originals = {
+        r["review_id"]
+        for r in journal.reviewer.native_finding_receipts(
+            repository_id=journal.identity.repository_id,
+            pull_request=journal.identity.pull_request,
+        )
+        if r["head_sha"] == journal.head_sha
+    }
+    if not originals or not originals <= set(expected):
+        return None
+    selected = []
+    for review_id, body in expected.items():
+        matches = [r for r in reviews if r.get("id") == review_id]
+        if len(matches) != 1:
+            return None
+        review = matches[0]
+        user, raw = review.get("user"), review.get("body")
+        if (
+            not isinstance(user, dict)
+            or type(user.get("id")) is not int
+            or producer != f"github-bot:{user['id']}"
+            or user.get("type") != "Bot"
+            or str(user.get("login", "")).casefold() != app_slug.casefold()
+            or review.get("commit_id") != journal.head_sha
+            or review.get("state") not in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+            or review.get("edited_by_human") is True
+            or not isinstance(raw, str)
+            or hashlib.sha256(raw.encode()).hexdigest() != body["$body_sha256"]
+            or len(raw.encode()) != body["utf8_bytes"]
+        ):
+            return None
+        if sum(r.get("body") == raw for r in reviews) != 1:
+            return None
+        selected.append(review)
+    from .publication import APPROVAL_ELIGIBILITY_MARKER_PREFIX
+
+    eligible_frames = [
+        r
+        for r in reviews
+        if r.get("commit_id") == journal.head_sha
+        and APPROVAL_ELIGIBILITY_MARKER_PREFIX in str(r.get("body", ""))
+        and str((r.get("user") or {}).get("login", "")).casefold()
+        == app_slug.casefold()
+    ]
+    if not eligible_frames or not any(eligible_frames[-1] is r for r in selected):
+        return None
+    return [r for r in reviews if any(r is selected_r for selected_r in selected)]
+
+
+def command_preconfirmed_instances(plan):
+    cleanup_capacity_states(plan)
+    context = _CLEANUP.get(plan)
+    return context[3] if context is not None else frozenset()
+
+
+def checked_cleanup_discovery(journal, candidates, instances):
+    """Negative full-body check over the existing complete source discovery."""
+    import hashlib
+
+    receipts = {
+        r["instance"]: r
+        for r in journal.reviewer.native_finding_receipts(
+            repository_id=journal.identity.repository_id,
+            pull_request=journal.identity.pull_request,
+        )
+    }
+    found = set()
+    for node, root, instance, old in candidates:
+        receipt = receipts.get(instance)
+        if (
+            old
+            or receipt is None
+            or instance in found
+            or receipt["head_sha"] != journal.head_sha
+            or receipt["thread_id"] != node["id"]
+            or receipt["comment_id"] != root["databaseId"]
+            or hashlib.sha256(root["body"].encode()).hexdigest()
+            != receipt["body_sha256"]
+        ):
+            raise ReviewInputError("command cleanup retained criterion binding changed")
+        found.add(instance)
+    if found != set(instances):
+        raise ReviewInputError("command cleanup retained discovery is incomplete")
+    return tuple(item[0] for item in candidates)
+
+
+def execution_cleanup_roots(journal, resolver, *, root_reader, **scope):
+    if _executing_cleanup(journal) is None:
+        return root_reader()
+    # This is the same discovery query previously performed by resolve. The
+    # second candidate walk consumes these exact local nodes without another read.
+    candidates = resolver._discover_candidates(root_reader=root_reader, **scope)
+    return checked_cleanup_discovery(journal, candidates, scope["instances"])
