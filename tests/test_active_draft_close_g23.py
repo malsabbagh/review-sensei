@@ -706,9 +706,18 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
                             [r["event"] for r in ufx.review_posts], ["COMMENT"]
                         )
                     else:
-                        self.assertIsNone(out_u)
-                        self.assertIn(
-                            "review publication failed temporarily", ufx.error
+                        # The durable journal now reports the unknown outcome
+                        # explicitly; it does not turn absence into completion.
+                        self.assertEqual(
+                            out_u,
+                            {
+                                "status": "publication_incomplete",
+                                "publication_status": "unknown",
+                                "accounting_terminal": False,
+                                "terminal_reason": "publication_interrupted",
+                                "review_id": None,
+                                "diagnostic": "publication_outcome_incomplete",
+                            },
                         )
                         self.assertEqual(ufx.review_posts, [])
                         assert ufx.comment is not None
@@ -918,7 +927,17 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
             ufx = _UnknownDispatchCloseFixture(Path(tmp_u))
             code_u, out_u = ufx.run_and_read(human=False)
             self.assertEqual(code_u, 1)
-            self.assertIsNone(out_u)
+            self.assertEqual(
+                out_u,
+                {
+                    "status": "publication_incomplete",
+                    "publication_status": "unknown",
+                    "accounting_terminal": False,
+                    "terminal_reason": "publication_interrupted",
+                    "review_id": None,
+                    "diagnostic": "publication_outcome_incomplete",
+                },
+            )
             self.assertEqual(ufx.provider_calls, 1)
             self.assertEqual(ufx.review_posts, [])
 
