@@ -152,3 +152,32 @@ class OrdinaryNativeRecoveryCustodyTests(unittest.TestCase):
                     for item in unknown
                 )
             )
+
+    def test_mutated_physical_request_identity_cannot_settle_another_charge(self):
+        original = recovery.recover
+        for field, value in (
+            ("request_id", "foreign-unresolved"),
+            ("deadline_unix_ms", 1),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                fixture = self.fixture(directory)
+                observed = []
+
+                def mutate(capture, **kwargs):
+                    observed.append(capture.mutation["request_id"])
+                    capture.mutation[field] = value
+                    return original(capture, **kwargs)
+
+                with patch.object(recovery, "recover", mutate):
+                    self.assertEqual(fixture.invoke(), 1, fixture.error)
+                self.assert_terminal_held(fixture)
+                self.assertTrue(observed)
+                self.assertTrue(
+                    all(
+                        identifier not in fixture.accounted._reconciled_mutations
+                        for identifier in observed
+                    )
+                )
+                self.assertNotIn(
+                    "foreign-unresolved", fixture.accounted._reconciled_mutations
+                )

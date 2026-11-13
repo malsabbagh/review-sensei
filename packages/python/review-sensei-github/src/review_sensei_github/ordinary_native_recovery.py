@@ -21,6 +21,20 @@ _READS: WeakKeyDictionary = WeakKeyDictionary()
 _MUTATIONS: WeakKeyDictionary = WeakKeyDictionary()
 _INVALID: WeakKeyDictionary = WeakKeyDictionary()
 _CLOSED: WeakKeyDictionary = WeakKeyDictionary()
+_PHYSICAL: WeakKeyDictionary = WeakKeyDictionary()
+
+
+def _physical_identity(observation):
+    return tuple(
+        observation.get(key)
+        for key in (
+            "phase",
+            "lifecycle_phase",
+            "request_id",
+            "deadline_unix_ms",
+            "mutation",
+        )
+    )
 
 
 class ReconciledCheck(Exception):
@@ -145,6 +159,10 @@ class _Capture:
             or not any(effect is self.effect for effect in journal.effects)
             or caller._root != journal._record.record_sha256
             or caller._root != (self.committed_root if committed else self.root)
+            or any(
+                _physical_identity(observation) != identity
+                for observation, identity in _PHYSICAL.get(self, ())
+            )
             or self.invalid
             or self in _INVALID
             or self.mutation is not _MUTATIONS.get(self)
@@ -216,6 +234,7 @@ def dispatch(caller, request, observation):
             raise ReviewInputError("ordinary native recovery physical request changed")
         capture.mutation = observation
         _MUTATIONS[capture] = observation
+        _PHYSICAL[capture] = ((observation, _physical_identity(observation)),)
         return
     if (
         method != "GET"
@@ -228,6 +247,10 @@ def dispatch(caller, request, observation):
         _INVALID[capture] = True
         raise ReviewInputError("ordinary native recovery physical request changed")
     captured = (parsed.path, parse_qs(parsed.query), observation)
+    _PHYSICAL[capture] = (
+        *_PHYSICAL[capture],
+        (observation, _physical_identity(observation)),
+    )
     capture.reads.append(captured)
     _READS[capture] = (*_READS[capture], captured)
 
