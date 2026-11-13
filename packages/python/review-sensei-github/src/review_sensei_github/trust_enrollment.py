@@ -30,6 +30,8 @@ class _Observation:
     broker: object
     session: Any
     document: bytes
+    token_sha256: str
+    grant_sha256: str
 
 
 _SOURCE_INSTALLED = False
@@ -74,7 +76,15 @@ def _install_observation_source(source_class):
                 "authority": authority,
             }
         )
-        receipt = _Observation(self, session, document)
+        if not isinstance(session.grant, str):
+            raise ReviewInputError("trust observation source grant is unavailable")
+        receipt = _Observation(
+            self,
+            session,
+            document,
+            hashlib.sha256(session.token.encode()).hexdigest(),
+            hashlib.sha256(session.grant.encode()).hexdigest(),
+        )
         issued.add(receipt)
         object.__setattr__(session, "_trust_observation", receipt)
         return session
@@ -121,7 +131,14 @@ def current_observation(broker, session):
     authority = parse_authority(document["authority"], grant=True)
     if not authority["issued_at"] <= int(time.time()) < authority["expires_at"]:
         raise ReviewInputError("trust current observation is expired")
-    if authority != session.attestation or document["app_id"] != session.app_id:
+    if (
+        authority != session.attestation
+        or document["app_id"] != session.app_id
+        or not isinstance(session.token, str)
+        or not isinstance(session.grant, str)
+        or hashlib.sha256(session.token.encode()).hexdigest() != receipt.token_sha256
+        or hashlib.sha256(session.grant.encode()).hexdigest() != receipt.grant_sha256
+    ):
         raise ReviewInputError("trust current observation changed")
     return document
 
@@ -231,12 +248,15 @@ def _install_native_source(source_class):
     }
     issued: weakref.WeakSet[_RestoredEnrollment] = weakref.WeakSet()
 
-    def guard(ledger):
+    def implementation(ledger):
         if type(ledger) is not source_class or any(
             name in ledger.__dict__ or getattr(source_class, name) is not method
             for name, method in methods.items()
         ):
             raise ReviewInputError("trust native source implementation changed")
+
+    def guard(ledger):
+        implementation(ledger)
         if ledger.app_slug is None or ledger.evidence_budget is None:
             raise ReviewInputError("trust cold restore requires bounded native source")
 
@@ -277,7 +297,15 @@ def _install_native_source(source_class):
             raise ReviewInputError("trust original receipt commitment changed")
         return record
 
-    _native_sources[role] = (source_class, load, restore)
+    _native_sources[role] = (source_class, load, restore, implementation)
+
+
+def require_native_implementation(ledger):
+    """Validate captured native code without adding a discovery/read request."""
+    source = _native_sources.get(type(ledger).__name__)
+    if source is None or source[0] is not type(ledger):
+        raise ReviewInputError("trust native source implementation is unsupported")
+    source[3](ledger)
 
 
 def load_original_enrollment(ledger, identity, *, now=None):

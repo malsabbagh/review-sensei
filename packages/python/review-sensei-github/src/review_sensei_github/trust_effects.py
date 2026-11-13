@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from functools import wraps
 from typing import Any
 from urllib.parse import urlsplit
 from weakref import WeakKeyDictionary
@@ -16,7 +17,12 @@ from weakref import WeakKeyDictionary
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
 
-from .trust_enrollment import current_observation, refresh_current_observation
+from .trust_enrollment import (
+    current_observation,
+    original_observation,
+    refresh_current_observation,
+    require_native_implementation,
+)
 
 
 @dataclass(frozen=True, eq=False)
@@ -61,6 +67,39 @@ def _install_transport_source(source_class):
     _pending: WeakKeyDictionary = WeakKeyDictionary()
     _receipts: WeakKeyDictionary = WeakKeyDictionary()
     _admitted_routes: WeakKeyDictionary = WeakKeyDictionary()
+    _initializing: WeakKeyDictionary = WeakKeyDictionary()
+    initialize_source = source_class.initialize_and_activate
+    require_ledger_source = source_class._require_ledger
+
+    @wraps(initialize_source)
+    def initialize(self, ledger, identity, configuration, owner, **kwargs):
+        profile = verification_profile(self)
+        if profile is None:
+            return initialize_source(
+                self, ledger, identity, configuration, owner, **kwargs
+            )
+        if (
+            source_class.initialize_and_activate is not initialize
+            or getattr(self.initialize_and_activate, "__func__", None) is not initialize
+            or kwargs.get("trust_source") != (profile.broker, profile.session)
+            or self in _initializing
+            or self._state is not None
+            or ledger.token != profile.session.token
+            or ledger.authenticated_app_id != json.loads(profile.original)["app_id"]
+            or ledger.http.api_url != profile.api_origin
+        ):
+            raise ReviewInputError("trust initialization source binding is unavailable")
+        require_native_implementation(ledger)
+        require_ledger_source(self, ledger, identity)
+        _initializing[self] = (ledger, identity)
+        try:
+            return initialize_source(
+                self, ledger, identity, configuration, owner, **kwargs
+            )
+        finally:
+            _initializing.pop(self, None)
+
+    setattr(source_class, "initialize_and_activate", initialize)
 
     def bound_to(opener, owner):
         return (
@@ -122,6 +161,8 @@ def _install_transport_source(source_class):
             _source is None
             or type(caller) is not source[0]
             or source[0].open is not source[1]
+            or source[0].initialize_and_activate is not initialize
+            or source[0]._require_ledger is not require_ledger_source
             or getattr(caller.open, "__func__", None) is not source[1]
             or canonical_bytes(current_observation(profile.broker, profile.session))
             != profile.original
@@ -219,7 +260,51 @@ def _install_transport_source(source_class):
         if getattr(caller, "_controlled_restart_admission", None) is not None:
             raise ReviewInputError("trust effect restart pricing is unsupported")
         if profile not in _admitted_routes:
-            raise ReviewInputError("trust effect complete route admission unavailable")
+            initial = _initializing.get(caller)
+            if initial is None:
+                raise ReviewInputError(
+                    "trust effect complete route admission unavailable"
+                )
+            ledger, identity = initial
+            require_native_implementation(ledger)
+            require_ledger_source(caller, ledger, identity)
+            from review_sensei.errors import EvidenceBudgetExhausted
+
+            from .api_run_plan import WRITE_CONFIRMATION_TAIL
+            from .session_ledger import parse_session_comment
+
+            activation = caller._activation
+            try:
+                body = json.loads(request.data)
+                parsed = parse_session_comment(body.get("body"), identity=identity)
+            except (ValueError, TypeError, AttributeError):
+                raise ReviewInputError(
+                    "trust initialization candidate is invalid"
+                ) from None
+            if (
+                activation is None
+                or parsed is None
+                or canonical_bytes(parsed.to_dict())
+                != canonical_bytes(activation[0].to_dict())
+                or parsed.trust_enrollment is None
+                or original_observation(parsed)["authority"]
+                != profile.session.attestation
+                or ledger.token != profile.session.token
+                or request.get_header("Authorization")
+                != f"Bearer {profile.session.token}"
+                or request.get_method() != "POST"
+                or request.full_url
+                != profile.api_origin
+                + f"/repos/{identity.repository}/issues/{identity.pull_request}/comments"
+            ):
+                raise ReviewInputError("trust initialization candidate changed")
+            if (
+                len(caller._slot.requests) - caller.startup_dispatches
+                < 1 + WRITE_CONFIRMATION_TAIL
+            ):
+                raise EvidenceBudgetExhausted(
+                    "trust initialization refresh and confirmation tail are unfunded"
+                )
         bound = _binding(profile, request, sequence=caller._sequence + 2)
         digest = hashlib.sha256(bound).hexdigest()
         _pending[caller] = (digest, False)
@@ -243,6 +328,15 @@ def _install_transport_source(source_class):
         profile = verification_profile(caller)
         if profile is None:
             return
+        if caller in _initializing:
+            ledger, identity = _initializing[caller]
+            require_native_implementation(ledger)
+            require_ledger_source(caller, ledger, identity)
+            if (
+                ledger.token != profile.session.token
+                or ledger.http.api_url != profile.api_origin
+            ):
+                raise ReviewInputError("trust initialization current source changed")
         receipt = _receipts.pop(request, None)
         if receipt is None:
             # Non-native requests were not candidates for a receipt.

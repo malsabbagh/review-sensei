@@ -464,3 +464,17 @@ liabilities must be admitted before the first effect under the original total
 funding. Unsupported routes and unavailable evidence must remain named holds;
 unknown outcomes after a native effect must remain unknown until reconciled.
 No deployment or live activation is qualified by local source tests.
+
+A separately tested, non-CLI initialization primitive now applies the refresh
+contract to the actual `initialize_and_activate` source path. It requires the
+exact prepared initial root, captured native implementation, original issued
+session token, caller/run identity, and one additional physical broker request
+inside the existing startup slot. Before that request it preserves the complete
+existing native write/confirmation tail. The same effect digest, including the
+intended physical sequence and a local authentication hash, is refreshed and
+consumed once before the root POST. Changed role, substituted source/token,
+changed request bytes/headers, and one-short funding refuse before the root;
+a lost native response retains its unknown accounting and is not replayed.
+This primitive introduces no public effect-mode CLI flag. After initialization,
+unpriced business routes still hold before their first native mutation. It does
+not qualify review/check/command finalization, partitioned writes, or recovery.
