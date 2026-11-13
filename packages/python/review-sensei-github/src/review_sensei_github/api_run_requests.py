@@ -1777,6 +1777,24 @@ class ApiRunRequestTransport:
                 raise
             return self.reconcile_checkpoint(ledger, identity)
 
+    def action_intent_document(self, *, purpose, source, head_sha, operation_key):
+        """Pure source layout for admission sizing, never an effect authority.
+
+        This reads the current original accounting/root without changing either.
+        Actual admission still validates native custody and publishes its own
+        intent. A preview cannot substitute for that publication or its receipt.
+        """
+        return {
+            "purpose": purpose,
+            "source": source,
+            "run_id": self.run.run_id,
+            "owner": asdict(self.accounting.owner),
+            "head_sha": head_sha,
+            "configuration_digest": self.accounting.configuration.digest,
+            "operation_key": operation_key,
+            "source_root": self._root,
+        }
+
     def admit_action(
         self, ledger, identity, *, purpose, source, head_sha, operation_key
     ) -> dict[str, Any]:
@@ -1792,16 +1810,12 @@ class ApiRunRequestTransport:
         self._require_ledger(ledger, identity)
         if self._action_unresolved():
             raise ReviewInputError("caller action admission has unresolved work")
-        intent = {
-            "purpose": purpose,
-            "source": source,
-            "run_id": self.run.run_id,
-            "owner": asdict(self.accounting.owner),
-            "head_sha": head_sha,
-            "configuration_digest": self.accounting.configuration.digest,
-            "operation_key": operation_key,
-            "source_root": self._root,
-        }
+        intent = self.action_intent_document(
+            purpose=purpose,
+            source=source,
+            head_sha=head_sha,
+            operation_key=operation_key,
+        )
         existing = self.accounting.action
         if existing is not None:
             original = existing["intent"]
