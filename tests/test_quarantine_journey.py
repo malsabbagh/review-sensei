@@ -1,7 +1,6 @@
 """Public CLI quarantine → empty fresh review → individual decisions → verify."""
 
 import copy
-import itertools
 import json
 import os
 import random
@@ -13,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fake_github_http import json_response
+from quarantine_fixture_identity import JOURNEY_RUNS
 from review_sensei_github.publication import approval_eligibility_from_body
 from review_sensei_github.session_ledger import parse_session_comment
 from test_action_run import CommandEntryFixture
@@ -21,7 +21,7 @@ from test_quarantine_creation import CreationFixture
 from test_quarantine_evidence import git, original_objects
 from test_review_run import EntryFixture
 
-_RUNS = itertools.count(2900)
+_RUNS = JOURNEY_RUNS
 
 
 class JourneyFixture(CreationFixture, CommandEntryFixture):

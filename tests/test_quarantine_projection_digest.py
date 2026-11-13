@@ -19,6 +19,13 @@ from tests.test_quarantine_journey import JourneyFixture, registered_resource
 
 
 class QuarantineProjectionDigestTests(unittest.TestCase):
+    def test_journey_import_aliases_share_synthetic_execution_sequence(self):
+        import importlib
+
+        bare = importlib.import_module("test_quarantine_journey")
+        qualified = importlib.import_module("tests.test_quarantine_journey")
+        self.assertIs(bare._RUNS, qualified._RUNS)
+
     def test_current_collision_authenticates_projection_and_rejects_bad_sources(self):
         for fault in (None, "missing-result", "changed-result", "stale-root"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:

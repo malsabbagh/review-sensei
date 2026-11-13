@@ -115,6 +115,7 @@ include tests/test_quarantine_creation.py
 include tests/test_quarantine_evidence.py
 include tests/test_quarantine_isolation.py
 include tests/test_quarantine_journey.py
+include tests/quarantine_fixture_identity.py
 include tests/test_quarantine_lineage.py
 include tests/test_quarantine_origin.py
 include tests/test_quarantine_record.py
