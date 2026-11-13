@@ -82,3 +82,36 @@ self-contained snapshot limits ordinary future restoration cost but does not
 erase earlier retained checkpoints. Offline size measurements establish design
 feasibility only; they are not runtime qualification, a deployed rollout or full
 closure of the residual-gap plan.
+
+### Source-qualified paged checkpoint tranches
+
+A plain hosted lifecycle checkpoint can exceed the generic ten-call operation
+tranche without exceeding the frozen run budget. The exact source-owned adapter
+now issues a one-use capacity proof tied to its caller, selected root, complete
+ordered inventory, unchanged record bytes and future checkpoint parts. It chooses
+one fixed page size from 100/20/10/5/1 and reserves every full preactivation and
+final inventory, including a short terminal page. Each complete census remains
+at most ten physical reads and at most 200 allocations. This is not the denied
+larger census or a change to generic operation funding.
+
+The complete future plan includes each retained body, conservative root growth,
+every possible new part and its metadata, with each response below 512 KiB.
+Ordering, positive unique IDs, body growth and terminal completeness are checked
+again on actual reads. There is no adaptive retry or smaller-page fallback after
+admission. New parts append to the authenticated creation-order prefix; a changed
+prefix or duplicate appended ID refuses. Existing ownership, dependency, native
+head, expected-root and unknown-outcome checks remain independent.
+
+A checkpoint with `n` new parts and `p` inventory pages reserves its source-owned
+base calls plus `3*n + 2*(p-1)` and existing restart fences. The same original
+run funds any specialized tranche and its expanded confirmation tail; protected
+terminal liabilities remain reserved. Inline checkpoints consume the same opaque
+pricing proof: both post-mutator inventories are included, not just the last
+readback. Copied, mutated, foreign, stale or reused proofs do not authorize a
+tranche. Missing funds refuse before the first checkpoint effect.
+
+Focused qualification includes both actual 77-finding history cases at 512 calls,
+PR342 recovery at 1024, zero-part inline paging, insufficient funding, response
+growth, duplicate IDs, deleted dependencies before and after PATCH, changed
+ordering and unsupported page/allocation envelopes. These original-budget
+fixtures are source qualification, not universal capacity or final exact-head CI.

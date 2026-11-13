@@ -288,7 +288,9 @@ class HostedFindingLifecycleTests(unittest.TestCase):
             second = self.phase(root, "omitted")
             self.assertIsNone(second["error"], second)
             self.assertEqual(second["status"], "published")
-            self.assertEqual(second["evidence_calls"], 56)
+            # The source-owned selected root avoids one duplicate read;
+            # actual native identity and cold marker negatives remain below.
+            self.assertEqual(second["evidence_calls"], 55)
             self.assertEqual(len(second["threads"]), 1)
             self.assertEqual(second["record"]["completed_initial_reviews"], 1)
             self.assertEqual(second["record"]["completed_verification_rounds"], 1)
