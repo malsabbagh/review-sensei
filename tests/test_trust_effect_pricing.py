@@ -141,7 +141,9 @@ class TrustEffectPricingTests(unittest.TestCase):
             if (
                 event != "call"
                 or frame.f_code.co_name != "preflight_command_finalization"
-                or not frame.f_code.co_filename.endswith("/finding_lifecycle.py")
+                or not frame.f_code.co_filename.replace("\\", "/").endswith(
+                    "/finding_lifecycle.py"
+                )
             ):
                 return
             args = frame.f_locals
