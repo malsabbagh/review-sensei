@@ -437,9 +437,16 @@ finding inventory and native-effect holds in this process. A reduced persisted
 baseline is not that proof, even when all changed text is reviewed or GitHub
 threads were resolved, edited or deleted.
 
-This path stops before native publication/reconciliation writes. Preserve the
-original result, baseline criteria, receipts, budget/accounting and uncertain
-writes. Do not retry unchanged, omit the baseline, relabel the result as an
+This path stops before native publication/reconciliation writes. An unbound
+cold application call also checks selected existing ledger history before
+reserving or aborting a session round, even if the result claims full coverage
+and omits the baseline. Its handoff preserves the exact retained root instead
+of changing its generation through a reserve/abort pair. Bound transaction
+replay still uses its existing validation gates. The low-level publisher alone
+has no independently selected ledger and cannot infer omitted history.
+
+Preserve the original result, baseline criteria, receipts, budget/accounting and
+uncertain writes. Do not retry unchanged, omit the baseline, relabel the result as an
 initial full review, or recreate native artifacts to bypass the hold. Full
 durable lifecycle retention and ordinary cold-process reconstruction remain
 unqualified; this correction does not supply them or establish historical

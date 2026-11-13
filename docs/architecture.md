@@ -1052,3 +1052,17 @@ immutable numeric repository/PR, base/head and result identity. A successful nat
 response survives optional observation failure without duplicate dispatch; later
 approval is held for that invocation. The projection receipt expressly does not
 evaluate durable authority. See [ADR 0134](adr/0134-bounded-active-findings-and-artifact-authority.md).
+
+
+## Cold finding inventory at the session boundary
+
+Active-window/drift inventories are still process-local, not reconstructed from
+reduced baseline history. The unbound cold application path checks selected
+ledger history before preparing a session round. An existing lifecycle without
+selected in-memory state produces a handoff, preserving reservations and
+review-round counters. Hosted authority-read charges continue.
+
+Known-marker reads are reused within existing bounds, with no extra census,
+storage or allowance. Bound transaction validation is unchanged. This correction
+does not supply durable slot/effect restoration or close G10/G14/G16. See
+[ADR 0134](adr/0134-bounded-active-findings-and-artifact-authority.md).
