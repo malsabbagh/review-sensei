@@ -1,7 +1,6 @@
 """A cold populated replay preserves complete original hidden criteria."""
 
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -99,7 +98,7 @@ class OrdinaryPopulatedColdTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 timeout=45,
-                env=os.environ.copy(),
+                env=cold.subprocess_environment(),
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             result = json.loads(completed.stdout)

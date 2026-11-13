@@ -11,6 +11,23 @@ from pathlib import Path
 from tests import test_ordinary_native_recovery_custody as fixtures
 
 
+def subprocess_environment():
+    """A fresh interpreter receives this checkout's explicit import roots."""
+    repo = Path(__file__).resolve().parents[1]
+    return {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            str(repo / relative)
+            for relative in (
+                "src",
+                "packages/python/review-sensei-github/src",
+                "tests",
+                ".",
+            )
+        ),
+    }
+
+
 class OrdinaryNativeRecoveryColdTests(unittest.TestCase):
     CHILD = r"""
 import copy, json, sys
@@ -127,7 +144,7 @@ print(json.dumps({"code":code,"error":f.error,"states":observed[-1] if observed 
                     capture_output=True,
                     text=True,
                     timeout=45,
-                    env=os.environ.copy(),
+                    env=subprocess_environment(),
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 result = json.loads(completed.stdout)
