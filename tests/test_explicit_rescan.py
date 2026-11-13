@@ -1707,6 +1707,54 @@ class CurrentDispatchRescanEntryTests(unittest.TestCase):
             self.assertEqual(len(fixture.reviews), 1)
             self.assert_metered(fixture)
 
+    def test_remaining_rejects_changed_projection_without_new_work(self):
+        from review_sensei_github.publication import (
+            approval_eligibility_from_body,
+            review_result_digest,
+        )
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.models import ReviewResult
+        from tests.test_api_work_persistence import IDENTITY
+
+        for fault in ("unprojected", "foreign"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                fixture, source = self.fixture(directory, remaining=True)
+                original = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                retained = ReviewResult.from_dict(
+                    json.loads((fixture.root / "review.json").read_text())
+                )
+                eligibility = approval_eligibility_from_body(
+                    fixture.reviews[-1]["body"]
+                )
+                unprojected = review_result_digest(
+                    replace(retained, transaction=source)
+                )
+                self.assertNotEqual(unprojected, eligibility.result_digest)
+                changed = replace(
+                    eligibility,
+                    result_digest=unprojected if fault == "unprojected" else "f" * 64,
+                )
+                fixture.reviews[-1]["body"] = fixture.reviews[-1]["body"].replace(
+                    approval_eligibility_marker(eligibility),
+                    approval_eligibility_marker(changed),
+                )
+                self.assertEqual(fixture.invoke(), 1)
+                self.assertIn(
+                    "published source does not match retained evidence", fixture.error
+                )
+                final = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                self.assertEqual(final.dispositions, original.dispositions)
+                self.assertEqual(final.finding_lifecycle, original.finding_lifecycle)
+                self.assertIsNone(final.rescan_state)
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertEqual(len(fixture.reviews), 1)
+                self.assert_metered(fixture)
+
     def test_actual_dispatch_authority_and_exact_source_controls_keep_decisions(self):
         import copy
 

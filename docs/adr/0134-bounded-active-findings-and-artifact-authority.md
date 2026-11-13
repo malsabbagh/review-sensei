@@ -382,3 +382,12 @@ cap-one producer with three obligations and a genuinely archived predecessor,
 not a supplied synthetic lifecycle dictionary. This source reader qualification
 does not establish a complete successor-quarantine journey or settle its prior
 uncertain effects.
+
+The ordinary remaining-review consumer compares native eligibility with the
+actual display projection reconstructed from the same selected lifecycle root,
+not the unprojected original result. Original retained result identity/content,
+transaction scope, journal validation, fresh root/dependency fences and the
+existing caller meter still apply. Native edits or a foreign/unprojected digest
+refuse before new inference or publication. A historical rescan receipt without
+its current transaction does not establish a current lifecycle projection;
+that retry remains held pending a separately authenticated historical contract.
