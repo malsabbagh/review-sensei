@@ -89,8 +89,12 @@ A plain hosted lifecycle checkpoint can exceed the generic ten-call operation
 tranche without exceeding the frozen run budget. The exact source-owned adapter
 now issues a one-use capacity proof tied to its caller, selected root, complete
 ordered inventory, unchanged record bytes and future checkpoint parts. It chooses
-one fixed page size from 100/20/10/5/1 and reserves every full preactivation and
-final inventory, including a short terminal page. Each complete census remains
+a sealed sequence of page sizes from 100/20/10/5/1 and reserves every full
+preactivation and final inventory, including a short terminal page. Each selected
+size divides the accumulated offset: `(page - 1) * per_page` is exactly the next
+unread offset. Changing sizes therefore neither skips nor overlaps entries. The
+sequence and each response bound are part of the issued proof, not choices made
+from later responses. Each complete census remains
 at most ten physical reads and at most 200 allocations. This is not the denied
 larger census or a change to generic operation funding.
 
@@ -143,3 +147,32 @@ an explicit pre-publication hold. That is a stated support limit, not successful
 handling of a larger inventory. No observed objects are hidden or excluded to
 fit the bound. A future larger profile would need separate authorization and
 qualification; the current implementation does not provide it.
+
+
+### Creation-phase census and lifetime capacity
+
+The literal-blocker prepublication creation route can qualify its two complete
+censuses separately from the successor's later lifetime. Before the first effect,
+its lifetime plan still admits every known comment, future carrier, successor
+root and native publication tail under the unchanged 200-allocation and 8 MiB
+bounds. Phase pricing does not remove those future obligations.
+
+A one-shot source-owned dispatcher restricts the creation phase to the exact
+registered carrier and root POSTs, including their URL, bytes and authorization.
+Review, check, reply and decision mutations cannot consume that phase witness.
+The witness pins the native transport, caller, root, run, attempt, job,
+configuration and registration; substituted executors and a later-installed
+capacity guard refuse. Guarded profiles retain their original conservative plan
+until their own source-qualified extension exists.
+
+The original 52-obligation fixture qualifies creation within its existing funding
+with 167 lifetime allocations and 6,427,467 lifetime wire bytes, retaining 109
+future carriers and the native publication tail. Stored or absent responses and
+interrupted carriers preserve the original one-shot state rather than reposting.
+This is creation qualification only: later publication, decisions, terminal
+settlement and deployed isolation remain separate requirements.
+
+The large-comment P1 fixture independently completes its original 512-call run
+using the sealed aligned page recipe. Changed, grown, reordered or oversized
+frontiers still refuse before business publication. Neither this positive nor the
+creation proof permits inventories above 200 or closes the complete gap plan.
