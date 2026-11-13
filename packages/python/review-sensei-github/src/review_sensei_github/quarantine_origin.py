@@ -514,7 +514,10 @@ class QuarantineOriginReader:
                     or set(published)
                     != {"schema_version", "record", "review_id", "review_body"}
                     or published["schema_version"]
-                    != "quarantine-published-assessment-source-v1"
+                    not in {
+                        "quarantine-published-assessment-source-v1",
+                        "quarantine-lifecycle-published-assessment-source-v1",
+                    }
                 ):
                     raise ReviewInputError("quarantine published source is unsupported")
             for origin in origins["origins"]:
