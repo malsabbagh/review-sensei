@@ -57,10 +57,15 @@ def require_durable_floor(journal, *, checks_enabled):
     record, ledger = journal._record, journal.ledger
     if record.quarantine_lineage is None:
         return
+    from .publication_recovery import _publication_transport
     from .quarantine_capacity import installed_capacity
     from .quarantine_census import lifecycle_checkpoint_pricing
 
-    installed_capacity(ledger, journal.identity)
+    # The authentic plain isolation profile intentionally has no native guard.
+    # The checkpoint planner below authenticates that profile independently and
+    # rejects a missing guard for every profile that requires one.
+    if _publication_transport(ledger.http)._quarantine_capacity_guard is not None:
+        installed_capacity(ledger, journal.identity)
 
     def quote(owner, selected, *, calls, validate, **_unused):
         if owner is not ledger or selected is not record or not validate():
