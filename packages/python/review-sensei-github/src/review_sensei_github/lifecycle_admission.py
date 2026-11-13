@@ -14,6 +14,7 @@ from review_sensei.errors import ReviewInputError
 def restore_original_lifecycle_admission(result, state, *, head_sha, base_sha):
     from review_sensei.active_finding_window import (
         ActiveWindowRoundState,
+        AuthoritativeObligation,
         obligation_from_comment,
     )
     from review_sensei.finding_drift import (
@@ -22,6 +23,7 @@ def restore_original_lifecycle_admission(result, state, *, head_sha, base_sha):
     )
 
     restored = {}
+    active_obligations: tuple[AuthoritativeObligation, ...] = ()
     if state.head_sha != head_sha or state.base_sha != base_sha:
         raise ReviewInputError("original lifecycle admission snapshot conflicts")
     if not 0 < len(result.comments) <= 2:
@@ -77,11 +79,10 @@ def restore_original_lifecycle_admission(result, state, *, head_sha, base_sha):
                 effective_blocking=obligation.criterion.blocking,
                 needs_human=obligation.criterion.needs_human,
             )
-        obligations = ()
     elif type(state) is ActiveWindowRoundState:
-        obligations = state.authoritative_decision_inventory.obligations
+        active_obligations = state.authoritative_decision_inventory.obligations
         if (
-            len(obligations) != len(result.comments)
+            len(active_obligations) != len(result.comments)
             or state.display_active_findings.slots
         ):
             raise ReviewInputError("original lifecycle admission membership conflicts")
@@ -93,13 +94,13 @@ def restore_original_lifecycle_admission(result, state, *, head_sha, base_sha):
         if created.obligation_id in expected:
             raise ReviewInputError("original lifecycle admission membership conflicts")
         expected[created.obligation_id] = comment
-    for obligation in obligations:
-        comment = expected.get(obligation.obligation_id)
+    for active_obligation in active_obligations:
+        comment = expected.get(active_obligation.obligation_id)
         if comment is None:
             raise ReviewInputError("original lifecycle admission membership conflicts")
-        identity = obligation_from_comment(comment)
+        active_identity = obligation_from_comment(comment)
         if any(
-            getattr(obligation, field) != getattr(identity, field)
+            getattr(active_obligation, field) != getattr(active_identity, field)
             for field in (
                 "obligation_id",
                 "fingerprint",
@@ -112,23 +113,23 @@ def restore_original_lifecycle_admission(result, state, *, head_sha, base_sha):
                 "concern",
             )
         ) or (
-            obligation.generation != 0
-            or obligation.lifecycle_state != "active-unresolved"
-            or obligation.native_target is not None
-            or obligation.resolution_proof_sha256 is not None
+            active_obligation.generation != 0
+            or active_obligation.lifecycle_state != "active-unresolved"
+            or active_obligation.native_target is not None
+            or active_obligation.resolution_proof_sha256 is not None
         ):
             raise ReviewInputError("original lifecycle admission membership conflicts")
         # Public result decoding intentionally omits runtime admission flags.
         # Preserve the authenticated inventory's classification/evidence; never
         # replace those facts with the raw result's advisory defaults.
-        if obligation.comment is None or canonical_bytes(
-            obligation.comment.to_dict()
+        if active_obligation.comment is None or canonical_bytes(
+            active_obligation.comment.to_dict()
         ) != canonical_bytes(comment.to_dict()):
             raise ReviewInputError("original lifecycle admission membership conflicts")
         restored[canonical_bytes(comment.to_dict())] = replace(
             comment,
-            effective_blocking=obligation.blocking,
-            needs_human=obligation.needs_human,
+            effective_blocking=active_obligation.blocking,
+            needs_human=active_obligation.needs_human,
         )
     return replace(
         result,

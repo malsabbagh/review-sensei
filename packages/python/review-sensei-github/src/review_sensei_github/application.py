@@ -2303,6 +2303,7 @@ class GitHubApplication:
                         )
                         and lifecycle_record.transaction.result_sha256
                         == transaction_record.transaction.result_sha256
+                        and result.transaction is not None
                         and result.transaction.logical_identity_matches(
                             transaction_record.transaction
                         )
