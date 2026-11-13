@@ -245,12 +245,10 @@ def admit_prefix_branches(journal, branches, *, read_calls):
     )
 
 
-def admit_current(
+def current_request_branches(
     publisher,
-    observer,
     journal,
     *,
-    original_result,
     result,
     assembled,
     eligibility,
@@ -258,16 +256,10 @@ def admit_current(
     outcome,
     policy,
     complete_inventory,
-    checks_enabled,
-    grouped,
-    planned_window=None,
-    planned_drift=None,
-    convergence_policy=None,
-    auto_approval=False,
     preserve_explanations=False,
     window_non_inline_blocking=False,
 ):
-    """The closed ordinary source route, before its first business effect."""
+    """Pure shared framing from the actual source producers; no admission."""
     from dataclasses import replace
 
     from .approval import evaluate_approval_facts
@@ -283,31 +275,6 @@ def admit_current(
         review_result_digest,
     )
 
-    if convergence_policy is not None:
-        assembled = publisher._adjust_assembled_for_drift(
-            publisher._adjust_assembled_for_window(
-                assembled,
-                planned_window,
-                convergence_policy=convergence_policy,
-                auto_approval=auto_approval,
-            ),
-            planned_drift,
-            convergence_policy=convergence_policy,
-            auto_approval=auto_approval,
-        )
-    witness = observer.qualify(
-        record=journal._record,
-        result=original_result,
-        projected_result=result,
-        assembled=assembled,
-        eligibility=eligibility,
-        checks_enabled=checks_enabled,
-        cleanup_targets=(),
-        grouped=grouped,
-    )
-    if witness is None:
-        return None  # This route is not admitted by the closed-source contract.
-    witness.require(journal, publisher)
     pending_eligibility = replace(
         eligibility,
         facts=replace(
@@ -363,7 +330,7 @@ def admit_current(
         retained_blocking=False,
         app_authored=False,
     )
-    branches = request_branches(
+    return request_branches(
         publisher,
         journal,
         frame=frame,
@@ -380,6 +347,69 @@ def admit_current(
             for temporary in (False, True)
         ),
         approval_body=approval,
+    )
+
+
+def admit_current(
+    publisher,
+    observer,
+    journal,
+    *,
+    original_result,
+    result,
+    assembled,
+    eligibility,
+    marker,
+    outcome,
+    policy,
+    complete_inventory,
+    checks_enabled,
+    grouped,
+    planned_window=None,
+    planned_drift=None,
+    convergence_policy=None,
+    auto_approval=False,
+    preserve_explanations=False,
+    window_non_inline_blocking=False,
+):
+    """The closed ordinary source route, before its first business effect."""
+    if convergence_policy is not None:
+        assembled = publisher._adjust_assembled_for_drift(
+            publisher._adjust_assembled_for_window(
+                assembled,
+                planned_window,
+                convergence_policy=convergence_policy,
+                auto_approval=auto_approval,
+            ),
+            planned_drift,
+            convergence_policy=convergence_policy,
+            auto_approval=auto_approval,
+        )
+    witness = observer.qualify(
+        record=journal._record,
+        result=original_result,
+        projected_result=result,
+        assembled=assembled,
+        eligibility=eligibility,
+        checks_enabled=checks_enabled,
+        cleanup_targets=(),
+        grouped=grouped,
+    )
+    if witness is None:
+        return None  # This route is not admitted by the closed-source contract.
+    witness.require(journal, publisher)
+    branches = current_request_branches(
+        publisher,
+        journal,
+        result=result,
+        assembled=assembled,
+        eligibility=eligibility,
+        marker=marker,
+        outcome=outcome,
+        policy=policy,
+        complete_inventory=complete_inventory,
+        preserve_explanations=preserve_explanations,
+        window_non_inline_blocking=window_non_inline_blocking,
     )
     plan = admit_prefix_branches(journal, branches, read_calls=witness.read_calls)
     witness.require(journal, publisher)
