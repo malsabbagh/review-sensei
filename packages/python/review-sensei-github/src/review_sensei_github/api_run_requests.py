@@ -21,6 +21,7 @@ from typing import Any, Mapping, cast
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from weakref import WeakKeyDictionary
 
 from review_sensei.api_work import (
     LEGACY_ACCOUNTING_VERSION,
@@ -42,6 +43,59 @@ from .caller_operation import CallerOperation
 from .errors import GitHubHTTPError, GitHubPublicationTransientError
 from .http import Opener
 from .session_ledger import GitHubIssueCommentSessionLedger
+
+
+@dataclass(frozen=True, eq=False)
+class _PlainFindingPagePlan:
+    caller: Any
+    root: str
+    record: SessionRecord
+    record_bytes: bytes
+    inventory_ids: tuple[int, ...]
+    inventory_bytes: bytes
+    page_size: int
+    page_bounds: tuple[int, ...]
+    maximum_items: int
+    checkpoint_parts: tuple[int, ...]
+    root_calls: int
+    fences: int
+
+
+# These capabilities are issued only after the complete source frontier passes
+# the existing ownership/dependency checks. A caller attribute is not a grant.
+_PLAIN_FINDING_PLANS: WeakKeyDictionary[Any, _PlainFindingPagePlan] = (
+    WeakKeyDictionary()
+)
+_PLAIN_FINDING_ACTIVE: WeakKeyDictionary[Any, tuple[_PlainFindingPagePlan, bool]] = (
+    WeakKeyDictionary()
+)
+
+
+_PLAIN_FINDING_ISSUED: WeakKeyDictionary[Any, tuple[Any, ...]] = WeakKeyDictionary()
+
+
+def _plain_page_signature(plan):
+    return (
+        plan.caller,
+        plan.root,
+        id(plan.record),
+        plan.record_bytes,
+        plan.inventory_ids,
+        plan.inventory_bytes,
+        plan.page_size,
+        plan.page_bounds,
+        plan.maximum_items,
+        plan.checkpoint_parts,
+        plan.root_calls,
+        plan.fences,
+    )
+
+
+def _require_plain_page_plan(plan):
+    if type(plan) is not _PlainFindingPagePlan or _PLAIN_FINDING_ISSUED.get(
+        plan
+    ) != _plain_page_signature(plan):
+        raise ReviewInputError("finding lifecycle page plan is not source-issued")
 
 
 def json_copy(value: Any) -> Any:
@@ -2103,10 +2157,20 @@ class ApiRunRequestTransport:
                 if self._terminal_reason is None
                 else QUARANTINE_CHECKPOINT_REQUESTS
             )
+        confirmation_tail = WRITE_CONFIRMATION_TAIL
+        if not quarantine and isinstance(ledger, ApiRunSessionLedger):
+            if (
+                getattr(ledger._take_plain_finding_operation, "__func__", None)
+                is not ApiRunSessionLedger._take_plain_finding_operation
+            ):
+                raise ReviewInputError("finding lifecycle operation source changed")
+            specialized = ledger._take_plain_finding_operation(self, identity)
+            if specialized is not None:
+                capacity, confirmation_tail = specialized
         with self._operation(
             key,
             capacity + fences,
-            write_tail=WRITE_CONFIRMATION_TAIL,
+            write_tail=confirmation_tail,
             prewrite_reads=fences,
         ) as operation:
             self._checkpoint_operation = operation
@@ -2340,14 +2404,18 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         from review_sensei.bounded_evidence import canonical_bytes
         from review_sensei.finding_lifecycle_store import _issue_checkpoint_pricing
 
-        from .review_run import ActionRunLedger
+        from .review_run import ActionRunLedger, ReviewRunLedger
         from .run_authority import VerifiedRunAction
 
-        if type(self) not in {ApiRunSessionLedger, ActionRunLedger}:
+        if type(self) not in {ApiRunSessionLedger, ActionRunLedger, ReviewRunLedger}:
+            return None
+        if type(self) is ReviewRunLedger and self.caller._abort_source is not None:
             return None
         expected_replace = (
             ApiRunSessionLedger.replace
             if type(self) is ApiRunSessionLedger
+            else ReviewRunLedger.replace
+            if type(self) is ReviewRunLedger
             else ActionRunLedger.replace
         )
         implementations = (
@@ -2373,6 +2441,15 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 ApiRunSessionLedger._plain_finding_selected_input,
             ),
             ("stage_evidence", ApiRunSessionLedger.stage_evidence),
+            (
+                "_take_plain_finding_operation",
+                ApiRunSessionLedger._take_plain_finding_operation,
+            ),
+            (
+                "_read_plain_finding_pages",
+                ApiRunSessionLedger._read_plain_finding_pages,
+            ),
+            ("_bounded_comments", GitHubIssueCommentSessionLedger._bounded_comments),
             (
                 "preflight_finding_lifecycle_retention",
                 ApiRunSessionLedger.preflight_finding_lifecycle_retention,
@@ -2416,6 +2493,8 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                     for name, implementation in implementations
                 )
                 or getattr(self, "business_guard", None) is not guard
+                or type(self) is ReviewRunLedger
+                and self.caller._abort_source is not None
             ):
                 return False
             return owner is None or (
@@ -2426,13 +2505,31 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 and canonical_bytes(owner.document) == authority_bytes
             )
 
+        page_plan = None
         observed = self.preflight_finding_lifecycle_retention(
             identity,
             added_parts=added_parts,
             added_bytes=added_bytes,
             checkpoint_parts=checkpoint_parts,
         )
-        if not validate():
+        page_plan = _PLAIN_FINDING_PLANS.get(self)
+        source_validate = validate
+
+        def validate_page_plan():
+            if not source_validate():
+                return False
+            if page_plan is None:
+                return True
+            _require_plain_page_plan(page_plan)
+            return (
+                page_plan.record is record
+                and page_plan.caller is self.caller
+                and page_plan.root == self.caller._root
+                and page_plan.inventory_bytes
+                == canonical_bytes(self._cached_comments())
+            )
+
+        if not validate_page_plan():
             raise ReviewInputError(
                 "finding lifecycle checkpoint pricing source changed"
             )
@@ -2442,14 +2539,20 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             checkpoint_parts=checkpoint_parts,
             capacity=observed,
             calls=tuple(
-                (5 if n == 0 else 4 + 3 * n) + guard_calls for n in checkpoint_parts
+                (5 if n == 0 else 4 + 3 * n)
+                + 2 * ((len(page_plan.page_bounds) if page_plan is not None else 1) - 1)
+                + guard_calls
+                for n in checkpoint_parts
             ),
-            validate=validate,
+            validate=validate_page_plan,
+            page_counts=tuple(
+                (len(page_plan.page_bounds) if page_plan is not None else 1)
+                for _ in checkpoint_parts
+            ),
         )
 
     def preflight_finding_lifecycle_inline(self, record):
         from review_sensei.finding_lifecycle_store import (
-            _consume_checkpoint_pricing,
             _inline_checkpoint_read_free,
         )
 
@@ -2463,8 +2566,8 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         )
         if proof is None:
             return None
-        _consume_checkpoint_pricing(proof, self, record, (0,))
         return {
+            "checkpoint_pricing": proof,
             "conditional_calls": 4,
             "post_mutator_calls": 3,
             "page_size": 100,
@@ -2506,17 +2609,8 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         fences = prewrite_fence_requests(self.caller)
         selected = self._plain_finding_selected_input(identity)
         root_calls = 4 if selected is not None else 5
-        # A source-owned selected input omits only the initial redundant listing.
-        # Independent preactivation/final listings, live head and root PATCH remain.
-        # Each new part needs live-head GET, POST and independent part GET =3.
-        # Restart fences are existing additional physical liabilities, not room.
-        if any(
-            root_calls + 3 * n + (n + 1) * fences > NATIVE_OPERATION_REQUESTS + fences
-            for n in checkpoints
-        ):
-            raise EvidenceBudgetExhausted(
-                "finding lifecycle parts exceed original checkpoint operation"
-            )
+        # A specialized closed full-page plan can reserve more than the
+        # generic ten-call tranche, never more than the same caller can fund.
         items = self._cached_comments()
         if (
             not self._inventory_complete
@@ -2629,14 +2723,94 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         # Actual staging repeats this with canonical rendered-part lengths.
         # Keep framing/outer-JSON escapes and native metadata for every part.
         wire += added_bytes + added_parts * (512 + 4096)
-        if len(items) + added_parts >= 100 or wire >= 512 * 1024:
+        if len(items) + added_parts > 200:
             raise ReviewInputError(
-                "finding lifecycle plain single-page capacity exceeded"
+                "finding lifecycle comment allocation capacity exceeded"
             )
+        page_count = 1
+        if len(items) + added_parts >= 100 or wire >= 512 * 1024:
+            from .review_run import ActionRunLedger, ReviewRunLedger
+
+            if (
+                type(self)
+                not in {ApiRunSessionLedger, ActionRunLedger, ReviewRunLedger}
+                or selected is None
+                or getattr(self.replace_finding_lifecycle_parts, "__func__", None)
+                is not ApiRunSessionLedger.replace_finding_lifecycle_parts
+                or getattr(self._preflight_plain_finding_parts, "__func__", None)
+                is not ApiRunSessionLedger._preflight_plain_finding_parts
+                or getattr(self._bounded_comments, "__func__", None)
+                is not GitHubIssueCommentSessionLedger._bounded_comments
+            ):
+                raise ReviewInputError("finding lifecycle paged source is unqualified")
+            # GitHub returns issue comments in creation order. Pin the observed
+            # prefix; all future immutable parts append. A changed ordering is
+            # a refusal, never a reason to change pages or omit old history.
+            ids = tuple(item.get("id") for item in items)
+            if any(type(i) is not int or i <= 0 for i in ids) or len(set(ids)) != len(
+                ids
+            ):
+                raise ReviewInputError("finding lifecycle frontier identity is invalid")
+            bounds = [len(canonical_bytes(item)) for item in items]
+            root_index = next(
+                i for i, item in enumerate(items) if item["body"] == root_bodies[0]
+            )
+            bounds[root_index] += root_wire - replaced_body + 4096
+            # Per-page partitioning needs individual maxima, not an average of
+            # aggregate bytes. The original canonical part bound is unchanged.
+            from review_sensei.bounded_evidence import MAX_PART_BYTES
+
+            bounds.extend([MAX_PART_BYTES + 512 + 4096] * added_parts)
+            page_size = 0
+            page_bounds: tuple[int, ...] = ()
+            for size in (100, 20, 10, 5, 1):
+                candidates = tuple(
+                    2
+                    + sum(bounds[start : start + size])
+                    + max(0, len(bounds[start : start + size]) - 1)
+                    for start in range(0, len(bounds) + 1, size)
+                )
+                if len(candidates) <= 10 and all(
+                    value < 512 * 1024 for value in candidates
+                ):
+                    page_size, page_bounds = size, candidates
+                    break
+            if not page_size:
+                raise ReviewInputError("finding lifecycle page capacity exceeded")
+            plan = _PlainFindingPagePlan(
+                self.caller,
+                self.caller._root,
+                selected,
+                canonical_bytes(selected.to_dict()),
+                ids,
+                canonical_bytes(items),
+                page_size,
+                page_bounds,
+                len(bounds),
+                checkpoints,
+                root_calls,
+                fences,
+            )
+            _PLAIN_FINDING_ISSUED[plan] = _plain_page_signature(plan)
+            _PLAIN_FINDING_PLANS[self] = plan
+            page_count = len(page_bounds)
+        else:
+            _PLAIN_FINDING_PLANS.pop(self, None)
+            if any(
+                root_calls + 3 * n + (n + 1) * fences
+                > NATIVE_OPERATION_REQUESTS + fences
+                for n in checkpoints
+            ):
+                raise EvidenceBudgetExhausted(
+                    "finding lifecycle parts exceed original checkpoint operation"
+                )
         carriers = tuple(self._owned_carrier_items(items, identity))
         assert self.evidence_budget is not None
         self.evidence_budget.preflight(
-            sum(root_calls + 3 * n + (n + 1) * fences for n in checkpoints)
+            sum(
+                root_calls + 3 * n + 2 * (page_count - 1) + (n + 1) * fences
+                for n in checkpoints
+            )
         )
         return {
             "additional_calls": 0,
@@ -2645,6 +2819,91 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             "retained_bytes": sum(len(i["body"].encode()) for i in carriers)
             + added_bytes,
         }
+
+    def _take_plain_finding_operation(self, caller, identity):
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .api_run_plan import NATIVE_OPERATION_REQUESTS, WRITE_CONFIRMATION_TAIL
+
+        active = _PLAIN_FINDING_ACTIVE.get(self)
+        if active is None:
+            return None
+        plan, consumed = active
+        _require_plain_page_plan(plan)
+        if (
+            consumed
+            or caller is not plan.caller
+            or caller is not self.caller
+            or caller._root != plan.root
+            or identity != plan.record.identity()
+            or canonical_bytes(plan.record.to_dict()) != plan.record_bytes
+            or self._plain_finding_selected_input(identity) is not plan.record
+            or len(plan.checkpoint_parts) != 1
+            or canonical_bytes(self._cached_comments()) != plan.inventory_bytes
+        ):
+            raise ReviewInputError("finding lifecycle paged operation custody changed")
+        _PLAIN_FINDING_ACTIVE[self] = (plan, True)
+        pages = len(plan.page_bounds)
+        calls = plan.root_calls + 3 * plan.checkpoint_parts[0] + 2 * (pages - 1)
+        assert self.evidence_budget is not None
+        self.evidence_budget.preflight(
+            calls + (plan.checkpoint_parts[0] + 1) * plan.fences
+        )
+        return max(
+            NATIVE_OPERATION_REQUESTS, calls
+        ), WRITE_CONFIRMATION_TAIL + pages - 1
+
+    def _read_plain_finding_pages(self, identity):
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        active = _PLAIN_FINDING_ACTIVE.get(self)
+        if active is None:
+            return None
+        plan, consumed = active
+        _require_plain_page_plan(plan)
+        if (
+            not consumed
+            or self.caller is not plan.caller
+            or self.caller._root != plan.root
+            or identity != plan.record.identity()
+            or canonical_bytes(plan.record.to_dict()) != plan.record_bytes
+        ):
+            raise ReviewInputError("finding lifecycle page plan custody changed")
+        if self._inventory_complete and not self._list_refresh:
+            return self._cached_comments()
+        collected = []
+        for page, bound in enumerate(plan.page_bounds, 1):
+            path = (
+                f"{self._comments_path(identity)}?per_page={plan.page_size}&page={page}"
+            )
+            status, payload = self._request("GET", path)
+            if (
+                status != 200
+                or not isinstance(payload, list)
+                or len(payload) > plan.page_size
+                or any(not isinstance(item, dict) for item in payload)
+                or len(canonical_bytes(payload)) > bound
+            ):
+                raise ReviewInputError("finding lifecycle planned page changed")
+            collected.extend(payload)
+            if len(collected) > plan.maximum_items:
+                raise ReviewInputError("finding lifecycle planned frontier grew")
+            if len(payload) < plan.page_size:
+                observed_ids = tuple(item.get("id") for item in collected)
+                if (
+                    any(type(value) is not int or value <= 0 for value in observed_ids)
+                    or len(set(observed_ids)) != len(observed_ids)
+                    or observed_ids[: len(plan.inventory_ids)] != plan.inventory_ids
+                ):
+                    raise ReviewInputError(
+                        "finding lifecycle planned frontier order changed"
+                    )
+                self._replace_inventory(collected)
+                self._inventory_complete = True
+                self._list_refresh = False
+                self._note_anchor(collected)
+                return self._cached_comments()
+        raise ReviewInputError("finding lifecycle planned terminal page is not short")
 
     def _current_plain_snapshot_part(self, identity, storage_id):
         """Authenticate only the complete currently observed listing body."""
@@ -2857,6 +3116,9 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             )
         if getattr(self, "_plain_finding_scope_active", False):
             raise ReviewInputError("finding lifecycle selected input cannot nest")
+        page_plan = _PLAIN_FINDING_PLANS.pop(self, None)
+        if page_plan is not None:
+            _PLAIN_FINDING_ACTIVE[self] = (page_plan, False)
         self._finding_lifecycle_page_size = 100
         self._plain_finding_input = (
             (record, canonical_bytes(record.to_dict()))
@@ -2885,6 +3147,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             self._plain_finding_input = None
             self._plain_finding_scope_active = False
             self._finding_lifecycle_page_size = None
+            _PLAIN_FINDING_ACTIVE.pop(self, None)
 
     def stage_disposition_snapshot_batch(self, identity, **kwargs):
         if self._part_staging_identity is not None:

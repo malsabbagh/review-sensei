@@ -124,7 +124,7 @@ class CurrentRunFindingPartsTests(unittest.TestCase):
                             "body": "discussion",
                             "user": {"id": 2, "type": "User"},
                         }
-                        for i in range(99)
+                        for i in range(199)
                     ]
                 if defect == "bytes":
                     items += [

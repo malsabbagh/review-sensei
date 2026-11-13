@@ -1678,6 +1678,18 @@ class GitHubIssueCommentSessionLedger:
         assert self.evidence_budget is not None
         lifecycle_page_size = getattr(self, "_finding_lifecycle_page_size", None)
         if lifecycle_page_size is not None:
+            from .api_run_requests import ApiRunSessionLedger
+
+            scoped = getattr(self, "_read_plain_finding_pages", None)
+            if (
+                callable(scoped)
+                and getattr(scoped, "__func__", None)
+                is ApiRunSessionLedger._read_plain_finding_pages
+            ):
+                planned = scoped(identity)
+                if planned is not None:
+                    return planned
+        if lifecycle_page_size is not None:
             if self._inventory_complete and not self._list_refresh:
                 return self._cached_comments()
             # No incremental merge, pagination, response-size retry or fallback.

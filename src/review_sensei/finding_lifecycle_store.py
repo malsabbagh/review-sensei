@@ -247,7 +247,7 @@ def _register_checkpoint_pricer(source):
 
 
 def _issue_checkpoint_pricing(
-    ledger, record, *, checkpoint_parts, capacity, calls, validate
+    ledger, record, *, checkpoint_parts, capacity, calls, validate, page_counts=None
 ):
     source = getattr(
         getattr(ledger, "preflight_finding_lifecycle_checkpoint_pricing", None),
@@ -268,6 +268,7 @@ def _issue_checkpoint_pricing(
         calls,
         validate,
         source,
+        tuple(1 for _ in checkpoint_parts) if page_counts is None else page_counts,
     )
     return proof
 
@@ -293,14 +294,22 @@ def _consume_checkpoint_pricing(proof, ledger, record, checkpoint_parts):
     ):
         raise ReviewInputError("finding lifecycle checkpoint pricing changed or reused")
     prices = issued[5]
+    pages = issued[8]
+    if (
+        not isinstance(pages, tuple)
+        or len(pages) != len(checkpoint_parts)
+        or any(type(page) is not int or not 1 <= page <= 10 for page in pages)
+    ):
+        raise ReviewInputError("finding lifecycle checkpoint page pricing is invalid")
     if (
         not isinstance(prices, tuple)
         or len(prices) != len(checkpoint_parts)
         or any(type(n) is not int or n < 0 for n in checkpoint_parts)
         or any(
             type(price) is not int
-            or price not in ({5, 7} if n == 0 else {4 + 3 * n, 6 + 3 * n})
-            for n, price in zip(checkpoint_parts, prices)
+            or price - 2 * (page - 1)
+            not in ({5, 7} if n == 0 else {4 + 3 * n, 6 + 3 * n})
+            for n, price, page in zip(checkpoint_parts, prices, pages)
         )
     ):
         raise ReviewInputError("finding lifecycle checkpoint pricing is invalid")
@@ -623,6 +632,32 @@ def _remote_inline_plan(ledger: Any, record: Any) -> Mapping[str, object] | None
     plan = preflight(record)
     if plan is None:
         return None
+    if isinstance(plan, Mapping) and "checkpoint_pricing" in plan:
+        proof = plan["checkpoint_pricing"]
+        issued = (
+            _CHECKPOINT_PRICING.get(proof)
+            if type(proof) is _CheckpointPricing
+            else None
+        )
+        _, prices = _consume_checkpoint_pricing(proof, ledger, record, (0,))
+        assert issued is not None
+        pages = issued[8][0]
+        plan = {
+            key: value for key, value in plan.items() if key != "checkpoint_pricing"
+        }
+        # These counts come only from the consumed source/root-bound proof.
+        # The core's outer stage has already supplied the initial read.
+        plan["conditional_calls"] = prices[0] - 1
+        plan["post_mutator_calls"] = 3 + 2 * (pages - 1)
+        if (
+            set(plan)
+            != {"conditional_calls", "post_mutator_calls", "page_size", "sealed"}
+            or type(plan["sealed"]) is not bool
+            or type(plan["page_size"]) is not int
+            or not 1 <= plan["page_size"] <= 100
+        ):
+            raise ReviewInputError("finding lifecycle adapter inline proof is invalid")
+        return plan
     if (
         not isinstance(plan, Mapping)
         or set(plan)
@@ -1049,7 +1084,9 @@ def stage_finding_lifecycle(
                 _remote_inline_plan(ledger, current) if part_calls == 0 else None
             )
             if remote_plan is not None and remote_plan["sealed"]:
-                commit_calls = 3
+                post_calls = remote_plan["post_mutator_calls"]
+                assert type(post_calls) is int
+                commit_calls = post_calls
             budget.preflight(part_calls + commit_calls + reserved_tail_calls)
         manifest = ledger.stage_evidence(
             current.identity(),
@@ -1322,7 +1359,9 @@ def preflight_finding_lifecycle(
                 else None
             )
             if remote_plan is not None:
-                checkpoint_calls = 4
+                source_calls = remote_plan["conditional_calls"]
+                assert type(source_calls) is int
+                checkpoint_calls = source_calls
             calls += checkpoint_calls
             added_parts += count
             added_bytes += retained_bytes
