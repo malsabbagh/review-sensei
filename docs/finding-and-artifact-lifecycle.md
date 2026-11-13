@@ -430,6 +430,9 @@ its presence alone is not a passing receipt.
 | Reply/human resolution releases only its own slot | Authenticated original criterion and native receipt, cold resolver confirmation, later cold review promotion | `test_finding_lifecycle_reply_restart`; `test_finding_lifecycle_consumers` |
 | Lost resolution cannot clear a hidden blocker | Actual command/resolver transport, pending journal, cold native reconciliation | `test_finding_lifecycle_resolution_failure` |
 | Rename/move/split preserves history and native identity | Ordinary drift plan, retained obligations and receipts, fresh drift consumer | `test_durable_finding_lifecycle_restart.test_rename_move_and_split_keep_native_identity_across_processes`; `test_finding_location_drift_g16` |
+| Copy/duplication, deletion, rewrite and partial coverage do not erase criteria | Ordinary drift publication and authenticated inventory, new interpreter for each transition and resume | `test_durable_finding_lifecycle_restart.test_copy_deletion_rewrite_and_partial_coverage_survive_cold_resume` |
+| A lost native drift edit uses its exact retained target | Landed PATCH and pending journal, fresh native-ID readback; changed author/body or missing target remains pending | `test_finding_lifecycle_drift_replay` |
+| A cold source command cannot silently become a different command | Actual command CLI, observed admission/execution/business checkpoints, original source identity and funding on attempt two | `test_source_lifecycle_process_matrix` |
 | Newer roots are not overwritten by stale preparations | Selected lifecycle reference, original-root completion lineage, fresh ledger CAS | `test_finding_lifecycle_custody` |
 | Reused native roots remain exact members | Native group writer, versioned union receipt, bounded independent reader | `test_native_union_reused_roots`; `test_native_finding_receipts` |
 | Overflow preserves original funds and all obligations | Complete pending/future envelope preview, existing evidence allocator, authenticated part reader | `test_finding_lifecycle_parts`; `test_finding_lifecycle_store`; `test_finding_lifecycle_current_hosted.test_unchanged_small_original_allowance_refuses_before_native_effects` |
@@ -460,3 +463,10 @@ qualified. Current observations do not prove permission/selection continuity,
 actor repository permission or freshness immediately before every native effect.
 Missing facts cannot populate a synthetic `permission_epoch` or silently satisfy
 the complete G15 trust contract.
+
+The source-command process matrix qualifies unchanged unstarted continuation and
+explicit held routes after source edits/deletion, revision restoration, changed
+head, started work or landed business effects. Terminal second-attempt entry is
+an ordinary already-terminal bootstrap refusal, not a newly supported replay.
+Stopping a test interpreter supplies no production cancellation, cessation or
+non-dispatch authority. Reply-source composition remains separately qualified.
