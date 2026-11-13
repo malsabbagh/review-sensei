@@ -2986,6 +2986,7 @@ class FindingLifecycleJournal:
             ):
                 return None
         candidates = None
+        confirmed_check_successor = None
         if path == "/graphql":
             return self._readback_thread(effect, token=token)
         if (
@@ -3049,12 +3050,25 @@ class FindingLifecycleJournal:
                     # A later confirmed update in this same ordered intent log
                     # legitimately supersedes the earlier pending projection.
                     for later in self.effects[self.effects.index(effect) + 1 :]:
-                        if (
-                            later["path"] == object_path
-                            and later["method"] == "PATCH"
-                            and later["status"] == "confirmed"
-                        ):
+                        if later["path"] != object_path or later["method"] != "PATCH":
+                            continue
+                        if later["status"] == "confirmed":
                             expected_request = {**expected_request, **later["request"]}
+                        elif (
+                            later["status"] == "pending"
+                            and later is self.effects[-1]
+                            and sum(
+                                item["status"] == "pending" for item in self.effects
+                            )
+                            == 1
+                            and self._check_update_matches(later, value)
+                        ):
+                            # A response-lost final update may supersede this
+                            # earlier confirmed creation. The same fresh GET
+                            # proves its exact source-bound object/request; do
+                            # not infer success from a generic failure state.
+                            expected_request = {**expected_request, **later["request"]}
+                            confirmed_check_successor = later
                 candidates = (
                     [value] if _request_matches(value, expected_request) else []
                 )
@@ -3183,6 +3197,19 @@ class FindingLifecycleJournal:
                     return None
             if inline and not self._adopt_review_readback(value, inline, token=token):
                 return None
+        if confirmed_check_successor is not None:
+            # Mutate only after every original object/owner/body guard above
+            # passed. As with an immediate native response, the next intent or
+            # finish checkpoint retains this exact receipt before any terminal
+            # accounting; a crash before then simply requires fresh readback.
+            receipt = [
+                200,
+                self._compact_response(value, effect=confirmed_check_successor),
+            ]
+            (
+                confirmed_check_successor["status"],
+                confirmed_check_successor["response"],
+            ) = ("confirmed", receipt)
         return (200, value)
 
     def _adopt_review_readback(self, review, inline, *, token):
