@@ -106,6 +106,7 @@ class OrdinaryColdStructuralDriftTests(unittest.TestCase):
             self.assertNotEqual(current["thread_binding"]["slot_state"], "released")
             self.assertEqual(current["thread_binding"]["thread_id"], f.threads[0]["id"])
             self.assertEqual(len(result["threads"]), 1)
+            self.assertFalse(result["threads"][0]["isResolved"])
             self.assertFalse(any(r["state"] == "APPROVED" for r in result["reviews"]))
             if paths:
                 self.assertEqual(current["lifecycle_state"], "ambiguous-multi-target")
