@@ -19,13 +19,18 @@ class WindowSupersessionReuseTests(unittest.TestCase):
         original_publish = GitHubApplication.publish_review
         original_cleanup = ReviewPublisher._supersede_replaced_threads
         seen = []
+        published = []
 
         def policy(app, *args, **kwargs):
             # Supported max-active-only policy, not a legacy/lifecycle opt-out.
             kwargs["options"] = replace(
                 kwargs["options"], max_active_findings=2, enable_drift_tracking=False
             )
-            return original_publish(app, *args, **kwargs)
+            result = original_publish(app, *args, **kwargs)
+            published.append(
+                (app.reviewer, copy.deepcopy(app.reviewer._active_window_states))
+            )
+            return result
 
         def cleanup(publisher, **kwargs):
             key = kwargs["repository_id"], kwargs["pull_request"]
@@ -74,29 +79,40 @@ class WindowSupersessionReuseTests(unittest.TestCase):
             self.assertEqual(len(fixture.threads), 2)
             self.assertTrue(all(not t["isResolved"] for t in fixture.threads))
             self.assertEqual(fixture.accounted.accounting.configuration.limit, 512)
-            self.assertEqual(len(seen), 2)
-            self.assertIsNot(seen[0][0], seen[1][0])
-            self.assertEqual(len(seen[1][2]), 2)
+            # The first publication has a complete empty cleanup candidate set;
+            # it intentionally schedules no cleanup closure. The continuation
+            # must still inspect both actual predecessor threads.
+            self.assertEqual(len(published), 2)
+            self.assertIsNot(published[0][0], published[1][0])
+            self.assertEqual(len(seen), 1)
+            # The application copies its publisher for scoped finalization;
+            # compare the authenticated lifecycle, not that private clone ID.
+            self.assertIsNot(seen[0][0], published[0][0])
+            self.assertEqual(len(seen[0][2]), 2)
+            initial = next(iter(published[0][1].values()))
+            continued = seen[0][1]
+            self.assertEqual(initial.head_sha, old.transaction.head_sha)
+            self.assertEqual(continued.head_sha, fixture.live_head)
             self.assertEqual(
                 {
                     o.obligation_id
-                    for o in seen[0][1].authoritative_decision_inventory.obligations
+                    for o in initial.authoritative_decision_inventory.obligations
                 },
                 {
                     o.obligation_id
-                    for o in seen[1][1].authoritative_decision_inventory.obligations
+                    for o in continued.authoritative_decision_inventory.obligations
                 },
             )
             self.assertTrue(
                 all(
                     o.unresolved
-                    for o in seen[1][1].authoritative_decision_inventory.obligations
+                    for o in continued.authoritative_decision_inventory.obligations
                 )
             )
             self.assertEqual(
                 {
                     s.target
-                    for s in seen[1][1].display_active_findings.slots
+                    for s in continued.display_active_findings.slots
                     if s.state == "active"
                 },
                 {t["id"] for t in old_threads},
@@ -105,11 +121,11 @@ class WindowSupersessionReuseTests(unittest.TestCase):
             self.assertIsNotNone(current.finding_lifecycle)
             terminal = current.api_run_accounting["terminal_transaction"]
             if simulate_old_guard:
-                self.assertEqual(seen[1][3], "thread_resolution_unconfirmed")
+                self.assertEqual(seen[0][3], "thread_resolution_unconfirmed")
                 self.assertIsNone(terminal)
                 self.assertIn("thread_cleanup_unconfirmed", fixture.error)
             else:
-                self.assertIsNone(seen[1][3])
+                self.assertIsNone(seen[0][3])
                 self.assertEqual(terminal, current.transaction.transaction_id)
             self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
 

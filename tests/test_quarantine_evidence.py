@@ -2,10 +2,10 @@
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from fake_github_http import json_response
@@ -98,23 +98,61 @@ class QuarantineEvidenceTests(unittest.TestCase):
             self.assertIsNone(previous.api_run_accounting["terminal_transaction"])
             calls = fixture.provider_calls
             fixture.allow, fixture.attempt = True, 2
-            from review_sensei_github import default_human_reader
+            from review_sensei_github.finding_lifecycle import restore_finding_lifecycle
 
-            restore = default_human_reader.restore_admitted_result
+            from review_sensei.finding_lifecycle import decode_lifecycle_state
+
             admitted = []
 
-            def observe(*args, **kwargs):
-                result = restore(*args, **kwargs)
-                admitted.append(result)
-                return result
+            def observe(frame, event, result):
+                # The durable lifecycle is restored before retrying the native
+                # effect. Observe that actual authenticated return, without
+                # replacing a reader or demanding the obsolete result fallback.
+                if (
+                    event == "return"
+                    and frame.f_code is restore_finding_lifecycle.__code__
+                    and result is not None
+                    and result[1] is not None
+                ):
+                    admitted.append(
+                        (
+                            result[0].finding_lifecycle,
+                            decode_lifecycle_state(result[1]["lifecycle"]).state,
+                        )
+                    )
 
-            with patch.object(
-                default_human_reader, "restore_admitted_result", side_effect=observe
-            ):
+            previous_profile = sys.getprofile()
+            try:
+                sys.setprofile(observe)
                 self.assertEqual(fixture.invoke(human=True), 1, fixture.error)
-            self.assertEqual(len(admitted), 1)
+            finally:
+                sys.setprofile(previous_profile)
+            self.assertTrue(admitted)
+            self.assertEqual(admitted[0][0], previous.finding_lifecycle)
+            inventories = [
+                (
+                    getattr(state, "inventory", None)
+                    or state.authoritative_decision_inventory
+                ).obligations
+                for _, state in admitted
+            ]
+            original_criteria = {
+                item.obligation_id: item.criterion for item in inventories[0]
+            }
+            self.assertTrue(original_criteria)
+            for obligations in inventories:
+                self.assertEqual(
+                    {item.obligation_id: item.criterion for item in obligations},
+                    original_criteria,
+                )
             self.assertTrue(
-                any(comment.needs_human for comment in admitted[0].comments)
+                all(
+                    any(
+                        obligation.criterion.needs_human and obligation.unresolved
+                        for obligation in obligations
+                    )
+                    for obligations in inventories
+                )
             )
             self.assertIn(
                 "native outcome remains uncertain; no retry dispatched", fixture.error
