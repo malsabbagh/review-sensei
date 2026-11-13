@@ -82,12 +82,14 @@ def _source_guard(publisher, journal):
             raise ReviewInputError(
                 "ordinary publication producer implementation changed"
             )
+    # The application configures a publisher cleanup provider even for empty
+    # reviews. Exact empty inputs below make _schedule_thread_cleanup return
+    # before invoking it; any pending closure remains forbidden.
     if any(
         getattr(owner, name, None) is not None
         for owner, name in (
             (publisher.finalizer, "_operation_observer"),
             (publisher.finalizer, "_thread_cleanup_token_provider"),
-            (publisher, "_thread_cleanup_token_provider"),
             (publisher, "_pending_thread_cleanup"),
         )
     ):

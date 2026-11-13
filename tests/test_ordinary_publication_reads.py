@@ -109,7 +109,6 @@ class OrdinaryPublicationReadCustodyTests(unittest.TestCase):
         for target, name in (
             ("finalizer", "_operation_observer"),
             ("finalizer", "_thread_cleanup_token_provider"),
-            ("publisher", "_thread_cleanup_token_provider"),
             ("publisher", "_pending_thread_cleanup"),
         ):
             publisher, journal, _ = self.fixture()
@@ -122,3 +121,15 @@ class OrdinaryPublicationReadCustodyTests(unittest.TestCase):
                 with self.assertRaisesRegex(ReviewInputError, "callback"):
                     with reads.observe_publication(publisher, journal):
                         self.fail("opaque callback cannot enter source-bound route")
+
+    def test_configured_unused_publisher_provider_is_not_invoked(self):
+        publisher, journal, _ = self.fixture()
+        calls = []
+        publisher._thread_cleanup_token_provider = lambda: calls.append("called")
+        with reads.observe_publication(publisher, journal) as observation:
+            observation._require(journal, publisher)
+            self.assertEqual(calls, [])
+            publisher._pending_thread_cleanup = lambda: None
+            with self.assertRaisesRegex(ReviewInputError, "callback"):
+                observation._require(journal, publisher)
+        self.assertEqual(calls, [])
