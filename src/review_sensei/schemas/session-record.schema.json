@@ -1557,6 +1557,52 @@
           }
         }
       ]
+    },
+    "trust_enrollment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "document",
+        "sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "trust-enrollment-reference-v1"
+        },
+        "document": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "authority",
+            "app_id",
+            "generation"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "original-trust-enrollment-v1"
+            },
+            "authority": {
+              "type": "object"
+            },
+            "app_id": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            }
+          }
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
     }
   },
   "allOf": [

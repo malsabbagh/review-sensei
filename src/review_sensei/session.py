@@ -871,6 +871,7 @@ class SessionRecord:
     quarantine_lineage: Mapping[str, object] | None = None
     publication_staging: Mapping[str, object] | None = None
     finding_lifecycle: Mapping[str, object] | None = None
+    trust_enrollment: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
     _digest_shape_input: InitVar[str] = "current"
@@ -1165,6 +1166,21 @@ class SessionRecord:
                 or binding["generation"] > self.generation
             ):
                 raise ReviewInputError("finding lifecycle session scope conflicts")
+        from .trust_enrollment import normalize_reference as normalize_trust
+
+        trust = normalize_trust(self.trust_enrollment)
+        object.__setattr__(self, "trust_enrollment", trust)
+        if trust is not None:
+            original = trust["document"]
+            authority = original["authority"]
+            if (
+                authority["repository"],
+                authority["repository_id"],
+                authority["pull_request"],
+            ) != (self.repository, self.repository_id, self.pull_request) or original[
+                "generation"
+            ] > self.generation:
+                raise ReviewInputError("trust enrollment session scope conflicts")
         expected_payload = {
             "current": self._payload,
             "operator-paused": self._payload_without_dispositions,
@@ -1214,6 +1230,10 @@ class SessionRecord:
         if self.quarantine_lineage is not None:
             payload["quarantine_lineage"] = json.loads(
                 canonical_bytes(self.quarantine_lineage)
+            )
+        if self.trust_enrollment is not None:
+            payload["trust_enrollment"] = json.loads(
+                canonical_bytes(self.trust_enrollment)
             )
         if self.finding_lifecycle is not None:
             payload["finding_lifecycle"] = json.loads(
@@ -1282,6 +1302,7 @@ class SessionRecord:
         quarantine_lineage: Mapping[str, object] | None = None,
         publication_staging: Mapping[str, object] | None = None,
         finding_lifecycle: Mapping[str, object] | None = None,
+        trust_enrollment: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
         normalized_grants = _stored_continuation_grants(continuation_grants)
@@ -1334,7 +1355,11 @@ class SessionRecord:
         normalized_lineage = normalize_lineage(quarantine_lineage)
         from .finding_lifecycle_store import normalize_reference
         from .publication_staging import normalize_staging
+        from .trust_enrollment import normalize_reference as normalize_trust
 
+        normalized_trust = normalize_trust(trust_enrollment)
+        if normalized_trust is not None:
+            payload["trust_enrollment"] = normalized_trust
         normalized_lifecycle = normalize_reference(finding_lifecycle)
         if normalized_lifecycle is not None:
             payload["finding_lifecycle"] = normalized_lifecycle
@@ -1386,6 +1411,7 @@ class SessionRecord:
             quarantine_lineage=normalized_lineage,
             publication_staging=normalized_staging,
             finding_lifecycle=normalized_lifecycle,
+            trust_enrollment=normalized_trust,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -1467,6 +1493,8 @@ class SessionRecord:
             raise ReviewInputError(
                 "historical assessments cannot be a null absence marker"
             )
+        if "trust_enrollment" in value and value["trust_enrollment"] is None:
+            raise ReviewInputError("trust enrollment cannot be a null absence marker")
         if "finding_lifecycle" in value and value["finding_lifecycle"] is None:
             raise ReviewInputError("finding lifecycle cannot be a null absence marker")
         if "publication_staging" in value and value["publication_staging"] is None:
@@ -1502,6 +1530,7 @@ class SessionRecord:
             or "historical_assessments" in value
             or "quarantine_lineage" in value
             or "publication_staging" in value
+            or "trust_enrollment" in value
             or "finding_lifecycle" in value
             or "rescan_state" in value
             else "operator-paused"
@@ -1598,6 +1627,9 @@ class SessionRecord:
             finding_lifecycle=cast(
                 Mapping[str, object] | None, value.get("finding_lifecycle")
             ),
+            trust_enrollment=cast(
+                Mapping[str, object] | None, value.get("trust_enrollment")
+            ),
             _digest_shape_input=digest_shape,
         )
         validate_public_document(dict(value), "session-record")
@@ -1632,6 +1664,7 @@ class SessionRecord:
         quarantine_lineage: Mapping[str, object] | None = None,
         publication_staging: Mapping[str, object] | None = None,
         finding_lifecycle: Mapping[str, object] | None = None,
+        trust_enrollment: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         created = _aware_now(now)
         if isinstance(expires_at, str):
@@ -1676,6 +1709,7 @@ class SessionRecord:
             quarantine_lineage=quarantine_lineage,
             publication_staging=publication_staging,
             finding_lifecycle=finding_lifecycle,
+            trust_enrollment=trust_enrollment,
         )
 
     def rollover_api_accounting(
@@ -1881,7 +1915,14 @@ class SessionRecord:
         quarantine_lineage: Mapping[str, object] | None | object = ...,
         publication_staging: Mapping[str, object] | None | object = ...,
         finding_lifecycle: Mapping[str, object] | None | object = ...,
+        trust_enrollment: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
+        from .trust_enrollment import require_successor as require_trust_successor
+
+        next_trust = (
+            self.trust_enrollment if trust_enrollment is ... else trust_enrollment
+        )
+        require_trust_successor(self.trust_enrollment, next_trust)
         from .quarantine_lineage import require_lineage_successor
 
         next_lineage = (
@@ -2009,6 +2050,7 @@ class SessionRecord:
             quarantine_lineage=cast(Mapping[str, object] | None, next_lineage),
             publication_staging=cast(Mapping[str, object] | None, next_staging),
             finding_lifecycle=cast(Mapping[str, object] | None, next_lifecycle),
+            trust_enrollment=cast(Mapping[str, object] | None, next_trust),
             convergence_history=(
                 self.convergence_history
                 if convergence_history is ...

@@ -451,7 +451,9 @@ class BrokerClient:
             or SESSION_GRANT_PATTERN.fullmatch(grant) is None
         ):
             raise GitHubBrokerClientError("Broker current run grant conflicts")
-        return BrokerSession(
+        from .trust_enrollment import _record_session_observation
+
+        session = BrokerSession(
             token=token,
             state=state,
             reservation_owner=owner,
@@ -459,6 +461,7 @@ class BrokerClient:
             attestation=attestation,
             app_id=self._validated_app_id(parsed.get("app_id")),
         )
+        return _record_session_observation(self, session)
 
     def open_session_release(
         self,
