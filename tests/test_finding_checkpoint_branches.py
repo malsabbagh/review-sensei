@@ -7,13 +7,15 @@ from unittest.mock import patch
 
 from review_sensei import finding_lifecycle_store as store
 from review_sensei.errors import ReviewInputError
-from tests.test_finding_lifecycle_parts import CurrentRunFindingPartsTests
+from tests import test_finding_lifecycle_parts as parts_fixtures
 
 
 class CheckpointBranchTests(unittest.TestCase):
     def test_branch_totals_use_one_frontier_not_sum_of_unreachable_paths(self):
         with tempfile.TemporaryDirectory() as root:
-            fixture, record, arguments = CurrentRunFindingPartsTests().fixture(root)
+            fixture, record, arguments = (
+                parts_fixtures.CurrentRunFindingPartsTests().fixture(root)
+            )
             arguments = dict(arguments)
             arguments.pop("document")
             documents = tuple(
@@ -76,7 +78,9 @@ class CheckpointBranchTests(unittest.TestCase):
         from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
 
         with tempfile.TemporaryDirectory() as root:
-            fixture, record, arguments = CurrentRunFindingPartsTests().fixture(root)
+            fixture, record, arguments = (
+                parts_fixtures.CurrentRunFindingPartsTests().fixture(root)
+            )
             before = list(fixture.service.trace)
             with self.assertRaisesRegex(ReviewInputError, "unissued"):
                 store.preflight_finding_lifecycle(

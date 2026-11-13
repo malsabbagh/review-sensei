@@ -8,7 +8,7 @@ from unittest.mock import patch
 from review_sensei import finding_lifecycle_store as store
 from review_sensei.bounded_evidence import canonical_bytes, inline_manifest
 from review_sensei.errors import ReviewInputError
-from tests.test_finding_lifecycle_parts import CurrentRunFindingPartsTests
+from tests import test_finding_lifecycle_parts as parts_fixtures
 
 
 class SemanticReferenceReserveTests(unittest.TestCase):
@@ -16,7 +16,9 @@ class SemanticReferenceReserveTests(unittest.TestCase):
         self,
     ):
         with tempfile.TemporaryDirectory() as root:
-            fixture, record, args = CurrentRunFindingPartsTests().fixture(root)
+            fixture, record, args = (
+                parts_fixtures.CurrentRunFindingPartsTests().fixture(root)
+            )
             args = dict(args)
             selected = None
             for count in range(1, 200):

@@ -6,7 +6,7 @@ import unittest
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
-from tests.test_plain_cleanup_fence import PlainCleanupFenceTests
+from tests import test_plain_cleanup_fence as cleanup_fixtures
 
 
 class CommandFinalizationPlanTests(unittest.TestCase):
@@ -25,7 +25,9 @@ class CommandFinalizationPlanTests(unittest.TestCase):
         )
 
     def test_actual_closed_preparation_only_reads_and_keeps_original_state(self):
-        state, finalizer, args, calls = PlainCleanupFenceTests().fixture()
+        state, finalizer, args, calls = (
+            cleanup_fixtures.PlainCleanupFenceTests().fixture()
+        )
         finalizer.evidence_budget = EvidenceReadBudget()
         before = copy.deepcopy(state.reviews)
         trust = finalizer._trust_decisions
@@ -142,7 +144,9 @@ class CommandFinalizationPlanTests(unittest.TestCase):
             "load_eligibility",
         ):
             with self.subTest(name=name):
-                state, finalizer, args, calls = PlainCleanupFenceTests().fixture()
+                state, finalizer, args, calls = (
+                    cleanup_fixtures.PlainCleanupFenceTests().fixture()
+                )
                 invoked = []
                 setattr(finalizer, name, lambda *a, **k: invoked.append(True))
                 with self.assertRaisesRegex(ReviewInputError, "source is unsupported"):
@@ -155,7 +159,7 @@ class CommandFinalizationPlanTests(unittest.TestCase):
             attach_execution_reads,
         )
 
-        _, finalizer, args, calls = PlainCleanupFenceTests().fixture()
+        _, finalizer, args, calls = cleanup_fixtures.PlainCleanupFenceTests().fixture()
         finalizer.evidence_budget = EvidenceReadBudget()
         plan = self.prepare(finalizer, args)
         observed = len(calls)
