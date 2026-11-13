@@ -25,6 +25,7 @@ class _StatusRoute:
 
         require_source()
         caller = run.caller
+        self.require_budget_source(caller)
         original = json.loads(profile.original)["authority"]
         if (
             type(run) is not ReviewRun
@@ -97,6 +98,86 @@ class _StatusRoute:
         self.body = args.comment_body
         self.source = canonical_bytes(original["source"])
 
+        from review_sensei.api_work import ApiRunAccounting
+
+        persisted = ApiRunAccounting.from_document(record.api_run_accounting)
+        current = caller.accounting
+        persisted.require_successor(current)
+        prior_ids = {p.request_id for p in persisted.completed} | {
+            p.request_id for b in persisted.blocks for p in b.pending
+        }
+        dispatched = sum(
+            o["phase"] == "ordinary" and o["request_id"] not in prior_ids
+            for o in caller.observations
+        )
+        old = {b.block_id: b for b in persisted.blocks}
+        if (
+            current.configuration != persisted.configuration
+            or current.owner != persisted.owner
+            or {b.block_id for b in current.blocks} != set(old)
+            or any(
+                b.issued_by != old[b.block_id].issued_by
+                or b.undispatched
+                != old[b.block_id].undispatched
+                - (dispatched if b.block_id == caller._block else 0)
+                for b in current.blocks
+            )
+        ):
+            raise ReviewInputError("trust status original allocation changed")
+        self._configuration, self._owner = current.configuration, current.owner
+        self._work_block, self._terminal_block = caller._block, caller._terminal_block
+        self._balances = {b.block_id: b.undispatched for b in current.blocks}
+        self._seen = len(caller.observations)
+
+    @staticmethod
+    def require_budget_source(caller):
+        from review_sensei.api_work import ApiRunAccounting
+
+        from .api_run_budget import CallerRunBudget
+
+        budget = caller.budget_view
+        if (
+            type(budget) is not CallerRunBudget
+            or budget.caller is not caller
+            or type(caller.accounting) is not ApiRunAccounting
+            or budget._ordinary_hold != 0
+            or any(
+                name in budget.__dict__
+                for name in dir(CallerRunBudget)
+                if callable(getattr(CallerRunBudget, name))
+            )
+        ):
+            raise ReviewInputError("trust status budget source changed")
+
+    def require_accounting(self):
+        caller = self.run.caller
+        self.require_budget_source(caller)
+        current = caller.accounting
+        expected = self._balances.copy()
+        for observation in caller.observations[self._seen :]:
+            if observation["phase"] != "ordinary":
+                raise ReviewInputError("trust status accounting phase changed")
+            block = (
+                self._terminal_block
+                if observation["lifecycle_phase"] == "terminal"
+                else self._work_block
+            )
+            expected[block] -= 1
+        if (
+            current.configuration != self._configuration
+            or current.owner != self._owner
+            or {b.block_id: b.undispatched for b in current.blocks} != expected
+            or any(b.issued_by != self._owner for b in current.blocks)
+            or caller._block
+            != (
+                self._terminal_block
+                if caller._terminal_reason is not None
+                else self._work_block
+            )
+        ):
+            raise ReviewInputError("trust status source allocation changed")
+        self._balances, self._seen = expected, len(caller.observations)
+
     @staticmethod
     def business(record):
         return canonical_bytes(
@@ -118,6 +199,7 @@ class _StatusRoute:
         from .session_ledger import parse_session_comment
 
         self.require_source()
+        self.require_accounting()
         run, profile = self.run, self.profile
         candidate = caller._checkpoint
         if caller is not run.caller or self.count >= 3 or candidate is None:

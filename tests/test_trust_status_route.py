@@ -37,6 +37,7 @@ class StatusFixture(ReceiptFixture):
         ):
             super().__init__(directory)
         self.loss_stage = None
+        self.after_root = None
         self.absent_loss = False
         self.initialize()
         self.action_ledger = ActionRunLedger(self.ledger, self.caller, IDENTITY)
@@ -121,6 +122,9 @@ class StatusFixture(ReceiptFixture):
                     self.comment["body"] = json.loads(request.data)["body"]
                 if losing:
                     raise OSError("synthetic status root response lost")
+                if self.after_root is not None:
+                    hook, self.after_root = self.after_root, None
+                    hook()
                 return json_response(copy.deepcopy(self.comment))
         return super().open(request, timeout)
 
@@ -241,3 +245,142 @@ class TrustStatusRouteTests(unittest.TestCase):
                 timeout=30,
             )
         self.assertEqual(len(f.native), before)
+
+    def test_transitive_helpers_and_constructors_are_pinned_before_and_after_root(self):
+        from urllib.request import Request
+
+        from review_sensei_github import action_run, historical_assessment_action
+
+        from review_sensei import disposition
+
+        targets = (
+            (action_run, "require_action_settlement_representable"),
+            (disposition, "apply_session_command"),
+            (historical_assessment_action, "parse_historical_command"),
+            (action_run, "verify_live_comment_source"),
+            (action_run, "resolve_review_convergence_policy"),
+            (action_run, "command_exit_code"),
+            (action_run, "GitHubApplication"),
+            (action_run, "ReviewPublisher"),
+            (action_run, "ConversationPublisher"),
+            (action_run, "LearningPRPublisher"),
+            (action_run.GitHubApplication, "__init__"),
+        )
+        for owner, name in targets:
+            for after_first in (False, True):
+                with (
+                    self.subTest(name=name, after_first=after_first),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    f = StatusFixture(directory)
+                    original = getattr(owner, name)
+                    boundary = []
+
+                    def replacement(*args, **kwargs):
+                        # This extra read must never reach the physical opener.
+                        with f.caller.open(
+                            Request("https://api.github.test/repos/owner/repo/pulls/7"),
+                            timeout=30,
+                        ) as response:
+                            response.read(65536)
+                        return original(*args, **kwargs)
+
+                    change = patch.object(owner, name, replacement)
+
+                    def install():
+                        boundary.append(len(f.native))
+                        change.start()
+
+                    if after_first:
+                        f.after_root = install
+                    else:
+                        install()
+                    try:
+                        with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                            execute_command(f.run, f.args)
+                    finally:
+                        change.stop()
+                    self.assertEqual(
+                        sum(m == "PATCH" for m, _, _ in f.native), int(after_first)
+                    )
+                    self.assertEqual(len(f.native), boundary[0])
+                    self.assertEqual(f.caller.accounting.configuration.limit, 512)
+
+    def test_admission_rejects_fabricated_budget_or_reallocated_original_blocks(self):
+        from dataclasses import replace
+
+        from review_sensei_github import trust_status
+        from review_sensei_github.api_run_requests import ApiRunRequestTransport
+
+        for fault in (
+            "budget-object",
+            "preflight",
+            "accounting-object",
+            "accounting-property",
+            "configuration",
+            "blocks",
+            "quote",
+        ):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = StatusFixture(directory)
+                original = f.comment["body"]
+                state = f.caller.accounting
+                change = None
+                if fault == "budget-object":
+                    f.caller._budget_view = SimpleNamespace(
+                        preflight=lambda n: None, caller=f.caller
+                    )
+                elif fault == "preflight":
+                    f.caller.budget_view.preflight = lambda n: None
+                elif fault == "accounting-object":
+                    f.caller._state = SimpleNamespace(
+                        owner=state.owner,
+                        configuration=state.configuration,
+                        blocks=state.blocks,
+                    )
+                elif fault == "accounting-property":
+                    change = patch.object(
+                        ApiRunRequestTransport, "accounting", property(lambda _: state)
+                    )
+                    change.start()
+                elif fault == "configuration":
+                    f.caller._state = replace(
+                        state, configuration=replace(state.configuration, limit=1024)
+                    )
+                elif fault == "quote":
+                    change = patch.object(trust_status, "STATUS_WORK_CALLS", 0)
+                    change.start()
+                else:
+                    f.caller._state = replace(
+                        state,
+                        blocks=tuple(
+                            replace(
+                                b,
+                                undispatched=b.undispatched
+                                + (1 if b.block_id == f.caller._block else -1),
+                            )
+                            for b in state.blocks
+                        ),
+                    )
+                try:
+                    with self.assertRaises(ReviewInputError):
+                        execute_command(f.run, f.args)
+                finally:
+                    if change is not None:
+                        change.stop()
+                self.assertEqual(f.comment["body"], original)
+                self.assertEqual(sum(m == "PATCH" for m, _, _ in f.native), 0)
+
+    def test_budget_substitution_after_first_root_stops_before_an_extra_read(self):
+        f = StatusFixture(self.directory.name)
+        boundary = []
+
+        def replace_budget():
+            boundary.append(len(f.native))
+            f.caller.budget_view.preflight = lambda n: None
+
+        f.after_root = replace_budget
+        with self.assertRaisesRegex(ReviewInputError, "budget source changed"):
+            execute_command(f.run, f.args)
+        self.assertEqual(len(f.native), boundary[0])
+        self.assertEqual(sum(m == "PATCH" for m, _, _ in f.native), 1)

@@ -155,6 +155,7 @@ def _install_transport_source(source_class):
             )
 
             def require_source():
+                source_seal()
                 if (
                     module.execute_command is not execute
                     or (
@@ -209,6 +210,8 @@ def _install_transport_source(source_class):
             _admitted_routes[profile] = route
             try:
                 result = execute_source(run, args)
+                require_source()
+                route.require_accounting()
                 if (
                     route.count != 3
                     or run.caller.accounting.action["phase"] != "terminal"
@@ -219,6 +222,9 @@ def _install_transport_source(source_class):
                 _admitted_routes.pop(profile, None)
 
         setattr(module, "execute_command", execute)
+        from .trust_status_source import capture_status_source
+
+        source_seal = capture_status_source()
 
     _install_command_source = install_command_source
     initialize_source = source_class.initialize_and_activate
@@ -369,6 +375,10 @@ def _install_transport_source(source_class):
         profile = verification_profile(caller)
         if profile is None:
             return False
+        route = _admitted_routes.get(profile)
+        if route is not None:
+            route.require_source()
+            route.require_accounting()
         pending = _pending.get(caller)
         if pending is not None:
             digest, used = pending

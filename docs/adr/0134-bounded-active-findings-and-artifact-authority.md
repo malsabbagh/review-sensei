@@ -519,3 +519,12 @@ permit disappears on success or failure. Other commands and retained-history
 routes remain explicit holds, and no public effect-mode switch is exposed by
 this source slice. This qualifies neither continuous permission history nor
 live deployment, and does not close G15.
+
+The status source seal includes its explicit transitive helper and constructor
+bindings, including locally imported disposition/settlement functions. It is
+checked before every physical request, not only before mutations, so replacing
+a helper after an earlier root cannot introduce unpriced reads. Admission also
+requires the real caller budget facade and immutable accounting/configuration
+source, reconciles original authenticated block balances with physical debits,
+and checks subsequent balance reductions against the actual request trace.
+These checks neither replenish work nor move terminal capacity into work.
