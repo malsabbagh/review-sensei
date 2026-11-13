@@ -2300,12 +2300,9 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         authenticated context is unsupported, not permission to mint a budget.
         Actual staging repeats its checkpoint-snapshot and capacity checks.
         """
-        from copy import copy
-
-        from review_sensei.bounded_evidence import MAX_PART_BYTES, MAX_STORED_PARTS
+        from review_sensei.bounded_evidence import MAX_STORED_PARTS
 
         from .quarantine_published_tail import retained_storage_reserve
-        from .session_ledger import parse_session_comment
 
         self.caller._require_ledger(self, identity)
         self.caller.accounting
@@ -2327,67 +2324,30 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 added_bytes=added_bytes,
                 checkpoint_parts=checkpoint_parts,
             )
-        from .publication_recovery import _publication_transport
+        from .quarantine_census import lifecycle_capacity_plan
 
-        guard = getattr(
-            _publication_transport(self.http), "_quarantine_capacity_guard", None
-        )
-        if (
-            guard is None
-            or guard.identity != identity
-            or not guard.complete_tail
-            or guard.comment_bounds is None
-            or guard.comment_plan is None
-        ):
-            raise ReviewInputError(
-                "finding lifecycle original comment allocation is unavailable"
-            )
+        scope = lifecycle_capacity_plan(self, identity, added_parts=added_parts)
         items = self._cached_comments()
-        roots = []
-        for item in items:
-            body = item.get("body") if isinstance(item, dict) else None
-            if not isinstance(body, str):
-                raise ReviewInputError(
-                    "finding lifecycle retained frontier is incomplete"
-                )
-            parsed = parse_session_comment(body, identity=identity)
-            if parsed is not None:
-                self._part_owner(item, identity)
-                roots.append(parsed)
-        if len(roots) != 1 or roots[0].record_sha256 != self.caller._root:
-            raise ReviewInputError("finding lifecycle retained session root changed")
-        # Canonical evidence parts contain only base64, digests and integers;
-        # 512 bytes covers fixed carrier framing and JSON quote/newline escapes.
-        # No arbitrary user text appears in the encoded part body. Bounds
-        # are consumed only in this detached proof, never expanded or reset.
-        maximum_wire = MAX_PART_BYTES + 512
-        projected = copy(guard)
-        projected.comment_bounds = list(guard.comment_bounds)
-        for _ in range(added_parts):
-            choices = [
-                bound for bound in projected.comment_bounds if bound >= maximum_wire
-            ]
-            if not choices:
-                raise ReviewInputError(
-                    "finding lifecycle original comment tail cannot fit complete parts"
-                )
-            projected.comment_bounds.remove(min(choices))
-        guard.require(guard.stats)
         carriers = tuple(self._owned_carrier_items(items, identity))
         reserve_parts, reserve_bytes = retained_storage_reserve(self)
         # Existing admitted tail still owns its storage promise. New lifecycle
         # bytes cannot silently consume that independent recovery reservation.
-        retained_parts = len(carriers) + reserve_parts + added_parts
+        from review_sensei.bounded_evidence import MAX_PART_BYTES
+
+        from .native_manifest import MANIFEST_WIRE_BOUND
+
+        authenticated = self._quarantine_authenticated
+        assert authenticated is not None
+        promised_parts = 2 * len(authenticated.pending) + 5
+        promised_bytes = (promised_parts - 1) * MAX_PART_BYTES + MANIFEST_WIRE_BOUND
+        retained_parts = len(carriers) + reserve_parts + added_parts + promised_parts
         retained_bytes = (
             sum(len(item["body"].encode()) for item in carriers)
             + reserve_bytes
             + added_bytes
+            + promised_bytes
         )
-        comments = (
-            guard.stats["issue_comments"]["count"]
-            + guard.reserve["issue_comments"]["new_objects"]
-            + guard.future_parts
-        )
+        comments = len(scope.plan.known) + len(scope.plan.unknown)
         assert self.evidence_budget is not None
         self.evidence_budget.preflight(2 * added_parts + 5)
         return {
@@ -3104,7 +3064,16 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             checkpoint_parts=(parts,),
         )
         if self._quarantine_required:
-            return self.replace(identity, mutate)
+            from .quarantine_census import (
+                activate_lifecycle_capacity,
+                lifecycle_capacity_plan,
+            )
+
+            if record is not self.caller._effect_record:
+                raise ReviewInputError("quarantine lifecycle input is not source-owned")
+            scope = lifecycle_capacity_plan(self, identity, added_parts=parts)
+            with activate_lifecycle_capacity(scope):
+                return self.replace(identity, mutate)
         if getattr(self, "_finding_lifecycle_page_size", None) is not None:
             raise ReviewInputError("finding lifecycle scoped mutation cannot nest")
         from review_sensei.bounded_evidence import canonical_bytes

@@ -54,6 +54,34 @@ def _remember_confirmation(snapshot, record):
     return record
 
 
+def confirmed_checkpoint_capacity(caller, ledger, identity):
+    """Read an existing owned GET receipt for sizing, never consume or authorize it."""
+    receipt = _CONFIRMED.get(caller)
+    record = caller._effect_record
+    if (
+        type(receipt) is not _ConfirmedCheckpoint
+        or receipt.ledger_ref() is not ledger
+        or receipt.identity != identity
+        or caller._block != receipt.block
+        or caller._checkpoint is not None
+        or record is not receipt.record
+        or caller._root != record.record_sha256
+        or ledger.caller is not caller
+    ):
+        raise ReviewInputError(
+            "quarantine lifecycle current checkpoint receipt is unavailable"
+        )
+    parsed = parse_session_comment(receipt.body, identity=identity)
+    if parsed is None or canonical_bytes(parsed.to_dict()) != canonical_bytes(
+        record.to_dict()
+    ):
+        raise ReviewInputError(
+            "quarantine lifecycle current checkpoint receipt changed"
+        )
+    caller._require_ledger(ledger, identity)
+    return receipt
+
+
 def take_confirmed_checkpoint(caller, ledger, identity, *, staging):
     receipt = _CONFIRMED.pop(caller, None)
     if (
@@ -264,7 +292,7 @@ def replace_quarantine_checkpoint(caller, ledger, identity, mutate, *, now=None)
         identity,
         operation,
         caller._block,
-        caller._root,
+        record.record_sha256,
         comment_id,
         item["user"]["id"],
         record,
