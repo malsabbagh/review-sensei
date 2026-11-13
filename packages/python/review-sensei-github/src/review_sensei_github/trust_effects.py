@@ -44,9 +44,9 @@ def _unavailable(*args, **kwargs):
     raise ReviewInputError("trust effect source registration is unavailable")
 
 
-enable = verification_profile = verification_calls = before_request = consume = (
-    require_native_attempt
-) = _unavailable
+enable = verification_profile = verification_calls = before_request = after_response = (
+    consume
+) = require_native_attempt = _unavailable
 _install_command_source = _finish_command_source = _unavailable
 
 
@@ -57,6 +57,7 @@ def _install_transport_source(source_class):
         verification_profile, \
         verification_calls, \
         before_request, \
+        after_response, \
         consume, \
         require_native_attempt, \
         _install_command_source, \
@@ -425,6 +426,15 @@ def _install_transport_source(source_class):
                 else sequence,
             }
         )
+
+    def after_response(caller):
+        """Validate source custody before returning from physical response code."""
+        profile = verification_profile(caller)
+        if profile is not None:
+            route = _admitted_routes.get(profile)
+            if route is not None:
+                route.require_source()
+                route.require_accounting()
 
     def before_request(caller, request):
         """Return true only for the single nested, source-owned verification POST."""

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -128,25 +129,49 @@ class _AccountedResponse:
         response: Any,
         confirmed: Callable[[], None],
         observed: Callable[[Any], None] | None = None,
+        validate_return: Callable[[], None] | None = None,
     ):
         self._response, self._confirmed = response, confirmed
         self._observed = observed
+        self._validate_return = validate_return
         self._read = False
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._response, name)
+        try:
+            return getattr(self._response, name)
+        finally:
+            self._require_return()
+
+    def _require_return(self) -> None:
+        if self._validate_return is not None:
+            self._validate_return()
 
     def __enter__(self) -> _AccountedResponse:
-        self._response.__enter__()
+        try:
+            self._response.__enter__()
+            self._require_return()
+        except BaseException:
+            # A failed __enter__ is not followed by the caller's __exit__.
+            self._response.__exit__(*sys.exc_info())
+            raise
         return self
 
     def __exit__(self, *args: Any) -> Any:
-        return self._response.__exit__(*args)
+        try:
+            return self._response.__exit__(*args)
+        finally:
+            self._require_return()
 
     def read(self, size: int) -> Any:
-        value = self._response.read(size)
+        try:
+            value = self._response.read(size)
+            if not self._read:
+                # Physical completion is retained even if source custody was
+                # changed by response code. A hold never refunds this request.
+                self._confirmed()
+        finally:
+            self._require_return()
         if not self._read:
-            self._confirmed()
             if self._observed is not None:
                 self._observed(value)
             self._read = True
@@ -989,12 +1014,28 @@ class ApiRunRequestTransport:
         # preserve the charge; read/parse/status failures never refund it.
         from .trust_effects import consume as consume_trust_receipt
 
+        # Capture the defining-module installed validator before external
+        # response code runs; a response cannot substitute the return hook.
+        validate_trust_return = _validate_trust_return
         consume_trust_receipt(self, request)
         try:
             response = self._opener(request, timeout=timeout)
         except HTTPError as error:
             observed_status = error.code
             confirmed()
+            validate_trust_return(self)
+            raise
+        except BaseException:
+            validate_trust_return(self)
+            raise
+        try:
+            validate_trust_return(self)
+        except BaseException:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+            else:
+                response.__exit__(*sys.exc_info())
             raise
         observed_status = getattr(response, "status", None)
         return _AccountedResponse(
@@ -1005,6 +1046,7 @@ class ApiRunRequestTransport:
             else lambda raw: self._observe_thread_readback(
                 resolution_readback, raw, observed_status
             ),
+            validate_return=lambda: validate_trust_return(self),
         )
 
     def _require_ledger(
@@ -3483,9 +3525,8 @@ from .trust_effects import _install_transport_source  # noqa: E402
 
 _install_transport_source(ApiRunRequestTransport)
 del _install_transport_source
-
-
 from .trust_capabilities import _install_capability_transport  # noqa: E402
+from .trust_effects import after_response as _validate_trust_return  # noqa: E402
 
 _install_capability_transport(ApiRunRequestTransport)
 del _install_capability_transport

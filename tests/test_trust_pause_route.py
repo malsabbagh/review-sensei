@@ -156,6 +156,7 @@ class TrustPauseRouteTests(unittest.TestCase):
             "_paginate",
             "pagination_page_size",
             "foreign-class",
+            "self-restoring",
         ):
             for after_first in (False, True):
                 with (
@@ -170,6 +171,7 @@ class TrustPauseRouteTests(unittest.TestCase):
                     f.http = f.ledger.http = f.action_ledger.http = wrapper
                     f.run = replace(f.run, http=wrapper)
                     boundary = []
+                    invoked = []
 
                     def tamper():
                         boundary.append(len(f.native))
@@ -186,6 +188,9 @@ class TrustPauseRouteTests(unittest.TestCase):
                         else:
 
                             def injected(*args, **kwargs):
+                                invoked.append(True)
+                                if fault == "self-restoring":
+                                    del wrapper.pagination_page_size
                                 # Even when consulted between request boundaries,
                                 # a substituted helper cannot dispatch extra I/O.
                                 return base.request(
@@ -194,7 +199,13 @@ class TrustPauseRouteTests(unittest.TestCase):
                                     token=f.session.token,
                                 )
 
-                            setattr(wrapper, fault, injected)
+                            setattr(
+                                wrapper,
+                                "pagination_page_size"
+                                if fault == "self-restoring"
+                                else fault,
+                                injected,
+                            )
 
                     if after_first:
                         f.after_root = tamper
@@ -202,6 +213,7 @@ class TrustPauseRouteTests(unittest.TestCase):
                         tamper()
                     with self.assertRaises(ReviewInputError):
                         execute_command(f.run, f.args)
+                    self.assertFalse(invoked)
                     self.assertEqual(len(f.native), boundary[0])
                     self.assertEqual(
                         sum(m == "PATCH" for m, _, _ in f.native), int(after_first)
