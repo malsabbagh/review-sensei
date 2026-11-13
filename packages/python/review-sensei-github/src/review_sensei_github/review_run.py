@@ -879,8 +879,15 @@ def bootstrap(
     recovery_context_ttl_seconds: int = DEFAULT_RECOVERY_TTL_SECONDS,
     rollover_service: RolloverService | None = None,
     enable_current_trust_enrollment: bool = False,
+    observe_original_actor_role: bool = False,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
+    if type(observe_original_actor_role) is not bool or (
+        observe_original_actor_role and not enable_current_trust_enrollment
+    ):
+        raise ReviewInputError(
+            "original actor-role observation requires opted v4 enrollment"
+        )
     lifecycle_diagnostics.phase("bootstrap")
     lifecycle_diagnostics.step("policy_checkout")
     lifecycle_diagnostics.requested(args, policy_commit)
@@ -1185,6 +1192,7 @@ def bootstrap(
         repository_id=args.repository_id,
         pull_request=args.pull_request,
         head_sha=args.head_sha,
+        **({"observe_actor_role": True} if observe_original_actor_role else {}),
     )
     if session.reservation_owner != {"run_id": run_id, "head_sha": args.head_sha}:
         raise ReviewInputError("broker review owner scope conflicts")
