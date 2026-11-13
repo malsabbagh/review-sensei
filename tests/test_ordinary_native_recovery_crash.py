@@ -47,6 +47,7 @@ class OrdinaryNativeRecoveryCrashTests(unittest.TestCase):
             packet.write_text(
                 json.dumps(
                     {
+                        "resume_expected": True,
                         "root": str(fixture.root),
                         "policy": fixture.policy,
                         "config_hex": fixture.config_bytes.hex(),
@@ -88,11 +89,24 @@ class OrdinaryNativeRecoveryCrashTests(unittest.TestCase):
             self.assertGreater(result["restored_unknown_charges"], 0)
             self.assertTrue(result["states"], result)
             self.assertEqual(set(result["states"]), {"confirmed"})
-            # No ephemeral request-settlement capability crosses the process.
-            # Unsupported cold continuation must hold, not silently refund it.
-            self.assertEqual(result["code"], 1, result)
-            self.assertIsNone(result["terminal"])
-            self.assertTrue(result["no_native_effects"])
+            # The source-confirmed journal is revalidated on the fresh attempt;
+            # the original physical unknown charge is never refunded.
+            self.assertEqual(result["code"], 0, result)
+            self.assertIsNotNone(result["terminal"])
+            self.assertEqual(result["review_states"], ["COMMENTED", "APPROVED"])
+            self.assertEqual(result["check_ids"], [fixture.check_runs[0]["id"]])
+            self.assertEqual(result["check_statuses"], ["completed"])
+            self.assertEqual(
+                result["native_writes"],
+                [
+                    [
+                        "PATCH",
+                        f"/repos/owner/repo/check-runs/{fixture.check_runs[0]['id']}",
+                    ],
+                    ["POST", "/repos/owner/repo/pulls/7/reviews"],
+                    ["POST", "/repos/owner/repo/pulls/7/reviews"],
+                ],
+            )
             self.assertTrue(result["no_process_authority"])
 
     def test_receipt_checkpoint_crash_never_settles_before_durable_return(self):

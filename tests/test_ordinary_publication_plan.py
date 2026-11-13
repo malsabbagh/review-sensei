@@ -140,6 +140,21 @@ class OrdinaryPublicationPlanTests(unittest.TestCase):
                             hashlib.sha256(rendered.encode()).hexdigest(),
                         )
                         self.assertEqual(changed[-1][2]["body"], rendered)
+                    # A confirmed original intent is retained, not appended a
+                    # second time merely because a cold plan includes its shape.
+                    replay = copy.copy(journal)
+                    replay.effects = _unpack_journal(documents[1])["effects"]
+                    original_receipt = copy.deepcopy(replay.effects)
+                    replay_documents, replay_count = price_prefixes(
+                        replay, requests, native_calls=4
+                    )
+                    self.assertEqual(replay.effects, original_receipt)
+                    self.assertEqual(len(replay_documents), 5)
+                    self.assertEqual(replay_count, len(original_receipt) + 2)
+                    self.assertEqual(
+                        _unpack_journal(replay_documents[0])["effects"],
+                        original_receipt,
+                    )
                     self.assertEqual(len(documents), 5)
                     self.assertEqual(count, len(effects) + 3)
                     self.assertEqual(journal.effects, effects)

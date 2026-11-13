@@ -13,7 +13,7 @@ from tests import test_ordinary_native_recovery_custody as fixtures
 
 class OrdinaryNativeRecoveryColdTests(unittest.TestCase):
     CHILD = r"""
-import json, sys
+import copy, json, sys
 from pathlib import Path
 from unittest.mock import patch
 from test_recovery_context_g17 import OrdinaryEntryHostedAndCliRecoveryG17Tests
@@ -34,9 +34,10 @@ f.override_run_directory=Path(sys.argv[2])/"run"
 f.override_run_directory.mkdir()
 for name,value in packet["remote"].items():
     if name == "extra_comments": value={int(key):item for key,item in value.items()}
-    setattr(f,name,value)
+    setattr(f,name,copy.deepcopy(value))
 old=parse_session_comment(f.comment["body"],identity=IDENTITY)
 original=ApiRunAccounting.from_document(old.api_run_accounting)
+trace_start=len(f.trace)
 assert not recovery._ACTIVE and not recovery._CHECK_RESULTS
 observed=[]
 restore=lifecycle.restore_finding_lifecycle
@@ -52,11 +53,13 @@ current=parse_session_comment(f.comment["body"],identity=IDENTITY)
 now=ApiRunAccounting.from_document(current.api_run_accounting)
 assert now.blocks[:2] == original.blocks[:2]
 assert now.configuration == original.configuration and now.identity == original.identity
-assert f.reviews == packet["remote"]["reviews"] and f.check_runs == packet["remote"]["check_runs"]
+no_native_effects = f.reviews == packet["remote"]["reviews"] and f.check_runs == packet["remote"]["check_runs"]
+if not packet.get("resume_expected"): assert no_native_effects
 assert not recovery._ACTIVE and not recovery._CHECK_RESULTS
 print(json.dumps({"code":code,"error":f.error,"states":observed[-1] if observed else [],
     "unknown_charges":original.uncertain,"restored_unknown_charges":now.uncertain,
-    "terminal":now.terminal_transaction,"no_process_authority":True,"no_native_effects":True,"provider_calls":f.provider_calls}))
+    "native_writes":[[method,path] for _,method,path in f.trace[trace_start:] if method in {"POST","PATCH","PUT","DELETE"} and ("/check-runs" in path or path.endswith("/pulls/7/reviews"))],
+    "terminal":now.terminal_transaction,"no_process_authority":True,"no_native_effects":no_native_effects,"review_states":[r["state"] for r in f.reviews],"check_ids":[c["id"] for c in f.check_runs],"check_statuses":[c["status"] for c in f.check_runs],"provider_calls":f.provider_calls}))
 """
 
     def test_cold_confirmed_and_unmatched_carriers_preserve_unknown_charges(self):

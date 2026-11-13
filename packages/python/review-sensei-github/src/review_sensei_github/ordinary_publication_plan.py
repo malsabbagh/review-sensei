@@ -42,6 +42,7 @@ def price_prefixes(journal, requests, *, native_calls):
     from .finding_lifecycle import (
         MAX_EFFECTS,
         _digest,
+        _pack_journal,
         _require_effect_scope,
     )
 
@@ -73,6 +74,28 @@ def price_prefixes(journal, requests, *, native_calls):
         }
         if precondition is not None:
             effect["check_update_precondition"] = precondition
+        matches = [
+            previous
+            for previous in shadow.effects
+            if previous["request_sha256"] == effect["request_sha256"]
+        ]
+        if matches:
+            if len(matches) != 1 or any(
+                canonical_bytes(matches[0][field]) != canonical_bytes(effect[field])
+                for field in ("method", "path", "request")
+            ):
+                raise ReviewInputError("ordinary publication replay identity conflicts")
+            # Capacity only: retain the authenticated effect and its receipt.
+            # Runtime still independently reads mutable native state before use.
+            # Keep both checkpoint slots and the original native/read quote;
+            # replay does not grant a discount or a cached response capability.
+            _require_effect_scope(
+                shadow._document(), journal.identity, journal.head_sha
+            )
+            retained = _pack_journal(shadow._document())
+            documents.extend((retained, retained))
+            stops.append(retained)
+            continue
         shadow.effects.append(effect)
         _require_effect_scope(shadow._document(), journal.identity, journal.head_sha)
         pending, future, confirmed = shadow._preflight_effect(capacity_only=True)
