@@ -26,23 +26,22 @@ def require_durable_floor(journal, *, checks_enabled):
         type(journal) is not FindingLifecycleJournal
         or type(journal.reviewer) is not ReviewPublisher
         or type(journal.reviewer.checks) is not ReviewCheckPublisher
-        or any(
-            name in vars(owner)
-            for owner, names in (
-                (
-                    journal.reviewer,
-                    ("_check_state_or_diagnostic", "_publish_check_state"),
-                ),
-                (
-                    journal.reviewer.checks,
-                    ("start", "complete", "_write", "_create", "_update"),
-                ),
-                (journal, ("request", "checkpoint", "finish")),
-            )
-            for name in names
-        )
     ):
         return  # Unsupported custom producers retain their existing guards.
+    from review_sensei.source_registry import require_instance_source
+
+    try:
+        require_instance_source(
+            journal.reviewer,
+            methods=("_check_state_or_diagnostic", "_publish_check_state"),
+        )
+        require_instance_source(
+            journal.reviewer.checks,
+            methods=("start", "complete", "_write", "_create", "_update"),
+        )
+        require_instance_source(journal, methods=("request", "checkpoint", "finish"))
+    except ReviewInputError:
+        return  # A custom source cannot inherit the closed success floor.
     record, ledger = journal._record, journal.ledger
     if record.quarantine_lineage is None:
         return

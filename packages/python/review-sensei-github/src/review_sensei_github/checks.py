@@ -796,3 +796,8 @@ __all__ = [
     "review_check_outcome",
     "review_check_outcome_for_publication_failure",
 ]
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()
