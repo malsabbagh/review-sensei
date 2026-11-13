@@ -423,3 +423,44 @@ repository permission, or fresh trust at every native effect. Existing native
 source/actor and finalization gates remain in force. A per-effect observation
 producer and its complete prepaid cost remain separate work. Reverification of
 an old session grant must never be described as a new observation.
+
+### Source-only refreshed observations and explicit original actor role
+
+The broker source now has a separate, explicitly requested observation refresh.
+An opted-in v4 session exchange may request `observe_actor_role: true` to retain
+`current-observation-v2`: the actual collaborator-permission response must bind
+both numeric user ID and login to the authenticated run actor. Its legacy
+permission and role name are retained separately; association never supplies a
+role. Existing v3 behavior and v4/v1 observation issuance remain unchanged. A v1
+original is still readable/verifiable but cannot qualify the stronger refresh:
+`broker_original_actor_role_unavailable` is a hold, not an inferred migration.
+
+The existing session-grant endpoint accepts an explicit
+`refresh_effect_sha256` request. This source route verifies the unchanged original
+signed attestation and reads current installation/selection/permissions,
+repository identity, PR head, numeric actor permission, and (for action runs)
+exact original command/reply source. Changed facts hold rather than silently
+replace the original. The response keeps original attestation and current facts
+separate and binds the result to the requested digest. It issues no publication
+token, writes no native object, renews no grant, and proves no continuous history.
+Distinct action runs retain their own authenticated actors; the original review
+actor is not blanket command ownership. Operation-specific authorization still
+belongs to the existing command/effect policy, not this observation parser.
+
+Before dispatch, refresh admits its complete bounded internal read cost: eight
+for review or nine for command/reply, including the worst-case public Git failure
+and annotated REST-tag fallback. A one-short control refuses before any network
+request. This stays inside the existing 60-subrequest service ceiling. The one
+internal scoped-token issuance requests only existing review-session permissions;
+it is not a native review/check/session mutation or new persistent grant.
+
+This backend slice is **not yet a per-effect caller qualification**. No ordinary
+caller emits the new role request or refresh request in this slice. Startup v4
+and reused capability redemption remain insufficient for effect freshness. Each
+supported future native effect will need a prepaid additional caller exchange,
+exact source-owned effect binding, and a single-use consumption boundary that
+cannot recurse through the journal. Complete success, readback, and terminal
+liabilities must be admitted before the first effect under the original total
+funding. Unsupported routes and unavailable evidence must remain named holds;
+unknown outcomes after a native effect must remain unknown until reconciled.
+No deployment or live activation is qualified by local source tests.

@@ -75,6 +75,62 @@ class CurrentTrustObservationTests(unittest.TestCase):
                     "synthetic-oidc", repository_id=123, pull_request=7, head_sha=HEAD
                 )
 
+    def test_versioned_original_role_is_explicit_closed_and_round_trips(self):
+        from review_sensei_github.trust_enrollment import prepare_original_enrollment
+
+        from review_sensei.session import SessionIdentity, SessionRecord
+
+        request, grant = observed()
+        observation = grant["current_observation"]
+        observation["schema_version"] = "current-observation-v2"
+        observation["actor"].update(
+            repository_permission="write", repository_role="maintain"
+        )
+        self.assertEqual(parse_authority(grant, grant=True), grant)
+
+        def response(document):
+            document["session_attestation"]["current_observation"] = copy.deepcopy(
+                observation
+            )
+            return document
+
+        fixture = BrokerFixture(request, response)
+        with patch("review_sensei_github.trust_enrollment.time.time", return_value=NOW):
+            session = fixture.client.open_session(
+                "synthetic-oidc", repository_id=123, pull_request=7, head_sha=HEAD
+            )
+            record = prepare_original_enrollment(
+                fixture.client,
+                session,
+                SessionRecord.create(
+                    SessionIdentity("owner/repo", 7, repository_id=123)
+                ),
+            )
+        restored = SessionRecord.from_dict(record.to_dict())
+        self.assertEqual(restored.trust_enrollment, record.trust_enrollment)
+        for key, value in (
+            ("repository_permission", True),
+            ("repository_role", ""),
+            ("repository_permission", "maintain"),
+        ):
+            bad = copy.deepcopy(grant)
+            bad["current_observation"]["actor"][key] = value
+            with (
+                self.subTest(key=key, value=value),
+                self.assertRaises(GitHubBrokerClientError),
+            ):
+                parse_authority(bad, grant=True)
+        for version in ("current-observation-v1", "current-observation-v3"):
+            bad = copy.deepcopy(grant)
+            bad["current_observation"]["schema_version"] = version
+            with self.assertRaises(GitHubBrokerClientError):
+                parse_authority(bad, grant=True)
+        for key in ("repository_role", "repository_permission"):
+            bad = copy.deepcopy(grant)
+            del bad["current_observation"]["actor"][key]
+            with self.assertRaises(GitHubBrokerClientError):
+                parse_authority(bad, grant=True)
+
     def test_unsigned_capability_and_release_routes_refuse_before_dispatch(self):
         request, _ = observed()
         for capability in ("review_publish", "review_session", "check_publish"):

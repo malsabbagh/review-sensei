@@ -532,6 +532,18 @@ export class GitHubApi {
     return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
   }
 
+  /** One authenticated lookup. Association and caller-supplied role are not permission. */
+  async actorRepositoryPermission(repository: string, token: string, id: number, login: string): Promise<{ repository_permission: string; repository_role: string }> {
+    if (!Number.isSafeInteger(id) || id <= 0 || !/^[A-Za-z0-9-]{1,39}$/.test(login)) throw new Error("github_actor_permission_invalid");
+    const response = await this.request("GET", `${repositoryPath(repository)}/collaborators/${encodeURIComponent(login)}/permission`, token);
+    const data = response.data;
+    if (response.status !== 200 || !isObject(data) || !isObject(data.user) || data.user.id !== id ||
+        typeof data.user.login !== "string" || data.user.login.toLowerCase() !== login.toLowerCase() || data.user.type !== "User" ||
+        !["none", "read", "write", "admin"].includes(data.permission as string) ||
+        typeof data.role_name !== "string" || !/^[A-Za-z0-9_. -]{1,100}$/.test(data.role_name)) throw new Error("github_actor_permission_invalid");
+    return { repository_permission: data.permission as string, repository_role: data.role_name };
+  }
+
   async installationObservationFor(repository: string): Promise<{ id: number; repository_selection: "all" | "selected"; permissions: Record<string, string> } | null> {
     const response = await this.request("GET", `${repositoryPath(repository)}/installation`, await this.appJwt());
     if (response.status === 404 || response.status === 403) return null;

@@ -1,7 +1,8 @@
 """Closed current observations carried inside a broker-authenticated grant.
 
 Parsing is not authentication. These facts describe current observations, not
-continuous selection/permission history, an actor role or a permission epoch.
+continuous selection/permission history, a permission epoch. Version 2 retains an explicitly read actor role, not
+operation authorization.
 """
 
 from __future__ import annotations
@@ -55,7 +56,10 @@ def parse_current_observation(
     row = _object(
         value, {"schema_version", "repository", "installation", "capability", "actor"}
     )
-    if row["schema_version"] != "current-observation-v1":
+    if row["schema_version"] not in (
+        "current-observation-v1",
+        "current-observation-v2",
+    ):
         _invalid()
     repository = _object(
         row["repository"], {"id", "full_name", "owner_id", "owner_login", "fork"}
@@ -102,7 +106,19 @@ def parse_current_observation(
         )
     ):
         _invalid()
-    actor = _object(row["actor"], {"id", "login", "source_association"})
+    v2 = row["schema_version"] == "current-observation-v2"
+    actor = _object(
+        row["actor"],
+        {"id", "login", "source_association"}
+        | ({"repository_permission", "repository_role"} if v2 else set()),
+    )
+    if v2 and (
+        not isinstance(actor["repository_permission"], str)
+        or actor["repository_permission"] not in {"none", "read", "write", "admin"}
+        or not isinstance(actor["repository_role"], str)
+        or re.fullmatch(r"[A-Za-z0-9_. -]{1,100}", actor["repository_role"]) is None
+    ):
+        _invalid()
     if not _id(actor["id"]) or not _login(actor["login"]):
         _invalid()
     granted_actor = authority["actor"]

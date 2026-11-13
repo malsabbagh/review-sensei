@@ -68,6 +68,11 @@ def normalize_reference(value):
         "actor",
     }:
         raise ReviewInputError("trust enrollment observation fields are unsupported")
+    if observation["schema_version"] not in (
+        "current-observation-v1",
+        "current-observation-v2",
+    ):
+        raise ReviewInputError("trust enrollment observation version is unsupported")
     shapes = {
         "repository": {"id", "full_name", "owner_id", "owner_login", "fork"},
         "installation": {
@@ -77,7 +82,12 @@ def normalize_reference(value):
             "permissions",
         },
         "capability": {"name", "permissions"},
-        "actor": {"id", "login", "source_association"},
+        "actor": {"id", "login", "source_association"}
+        | (
+            {"repository_permission", "repository_role"}
+            if observation["schema_version"] == "current-observation-v2"
+            else set()
+        ),
     }
     if any(
         not isinstance(observation[k], dict) or set(observation[k]) != fields

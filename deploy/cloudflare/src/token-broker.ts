@@ -115,6 +115,7 @@ interface BrokerBody {
   session?: unknown;
   session_attestation?: unknown;
   release_only?: unknown;
+  observe_actor_role?: unknown;
   control_budget?: unknown;
 }
 
@@ -341,6 +342,7 @@ export class TokenBroker {
     // Reject obsolete or wrong-purpose authority before requesting installation tokens.
     const requestedAuthority = bindRunAuthority(body.session_attestation, claims);
     if (requestedAuthority.version === 4 && (requested !== "review_session" || body.release_only === true)) throw new Error("broker_current_observation_scope_unsupported");
+    if (body.observe_actor_role !== undefined && (body.observe_actor_role !== true || requestedAuthority.version !== 4 || requested !== "review_session" || body.release_only === true)) throw new Error("broker_current_observation_scope_unsupported");
     authorizeRunCapability(requestedAuthority, requested);
     authorizeControlledRestart(requestedAuthority, requested, claims.event_name);
     const configuredTag = validatePublicWorkflowTag(this.env.PUBLIC_WORKFLOW_TAG ?? "");
@@ -402,11 +404,11 @@ export class TokenBroker {
     );
     if (requestedAuthority.version === 4) {
       attestation.current_observation = parseCurrentObservation({
-        schema_version: "current-observation-v1",
+        schema_version: body.observe_actor_role === true ? "current-observation-v2" : "current-observation-v1",
         repository: { id: info.id, full_name: info.full_name, owner_id: info.owner_id, owner_login: info.owner_login, fork: info.fork },
         installation: { ...installationObservation, repository_access: true },
         capability: { name: requested, permissions: capabilityObservation?.permissions },
-        actor: { id: claims.actor_id, login: claims.actor, source_association: attestation.actor?.association ?? null },
+        actor: { id: claims.actor_id, login: claims.actor, source_association: attestation.actor?.association ?? null, ...(body.observe_actor_role === true ? await github.actorRepositoryPermission(claims.repository, validationToken, claims.actor_id, claims.actor) : {}) },
       }, attestation);
     }
     if (requestedSession !== undefined) {
@@ -477,6 +479,56 @@ export class TokenBroker {
     }
     control?.check();
     return parsed;
+  }
+
+  /** Separate current facts, never a renewed grant or proof that a native effect ran.
+   * The caller must prepay its additional exchange and consume this at the exact
+   * requested effect boundary. No caller is wired to claim that contract yet.
+   */
+  async refreshSessionObservation(grant: unknown, attestation: unknown, effectSha256: unknown,
+    control?: BrokerDispatchControl, deadlineUnixMs?: number) {
+    if (typeof effectSha256 !== "string" || !/^[a-f0-9]{64}$/.test(effectSha256)) throw new Error("broker_effect_binding_invalid");
+    const parsed = parseRunAuthority(attestation, true);
+    const original = parsed.current_observation;
+    if (parsed.version !== 4 || original?.schema_version !== "current-observation-v2") throw new Error("broker_original_actor_role_unavailable");
+    // Three worst-case workflow reads + installation + scoped token + repository
+    // + head + numeric actor permission, and one action-source read. No census.
+    const required = parsed.purpose === "review" ? 8 : 9;
+    if (control && control.request.max_dispatches - control.receipt().dispatched < required) throw new Error("broker_control_budget_exhausted");
+    const lifetime = new BrokerLifetime(deadlineUnixMs, this.observation);
+    lifetime.constrain(control);
+    return await lifetime.run(async () => {
+      const verified = await this.verifyGrantWithinLifetime(grant, parsed, lifetime, control);
+      const github = this.github.withRequestLifetime(lifetime, control);
+      const installation = await github.installationObservationFor(parsed.repository);
+      if (!installation || installation.id !== original.installation.id) throw new Error("broker_current_trust_changed");
+      const capability = await github.capabilityTokenObservation(installation.id, parsed.repository, CAPABILITIES.review_session);
+      const repository = await github.repositoryInfo(parsed.repository, capability.token, true);
+      if (!repository || repository.fork) throw new Error("broker_repository_rejected");
+      if (await github.pullRequestHead(parsed.repository, parsed.pull_request, capability.token) !== parsed.head_sha) throw new Error("broker_session_head_rejected");
+      if (parsed.purpose !== "review") {
+        const source = await github.feedbackComment(parsed.repository, parsed.pull_request,
+          parsed.source.kind === "issue_comment" ? "issue" : "inline", parsed.source.id, capability.token);
+        if (source.comment_id !== parsed.source.id || source.updated_at !== parsed.source.updated_at ||
+            source.body_sha256 !== parsed.source.body_sha256 || source.author_id !== original.actor.id ||
+            typeof source.author !== "string" || source.author.toLowerCase() !== original.actor.login.toLowerCase() || source.association !== original.actor.source_association)
+          throw new Error("broker_session_actor_rejected");
+      }
+      const actorRole = await github.actorRepositoryPermission(parsed.repository, capability.token, original.actor.id, original.actor.login);
+      const current = parseCurrentObservation({ schema_version: "current-observation-v2",
+        repository: { id: repository.id, full_name: repository.full_name, owner_id: repository.owner_id, owner_login: repository.owner_login, fork: repository.fork },
+        installation: { ...installation, repository_access: true },
+        capability: { name: "review_session", permissions: capability.permissions },
+        actor: { ...original.actor, ...actorRole },
+      }, verified);
+      // A changed observation is a named hold, not inferred migration or a new
+      // operation policy. Each distinct action keeps its own authenticated actor.
+      if (JSON.stringify(current) !== JSON.stringify(original)) throw new Error("broker_current_trust_changed");
+      lifetime.check();
+      return { session_attestation: verified, current_observation: current,
+        observation_binding: { schema_version: "effect-observation-v1", effect_sha256: effectSha256,
+          original_attestation_sha256: await digest(canonicalRunAuthority(verified)) } };
+    });
   }
 
   private authorizeClaims(
