@@ -924,6 +924,9 @@ class ApiRunRequestTransport:
                 except (ValueError, TypeError, ReviewInputError):
                     pass
         self.observations.append(observation)
+        from .ordinary_native_recovery import dispatch as ordinary_recovery_dispatch
+
+        ordinary_recovery_dispatch(self, request, observation)
         try:
             from .check_accounting import _dispatch
 

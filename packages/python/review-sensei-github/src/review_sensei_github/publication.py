@@ -10174,6 +10174,12 @@ class ReviewPublisher:
                 complete_inventory=complete_inventory,
                 checks_enabled=check_token is not None,
                 grouped=grouped_publication,
+                planned_window=planned_window_state,
+                planned_drift=planned_drift_state,
+                convergence_policy=convergence_policy,
+                auto_approval=auto_approval,
+                preserve_explanations=human_inventory is not None,
+                window_non_inline_blocking=window_non_inline_blocking,
             )
         if write_preflight.app_authored:
             check_diagnostic: str | None = "app_authored"

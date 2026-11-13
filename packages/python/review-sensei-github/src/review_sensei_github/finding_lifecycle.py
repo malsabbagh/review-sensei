@@ -2439,7 +2439,17 @@ class FindingLifecycleJournal:
         )
 
     def _dispatch_effect(self, http, effect, method, path, *, token, body, **kwargs):
-        response = http.request(method, path, token=token, body=body, **kwargs)
+        from .errors import GitHubHTTPTransientError
+        from .ordinary_native_recovery import native_attempt, recover
+
+        with native_attempt(self, effect, method, path, body, token) as capture:
+            try:
+                response = http.request(method, path, token=token, body=body, **kwargs)
+            except GitHubHTTPTransientError:
+                recovered = recover(capture, token=token)
+                if recovered is None:
+                    raise
+                return recovered
         if len(canonical_bytes(response[1])) > MAX_RECEIPT_BYTES:
             raise ReviewInputError(
                 "finding lifecycle native receipt exceeds response capacity; intent retained"

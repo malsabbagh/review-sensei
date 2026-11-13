@@ -6,6 +6,7 @@ still reaches the existing charged transport and every source validator runs.
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -23,7 +24,16 @@ from .http import GitHubHttp
 # check lookups plus lost POST readback; two PATCH readbacks; review lost-ack
 # journal+marker reads; approval persisted+lost-ack journal+already reads;
 # two approval PR fences and one complete thread scan. Checkpoint I/O is separate.
-_ROLES = (("checks", 4), ("check", 2), ("reviews", 5), ("pr", 2), ("threads", 1))
+_ROLES = (
+    ("checks", 4),
+    ("check", 2),
+    ("reviews", 5),
+    ("pr", 2),
+    ("threads", 1),
+    # The journal opens even an empty exact inline inventory after a stored
+    # root or approval response loss. These remain independent native reads.
+    ("review_comments", 2),
+)
 _SOURCE: tuple[Any, ...] | None = None
 _TRANSPORT_METHODS: dict[Any, Any] = {}
 _ACTIVE: WeakKeyDictionary = WeakKeyDictionary()
@@ -43,7 +53,19 @@ def _install_publication_source(source_class):
         raise ReviewInputError(
             "ordinary publication read source already installed or foreign"
         )
-    classes = (ReviewPublisher, ReviewApprovalFinalizer, ReviewCheckPublisher)
+    from .api_run_requests import ApiRunRequestTransport
+    from .finding_lifecycle import FindingLifecycleJournal
+    from .ordinary_native_recovery import install_sources
+
+    install_sources(
+        ApiRunRequestTransport, FindingLifecycleJournal, ReviewCheckPublisher
+    )
+    classes = (
+        ReviewPublisher,
+        ReviewApprovalFinalizer,
+        ReviewCheckPublisher,
+        FindingLifecycleJournal,
+    )
     methods = tuple(
         {
             name: getattr(cls, name)
@@ -71,7 +93,7 @@ def _source_guard(publisher, journal):
     if _SOURCE is None or type(journal) is not FindingLifecycleJournal:
         raise ReviewInputError("ordinary publication read source unavailable")
     classes, methods = _SOURCE
-    owners = (publisher, publisher.finalizer, publisher.checks)
+    owners = (publisher, publisher.finalizer, publisher.checks, journal)
     if journal.reviewer is not publisher:
         raise ReviewInputError("ordinary publication journal owner changed")
     for owner, cls, expected in zip(owners, classes, methods, strict=True):
@@ -94,7 +116,7 @@ def _source_guard(publisher, journal):
         )
     ):
         raise ReviewInputError("ordinary publication callback route is unqualified")
-    return owners
+    return owners[:3]
 
 
 def _transport_signature(http, journal, budget):
@@ -138,7 +160,17 @@ def _transport_signature(http, journal, budget):
             raise ReviewInputError(
                 "ordinary publication transport implementation changed"
             )
-        result.append((id(http), cls, cls.request, id(target)))
+        result.append(
+            (
+                id(http),
+                cls,
+                cls.request,
+                id(target),
+                http.api_url,
+                http.timeout,
+                id(http.opener),
+            )
+        )
         if target is None:
             return tuple(result)
         http = target
@@ -152,12 +184,20 @@ class OrdinaryPublicationReadWitness:
 
     def require(self, journal, publisher):
         observation = _WITNESSES.get(self)
-        if observation is None or self.read_roles != _ROLES or self.read_calls != 14:
+        if observation is None or self.read_roles != _ROLES or self.read_calls != 16:
             raise ReviewInputError(
                 "ordinary publication read witness is unissued or changed"
             )
         _Observation._require(observation, journal, publisher)
         return self.read_calls
+
+
+def issued_witness(journal):
+    observation = getattr(journal.reviewer, "_ordinary_publication_observation", None)
+    witness = _ISSUED_WITNESS.get(observation) if observation is not None else None
+    if witness is not None:
+        witness.require(journal, journal.reviewer)
+    return witness
 
 
 class _Observation:
@@ -209,6 +249,8 @@ class _Observation:
         for owner, attr, old, wrapper, signature in self.bindings:
             if (
                 getattr(owner, attr) is not wrapper
+                or wrapper.api_url != old.api_url
+                or wrapper.timeout != old.timeout
                 or type(wrapper) is not _ClosedPublicationHttp
                 or wrapper.transport is not old
                 or wrapper.observation is not self
@@ -328,7 +370,7 @@ class _Observation:
             self.projected_bytes,
         )
         _REMAINING[self] = dict(_ROLES)
-        self.witness = OrdinaryPublicationReadWitness(_ROLES, 14)
+        self.witness = OrdinaryPublicationReadWitness(_ROLES, 16)
         _WITNESSES[self.witness] = self
         _ISSUED_WITNESS[self] = self.witness
         return self.witness
@@ -342,6 +384,12 @@ class _Observation:
                 return "pr"
             if parsed.path == f"{prefix}/pulls/{scope.pull_request}/reviews":
                 return "reviews"
+            if re.fullmatch(
+                re.escape(f"{prefix}/pulls/{scope.pull_request}/reviews/")
+                + r"[1-9][0-9]*/comments",
+                parsed.path,
+            ):
+                return "review_comments"
             if parsed.path == f"{prefix}/commits/{self.journal.head_sha}/check-runs":
                 return "checks"
             if (
@@ -402,7 +450,7 @@ class _Observation:
             raise
         status, value = response
         complete = status == 200
-        if role == "reviews":
+        if role in {"reviews", "review_comments"}:
             query = parse_qs(urlsplit(path).query)
             complete = (
                 complete

@@ -666,17 +666,27 @@ class ReviewCheckPublisher:
             create=True,
         )
         path = self._repository_path(repository, "/check-runs")
-        with native_check_call(
-            self.http,
-            "create",
-            "POST",
-            path,
-            repository=repository,
-            head_sha=head_sha,
-            body=body,
-            context=getattr(self, "_accounting_context", None),
-        ) as capture:
-            status_code, payload = self._request("POST", path, token, body)
+        from .ordinary_native_recovery import ReconciledCheck, consume_check
+
+        try:
+            with native_check_call(
+                self.http,
+                "create",
+                "POST",
+                path,
+                repository=repository,
+                head_sha=head_sha,
+                body=body,
+                context=getattr(self, "_accounting_context", None),
+            ) as capture:
+                status_code, payload = self._request("POST", path, token, body)
+        except ReconciledCheck as recovered:
+            return CheckPublicationResult(
+                status="created",
+                check_run_id=consume_check(
+                    recovered, self, method="POST", path=path, body=body
+                ),
+            )
         if status_code == 403:
             return CheckPublicationResult(
                 status="check_permission_denied",
@@ -715,17 +725,27 @@ class ReviewCheckPublisher:
             create=False,
         )
         path = self._repository_path(repository, f"/check-runs/{check_run_id}")
-        with native_check_call(
-            self.http,
-            "update",
-            "PATCH",
-            path,
-            repository=repository,
-            head_sha=head_sha,
-            body=body,
-            context=getattr(self, "_accounting_context", None),
-        ) as capture:
-            status_code, payload = self._request("PATCH", path, token, body)
+        from .ordinary_native_recovery import ReconciledCheck, consume_check
+
+        try:
+            with native_check_call(
+                self.http,
+                "update",
+                "PATCH",
+                path,
+                repository=repository,
+                head_sha=head_sha,
+                body=body,
+                context=getattr(self, "_accounting_context", None),
+            ) as capture:
+                status_code, payload = self._request("PATCH", path, token, body)
+        except ReconciledCheck as recovered:
+            return CheckPublicationResult(
+                status="updated",
+                check_run_id=consume_check(
+                    recovered, self, method="PATCH", path=path, body=body
+                ),
+            )
         if status_code == 403:
             return CheckPublicationResult(
                 status="check_permission_denied",

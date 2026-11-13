@@ -55,7 +55,7 @@ class OrdinaryPublicationReadCustodyTests(unittest.TestCase):
 
     def test_unissued_witness_and_custom_producer_fail(self):
         publisher, journal, _ = self.fixture()
-        witness = reads.OrdinaryPublicationReadWitness(reads._ROLES, 14)
+        witness = reads.OrdinaryPublicationReadWitness(reads._ROLES, 16)
         with self.assertRaises(ReviewInputError):
             witness.require(journal, publisher)
         publisher._publish_impl = lambda *args, **kwargs: None
@@ -71,6 +71,26 @@ class OrdinaryPublicationReadCustodyTests(unittest.TestCase):
                 observation._require(journal, publisher)
         with self.assertRaises(ReviewInputError):
             reads._install_publication_source(ReviewPublisher)
+
+    def test_lost_review_comments_role_is_exact_and_priced_twice(self):
+        publisher, journal, _ = self.fixture()
+        with reads.observe_publication(publisher, journal) as observation:
+            prefix = f"/repos/{journal.identity.repository}/pulls/{journal.identity.pull_request}/reviews/"
+            self.assertEqual(
+                observation.role(
+                    "GET", prefix + "123/comments?per_page=100&page=1", None
+                ),
+                "review_comments",
+            )
+            for path in (
+                prefix + "0/comments",
+                prefix + "-1/comments",
+                prefix + "123/comments/extra",
+                prefix.replace("/reviews/", "/other/") + "123/comments",
+            ):
+                self.assertIsNone(observation.role("GET", path, None))
+        self.assertEqual(dict(reads._ROLES)["review_comments"], 2)
+        self.assertEqual(sum(count for _, count in reads._ROLES), 16)
 
     def test_wrapper_delegate_observer_and_request_are_pinned(self):
         for field, replacement in (
@@ -90,7 +110,7 @@ class OrdinaryPublicationReadCustodyTests(unittest.TestCase):
         # source admission or a substitute for the actual hosted route tests.
         publisher, journal, _ = self.fixture()
         with reads.observe_publication(publisher, journal) as observation:
-            witness = reads.OrdinaryPublicationReadWitness(reads._ROLES, 14)
+            witness = reads.OrdinaryPublicationReadWitness(reads._ROLES, 16)
             reads._ISSUED_WITNESS[observation] = witness
             observation.witness = witness
             observation._require(journal, publisher)

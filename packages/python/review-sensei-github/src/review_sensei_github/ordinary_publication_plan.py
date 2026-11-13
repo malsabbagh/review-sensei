@@ -76,7 +76,11 @@ def price_prefixes(journal, requests, *, native_calls):
         shadow.effects.append(effect)
         _require_effect_scope(shadow._document(), journal.identity, journal.head_sha)
         pending, future, confirmed = shadow._preflight_effect(capacity_only=True)
-        documents.append(pending)
+        # The all-stored-loss branch must durably record authenticated
+        # readback before resuming its producer or entering the next effect.
+        # Normal success may coalesce receipts into the next intent; it does
+        # not erase the independently reachable readback checkpoint liability.
+        documents.extend((pending, future))
         stops.extend((pending, future))
         shadow.effects = confirmed
     # Any stop can require the last receipt checkpoint. Size its complete
@@ -86,7 +90,15 @@ def price_prefixes(journal, requests, *, native_calls):
 
 
 def request_branches(
-    publisher, journal, *, frame, comments, outcome, failure_outcomes, approval_body
+    publisher,
+    journal,
+    *,
+    frame,
+    comments,
+    outcome,
+    failure_outcomes,
+    approval_body,
+    review_event="COMMENT",
 ):
     """Closed ordinary producer shapes; future numeric identities are sizing only."""
     from .checks import ReviewCheckPublisher
@@ -101,6 +113,8 @@ def request_branches(
         or publisher.checks._state_fields is not ReviewCheckPublisher._state_fields
     ):
         raise ReviewInputError("ordinary publication request producer is unqualified")
+    if review_event not in {"COMMENT", "REQUEST_CHANGES"}:
+        raise ReviewInputError("ordinary publication review event is unqualified")
     repository = journal.identity.repository
     check_path = f"/repos/{repository}/check-runs"
     review_path = f"/repos/{repository}/pulls/{journal.identity.pull_request}/reviews"
@@ -137,7 +151,7 @@ def request_branches(
         review_path,
         {
             "body": frame,
-            "event": "COMMENT",
+            "event": review_event,
             "commit_id": journal.head_sha,
             "comments": list(comments),
         },
@@ -223,8 +237,14 @@ def admit_current(
     complete_inventory,
     checks_enabled,
     grouped,
+    planned_window=None,
+    planned_drift=None,
+    convergence_policy=None,
+    auto_approval=False,
+    preserve_explanations=False,
+    window_non_inline_blocking=False,
 ):
-    """The first closed ordinary source route, before its first business effect."""
+    """The closed ordinary source route, before its first business effect."""
     from dataclasses import replace
 
     from .approval import evaluate_approval_facts
@@ -240,6 +260,18 @@ def admit_current(
         review_result_digest,
     )
 
+    if convergence_policy is not None:
+        assembled = publisher._adjust_assembled_for_drift(
+            publisher._adjust_assembled_for_window(
+                assembled,
+                planned_window,
+                convergence_policy=convergence_policy,
+                auto_approval=auto_approval,
+            ),
+            planned_drift,
+            convergence_policy=convergence_policy,
+            auto_approval=auto_approval,
+        )
     witness = observer.qualify(
         record=journal._record,
         result=original_result,
@@ -254,7 +286,18 @@ def admit_current(
         return None  # This route is not admitted by the closed-source contract.
     witness.require(journal, publisher)
     pending_eligibility = replace(
-        eligibility, facts=replace(eligibility.facts, check_published=False)
+        eligibility,
+        facts=replace(
+            eligibility.facts,
+            check_published=False,
+            has_blocking_findings=(
+                any(
+                    entry.blocking and entry.body_placed
+                    for entry in assembled.index_entries
+                )
+                or window_non_inline_blocking
+            ),
+        ),
     )
     summary, index = fit_assembled_review(
         assembled,
@@ -268,6 +311,7 @@ def admit_current(
         summary_limit=_published_summary_byte_limit(result),
         complete_inventory=complete_inventory,
         reserved_bytes=_disposition_frame_reserve(eligibility, assembled.index_entries),
+        preserve_explanations=preserve_explanations,
     )
     frame = _framed_review_body(
         summary,
@@ -290,11 +334,21 @@ def admit_current(
             eligibility,
             decision,
         )
+    event, _ = publisher._ordinary_review_event(
+        approval_enabled=eligibility.facts.enabled,
+        requests_changes=assembled.requests_changes,
+        retained_blocking=False,
+        app_authored=False,
+    )
     branches = request_branches(
         publisher,
         journal,
         frame=frame,
-        comments=(),
+        comments=tuple(
+            publisher._inline_comment_payload(comment, body, anchor)
+            for comment, _fingerprint, body, anchor in assembled.inline_comments
+        ),
+        review_event=event,
         outcome=outcome,
         failure_outcomes=tuple(
             review_check_outcome_for_publication_failure(

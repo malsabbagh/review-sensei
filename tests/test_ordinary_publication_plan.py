@@ -126,7 +126,7 @@ class OrdinaryPublicationPlanTests(unittest.TestCase):
                             ),
                         )
                         variants, _ = price_prefixes(journal, changed, native_calls=4)
-                        commitment = _unpack_journal(variants[1])["effects"][-1][
+                        commitment = _unpack_journal(variants[2])["effects"][-1][
                             "request"
                         ]["body"]
                         self.assertEqual(
@@ -140,7 +140,7 @@ class OrdinaryPublicationPlanTests(unittest.TestCase):
                             hashlib.sha256(rendered.encode()).hexdigest(),
                         )
                         self.assertEqual(changed[-1][2]["body"], rendered)
-                    self.assertEqual(len(documents), 3)
+                    self.assertEqual(len(documents), 5)
                     self.assertEqual(count, len(effects) + 3)
                     self.assertEqual(journal.effects, effects)
                     self.assertEqual(canonical_bytes(journal._record.to_dict()), record)
