@@ -3252,6 +3252,119 @@ class FindingLifecycleJournal:
                     return None
             if inline and not self._adopt_review_readback(value, inline, token=token):
                 return None
+            # Body-only recovery uses this already authenticated unique review
+            # and complete empty inline inventory. Keep issuance inside the real
+            # readback, not a helper accepting an arbitrary caller-supplied body.
+            if not inline:
+                from review_sensei.active_finding_window import (
+                    ActiveWindowRoundState,
+                    reconcile_uncertain_slot,
+                )
+                from review_sensei.human_assessment import finding_instance_fingerprint
+                from review_sensei.presentation import render_finding
+
+                from .publication import (
+                    AssembledReview,
+                    NativeFindingReceipt,
+                    parse_finding_index,
+                )
+
+                context = getattr(self.reviewer, "_native_finding_context", None)
+                key = (self.identity.repository_id, self.identity.pull_request)
+                state = self.reviewer._active_window_states.get(key)
+                if (
+                    type(producer_id) is int
+                    and producer_id > 0
+                    and isinstance(context, dict)
+                    and (
+                        context.get("repository_id"),
+                        context.get("pull_request"),
+                        context.get("head_sha"),
+                        context.get("base_sha"),
+                        context.get("producer_id"),
+                    )
+                    == (*key, self.head_sha, self.base_sha, producer_id)
+                ):
+                    assembled = context.get("assembled")
+                    body = value.get("body")
+                    index = (
+                        parse_finding_index(
+                            body,
+                            repository_id=key[0],
+                            pull_request=key[1],
+                            head_sha=self.head_sha,
+                        )
+                        if isinstance(body, str)
+                        else None
+                    )
+                    if (
+                        type(assembled) is AssembledReview
+                        and isinstance(body, str)
+                        and index is not None
+                        and index.base_sha == self.base_sha
+                    ):
+                        indexed = {
+                            entry.instance
+                            for entry in index.entries
+                            if entry.body_placed
+                        }
+                        explanations = {
+                            item.instance: item for item in assembled.body_explanations
+                        }
+                        receipts = {
+                            instance: NativeFindingReceipt(
+                                self.identity.repository_id,
+                                self.identity.pull_request,
+                                self.head_sha,
+                                self.base_sha,
+                                producer_id,
+                                rid,
+                                instance,
+                                hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                            )
+                            for instance, item in explanations.items()
+                            if instance in indexed and render_finding(item.view) in body
+                        }
+                        if isinstance(state, ActiveWindowRoundState):
+                            for (
+                                obligation
+                            ) in state.authoritative_decision_inventory.obligations:
+                                if (
+                                    obligation.target_state != "uncertain"
+                                    or obligation.native_target is None
+                                    or obligation.comment is None
+                                ):
+                                    continue
+                                receipt = receipts.get(
+                                    finding_instance_fingerprint(obligation.comment)
+                                )
+                                if receipt is not None and (
+                                    obligation.native_target.startswith("intent:")
+                                    or obligation.native_target == receipt.target
+                                ):
+                                    state = reconcile_uncertain_slot(
+                                        state,
+                                        target=obligation.native_target,
+                                        resolved_state="active",
+                                        proof_sha256=receipt.proof_sha256,
+                                        confirmed_target=receipt.target,
+                                    )
+                        if receipts:
+                            if isinstance(state, ActiveWindowRoundState):
+                                self.reviewer._active_window_states[key] = state
+                            self.reviewer._native_finding_receipt_records.setdefault(
+                                key, {}
+                            ).update(
+                                {
+                                    instance: receipt.to_dict()
+                                    for instance, receipt in receipts.items()
+                                }
+                            )
+                            context["receipts"] = (rid, receipts)
+                            if self._planned is not None and isinstance(
+                                state, ActiveWindowRoundState
+                            ):
+                                self._planned = state
         if confirmed_check_successor is not None:
             # Mutate only after every original object/owner/body guard above
             # passed. As with an immediate native response, the next intent or
