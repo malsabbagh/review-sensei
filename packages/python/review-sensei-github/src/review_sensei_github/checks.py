@@ -352,13 +352,7 @@ class ReviewCheckPublisher:
             repository=repository,
             head_sha=head_sha,
             app_slug=app_slug,
-            status="in_progress",
-            title="ReviewSensei review in progress",
-            summary=(
-                "A new ReviewSensei review is running for this head; any "
-                "earlier conclusion on this head does not stand for it."
-            ),
-            conclusion=None,
+            **self._state_fields(),
         )
 
     def complete(
@@ -390,11 +384,31 @@ class ReviewCheckPublisher:
                 "and delayed effects remain unsettled. Controlled restart does "
                 "not certify those obligations or authorize approval.",
             )
+        return self._write(
+            token=token,
+            repository=repository,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            **self._state_fields(outcome),
+        )
+
+    @staticmethod
+    def _state_fields(outcome: CheckOutcome | None = None) -> dict[str, Any]:
+        """The actual pending/completed producer, shared by pure sizing only."""
+        if outcome is None:
+            return {
+                "status": "in_progress",
+                "title": "ReviewSensei review in progress",
+                "summary": (
+                    "A new ReviewSensei review is running for this head; any "
+                    "earlier conclusion on this head does not stand for it."
+                ),
+                "conclusion": None,
+            }
+        if outcome.conclusion not in COMPLETED_CONCLUSIONS:
+            raise GitHubPublicationError("check conclusion is invalid")
         validate_bounded_text(
-            outcome.title,
-            MAX_CHECK_TITLE_CHARS,
-            label="check title",
-            allow_empty=False,
+            outcome.title, MAX_CHECK_TITLE_CHARS, label="check title", allow_empty=False
         )
         validate_bounded_text(
             outcome.summary,
@@ -402,16 +416,12 @@ class ReviewCheckPublisher:
             label="check summary",
             allow_empty=False,
         )
-        return self._write(
-            token=token,
-            repository=repository,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            status="completed",
-            title=outcome.title,
-            summary=outcome.summary,
-            conclusion=outcome.conclusion,
-        )
+        return {
+            "status": "completed",
+            "title": outcome.title,
+            "summary": outcome.summary,
+            "conclusion": outcome.conclusion,
+        }
 
     def cancel(
         self,
