@@ -45,6 +45,10 @@ from .api_run_owner import claim_review_startup
 from .caller_operation import CallerOperation
 from .errors import GitHubHTTPError, GitHubPublicationTransientError
 from .http import Opener
+from .quarantine_capacity import (
+    _guarded_lifecycle_writer,
+    _install_guarded_lifecycle_writer,
+)
 from .session_ledger import GitHubIssueCommentSessionLedger
 
 
@@ -3205,8 +3209,17 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             raise ReviewInputError("finding lifecycle selected frontier changed")
         return comment_id, record
 
+    @_guarded_lifecycle_writer
     def replace_finding_lifecycle_parts(
-        self, identity, mutate, *, record, parts, retained_bytes, reserved_tail_calls=0
+        self,
+        identity,
+        mutate,
+        *,
+        record,
+        parts,
+        retained_bytes,
+        reserved_tail_calls=0,
+        _guarded_authorize=None,
     ):
         self.preflight_finding_lifecycle_retention(
             identity,
@@ -3245,6 +3258,12 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                     + business[0]
                     + reserved_tail_calls
                 )
+                if scope.extension is not None:
+                    if _guarded_authorize is None:
+                        raise ReviewInputError(
+                            "quarantine lifecycle writer capability is absent"
+                        )
+                    _guarded_authorize(scope)
                 return self.replace(identity, mutate)
         if getattr(self, "_finding_lifecycle_page_size", None) is not None:
             raise ReviewInputError("finding lifecycle scoped mutation cannot nest")
@@ -3450,6 +3469,9 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
 _install_checkpoint_pricer(
     ApiRunSessionLedger.preflight_finding_lifecycle_checkpoint_pricing
 )
+
+
+_install_guarded_lifecycle_writer(ApiRunSessionLedger, ApiRunRequestTransport)
 
 
 # Pin the ordinary physical dispatch implementation before any mode can issue

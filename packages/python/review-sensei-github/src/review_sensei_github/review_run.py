@@ -65,6 +65,7 @@ from .errors import GitHubPublicationTransientError
 from .http import GitHubHttp
 from .learning_pr import LearningPRPublisher
 from .publication import PublicationResult, ReviewPublisher
+from .quarantine_capacity import _install_guarded_ledger_replaces
 from .review_finalization_diagnostics import close_not_entered, close_review_run
 from .run_authority import request_authority
 from .session_ledger import GitHubIssueCommentSessionLedger
@@ -1635,3 +1636,8 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
         if not _has_option(core, "--exit-semantics"):
             core.extend(["--exit-semantics", "operational"])
         return selected.execute(core, publication_output=options.publication_outcome)
+
+
+# Pin genuine subclass writers once at source module initialization.
+
+_install_guarded_ledger_replaces(ReviewRunLedger, ActionRunLedger)

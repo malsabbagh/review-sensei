@@ -539,6 +539,7 @@ class _LifecycleCapacity:
     profile: bytes
     plan: Any
     parts: int
+    extension: Any = None
 
     def _require_scope(self, ledger, identity):
         from review_sensei.bounded_evidence import canonical_bytes
@@ -566,7 +567,13 @@ class _LifecycleCapacity:
                 "quarantine lifecycle census is outside its checkpoint"
             )
         if issued[1] is None:
-            _LIFECYCLE_ACTIVE[self] = (issued[0], operation)
+            if self.extension is not None:
+                from .quarantine_capacity import activate_lifecycle_extension
+
+                activate_lifecycle_extension(
+                    self.extension, capability=issued[2], operation=operation
+                )
+            _LIFECYCLE_ACTIVE[self] = (issued[0], operation, None)
         elif operation is not issued[1]:
             raise ReviewInputError("quarantine lifecycle census operation changed")
         self.caller._require_ledger(ledger, identity)
@@ -588,6 +595,7 @@ class _LifecycleCapacity:
             tuple(sorted(self.plan.metadata_known.items())),
             self.plan.metadata_unknown,
             self.parts,
+            id(self.extension),
         )
 
 
@@ -596,14 +604,25 @@ def _lifecycle_profile(ledger):
     from .quarantine_origin import _AUTHENTICATED, AuthenticatedQuarantine
 
     authenticated = ledger._quarantine_authenticated
+    guard = getattr(
+        _publication_transport(ledger.http), "_quarantine_capacity_guard", None
+    )
+    if guard is not None:
+        from .quarantine_capacity import installed_capacity
+
+        try:
+            installed_capacity(ledger, ledger.caller._effect_record.identity())
+        except ReviewInputError as exc:
+            raise ReviewInputError(
+                "quarantine lifecycle capacity source profile changed"
+            ) from exc
     if (
-        getattr(_publication_transport(ledger.http), "_quarantine_capacity_guard", None)
-        is not None
-        or type(authenticated) is not AuthenticatedQuarantine
+        type(authenticated) is not AuthenticatedQuarantine
         or authenticated not in _AUTHENTICATED
     ):
         raise ReviewInputError("quarantine lifecycle capacity source profile changed")
     return {
+        "guard": id(guard) if guard is not None else None,
         "tail": ledger._quarantine_native_comment_bounds,
         "tail_parts": ledger._quarantine_native_tail_parts,
         "producer": ledger.evidence_producer(),
@@ -660,6 +679,19 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
     predecessor = read_predecessor(authenticated.archive)
     lineage = authenticated.lineage
     expected = {lineage["predecessor_comment_id"]: predecessor.record_sha256}
+    from .publication_recovery import _publication_transport
+
+    guard = getattr(
+        _publication_transport(ledger.http), "_quarantine_capacity_guard", None
+    )
+    root_wire_bound = 9 + plain_session_comment_json_bound()
+    if guard is not None:
+        from .quarantine_capacity import installed_capacity
+
+        guard = installed_capacity(ledger, identity)
+        # The original guard rejects every root PATCH above this already
+        # admitted bound. Preserve its bound, not an unreachable larger root.
+        root_wire_bound = guard.closure_wire
     roots, known = {}, {}
     replaced = False
     for row in ledger._cached_comments():
@@ -713,7 +745,7 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
             # can never be silently removed from the capacity calculation.
             known[identifier] = max(
                 known[identifier],
-                9 + plain_session_comment_json_bound(),
+                root_wire_bound,
             )
     if (
         (receipt is not None and not replaced)
@@ -733,32 +765,30 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
     guard = getattr(
         _publication_transport(ledger.http), "_quarantine_capacity_guard", None
     )
-    if (
-        isolation.get("schema_version") != "quarantine-target-isolation-v1"
-        or native_reserve(isolation) is not None
-        or guard is not None
-    ):
-        # Published-tail and body-limit guards include mutable object maxima,
-        # closure widths and receipt updates beyond this legacy capacity-only
-        # contract. Never replace or reinterpret their source-issued plan.
-        if guard is not None:
-            from .quarantine_capacity import NativeCapacityGuard
+    extension = None
+    if guard is not None:
+        from .quarantine_capacity import lifecycle_capacity_extension
 
-            if type(guard) is not NativeCapacityGuard:
-                raise ReviewInputError(
-                    "quarantine lifecycle capacity guard source changed"
-                )
-            NativeCapacityGuard.require(guard, guard.stats)
-        raise ReviewInputError(
-            "quarantine lifecycle guarded capacity requires its original plan"
+        if native_reserve(isolation) is None:
+            raise ReviewInputError("quarantine lifecycle guard isolation changed")
+        extension = lifecycle_capacity_extension(
+            ledger, identity, known=known, added_parts=added_parts
         )
-    # Preserve the original per-obligation event/archive and ordinary
-    # verification storage promises, independently of this review's tail.
-    promised_parts = 2 * len(authenticated.pending) + 5
-    plan = CommentAllocationPlan(
-        known,
-        (*tail, *((MAX_PART_BYTES + 512,) * (added_parts + promised_parts))),
-    )
+        plan = extension.plan
+    else:
+        if (
+            isolation.get("schema_version") != "quarantine-target-isolation-v1"
+            or native_reserve(isolation) is not None
+        ):
+            raise ReviewInputError(
+                "quarantine lifecycle original capacity guard is missing"
+            )
+        # Every original event/archive and native tail remains reserved.
+        promised_parts = 2 * len(authenticated.pending) + 5
+        plan = CommentAllocationPlan(
+            known,
+            (*tail, *((MAX_PART_BYTES + 512,) * (added_parts + promised_parts))),
+        )
     if plan.worst_read_calls() > MAX_PAGINATION_PAGES:
         raise ReviewInputError(
             "quarantine lifecycle complete census exceeds original request bound"
@@ -773,6 +803,7 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         canonical_bytes(_lifecycle_profile(ledger)),
         plan,
         added_parts,
+        extension,
     )
     _LIFECYCLE_ISSUED[scope] = _LifecycleCapacity._seal(scope)
     return scope
@@ -792,7 +823,7 @@ def activate_lifecycle_capacity(scope):
         ledger = scope.ledger
         if getattr(ledger, "_quarantine_lifecycle_capacity", None) is not None:
             raise ReviewInputError("quarantine lifecycle census cannot nest")
-        _LIFECYCLE_ACTIVE[scope] = (_LifecycleCapacity._seal(scope), None)
+        _LIFECYCLE_ACTIVE[scope] = (_LifecycleCapacity._seal(scope), None, None)
         ledger._quarantine_lifecycle_capacity = scope
         try:
             yield
@@ -801,6 +832,13 @@ def activate_lifecycle_capacity(scope):
             _LIFECYCLE_ACTIVE.pop(scope, None)
 
     return active()
+
+
+def _bind_lifecycle_activation(scope, capability):
+    issued = _LifecycleCapacity._require_scope(scope, scope.ledger, scope.identity)
+    if issued[1] is not None or issued[2] is not None:
+        raise ReviewInputError("quarantine lifecycle writer capability was reused")
+    _LIFECYCLE_ACTIVE[scope] = (issued[0], None, capability)
 
 
 def lifecycle_checkpoint_operation(ledger, caller, identity):

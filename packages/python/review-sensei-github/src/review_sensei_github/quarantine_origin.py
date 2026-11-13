@@ -123,6 +123,28 @@ def source_binding(record, producer):
 
 
 _AUTHENTICATED: weakref.WeakSet[AuthenticatedQuarantine] = weakref.WeakSet()
+_AUTHENTICATED_OWNERS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def require_authenticated_read_owner(authenticated, ledger, caller, identity):
+    """Process-issued read custody only; no persistent authority or new I/O."""
+    if type(authenticated) is not AuthenticatedQuarantine:
+        raise ReviewInputError("quarantine authenticated read custody changed")
+    issued = _AUTHENTICATED_OWNERS.get(authenticated)
+    if (
+        type(authenticated) is not AuthenticatedQuarantine
+        or authenticated not in _AUTHENTICATED
+        or issued is None
+        or issued[0]() is not ledger
+        or issued[1]() is not caller
+        or issued[2] != identity
+        or authenticated.original_ledger is not ledger
+        or authenticated.original_caller is not caller
+        or authenticated.original_identity != identity
+        or authenticated.record_sha256 != issued[3]
+        or authenticated.lineage_bytes != issued[4]
+    ):
+        raise ReviewInputError("quarantine authenticated read custody changed")
 
 
 @dataclass(frozen=True, eq=False)
@@ -135,6 +157,7 @@ class AuthenticatedQuarantine:
     source_documents_bytes: bytes = b""
     original_caller: object = None
     original_identity: object = None
+    original_ledger: object = None
 
     @property
     def lineage(self):
@@ -645,9 +668,26 @@ class QuarantineOriginReader:
             canonical_bytes(sources),
             caller_for_http(ledger.http),
             identity,
+            ledger,
         )
         _AUTHENTICATED.add(authenticated)
         from .quarantine_native_scope import bind_native_scope
 
         bind_native_scope(ledger, identity, authenticated)
+        try:
+            owner_refs = (
+                weakref.ref(ledger),
+                weakref.ref(authenticated.original_caller),
+            )
+        except TypeError:
+            # Legacy/model readers retain their read result, but cannot issue
+            # this native hosted capacity-transfer capability.
+            pass
+        else:
+            _AUTHENTICATED_OWNERS[authenticated] = (
+                *owner_refs,
+                identity,
+                authenticated.record_sha256,
+                authenticated.lineage_bytes,
+            )
         return authenticated

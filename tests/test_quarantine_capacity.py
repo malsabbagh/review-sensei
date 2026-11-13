@@ -3,8 +3,10 @@
 import copy
 import hashlib
 import json
+import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from fake_github_http import json_response, make_http
@@ -155,10 +157,24 @@ class QuarantineNativeCapacityTests(unittest.TestCase):
         calls = []
         original = NativeCapacityGuard.before_request
 
-        def before(guard, method, path, body):
-            if method in {"POST", "PATCH", "PUT"} and path.startswith("/repos/"):
-                calls.append((method, path))
-            return original(guard, method, path, body)
+        @contextmanager
+        def observe_source():
+            previous = sys.getprofile()
+            source = original.__wrapped__.__code__
+
+            def observe(frame, event, value):
+                if event == "call" and frame.f_code is source:
+                    method, path = frame.f_locals["method"], frame.f_locals["path"]
+                    if method in {"POST", "PATCH", "PUT"} and path.startswith(
+                        "/repos/"
+                    ):
+                        calls.append((method, path))
+
+            sys.setprofile(observe)
+            try:
+                yield
+            finally:
+                sys.setprofile(previous)
 
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -169,7 +185,7 @@ class QuarantineNativeCapacityTests(unittest.TestCase):
             mutations = []
             with (
                 registered_resource([registration]),
-                patch.object(NativeCapacityGuard, "before_request", before),
+                observe_source(),
             ):
                 self.assertEqual(f.invoke(), 0, f.error)
                 mutations.extend(

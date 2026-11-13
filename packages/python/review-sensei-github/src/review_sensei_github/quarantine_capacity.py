@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import json
 import re
-from copy import deepcopy
+import weakref
+from copy import copy, deepcopy
+from dataclasses import dataclass
+from functools import wraps
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -104,6 +107,62 @@ def native_reserve(receipt):
     return surfaces
 
 
+# Only a completed authentic installation enters this registry. Constructors
+# and detached capacity previews never acquire an installed source identity.
+_INSTALLED_GUARDS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _guard_state(guard):
+    from review_sensei.bounded_evidence import canonical_bytes
+
+    plan = guard.comment_plan
+    values = {
+        key: value
+        for key, value in vars(guard).items()
+        if key
+        not in {"identity", "comment_reader", "comment_plan", "objects", "certificates"}
+    }
+    values["identity"] = vars(guard.identity)
+    values["reader_identity"] = id(guard.comment_reader)
+    values["objects"] = sorted(
+        (key[0], str(key[1]), value) for key, value in guard.objects.items()
+    )
+    values["plan"] = (
+        None
+        if plan is None
+        else {
+            "known": sorted(plan.known.items()),
+            "unknown": plan.unknown,
+            "metadata_known": sorted(plan.metadata_known.items()),
+            "metadata_unknown": plan.metadata_unknown,
+        }
+    )
+    return canonical_bytes(values)
+
+
+def _tracked_guard_mutation(method):
+    @wraps(method)
+    def tracked(self, *args, **kwargs):
+        installed = _INSTALLED_GUARDS.get(self)
+        if installed is not None and (
+            installed[3] != _guard_state(self)
+            or any(
+                getattr(getattr(self, name), "__func__", None) is not source
+                for name, source in _GUARD_SOURCE_METHODS.items()
+            )
+        ):
+            raise ReviewInputError(
+                "quarantine installed capacity state or source changed"
+            )
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            if installed is not None:
+                _INSTALLED_GUARDS[self] = (*installed[:3], _guard_state(self))
+
+    return tracked
+
+
 class NativeCapacityGuard:
     def __init__(
         self,
@@ -179,6 +238,7 @@ class NativeCapacityGuard:
         self._pending_create = None
         self.require(self.stats)
 
+    @_tracked_guard_mutation
     def admit_comment_batch(self, bodies):
         """Prepare the complete immutable batch before its first POST.
 
@@ -211,6 +271,7 @@ class NativeCapacityGuard:
             self.comment_bounds, self.future_parts, self.future_bytes = old
             raise
 
+    @_tracked_guard_mutation
     def admit_grouped_publication(self, *, plan, review_wire=None, inline_wires=None):
         """Refine the complete before-startup promise; never add native room.
 
@@ -278,6 +339,7 @@ class NativeCapacityGuard:
             raise
         self._native_prepared = requested
 
+    @_tracked_guard_mutation
     def admit_publication(self, *, review_wire, inline_wires):
         """Reserve the prepared publication, approval, checks and root close."""
         if not self.cursor:
@@ -501,6 +563,7 @@ class NativeCapacityGuard:
                 else "cold-rest",
             }
 
+    @_tracked_guard_mutation
     def seed(self, surface, rows):
         seen = set()
         for row in rows:
@@ -521,6 +584,7 @@ class NativeCapacityGuard:
             self.objects[surface, row["id"]] = _wire({"body": row.get("body", "")})
         self.require(self.stats)
 
+    @_tracked_guard_mutation
     def seed_projected_roots(self):
         """Count actual root identities with their source-enforced body bounds.
 
@@ -569,6 +633,7 @@ class NativeCapacityGuard:
         for method, path, body in edits:
             preview.before_request(method, path, body)
 
+    @_tracked_guard_mutation
     def before_request(self, method, path, body):
         # A response may bind only its own physical create. A later GraphQL
         # POST or a read after an unknown write cannot inherit that pending ID.
@@ -781,6 +846,7 @@ class NativeCapacityGuard:
             (surface, object_wire, deepcopy(object_body)) if new else None
         )
 
+    @_tracked_guard_mutation
     def after_response(self, method, value):
         if (
             self._pending_create is not None
@@ -833,6 +899,343 @@ class NativeCapacityGuard:
         if refined.worst_read_calls() <= self.comment_read_calls:
             self.comment_plan = refined
         self._pending_create = None
+
+
+_GUARD_SOURCE_METHODS = {
+    name: getattr(NativeCapacityGuard, name)
+    for name in (
+        "require",
+        "before_request",
+        "after_response",
+        "admit_comment_batch",
+        "admit_publication",
+        "admit_grouped_publication",
+        "seed",
+        "seed_projected_roots",
+        "_before_request",
+        "_bind_immutable_comment_capacity",
+        "preflight_native_edits",
+    )
+}
+
+
+def installed_capacity(ledger, identity):
+    """Return only the actual installed, unchanged native capacity owner."""
+    from .publication_recovery import _publication_transport
+
+    transport = _publication_transport(ledger.http)
+    guard = getattr(transport, "_quarantine_capacity_guard", None)
+    installed = (
+        _INSTALLED_GUARDS.get(guard) if type(guard) is NativeCapacityGuard else None
+    )
+    if (
+        installed is None
+        or installed[0]() is not ledger
+        or installed[1]() is not transport
+        or not isinstance(guard, NativeCapacityGuard)
+        or guard.identity != identity
+        or installed[3] != _guard_state(guard)
+        or any(
+            getattr(getattr(guard, name), "__func__", None) is not method
+            for name, method in _GUARD_SOURCE_METHODS.items()
+        )
+    ):
+        raise ReviewInputError("quarantine lifecycle installed capacity source changed")
+    NativeCapacityGuard.require(guard, guard.stats)
+    return guard
+
+
+_CAPACITY_EXTENSIONS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True, eq=False)
+class _LifecycleExtension:
+    guard: Any
+    ledger: Any
+    identity: Any
+    state: bytes
+    plan: Any
+    bounds: tuple[int, ...]
+
+
+def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
+    """Pure append-only capacity proposal; retain every original unknown slot."""
+    from review_sensei.bounded_evidence import MAX_STORED_PART_BYTES, MAX_STORED_PARTS
+
+    from .packed_comment_census import CommentAllocationPlan
+
+    guard = installed_capacity(ledger, identity)
+    old = guard.comment_plan
+    if (
+        not guard.complete_tail
+        or old is None
+        or guard.comment_bounds is None
+        or type(added_parts) is not int
+        or not 0 <= added_parts <= MAX_STORED_PARTS
+    ):
+        raise ReviewInputError("quarantine lifecycle installed tail is unsupported")
+    bounds = (MAX_PART_BYTES + 512,) * added_parts
+    if set(old.known) - set(known):
+        raise ReviewInputError(
+            "quarantine lifecycle retained capacity member disappeared"
+        )
+    # Keep the authenticated complete listing order; an original unknown root
+    # may precede later immutable IDs already bound by exact create echoes.
+    merged = {
+        identifier: max(old.known.get(identifier, 0), amount)
+        for identifier, amount in known.items()
+    }
+    plan = CommentAllocationPlan(
+        merged,
+        (*old.unknown, *bounds),
+        metadata_known=old.metadata_known,
+        metadata_unknown=old.metadata_unknown,
+    )
+    if (
+        plan.worst_read_calls() > MAX_PAGINATION_PAGES
+        or sum(plan.known.values()) + sum(plan.unknown) > MAX_STORED_PART_BYTES
+        or guard.future_parts + added_parts > MAX_STORED_PARTS
+    ):
+        raise ReviewInputError("quarantine lifecycle original capacity bound exceeded")
+    preview = copy(guard)
+    preview.comment_plan = plan
+    preview.comment_read_calls = plan.worst_read_calls()
+    preview.comment_bounds = [*guard.comment_bounds, *bounds]
+    preview.future_parts = len(preview.comment_bounds)
+    preview.future_bytes = sum(preview.comment_bounds)
+    preview.certificates = deepcopy(guard.certificates)
+    NativeCapacityGuard.require(preview, preview.stats)
+    proof = _LifecycleExtension(
+        guard, ledger, identity, _guard_state(guard), plan, bounds
+    )
+    _CAPACITY_EXTENSIONS[proof] = _extension_seal(proof)
+    return proof
+
+
+def _extension_seal(proof):
+    plan = proof.plan
+    return (
+        id(proof.guard),
+        id(proof.ledger),
+        proof.identity,
+        proof.state,
+        id(plan),
+        tuple(plan.known.items()),
+        tuple(plan.unknown),
+        tuple(plan.metadata_known.items()),
+        plan.metadata_unknown,
+        proof.bounds,
+    )
+
+
+_GUARDED_WRITER_SOURCE = None
+_GUARDED_REPLACES: dict[Any, Any] = {}
+_WRITER_ACTIVATIONS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True, eq=False)
+class _GuardedActivation:
+    pass
+
+
+def _guarded_lifecycle_writer(method):
+    """Inject an activation issuer only into the installed actual writer."""
+
+    @wraps(method)
+    def writer(ledger, identity, mutate, **kwargs):
+        if "_guarded_authorize" in kwargs:
+            raise ReviewInputError("quarantine writer capability cannot be supplied")
+        from .publication_recovery import _publication_transport
+
+        if (
+            not ledger._quarantine_required
+            or getattr(
+                _publication_transport(ledger.http), "_quarantine_capacity_guard", None
+            )
+            is None
+        ):
+            return method(ledger, identity, mutate, **kwargs)
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .quarantine_action import decision_fence_capacity
+
+        source = _GUARDED_WRITER_SOURCE
+        record = kwargs.get("record")
+        if record is None:
+            raise ReviewInputError("quarantine lifecycle writer record is absent")
+        parts, retained_bytes = kwargs.get("parts"), kwargs.get("retained_bytes")
+        tail = kwargs.get("reserved_tail_calls", 0)
+        caller = ledger.caller
+        root = caller._root
+        record_bytes = canonical_bytes(record.to_dict())
+        business = decision_fence_capacity(ledger)
+        live = [True]
+        capabilities: list[_GuardedActivation] = []
+
+        def require_source():
+            if (
+                not live[0]
+                or source is None
+                or source[0] is not writer
+                or type(ledger) not in _GUARDED_REPLACES
+                or getattr(ledger.replace, "__func__", None)
+                is not _GUARDED_REPLACES[type(ledger)]
+                or getattr(ledger.replace_finding_lifecycle_parts, "__func__", None)
+                is not writer
+                or any(
+                    getattr(getattr(caller, name), "__func__", None) is not fn
+                    for name, fn in source[1].items()
+                )
+                or any(
+                    getattr(getattr(ledger, name), "__func__", None) is not fn
+                    for name, fn in source[2].items()
+                )
+                or caller._root != root
+                or caller._effect_record is not record
+                or canonical_bytes(record.to_dict()) != record_bytes
+                or type(parts) is not int
+                or type(retained_bytes) is not int
+                or type(tail) is not int
+                or parts < 0
+                or retained_bytes < 0
+                or tail < 0
+                or record.identity() != identity
+                or decision_fence_capacity(ledger) != business
+                or business is None
+            ):
+                raise ReviewInputError("quarantine lifecycle writer source changed")
+            caller._require_ledger(ledger, identity)
+
+        require_source()
+
+        def authorize(scope):
+            require_source()
+            from .quarantine_census import _LifecycleCapacity
+
+            _LifecycleCapacity._require_scope(scope, ledger, identity)
+            if (
+                scope.record is not record
+                or scope.parts != parts
+                or scope.extension is None
+                or capabilities
+            ):
+                raise ReviewInputError("quarantine lifecycle writer target changed")
+            cost = scope.plan.worst_read_calls() + 6 + 2 * parts
+            caller.budget_view.preflight(cost + business[0] + tail)
+            capability = _GuardedActivation()
+
+            def validate(operation):
+                require_source()
+                _LifecycleCapacity._require_scope(scope, ledger, identity)
+                if (
+                    operation is not caller._active_operation
+                    or operation is not caller._checkpoint_operation
+                    or operation.key
+                    != "native:" + getattr(mutate, "__qualname__", "checkpoint")
+                    or operation.write_attempted
+                    or operation.confirmed
+                    or operation.remaining < cost
+                    or operation.write_tail != 3
+                    or not any(
+                        operation is issued and block == caller._block
+                        for issued, block in caller._issued_operations
+                    )
+                ):
+                    raise ReviewInputError(
+                        "quarantine lifecycle writer operation changed"
+                    )
+
+            _WRITER_ACTIVATIONS[capability] = (scope, scope.extension, validate)
+            capabilities.append(capability)
+            from .quarantine_census import _bind_lifecycle_activation
+
+            _bind_lifecycle_activation(scope, capability)
+
+        try:
+            return method(
+                ledger, identity, mutate, _guarded_authorize=authorize, **kwargs
+            )
+        finally:
+            live[0] = False
+            for capability in capabilities:
+                _WRITER_ACTIVATIONS.pop(capability, None)
+
+    return writer
+
+
+def _install_guarded_lifecycle_writer(ledger_type, caller_type):
+    global _GUARDED_WRITER_SOURCE
+    if _GUARDED_WRITER_SOURCE is not None:
+        raise ReviewInputError("quarantine lifecycle writer source already installed")
+    _GUARDED_WRITER_SOURCE = (
+        ledger_type.replace_finding_lifecycle_parts,
+        {
+            name: getattr(caller_type, name)
+            for name in (
+                "replace_checkpoint",
+                "_operation",
+                "_require_ledger",
+                "open",
+                "_accept_checkpoint",
+                "reconcile_checkpoint",
+                "close_analysis_abort",
+            )
+        },
+        {
+            name: getattr(ledger_type, name)
+            for name in (
+                "preflight_finding_lifecycle_retention",
+                "evidence_producer",
+                "_discover",
+                "_request",
+                "_fetch_pages",
+                "_verify_mutation_grant",
+                "_part_owner",
+                "_render_comment",
+            )
+        },
+    )
+    _GUARDED_REPLACES[ledger_type] = ledger_type.replace
+
+
+def _install_guarded_ledger_replaces(review_type, action_type):
+    if (
+        len(_GUARDED_REPLACES) != 1
+        or review_type in _GUARDED_REPLACES
+        or action_type in _GUARDED_REPLACES
+    ):
+        raise ReviewInputError("quarantine lifecycle ledger sources already installed")
+    _GUARDED_REPLACES.update(
+        {review_type: review_type.replace, action_type: action_type.replace}
+    )
+
+
+def activate_lifecycle_extension(proof, *, capability=None, operation=None):
+    """Consume once before I/O; a failed operation never replenishes this pool."""
+    issued = (
+        _WRITER_ACTIVATIONS.get(capability)
+        if type(capability) is _GuardedActivation
+        else None
+    )
+    if issued is None or issued[1] is not proof:
+        raise ReviewInputError("quarantine lifecycle writer capability is unissued")
+    if type(proof) is not _LifecycleExtension or _CAPACITY_EXTENSIONS.get(
+        proof
+    ) != _extension_seal(proof):
+        raise ReviewInputError("quarantine lifecycle capacity extension is unissued")
+    issued[2](operation)
+    guard = installed_capacity(proof.ledger, proof.identity)
+    if guard is not proof.guard or _guard_state(guard) != proof.state:
+        raise ReviewInputError("quarantine lifecycle capacity extension is stale")
+    _WRITER_ACTIVATIONS.pop(capability)
+    _CAPACITY_EXTENSIONS.pop(proof)
+    guard.comment_plan = proof.plan
+    guard.comment_read_calls = proof.plan.worst_read_calls()
+    guard.comment_bounds = [*guard.comment_bounds, *proof.bounds]
+    guard.future_parts = len(guard.comment_bounds)
+    guard.future_bytes = sum(guard.comment_bounds)
+    installed = _INSTALLED_GUARDS[guard]
+    _INSTALLED_GUARDS[guard] = (*installed[:3], _guard_state(guard))
 
 
 def _comment_allocation_plan(
@@ -1219,6 +1622,12 @@ def install_capacity(
     transport._quarantine_capacity_guard = guard
     ledger._quarantine_capacity_cursor = True
     guard.comment_reader = CapacityCommentReader(ledger, identity, transport)
+    _INSTALLED_GUARDS[guard] = (
+        weakref.ref(ledger),
+        weakref.ref(transport),
+        guard.comment_plan,
+        _guard_state(guard),
+    )
     return guard
 
 
@@ -1237,7 +1646,7 @@ def install_retained_capacity(ledger, identity, authenticated, *, token):
     bounds = ledger._quarantine_native_comment_bounds
     if bounds is not None:
         future = len(bounds)
-    return install_capacity(
+    guard = install_capacity(
         ledger,
         identity,
         archive["target_isolation"],
@@ -1246,3 +1655,57 @@ def install_retained_capacity(ledger, identity, authenticated, *, token):
         future_bytes=future * MAX_PART_BYTES,
         comment_bounds=bounds,
     )
+
+    if guard is not None:
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .quarantine_origin import _AUTHENTICATED, AuthenticatedQuarantine
+
+        installed = _INSTALLED_GUARDS.get(guard)
+        caller = getattr(ledger, "caller", None) or getattr(
+            ledger, "_startup_caller", None
+        )
+        old_caller = (
+            None
+            if installed is None
+            else (
+                getattr(installed[0](), "caller", None)
+                or getattr(installed[0](), "_startup_caller", None)
+            )
+        )
+        if (
+            installed is None
+            or caller is None
+            or old_caller is not caller
+            or type(authenticated) is not AuthenticatedQuarantine
+            or authenticated not in _AUTHENTICATED
+            or authenticated.original_caller is not caller
+            or authenticated.original_identity != identity
+            or ledger._quarantine_authenticated is not authenticated
+            or not ledger._inventory_complete
+            or installed[3] != _guard_state(guard)
+        ):
+            raise ReviewInputError(
+                "quarantine installed capacity selected owner changed"
+            )
+        from .api_run_requests import ApiRunRequestTransport
+
+        if not isinstance(caller, ApiRunRequestTransport):
+            raise ReviewInputError(
+                "quarantine installed capacity caller is unsupported"
+            )
+        caller._require_ledger(ledger, identity)
+        from .quarantine_origin import require_authenticated_read_owner
+
+        require_authenticated_read_owner(authenticated, ledger, caller, identity)
+        # The existing reader has independently authenticated this complete
+        # lineage. Transfer capacity custody only, never reset its consumed pool.
+        if canonical_bytes(authenticated.lineage) != authenticated.lineage_bytes:
+            raise ReviewInputError("quarantine installed capacity lineage changed")
+        _INSTALLED_GUARDS[guard] = (
+            weakref.ref(ledger),
+            installed[1],
+            installed[2],
+            installed[3],
+        )
+    return guard
