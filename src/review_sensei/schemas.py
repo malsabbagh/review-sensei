@@ -79,3 +79,8 @@ def validate_public_documents(instances: Iterable[object], schema_name: str) -> 
             raise ReviewInputError(
                 f"{schema_name} document {index} failed schema validation"
             ) from exc
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

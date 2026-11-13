@@ -891,3 +891,8 @@ def decode_evidence(
         RecursionError,
     ) as exc:
         raise ReviewInputError("encoded evidence is invalid") from exc
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

@@ -344,3 +344,8 @@ class VerifiedRunAction:
                 # a callback cannot weaken the action's source/head checks.
                 validate_pull(pull)
         return cast(Mapping[str, Any], current)
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

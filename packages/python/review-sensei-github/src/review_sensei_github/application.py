@@ -6099,3 +6099,8 @@ def _publication_round_flags(result: ReviewResult) -> dict[str, bool]:
         "latest_head_reviewed": True,
         "no_progress": False,
     }
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

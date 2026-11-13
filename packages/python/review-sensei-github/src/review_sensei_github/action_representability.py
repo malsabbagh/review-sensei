@@ -409,3 +409,8 @@ __all__ = [
     "guard_current_command_representability",
     "require_action_settlement_representable",
 ]
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

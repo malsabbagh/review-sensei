@@ -105,3 +105,8 @@ def decode_action_result_carrier(value: object, *, history=None) -> dict[str, An
     if len(canonical_bytes(document)) > MAX_PARTITION_DECODED_BYTES:
         raise ReviewInputError("action result exceeds the decoded byte bound")
     return document
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

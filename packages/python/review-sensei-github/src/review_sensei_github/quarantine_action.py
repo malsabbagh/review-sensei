@@ -858,3 +858,8 @@ def require_native_decision(ledger, before, after):
     ):
         raise ReviewInputError("quarantine individual decision reference conflicts")
     object.__setattr__(permit, "consumed", True)
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

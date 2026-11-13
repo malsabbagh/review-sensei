@@ -6755,3 +6755,8 @@ def resolve_local_session_ledger(
     except (OSError, TypeError, ValueError) as exc:
         raise ReviewInputError("session ledger path is invalid") from exc
     return LocalSessionLedger(root)
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

@@ -808,3 +808,8 @@ from .trust_enrollment import _install_observation_source  # noqa: E402
 
 _install_observation_source(BrokerClient)
 del _install_observation_source
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()
