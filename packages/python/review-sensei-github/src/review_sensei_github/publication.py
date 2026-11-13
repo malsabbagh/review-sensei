@@ -6993,8 +6993,16 @@ class ReviewPublisher:
             or not convergence_policy.automatic_github_review_events
         ):
             return assembled
+        # Human decisions withhold approval, but are not required code fixes.
         has_blocking = (
-            bool(planned_state.authoritative_decision_inventory.blocking_obligations)
+            any(
+                ob.unresolved
+                and (
+                    ob.blocking
+                    or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
+                )
+                for ob in planned_state.authoritative_decision_inventory.obligations
+            )
             or planned_state.display_active_findings.has_uncertain_slots
         )
         window_approved = (
@@ -7597,7 +7605,8 @@ class ReviewPublisher:
             return assembled
         has_uncertain = any(s.state == "uncertain" for s in planned_drift.slots)
         has_blocking = (
-            bool(planned_drift.inventory.blocking_obligations) or has_uncertain
+            any(ob.effective_blocking_now for ob in planned_drift.inventory.obligations)
+            or has_uncertain
         )
         if has_blocking and not assembled.requests_changes:
             return replace(
@@ -8881,15 +8890,19 @@ class ReviewPublisher:
             has_uncertain_drift = any(
                 s.state == "uncertain" for s in planned_drift_state.slots
             )
+            blocking_drift_obligations = tuple(
+                ob
+                for ob in planned_drift_state.inventory.obligations
+                if ob.effective_blocking_now
+            )
             window_has_blocking = (
-                bool(planned_drift_state.inventory.blocking_obligations)
-                or has_uncertain_drift
+                bool(blocking_drift_obligations) or has_uncertain_drift
             )
             window_non_inline_blocking = has_uncertain_drift or any(
                 ob.obligation_id not in displayed_drift_ids
                 or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-multi-target"}
                 or not ob.present_anchor.inline_anchorable
-                for ob in planned_drift_state.inventory.blocking_obligations
+                for ob in blocking_drift_obligations
             )
             window_has_human = any(
                 ob.unresolved
@@ -8919,10 +8932,17 @@ class ReviewPublisher:
                 entry.obligation_id
                 for entry in planned_window_state.display_active_findings.entries
             }
-            window_has_blocking = (
-                bool(
-                    planned_window_state.authoritative_decision_inventory.blocking_obligations
+            blocking_window_obligations = tuple(
+                ob
+                for ob in planned_window_state.authoritative_decision_inventory.obligations
+                if ob.unresolved
+                and (
+                    ob.blocking
+                    or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
                 )
+            )
+            window_has_blocking = (
+                bool(blocking_window_obligations)
                 or planned_window_state.display_active_findings.has_uncertain_slots
             )
             window_non_inline_blocking = (
@@ -8931,7 +8951,7 @@ class ReviewPublisher:
                     ob.obligation_id not in displayed_ob_ids
                     or ob.obligation_id in prev_displayed_ids_for_block
                     or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
-                    for ob in planned_window_state.authoritative_decision_inventory.blocking_obligations
+                    for ob in blocking_window_obligations
                 )
             )
             window_has_human = any(
