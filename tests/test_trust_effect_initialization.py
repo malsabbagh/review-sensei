@@ -206,6 +206,22 @@ class TrustInitializationTests(unittest.TestCase):
                 self.assertIsNone(f.comment)
                 self.assertFalse(any(m == "POST" for m, _, _ in f.native))
 
+    def test_changed_prepared_activation_after_refresh_refuses_native(self):
+        f = InitialEffectFixture(self.directory.name)
+
+        def mutate():
+            record, block = f.caller._activation
+            f.caller._activation = (record.evolve(operator_paused=True), block)
+
+        f.refresh_hook = mutate
+        with self.assertRaisesRegex(
+            ReviewInputError, "activation changed after refresh"
+        ):
+            f.initialize()
+        self.assertIsNone(f.comment)
+        self.assertFalse(any(m == "POST" for m, _, _ in f.native))
+        self.assertEqual(len(f.calls), 2)
+
     def test_native_response_loss_preserves_unknown_and_never_replays(self):
         f = InitialEffectFixture(self.directory.name)
         f.lost_post = True

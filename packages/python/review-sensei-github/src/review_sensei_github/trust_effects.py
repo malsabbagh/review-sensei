@@ -350,6 +350,23 @@ def _install_transport_source(source_class):
             ):
                 raise ReviewInputError("trust effect fresh receipt is unavailable")
             return
+        if caller in _initializing:
+            from .session_ledger import parse_session_comment
+
+            activation = caller._activation
+            value = json.loads(request.data)
+            record = parse_session_comment(
+                value.get("body"), identity=_initializing[caller][1]
+            )
+            if (
+                activation is None
+                or record is None
+                or canonical_bytes(record.to_dict())
+                != canonical_bytes(activation[0].to_dict())
+            ):
+                raise ReviewInputError(
+                    "trust initialization activation changed after refresh"
+                )
         # Caller.open increments its own physical sequence before this boundary.
         binding = json.loads(_binding(profile, request))
         binding["sequence"] -= 1
