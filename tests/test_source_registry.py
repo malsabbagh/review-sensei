@@ -77,3 +77,17 @@ class SourceRegistryTests(unittest.TestCase):
             require_instance_source(ledger, methods=methods)
             with self.assertRaisesRegex(ReviewInputError, "source changed"):
                 require_module_seal(review_run)
+
+    def test_default_binding_replacement_and_content_mutation_reject(self):
+        from review_sensei_github import http
+
+        function = http.GitHubHttp.paginate
+        original = function.__kwdefaults__
+        for replacement in (dict(original), {**original, "before_read": lambda: 30}):
+            with patch.object(function, "__kwdefaults__", replacement):
+                with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                    require_module_seal(http)
+        with patch.object(function, "__defaults__", (None,)):
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(http)
+        require_module_seal(http)

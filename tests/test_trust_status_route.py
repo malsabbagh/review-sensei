@@ -306,6 +306,81 @@ class TrustStatusRouteTests(unittest.TestCase):
                     self.assertEqual(len(f.native), boundary[0])
                     self.assertEqual(f.caller.accounting.configuration.limit, 512)
 
+    def test_in_place_defaults_are_pinned_before_and_after_first_root(self):
+        from review_sensei_github.http import GitHubHttp
+        from review_sensei_github.run_authority import VerifiedRunAction
+
+        for function, name in (
+            (GitHubHttp.paginate, "before_read"),
+            (GitHubHttp.paginate, "monotonic"),
+            (VerifiedRunAction.fence, "validate_pull"),
+        ):
+            for after_first in (False, True):
+                with (
+                    self.subTest(name=name, after_first=after_first),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    f = StatusFixture(directory)
+                    boundary = []
+                    invoked = []
+                    original = function.__kwdefaults__[name]
+
+                    def substitute():
+                        invoked.append(True)
+                        raise AssertionError("mutated default executed")
+
+                    def install():
+                        boundary.append(len(f.native))
+                        function.__kwdefaults__[name] = substitute
+
+                    if after_first:
+                        f.after_root = install
+                    else:
+                        install()
+                    try:
+                        with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                            execute_command(f.run, f.args)
+                    finally:
+                        function.__kwdefaults__[name] = original
+                    self.assertFalse(invoked)
+                    self.assertEqual(len(f.native), boundary[0])
+                    self.assertEqual(
+                        sum(m == "PATCH" for m, _, _ in f.native), int(after_first)
+                    )
+
+    def test_default_mutation_before_action_import_is_not_original_source(self):
+        import os
+        import subprocess
+        import sys
+
+        code = """
+import sys, tempfile
+from unittest.mock import patch
+from review_sensei_github.http import GitHubHttp
+assert 'review_sensei_github.action_run' not in sys.modules
+GitHubHttp.paginate.__kwdefaults__['before_read'] = lambda: 30
+from review_sensei_github.action_run import execute_command
+from tests.test_trust_status_route import StatusFixture
+from tests.test_run_authority import NOW
+with patch('time.time', return_value=NOW), tempfile.TemporaryDirectory() as directory:
+    f = StatusFixture(directory)
+    try:
+        execute_command(f.run, f.args)
+    except Exception as error:
+        assert 'source changed' in str(error), repr(error)
+    else:
+        raise AssertionError('mutated default acquired source authority')
+    assert not any(m == 'PATCH' for m, _, _ in f.native)
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_admission_rejects_fabricated_budget_or_reallocated_original_blocks(self):
         from dataclasses import replace
 

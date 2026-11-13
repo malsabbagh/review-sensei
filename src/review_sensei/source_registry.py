@@ -18,6 +18,36 @@ def _build_registry():
     registered: dict[Any, tuple[tuple[Any, str, Any, Any], ...]] = {}
 
     classes: dict[type, Any] = {}
+    function_defaults: dict[Any, Any] = {}
+
+    def default_snapshot(value, ancestors=()):
+        # Retain both binding identity and container contents. In particular the
+        # kwdefaults dictionary can be mutated without replacing the function.
+        identity = id(value)
+        if identity in ancestors:
+            return (identity, "cycle")
+        ancestors = (*ancestors, identity)
+        if type(value) in (type(None), bool, int, float, str, bytes):
+            return (identity, type(value), repr(value))
+        if type(value) in (tuple, list):
+            return (identity, tuple(default_snapshot(v, ancestors) for v in value))
+        if type(value) is dict:
+            return (
+                identity,
+                tuple(
+                    (default_snapshot(k, ancestors), default_snapshot(v, ancestors))
+                    for k, v in value.items()
+                ),
+            )
+        if type(value) in (set, frozenset):
+            return (identity, frozenset(default_snapshot(v, ancestors) for v in value))
+        return (identity, getattr(value, "__code__", None))
+
+    def defaults(function):
+        return (
+            default_snapshot(function.__defaults__),
+            default_snapshot(function.__kwdefaults__),
+        )
 
     def normalize(value):
         return getattr(value, "__func__", value)
@@ -93,6 +123,11 @@ def _build_registry():
                     original_methods,
                 )
                 bindings.extend(members)
+        for _owner, _name, original, _code in bindings:
+            if inspect.isfunction(original):
+                # An imported function may already have an earlier defining
+                # module seal. Never replace that original snapshot.
+                function_defaults.setdefault(original, defaults(original))
         registered[module] = tuple(bindings)
 
     def require_bindings(bindings):
@@ -105,6 +140,10 @@ def _build_registry():
             if (
                 current is not original
                 or getattr(current, "__code__", None) is not code
+                or (
+                    inspect.isfunction(current)
+                    and defaults(current) != function_defaults[current]
+                )
             ):
                 raise ReviewInputError("original module source changed: " + name)
 
