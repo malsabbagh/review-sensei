@@ -1458,11 +1458,42 @@ class GitHubApplication:
             app_slug=app_slug,
             evidence_budget=budget,
         )
+        from review_sensei.session import SessionRecord
+
+        from .api_run_requests import ApiRunRequestTransport, ApiRunSessionLedger
         from .publication_recovery import _PaginationObservationHttp
 
+        # The built-in publication wrapper may copy the same run-owned ledger
+        # twice. Reuse only its exact owned root, never a lookalike record or a
+        # checkpoint that is still in flight. This changes no native/CAS fence.
+        same_run_snapshot = (
+            type(ledger) is ApiRunSessionLedger
+            and type(transaction_ledger) is ApiRunSessionLedger
+            and type(ledger.caller) is ApiRunRequestTransport
+            and ledger.caller is transaction_ledger.caller
+            and ledger.evidence_budget is ledger.caller.budget_view
+            and transaction_record is not None
+            and transaction_record.identity() == identity
+            and transaction_record.record_sha256 == ledger.caller._root
+            and SessionRecord.from_dict(transaction_record.to_dict()).record_sha256
+            == ledger.caller._root
+            and transaction_record is ledger.caller._effect_record
+            and ledger.caller._checkpoint is None
+            and ledger.caller._checkpoint_operation is None
+            and ledger.caller._active_operation is None
+            and ledger.caller._staged_part_operation is None
+            and getattr(ledger.load, "__func__", None) is ApiRunSessionLedger.load
+            and getattr(transaction_ledger.load, "__func__", None)
+            is ApiRunSessionLedger.load
+        )
         same_selected_authority = ledger is transaction_ledger or (
-            type(ledger) is GitHubIssueCommentSessionLedger
-            and type(transaction_ledger) is GitHubIssueCommentSessionLedger
+            ledger is not None
+            and transaction_ledger is not None
+            and (
+                type(ledger) is GitHubIssueCommentSessionLedger
+                and type(transaction_ledger) is GitHubIssueCommentSessionLedger
+                or same_run_snapshot
+            )
             and type(ledger.http) is _PaginationObservationHttp
             and type(transaction_ledger.http) is _PaginationObservationHttp
             and ledger.evidence_budget is budget
