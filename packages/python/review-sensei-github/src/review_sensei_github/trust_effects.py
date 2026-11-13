@@ -84,6 +84,11 @@ def _install_transport_source(source_class):
         from .run_authority import VerifiedRunAction
         from .trust_status import _StatusRoute
 
+        if any(
+            source_class.__dict__.get(name) is not original
+            for name, original in transport_originals
+        ):
+            raise ReviewInputError("trust command original transport source changed")
         if command_registered or module is not action_run:
             raise ReviewInputError("trust command source registration is invalid")
         command_registered = True
@@ -158,6 +163,10 @@ def _install_transport_source(source_class):
                 source_seal()
                 if (
                     module.execute_command is not execute
+                    or any(
+                        source_class.__dict__.get(name) is not original
+                        for name, original in transport_originals
+                    )
                     or (
                         args.comment_body,
                         args.source_comment_id,
@@ -593,3 +602,11 @@ def _install_transport_source(source_class):
         ):
             raise ReviewInputError("trust native attempt binding changed")
         return identifier
+
+    # Captured when api_run_requests itself completes, not when a later command
+    # module happens to import. Late registration cannot bless replaced methods.
+    transport_originals = tuple(
+        (name, value)
+        for name, value in source_class.__dict__.items()
+        if callable(value) or isinstance(value, property)
+    )

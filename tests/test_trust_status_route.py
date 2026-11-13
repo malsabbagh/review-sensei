@@ -384,3 +384,32 @@ class TrustStatusRouteTests(unittest.TestCase):
             execute_command(f.run, f.args)
         self.assertEqual(len(f.native), boundary[0])
         self.assertEqual(sum(m == "PATCH" for m, _, _ in f.native), 1)
+
+    def test_preimport_transport_substitution_cannot_become_registered_source(self):
+        import os
+        import subprocess
+        import sys
+
+        code = """
+from review_sensei_github.api_run_requests import ApiRunRequestTransport
+import sys
+assert 'review_sensei_github.action_run' not in sys.modules
+original = ApiRunRequestTransport.admit_action
+def substitute(*args, **kwargs):
+    return original(*args, **kwargs)
+ApiRunRequestTransport.admit_action = substitute
+try:
+    import review_sensei_github.action_run
+except Exception as error:
+    assert 'original transport source changed' in str(error), repr(error)
+else:
+    raise AssertionError('late registration accepted substituted transport')
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
