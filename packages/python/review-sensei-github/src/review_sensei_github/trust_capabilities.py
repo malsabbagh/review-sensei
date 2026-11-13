@@ -15,6 +15,7 @@ from weakref import WeakKeyDictionary
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
 
+from .errors import GitHubBrokerClientError
 from .run_authority import parse_authority
 
 _installed = False
@@ -70,7 +71,14 @@ def _install_capability_source(source_class):
         if self in pending:
             pending[self]["invalid"] = True
         opener, destination = self.opener, self.broker_url
-        before = parse_authority(self.authority) if qualified else None
+        before = None
+        if qualified:
+            try:
+                before = parse_authority(self.authority)
+            except GitHubBrokerClientError:
+                # Existing exchange input validation owns its error precedence;
+                # malformed/unconfigured clients gain no provenance receipt.
+                qualified = False
         capture = {"response": None, "invalid": False}
         if qualified:
             pending[self] = capture
@@ -186,6 +194,7 @@ def _install_capability_source(source_class):
             observed = json.loads(document)
             if (
                 broker.opener is not opener
+                or destination != profile.broker_url
                 or broker.broker_url != destination
                 or getattr(opener, "__self__", None) is not caller
                 or getattr(opener, "__func__", None) is not caller_open

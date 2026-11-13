@@ -118,6 +118,31 @@ class TrustCapabilityTests(unittest.TestCase):
                 authority=f.session.attestation,
             )
 
+    def test_other_broker_realm_cannot_issue_for_original_profile(self):
+        f = CapabilityFixture(self.directory.name)
+        other = BrokerClient(
+            broker_url="https://other.invalid/token",
+            opener=f.caller.open,
+            authority={**f.request, "version": 3},
+        )
+        token = other.exchange("synthetic-oidc", capability="review_publish")
+        with self.assertRaisesRegex(ReviewInputError, "matching source issuance"):
+            require_source_capability(
+                f.caller,
+                token,
+                capability="review_publish",
+                authority=f.session.attestation,
+            )
+
+    def test_unconfigured_legacy_input_error_precedence_is_unchanged(self):
+        from review_sensei_github.errors import GitHubBrokerClientError
+
+        broker = BrokerClient()
+        with self.assertRaisesRegex(GitHubBrokerClientError, "OIDC token is empty"):
+            broker.exchange("", capability="unsupported")
+        with self.assertRaisesRegex(GitHubBrokerClientError, "capability is invalid"):
+            broker.exchange("synthetic-oidc", capability="unsupported")
+
     def test_direct_helper_decorated_source_and_scope_substitution_cannot_issue(self):
         from review_sensei_github.trust_capabilities import _install_capability_source
 
