@@ -122,6 +122,73 @@ def _guard_state(guard):
         if key
         not in {"identity", "comment_reader", "comment_plan", "objects", "certificates"}
     }
+    if guard.native_profile is not None:
+        from .native_reader_projection import HistoricalRoot, ReaderProjection
+
+        projection = guard.native_profile.get("projection")
+        projection_fields = (
+            "repository_id",
+            "pull_request",
+            "producer_id",
+            "execution_manifest_sha256",
+            "source_contract_sha256",
+            "fixed_explicit_review_heads",
+            "fixed_check_heads",
+            "implicit_review_objects",
+            "roots",
+        )
+        root_fields = ("root_id", "thread_id", "review_id", "head_sha")
+        if (
+            type(projection) is not ReaderProjection
+            or set(vars(projection)) != set(projection_fields)
+            or type(projection.roots) is not tuple
+            or any(
+                type(root) is not HistoricalRoot or set(vars(root)) != set(root_fields)
+                for root in projection.roots
+            )
+        ):
+            raise ReviewInputError("quarantine capacity reader projection type changed")
+        # This is a process-local custody commitment, not a new projection
+        # authority. Keep every authenticated field and the original objects;
+        # never stringify or drop typed source evidence to make JSON fit.
+        encoded = {name: getattr(projection, name) for name in projection_fields}
+        encoded["roots"] = [
+            {name: getattr(root, name) for name in root_fields}
+            for root in projection.roots
+        ]
+        values["native_profile"] = {
+            **guard.native_profile,
+            "projection": encoded,
+        }
+        from .native_review_census import RootMetadata
+
+        metadata_fields = (
+            "comment_id",
+            "review_id",
+            "producer_id",
+            "resolved",
+            "side",
+            "subject_type",
+            "head_sha",
+            "updated_at",
+        )
+        metadata = guard.native_profile.get("root_metadata", {})
+        if type(metadata) is not dict or any(
+            type(key) is not int
+            or type(row) is not RootMetadata
+            or set(vars(row)) != set(metadata_fields)
+            for key, row in metadata.items()
+        ):
+            raise ReviewInputError("quarantine capacity root metadata type changed")
+        values["native_profile"]["root_metadata"] = {
+            key: {name: getattr(row, name) for name in metadata_fields}
+            for key, row in metadata.items()
+        }
+        values["projection_metadata_identities"] = sorted(
+            (key, id(row)) for key, row in metadata.items()
+        )
+        values["projection_identity"] = id(projection)
+        values["projection_root_identities"] = [id(root) for root in projection.roots]
     values["identity"] = vars(guard.identity)
     values["reader_identity"] = id(guard.comment_reader)
     values["objects"] = sorted(
