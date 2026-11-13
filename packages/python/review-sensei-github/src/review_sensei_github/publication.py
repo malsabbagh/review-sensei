@@ -8634,7 +8634,37 @@ class ReviewPublisher:
             if lifecycle_journal is not None:
 
                 def publish_impl(**arguments):
-                    with lifecycle_journal.transports():
+                    from .ordinary_publication_reads import observe_publication
+
+                    key = (repository_id, pull_request)
+                    retained_state = self._drift_states.get(
+                        key
+                    ) or self._active_window_states.get(key)
+                    inventory = getattr(retained_state, "inventory", None) or getattr(
+                        retained_state, "authoritative_decision_inventory", None
+                    )
+                    closed_empty_route = (
+                        not result.comments
+                        and result.transaction is not None
+                        and getattr(lifecycle_journal.ledger, "caller", None)
+                        is not None
+                        and lifecycle_journal._record.quarantine_lineage is None
+                        and lifecycle_journal._record.historical_assessments is None
+                        and (inventory is None or not inventory.obligations)
+                        and retained_eligibility is None
+                    )
+                    with (
+                        lifecycle_journal.transports(),
+                        (
+                            observe_publication(self, lifecycle_journal)
+                            if closed_empty_route
+                            else nullcontext(None)
+                        ) as observation,
+                    ):
+                        previous_observation = getattr(
+                            self, "_ordinary_publication_observation", None
+                        )
+                        self._ordinary_publication_observation = observation
                         try:
                             outcome = self._publish_impl(**arguments)
                         except BaseException as exc:
@@ -8646,6 +8676,10 @@ class ReviewPublisher:
                                     + type(checkpoint_error).__name__
                                 )
                             raise
+                        finally:
+                            self._ordinary_publication_observation = (
+                                previous_observation
+                            )
                         lifecycle_journal.finish()
                         return outcome
 
@@ -10061,6 +10095,59 @@ class ReviewPublisher:
             head_sha,
             review_result_digest(result),
         )
+        planned_check_outcome = (
+            review_check_outcome(
+                policy=effective_policy,
+                review_status=prospective_eligibility.facts.review_status,
+                required_fixes=(
+                    prospective_eligibility.facts.has_blocking_findings
+                    or has_blocking_findings(result)
+                    or window_has_blocking
+                ),
+                required_decisions=(
+                    prospective_eligibility.facts.has_human_adjudication_findings
+                    or has_human_adjudication_findings(result)
+                    or window_has_human
+                ),
+                coverage_uncertainty_accepted=True,
+                review_verdict=result.review_verdict,
+            )
+            if window_coverage_accepted
+            else check_outcome_for_result(
+                replace(
+                    result,
+                    review_status=prospective_eligibility.facts.review_status,
+                ),
+                policy=effective_policy,
+                required_fixes=(
+                    prospective_eligibility.facts.has_blocking_findings
+                    or window_has_blocking
+                ),
+                required_decisions=(
+                    prospective_eligibility.facts.has_human_adjudication_findings
+                    or window_has_human
+                ),
+            )
+        )
+        ordinary_observation = getattr(self, "_ordinary_publication_observation", None)
+        if ordinary_observation is not None and not write_preflight.app_authored:
+            from .ordinary_publication_plan import admit_current
+
+            admit_current(
+                self,
+                ordinary_observation,
+                lifecycle_journal,
+                original_result=original_result,
+                result=result,
+                assembled=preflight_review,
+                eligibility=prospective_eligibility,
+                marker=marker,
+                outcome=planned_check_outcome,
+                policy=effective_policy,
+                complete_inventory=complete_inventory,
+                checks_enabled=check_token is not None,
+                grouped=grouped_publication,
+            )
         if write_preflight.app_authored:
             check_diagnostic: str | None = "app_authored"
         else:
@@ -10073,40 +10160,6 @@ class ReviewPublisher:
                 observation_context=check_observation_context,
             )
             if check_diagnostic is None:
-                planned_check_outcome = (
-                    review_check_outcome(
-                        policy=effective_policy,
-                        review_status=prospective_eligibility.facts.review_status,
-                        required_fixes=(
-                            prospective_eligibility.facts.has_blocking_findings
-                            or has_blocking_findings(result)
-                            or window_has_blocking
-                        ),
-                        required_decisions=(
-                            prospective_eligibility.facts.has_human_adjudication_findings
-                            or has_human_adjudication_findings(result)
-                            or window_has_human
-                        ),
-                        coverage_uncertainty_accepted=True,
-                        review_verdict=result.review_verdict,
-                    )
-                    if window_coverage_accepted
-                    else check_outcome_for_result(
-                        replace(
-                            result,
-                            review_status=prospective_eligibility.facts.review_status,
-                        ),
-                        policy=effective_policy,
-                        required_fixes=(
-                            prospective_eligibility.facts.has_blocking_findings
-                            or window_has_blocking
-                        ),
-                        required_decisions=(
-                            prospective_eligibility.facts.has_human_adjudication_findings
-                            or window_has_human
-                        ),
-                    )
-                )
                 check_diagnostic = self._check_state_or_diagnostic(
                     check_token=check_token,
                     repository=repository,
@@ -12168,3 +12221,10 @@ class ReviewPublisher:
 
     def http_get(self, path: str, *, token: str) -> tuple[int, Any]:
         return self.http.request("GET", path, token=token)
+
+
+# Install only after all actual source classes are defined. No first-caller registration.
+from .ordinary_publication_reads import _install_publication_source  # noqa: E402
+
+_install_publication_source(ReviewPublisher)
+del _install_publication_source
