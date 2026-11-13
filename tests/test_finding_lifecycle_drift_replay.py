@@ -18,6 +18,24 @@ def _worker(root: Path, action: str):
     native_open = fixture.PersistentNativeService._open
 
     def retain_check_identity(self, request, timeout=None):
+        path = urlparse(request.full_url).path
+        if request.method == "GET" and "/pulls/comments/" in path:
+            self.calls.append(("GET", path, None))
+            cid = int(path.rsplit("/", 1)[-1])
+            comment = next(
+                (
+                    c
+                    for t in self.threads
+                    for c in t["comments"]["nodes"]
+                    if c["databaseId"] == cid
+                ),
+                None,
+            )
+            self.save()
+            return self._resp(
+                dict(comment, id=cid) if comment else {"message": "Not Found"},
+                200 if comment else 404,
+            )
         response = native_open(self, request, timeout)
         if request.method == "POST" and urlparse(request.full_url).path.endswith(
             "/check-runs"
@@ -70,43 +88,49 @@ def _worker(root: Path, action: str):
     )
     result = ReviewResult.from_dict(json.loads((root / "result.json").read_text()))
     before = len(host.calls)
-    outcome = app.publish_review(
-        options=GitHubWriteOptions(
-            auto_review=True,
-            auto_approve=True,
-            github_writes=True,
-            operation_entry="disabled",
-            max_active_findings=1,
-            enable_drift_tracking=True,
-        ),
-        oidc_token="fixture-oidc",
-        repository="owner/repo",
-        repository_id=1,
-        pull_request=1,
-        head_sha=head,
-        base_branch="main",
-        base_sha=fixture.BASE_SHA,
-        result=result,
-        diff=fixture.ORDINARY_DIFF.replace("src/app.py", "src/renamed.py"),
-        drift_descriptors=(
-            FileDriftDescriptor(
-                "file_rename", "src/app.py", ("src/renamed.py",), ("auth",)
+    error = None
+    outcome = None
+    try:
+        outcome = app.publish_review(
+            options=GitHubWriteOptions(
+                auto_review=True,
+                auto_approve=True,
+                github_writes=True,
+                operation_entry="disabled",
+                max_active_findings=1,
+                enable_drift_tracking=True,
             ),
-        ),
-        app_slug="reviewsensei[bot]",
-        convergence_policy=fixture.POLICY,
-        configuration_context=fixture.CONFIGURATION,
-        evidence_context=fixture.EVIDENCE,
-        blocker_candidates=fixture.window_fixtures.OrdinaryPublisherActiveWindowTests._blockers(
-            result
-        ),
-    )
+            oidc_token="fixture-oidc",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=head,
+            base_branch="main",
+            base_sha=fixture.BASE_SHA,
+            result=result,
+            diff=fixture.ORDINARY_DIFF.replace("src/app.py", "src/renamed.py"),
+            drift_descriptors=(
+                FileDriftDescriptor(
+                    "file_rename", "src/app.py", ("src/renamed.py",), ("auth",)
+                ),
+            ),
+            app_slug="reviewsensei[bot]",
+            convergence_policy=fixture.POLICY,
+            configuration_context=fixture.CONFIGURATION,
+            evidence_context=fixture.EVIDENCE,
+            blocker_candidates=fixture.window_fixtures.OrdinaryPublisherActiveWindowTests._blockers(
+                result
+            ),
+        )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
     host.save()
     print(
         json.dumps(
             {
-                "status": outcome.status,
-                "diagnostic": outcome.diagnostic,
+                "status": outcome.status if outcome else None,
+                "diagnostic": outcome.diagnostic if outcome else None,
+                "error": error,
                 "calls": host.calls[before:],
                 "state": fixture._state_observation(publisher, "drift"),
                 "durable": fixture._durable_observation(root),
@@ -129,6 +153,64 @@ class DriftEditRestartTests(unittest.TestCase):
         )
         self.assertEqual(process.returncode, expected_exit, process.stderr)
         return json.loads(process.stdout) if process.stdout.strip() else None
+
+    def test_cold_drift_readback_uses_exact_target_without_retry(self):
+        for mutation in ("edited", "foreign", "duplicated", "deleted"):
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                fixture.DurableFindingRestartTests.run_phase(
+                    self, root, "drift", "initial"
+                )
+                self.run_worker(root, "lost", expected_exit=73)
+                path = root / "service.json"
+                service = json.loads(path.read_text())
+                comment = service["threads"][0]["comments"]["nodes"][0]
+                if mutation == "edited":
+                    comment["body"] += "\nHuman changed this evidence"
+                elif mutation == "foreign":
+                    comment["author"]["databaseId"] = 31337
+                    comment["user"]["id"] = 31337
+                elif mutation == "duplicated":
+                    duplicate = json.loads(json.dumps(service["threads"][0]))
+                    duplicate["id"] = "PRRT_duplicate_native"
+                    duplicate["comments"]["nodes"][0]["databaseId"] += 1
+                    service["threads"].append(duplicate)
+                else:
+                    service["threads"].clear()
+                path.write_text(json.dumps(service))
+                replay = self.run_worker(root, "replay")
+                if mutation == "duplicated":
+                    # A second object does not invalidate the exact known native ID.
+                    # It also cannot substitute for or authorize edits to that target.
+                    self.assertIsNone(replay["error"], replay)
+                else:
+                    self.assertIn("native intent remains uncertain", replay["error"])
+                self.assertEqual(replay["threads"], service["threads"])
+                self.assertEqual(replay["reviews"], service["reviews"])
+                self.assertFalse(
+                    any(
+                        method != "GET"
+                        and (
+                            path != "/graphql" or "mutation" in payload.get("query", "")
+                        )
+                        for method, path, payload in replay["calls"]
+                    )
+                )
+                self.assertFalse(
+                    any(r["state"] == "APPROVED" for r in replay["reviews"])
+                )
+                self.assertTrue(
+                    any(
+                        e["status"]
+                        == ("confirmed" if mutation == "duplicated" else "pending")
+                        and e["method"] == "PATCH"
+                        and "/pulls/comments/" in e["path"]
+                        for e in replay["durable"]["effects"]
+                    )
+                )
 
     def test_cold_lost_stored_patch_reconciles_without_second_edit(self):
         with tempfile.TemporaryDirectory() as directory:
