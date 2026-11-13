@@ -41,6 +41,7 @@ from .conversation import (
     ConversationPublisher,
     PreparedConversation,
     ReplyResult,
+    apply_authenticated_finding_resolution,
     authorized_human_comment,
     has_standalone_sensei_mention,
 )
@@ -233,6 +234,47 @@ class PreparedHumanAssessment:
 
 class HumanAssessmentPublisher:
     """Keep reply authority, inference evidence and review authority distinct."""
+
+    def _finalize_lifecycle_decisions(self, *, inventory, **kwargs):
+        consumer = getattr(self.finalizer, "_finding_lifecycle_consumer", None)
+
+        def finalize():
+            # Inline authority is freshly authenticated inside the finalizer.
+            # Partitioned readers keep their independent complete opening here.
+            if (
+                consumer is not None
+                and kwargs["eligibility"].partitioned_root is not None
+            ):
+                current = self.finalizer.load_eligibility(
+                    token=kwargs["token"],
+                    repository=kwargs["repository"],
+                    pull_request=kwargs["pull_request"],
+                    head_sha=kwargs["head_sha"],
+                    app_slug=kwargs["app_slug"],
+                    require_valid=True,
+                )
+                if current == kwargs["eligibility"]:
+                    apply_authenticated_finding_resolution(
+                        self.finalizer,
+                        repository_id=consumer.identity.repository_id,
+                        pull_request=kwargs["pull_request"],
+                        head_sha=kwargs["head_sha"],
+                        instances=inventory.resolved,
+                        evidence_sha256=hashlib.sha256(
+                            json.dumps(
+                                inventory.to_dict(),
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode()
+                        ).hexdigest(),
+                    )
+            return self.finalizer.finalize_recorded_decisions(**kwargs)
+
+        # One selected-root journal covers publication and dependent effects;
+        # each effect still durably checkpoints its pending intent before send.
+        if consumer is not None and not consumer._entered:
+            return consumer.run(finalize)
+        return finalize()
 
     def __init__(
         self,
@@ -1128,7 +1170,8 @@ class HumanAssessmentPublisher:
             # finalizer without another assessment record or model decision.
             # Its fresh PR/root/full-prose checks precede thread mutations and
             # approval; repeating them here cannot authorize any new write.
-            finalized = self.finalizer.finalize_recorded_decisions(
+            finalized = self._finalize_lifecycle_decisions(
+                inventory=updated_inventory,
                 token=review_token,
                 repository=repository,
                 pull_request=pull_request,
@@ -1225,31 +1268,49 @@ class HumanAssessmentPublisher:
         body = self._authority_body(
             prepared, updated_inventory, refreshed, evidence_sha256=evidence_digest
         )
-        status, payload = self.http.request(
-            "POST",
-            self.http.repository_path(repository, f"/pulls/{pull_request}/reviews"),
-            token=review_token,
-            body={"commit_id": conversation.head_sha, "event": "COMMENT", "body": body},
-        )
-        if (
-            status not in {200, 201}
-            or not isinstance(payload, dict)
-            or type(payload.get("id")) is not int
-        ):
-            raise GitHubPublicationError(
-                "human assessment publication was not confirmed"
+
+        def publish_authority():
+            return self.finalizer.http.request(
+                "POST",
+                self.http.repository_path(repository, f"/pulls/{pull_request}/reviews"),
+                token=review_token,
+                body={
+                    "commit_id": conversation.head_sha,
+                    "event": "COMMENT",
+                    "body": body,
+                },
             )
-        # Re-read durable eligibility inside finalization, including after the
-        # thread scan, so a newer same-head human finding wins over this result.
-        finalized = self.finalizer.finalize_recorded_decisions(
-            token=review_token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=conversation.head_sha,
-            app_slug=app_slug,
-            eligibility=refreshed,
-            check_token=check_token,
-            reviews_policy=reviews_policy,
+
+        def publish_and_finalize():
+            status, payload = publish_authority()
+            if (
+                status not in {200, 201}
+                or not isinstance(payload, dict)
+                or type(payload.get("id")) is not int
+            ):
+                raise GitHubPublicationError(
+                    "human assessment publication was not confirmed"
+                )
+            # Native readback inside finalization, not the POST response,
+            # authenticates the refreshed decisions. The next write checkpoints
+            # this response and its own pending intent atomically in one root.
+            return self._finalize_lifecycle_decisions(
+                inventory=updated_inventory,
+                token=review_token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=conversation.head_sha,
+                app_slug=app_slug,
+                eligibility=refreshed,
+                check_token=check_token,
+                reviews_policy=reviews_policy,
+            )
+
+        consumer = getattr(self.finalizer, "_finding_lifecycle_consumer", None)
+        finalized = (
+            consumer.run(publish_and_finalize)
+            if consumer is not None
+            else publish_and_finalize()
         )
         completed = replace(
             outcome,

@@ -4,7 +4,8 @@
 - Date: 2026-11-11
 - Decision owner/reviewers: ReviewSensei maintainers; independent source review
 - Linked GitHub Issue: pending; user-directed lifecycle gap qualification (G10, G16, G14, G15)
-- Linked PR: Stage B ordinary publisher/application integration (`fix/stage-b-g10-g16-g14-g15-publisher-integration`)
+- Linked PR: [#460](https://github.com/malsabbagh/review-sensei/pull/460) supplied the cold-inventory guard; the subsequent durable lifecycle candidate requires independent qualification.
+- Source revision of this decision: 2026-11-13; final exact-head qualification pending
 
 ## Context
 
@@ -33,19 +34,24 @@ identity, comment persistence, and repository trust are conflated:
 
 ## Decision
 
-The sections below describe the domain model and conditional ordinary-path
-hooks, not an authenticated durable wire contract. Active-window/drift state,
-artifact observations and trust snapshots still depend on complete supplied
-state or process-local caches. Ordinary cross-process finding reconstruction
-is not implemented; missing lifecycle proof must retain a handoff. The
-2026-11-12 amendments below qualify the implemented source scope.
+Retain the complete finding lifecycle under the independently selected session
+root, before effects, rather than treating a reduced baseline or publisher cache
+as authority. The versioned codec, evidence reference, transport journal and
+native readback described below extend the ordinary G10/G14/G16 paths. Current
+source includes fresh-process application tests and bounded native-publication
+tests; this document records the implementation contract, not a claim that the
+final candidate's complete test matrix or required CI has passed.
+
+G15 trust observations and migrations retain their separate admission contracts.
+A finding snapshot neither establishes current installation/owner trust nor
+solves G02/G08 uncontrolled-writer fencing.
 
 ### 1. Four-variable bounded active window (`review_sensei.active_finding_window`)
 
 When a complete lifecycle state is available, the domain evaluator separates
 four immutable state variables on each review round:
 - `changed_file_coverage`: diff enumeration and per-file coverage state;
-- `authoritative_decision_inventory`: complete in-memory inventory of unresolved,
+- `authoritative_decision_inventory`: complete retained inventory of unresolved,
   omitted-uncertain, ambiguous, verified-fixed, overridden, and rescan-superseded
   obligations regardless of display capacity;
 - `display_active_findings`: strict-cap (`max_active_findings`) priority-first
@@ -83,7 +89,18 @@ when unanchored). Multi-target copies, split moves, and duplicate code hold in
 `ambiguous-multi-target` until positive `ConfirmedFixEvidence` covers every
 implicated path, an `AuthorizedHumanOverride` is recorded, or a complete
 head-bound `AuthorizedRescan(mode="full")` (whose `reviewed_paths` include all
-present candidate paths) supersedes prior state.
+present candidate paths) supersedes prior state. Ambiguity and all prior
+candidate paths survive subsequent empty or single-target results; another diff
+or deleted path alone cannot collapse that set.
+
+Native success uses actual owned review/comment/thread readback. A review ID
+alone cannot confirm an inline binding. New inline receipts match the exact
+rendered body, instance, initial anchor, numeric producer, repository/PR and
+snapshot. An in-place comment edit preserves GitHub's original review, commit
+and anchor; the current lifecycle location and marker are tracked separately.
+Its old body digest and native identities must match the retained receipt before
+`PATCH`, and exact readback must confirm the edit. Pending creation uses a typed
+`intent:` handle with no numeric comment ID, not a manufactured GitHub ID.
 
 An `AuthorizedHumanOverride` on `ambiguous-multi-target` requires authenticated
 maintainer/admin authority (`OWNER`, `MEMBER`, or `COLLABORATOR` meeting
@@ -106,11 +123,11 @@ Classify GitHub review surfaces into:
 The artifact classifier treats mutations/deletions of `projection` surfaces as
 non-authoritative: supplied observations cannot erase retained obligations or
 manufacture approval. It refuses supplied tampered, duplicated, stale or foreign
-`authority` markers and missing/corrupted archive evidence. The current hooks do
-not establish complete durable observations of every native surface. After HTTP
-response loss, an available target slot enters a process-local exclusive
-`uncertain` hold before readback completes: exact unedited App-owned
-readback reconciles idempotently at most once (`reconciled-via-owned-readback`),
+`authority` markers and missing/corrupted archive evidence. Not every projection
+observation is retained as authority. Before a native mutation, the lifecycle journal retains its exact intent; after HTTP response
+loss the selected durable intent and target slot remain `uncertain` until
+readback completes. Exact unedited App-owned evidence reconciles idempotently
+at most once (`reconciled-via-owned-readback`),
 whereas human edits, duplicates, or deletions preserve conservative
 `uncertain-after-response-loss` holds. Restricted operator `reenroll` is
 permitted only for authenticated maintainers/admins on open, non-draft PRs when
@@ -144,154 +161,188 @@ restorations, and dual-attested transfers recover while preserving 100% of
 session charges, reservations, and obligation history
 (`fresh_allowance_minted=False`).
 
-## Scope
+### 5. Versioned lifecycle and session authority
 
-Core domain modules (`review_sensei.active_finding_window`,
-`review_sensei.finding_drift`), GitHub adapter authority/trust modules
-(`review_sensei_github.artifact_authority`,
-`review_sensei_github.trust_transitions`), ordinary review/verify/command/reply
-entry-point hooks in `review_sensei_github.publication` (`ReviewPublisher`,
-`ReviewApprovalFinalizer`) and `review_sensei_github.application`
-(`GitHubApplication`), with deterministic model and supplied-state integration
-suites for G10, G16, G14 and G15. These suites do not qualify durable ordinary
-cold reconstruction. Existing wire schemas, workflows, broker endpoints and
-historical incident ledgers remain unchanged. Incomplete opted-in lifecycle
-calls may now refuse instead of proceeding with reduced or missing state.
+`review_sensei.finding_lifecycle` defines the closed
+`finding-lifecycle-payload-v1` codec. It preserves coverage, complete active-window
+or drift inventory, original criteria, candidate paths, native slots and proofs,
+input identity and concern history. It explicitly encodes all 13 `ReviewComment`
+fields, including `effective_blocking` and `needs_human`. Public comment/result
+serializers intentionally omit those admission fields and are not this codec.
+Dataclass equality is insufficient for fidelity tests because the embedded
+comment fields are excluded from equality.
 
-## Consequences
+`review_sensei.finding_lifecycle_store` uses the existing bounded evidence
+primitives with purpose `finding-lifecycle`. The session's
+`finding-lifecycle-reference-v1` selects a `finding-lifecycle-evidence-v2`
+document and binds operation, predecessor root and predecessor snapshot. The
+reader reselects current session authority and checks numeric repository/PR,
+producer, generation, operation, snapshot and lineage. A digest alone is not
+producer authentication or current-root selection. Payloads cannot choose their
+own authority, allowance or activation permission.
 
-- With a complete retained lifecycle inventory, the evaluator withholds approval
-  for unresolved omitted, drifted, copied and non-displayed obligations, even at
-  100% diff coverage. Cold reconstruction remains an independent missing proof.
-- Refusals identify bounded next-step requirements. A reconstruction handoff is
-  not a currently supported route to completion or approval; do not retry it
-  unchanged, discard obligations or enlarge capacity to bypass it.
-- Supplied projection changes cannot erase the retained inventory. Durable
-  uncertain slots and authenticated ordinary native readback across restart
-  remain unqualified.
-- Cross-owner repository transfers sharing a numeric `repository_id` cannot
-  inherit silent write or budget authority.
+The lifecycle reference survives ordinary transaction completion and unrelated
+session transitions. Writers cannot silently remove it or replace it with an
+unrelated predecessor. Existing digest/closed-schema checks make an older reader
+refuse a lifecycle-bearing root it cannot preserve; downgrading an active session
+to a reader that discards the reference is not a rollback procedure.
 
-## Alternatives considered
+The carrier is not transaction-only `publication_staging-v2`, whose 4 KiB/eight
+part frontier has a different lifetime. It does not add fields to the closed
+`HumanInventoryStore` authority schema. Small documents use the audited inline
+encoding; larger documents use the existing authenticated evidence parts and
+bounded references, without recursively embedding previous snapshots. Canonical
+journal packing deduplicates repeated values losslessly, not by truncating
+obligations, prose, receipts or history.
 
-- **Collapsing non-displayed findings into a public deferred queue:** Rejected
-  by product constraints; exposes noisy counts and encourages unbounded loop
-  expectations.
-- **Treating outdated GitHub threads or deleted files as fixed:** Rejected; a
-  moved or rewritten defect remains live until positive fix proof or explicit
-  maintainer disposition.
-- **Trusting numeric `repository_id` across owner changes:** Rejected; GitHub
-  preserves `repository_id` across user-to-org and org-to-org transfers where
-  governance and secret boundaries change completely.
+### 6. Effect protocol and native unions
 
-## Validation
+The ordinary application restores selected lifecycle evidence before planning,
+command inventory construction or approval decisions. Publisher dictionaries
+are working projections of that state, not a substitute authority source.
+`review_sensei_github.finding_lifecycle` journals exact native requests without
+authentication tokens. A transition must preflight its complete retained future,
+known/unknown receipt growth, native dispatch/readback and protected completion
+tail before effects. Its order is:
 
-Qualified by provider-free deterministic suites:
+1. Authenticate the current root and reconstruct the complete lifecycle.
+2. Plan obligations, exact native intent and the bounded confirmation tail.
+3. Persist/read back the pre-effect state and intent under session authority.
+4. Revalidate the live target and dispatch once.
+5. Retain a confirmed/rejected receipt, or leave a pending unknown outcome.
+6. Reconcile exact owned native evidence, advance lifecycle authority and finish
+   the original transaction/accounting paths.
+
+A process death after dispatch is not proof of absence. A later process cannot
+reissue an unknown request merely because its response was lost. Edited,
+foreign, duplicated, missing or incompletely read projections preserve a hold.
+A known native success followed by persistence/observation failure remains known
+success with missing completion proof, not permission for a replacement write.
+Original charges, reservations and unresolved holds remain in force.
+
+`native-review-union-v2` represents current inline membership reused from old
+native roots as well as newly allocated part comments. Reused records bind
+instance, actual thread/comment/review IDs, original native commit and exact
+current body digest. The existing complete native census proves those roots,
+producer and final-frame digest; merely omitting them from a new-part plan would
+not be complete evidence. Replay reconstructs only new allocations and verifies
+the retained membership. Unmodified v1 receipts remain readable; an old v1
+reader cannot erase v2 reused-root fields.
+
+### 7. Enrollment, legacy state and limits
+
+A provably new admitted lifecycle can create its first reference before effects.
+A supported existing reference restores normally. Legacy migration requires a
+complete authentic source for every obligation, original criterion, binding,
+uncertain intent, receipt and original funding fact. Compatibility with old
+session metadata or native-union v1 alone does not supply that missing lifecycle.
+A reduced `ReviewBaseline`, complete file coverage, resolved/outdated host UI,
+explicit-reanalysis flag or an omitted prior-context argument is not an empty
+inventory. An enrolled legacy record without sufficient evidence retains
+`durable_finding_inventory_recovery_required`; malformed, corrupt, foreign,
+conflicting or unsupported evidence refuses before business effects. No generic
+reconstruction from missing historical data is promised.
+
+All existing limits remain independent and cumulative: 256 evidence parts,
+200 comment allocations, 8 MiB retained evidence, 512 KiB responses and 8 KiB
+queries; `ResultPartStore` additionally retains its 32-part/1 MiB result limit.
+The lifecycle payload itself is bounded to 1 MiB. The native union keeps its
+4 KiB frame, 50-existing-root and ten-read census limits, so only reused sets
+that fit the whole frame are admitted. Protected tails and provider/API budgets
+are unchanged. A representable snapshot alone does not prove its next effect,
+future receipt and accounting tail fit. No extra census, compressed-lossy
+fallback, allowance reset or limit increase is an overflow recovery route.
+
+### 8. Data handling
+
+The internal lifecycle representation retains normalized, validated finding
+prose and all admitted comment fields, hidden obligations, original criteria,
+exact native intent bodies and bounded receipts. Those are required for faithful
+restart; public summaries/status still omit deferred lists/counts and internal
+admission flags. They are not raw provider responses, review prompts, raw diffs,
+credentials or newly captured provider context.
+
+Storage uses the selected session's existing evidence carrier, retention and
+access policy, not a new service or access grant. Local private evidence and
+hosted repository-visible evidence are different access boundaries. Hosted
+issue-comment carriers remain readable to readers allowed by that repository;
+compression/base64 is not encryption. “Internal” means excluded from public
+status projections, not an added confidentiality guarantee. See
+[data handling](../data-handling.md); enabling this lifecycle must not silently
+change an operator's approved evidence-storage destination or visibility.
+
+## Validation and source qualification
+
+The feature's acceptance boundary is ordinary admitted producer → authenticated
+persistence → a genuinely fresh process → ordinary publication, verification or
+maintainer command → terminal accounting, without duplicate inference/effects
+or newly minted funds. Supplied-state domain tests and a safe refusal alone do
+not satisfy that boundary.
+
+Relevant suites include:
 - `tests/test_active_window_lifecycle_g10.py`
 - `tests/test_finding_location_drift_g16.py`
 - `tests/test_artifact_mutation_resilience_g14.py`
-- `tests/test_repository_trust_transitions_g15.py`
+- `tests/test_finding_lifecycle_codec.py`
+- `tests/test_finding_lifecycle_store.py`
+- `tests/test_finding_lifecycle_journal.py`
+- `tests/test_native_finding_receipts.py`
+- `tests/test_native_union_reused_roots.py`
+- `tests/test_durable_finding_lifecycle_restart.py`
 
-## Rollout and rollback
+The restart harness runs ordinary adapters/application paths in distinct
+interpreters sharing only persisted synthetic service/ledger bytes. Its cases
+cover hidden blockers at cap one, exact replay, native response loss/process
+death, projection mutation, drift/ambiguity and cold commands. Codec tests assert
+individual comment fields rather than relying on dataclass equality. Grouped
+native tests exercise both mixed new/reused and all-reused publication through
+the real bounded reader. Capacity and mutation tests qualify their explicit
+fixtures, not arbitrary input sizes or missing legacy evidence.
 
-Wired into ordinary `GitHubApplication` (`publish_review`,
-`apply_maintainer_command`, `generate_and_publish_reply`, `recover_review`,
-`execute_operator_reenroll`, `migrate_trust_boundary`) and `ReviewPublisher` /
-`ReviewApprovalFinalizer` entry points behind additive options and enrolled
-snapshots without live repository access mutations. Rollback reverts the
-additive integration commits cleanly without schema migration or historical
-ledger mutation.
+Source-level bounded G10/G14/G16 qualification requires the final exact candidate's
+complete acceptance tests, schema/lint/type checks and required remote CI.
+Until those results are recorded, this is implemented source under qualification,
+not a completed gap-closure or production-readiness claim. G15 trust qualification
+remains separate.
 
-## Follow-up work
+## Check receipts, deployment and rollback
 
-Coordinate canonical writer fencing (G02/G08) and full recovery-context
-retention (G17/G34) before enabling automated cross-process takeover.
+Check observations are bound to repository/PR, base/head and result digest.
+A confirmed native check response precedes optional observation; observer
+failure preserves the native ID and charge without reposting. Its
+`authority_evaluated=False` receipt does not authenticate lifecycle inventory,
+trust or historical settlement.
 
+This source work does not authorize a release, deployment, reenrollment, live
+recovery or historical settlement. Deploy reader support before enabling new
+lifecycle/native-union writers. Preserve retained references, receipts and
+funding during rollback; an older unsupported reader must remain fail-closed,
+not clear the new reference and restart a session.
 
-## Check receipt stabilization (2026-11-12)
+G02/G08 all-writer containment, G15 authentic durable trust transitions, G17/G34
+original-context recovery and historical incidents have separate evidence and
+activation requirements. Finding-lifecycle source tests neither settle those
+incidents nor establish live cross-process takeover safety outside the existing
+session-owner boundary.
 
-Check projection observation receives an explicit immutable numeric repository,
-PR, base/head and result-digest context through ordinary, replayed and explicit
-partitioned publication. A fresh check-only publisher needs no fabricated carried
-assessment context. Carried historical-reader inputs are scoped to the ordinary
-publication invocation and cannot be borrowed by another target.
+### Opt-in current-observation source contract
 
-A confirmed native check response is retained before optional observation.
-Observation failure preserves its ID and charged requests, performs no retry,
-uses the closed `approval_withheld` diagnostic and prevents later approval in
-that invocation. It does not become a failed/unknown native dispatch. Cancellation
-and unexpected failures outside that optional observation boundary are unchanged.
-The projection receipt explicitly records `authority_evaluated=False`: it is not
-proof of durable finding inventory, trust, enrollment, or historical settlement.
-G10/G14/G15/G16 durable ordinary-path integration remains separately unqualified;
-process-local caches are not promoted to authenticated authority by this fix.
+The v4 run-authority request retains the existing request scope and adds no
+caller-supplied trust facts. Its signed session grant includes a closed
+`current-observation-v1` document derived from the broker's existing authenticated
+GitHub and OIDC observations: repository/owner identity, installation identity,
+current repository access and selection mode, installation and effective token
+permissions, and actor identity. Source association remains distinct from actor
+repository permission. The existing grant MAC covers the whole observation.
 
-## Reduced-baseline cold-process refusal (2026-11-12)
+V3 remains compatible and is still the ordinary Python request producer. V4 is
+restricted to signed `review_session` exchanges with a session scope; token-only,
+release-only and other capability routes refuse rather than silently downgrade.
+No extra HTTP call, token scope, storage backend or deployed binding is introduced.
 
-A `ReviewBaseline` retains concern fingerprints, original resolution criteria and
-bounded path/symbol/blocking metadata. It is not a serialized active-window or
-drift inventory: it lacks native slot bindings, uncertain-effect holds, complete
-human/ambiguity state and their audit proofs. Loading a baseline therefore does
-not reconstruct the state described by this ADR.
-
-An opted-in active-window/drift publisher now returns
-`durable_finding_inventory_recovery_required` before native reconciliation or
-writes when the selected lifecycle has no prior state and a baseline or explicit
-later-round context is present. Incremental/fallback-full labels without a
-baseline cannot silently restart those routes; switching a live active window
-to a fresh drift tracker cannot discard its prior inventory either. Session
-dispositions, confirmed prior concerns, retained continuation eligibility and
-non-new lifecycle records also identify prior-review context. Fix/override
-proposals, the explicit-reanalysis flag, resolved/outdated host threads and
-complete file coverage do not provide the missing proof. The original baseline
-and its criteria remain unchanged. Initial full reviews without prior context
-and existing same-process lifecycle behavior remain supported. The application
-now also checks selected durable history for unbound opted-in cold calls, as
-described in the amendment below.
-
-This is a fail-closed correction, not durable reconstruction or gap closure. A
-low-level publisher without independently selected ledger authority still cannot
-distinguish a cold caller that omits every prior-context input from a real first
-review. Command/
-`verify` reconstruction, authenticated retention of complete lifecycle state and
-ordinary producer/consumer wiring remain unqualified. Process-local state is
-still not durable authority. Do not remove the baseline, relabel coverage,
-recreate deleted projections or repeat requests to evade this handoff. Preserve
-the retained result, original criteria, receipts, accounting and uncertainty;
-qualify the full durable reconstruction contract before resuming this lifecycle
-from a new process. No live recovery, reenrollment, capacity expansion or fresh
-inference is authorized by this diagnostic.
-
-
-## Selected-ledger pre-reservation refusal amendment (2026-11-12)
-
-For an unbound result (`transaction is None`) with an opted-in active-window or
-drift route whose selected process-local state is missing, `GitHubApplication`
-consults the independently selected session ledger before preparing a session
-round. Prior review/verification counters, retained convergence history, a durable
-transaction or staged publication cause the existing inventory-recovery handoff.
-Invalid/conflicting/expired selected state refuses rather than becoming an empty
-initial inventory. The hosted `known` enrollment path reuses its existing bounded
-marker read. This adds no storage, census, wire format or allowance.
-
-Preceding source already returned a generic identity-bound-transaction handoff
-for the qualified ordinary fixture, but reserved and aborted first, advancing the
-retained root generation from 4 to 6. The amendment refuses before those writes:
-the local fixture's exact root/file bytes, original criteria and reservations
-remain unchanged, without another session-round charge. Hosted authority reads
-and their existing request accounting still apply and must remain charged. The
-one-GET hosted fixture is not deployed authentication/accounting qualification.
-This is not evidence of a previously unsafe native publish or approval.
-A valid bound transaction continues through its existing validation/replay gates;
-it is not classified as an unbound missing-context call.
-
-Validation uses an ordinary bound initial producer with two obligations and an
-active cap of one, on-disk retention and a real fresh-process unbound consumer,
-plus hosted owned-marker readback, projection deletion, an original analysis
-reservation, corrupt/conflicting/expired loads and terminal bound replay.
-These tests prove refusal and preservation, not full lifecycle reconstruction.
-G10/G14/G16 remain open, including durable slot/ambiguity/effect serialization,
-authenticated current-root restoration, command/verify restoration and cold
-response-loss reconciliation. G15 enrollment/trust remains separately unqualified.
-No recovery, reenrollment, live activation, release or historical settlement is
-authorized. Rollback removes this early guard without changing stored records.
+This is a qualified observation producer/parser, not durable enrollment or
+per-native-effect freshness. It does not supply a permission epoch, continuous
+selection history or evidence that a revoke/restore transition did not occur
+between observations. Those claims require an authenticated durable event
+producer or an explicitly accepted narrower product contract. Neither option is
+implicitly selected by this source change.

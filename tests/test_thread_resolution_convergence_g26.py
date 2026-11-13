@@ -642,6 +642,114 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
                 finite_api_reads_charged=-1,
             )
 
+    def test_verify_keeps_fix_and_ambiguity_gates_separate_from_human_only(self):
+        import tempfile
+        from contextlib import nullcontext
+        from dataclasses import replace
+        from unittest.mock import patch
+
+        from review_sensei_github.publication import ReviewPublisher
+        from test_action_run import CommandEntryFixture
+
+        for scenario, conclusion in (
+            ("human", "action_required"),
+            ("mixed", "failure"),
+            ("ambiguous", "failure"),
+        ):
+            with (
+                self.subTest(scenario=scenario),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = CommandEntryFixture(directory, limit=512)
+                f.provider_comments = [
+                    {
+                        "path": "src/app.py",
+                        "line": 2,
+                        "side": "RIGHT",
+                        "body": "Confirm caller contract.",
+                        "symbol": "caller_contract",
+                        "severity": "high",
+                        "blocking": False,
+                        "needs_human": True,
+                    },
+                    {
+                        "path": "src/app.py",
+                        "line": 2,
+                        "side": "RIGHT",
+                        "body": "Confirm authorization contract.",
+                        "symbol": "authorization",
+                        "severity": "high",
+                        "blocking": False,
+                        "needs_human": True,
+                    },
+                ]
+                original = ReviewPublisher._plan_drift_round
+                witnessed = []
+
+                def qualified_plan(publisher, **kwargs):
+                    # Domain classification seam only: generate a mixed/ambiguous
+                    # plan before the ordinary producer persists it. The later
+                    # command uses only its actual authenticated carrier and native
+                    # projections, with no consumer-state or authority injection.
+                    state, key = original(publisher, **kwargs)
+                    item = state.inventory.obligations[1]
+                    if scenario == "mixed":
+                        item = replace(
+                            item, criterion=replace(item.criterion, blocking=True)
+                        )
+                    else:
+                        from review_sensei.finding_drift import (
+                            FileDriftDescriptor,
+                            evaluate_drift_round,
+                        )
+
+                        state = evaluate_drift_round(
+                            kwargs["result"],
+                            head_sha=kwargs["head_sha"],
+                            base_sha=kwargs["base_sha"],
+                            max_active_findings=20,
+                            round_number=state.round_number + 1,
+                            prior_inventory=state.inventory,
+                            drift_descriptors=(
+                                FileDriftDescriptor(
+                                    "cross_file_move",
+                                    "src/app.py",
+                                    ("src/app.py", "src/other.py"),
+                                ),
+                            ),
+                            diff_text=kwargs["diff"],
+                        )
+                        witnessed.extend(state.inventory.obligations)
+                        return state, key
+                    witnessed.append(item)
+                    return replace(
+                        state,
+                        inventory=replace(
+                            state.inventory,
+                            obligations=(state.inventory.obligations[0], item),
+                        ),
+                    ), key
+
+                scope = (
+                    patch.object(ReviewPublisher, "_plan_drift_round", qualified_plan)
+                    if scenario != "human"
+                    else nullcontext()
+                )
+                with scope:
+                    self.assertEqual(f.invoke(human=True), 0, f.error)
+                f.SOURCE_ID += 1
+                f.select_command("@reviewsensei verify", new_run=True)
+                self.assertEqual(f.invoke_command(), 0, f.error)
+                self.assertEqual(f.check_runs[-1]["conclusion"], conclusion)
+                self.assertEqual(f.provider_calls, 1)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+                self.assertEqual(f.accounted.accounting.configuration.limit, 512)
+                if scenario != "human":
+                    self.assertTrue(witnessed)
+                    self.assertTrue(
+                        all(item.effective_blocking_now for item in witnessed)
+                    )
+
     def test_ordinary_caller_verify_command_performs_native_effects_with_zero_inference(
         self,
     ) -> None:
@@ -693,6 +801,8 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
             )
             assert index is not None
             finding_ref = "RS-" + index.entries[0].instance[:6].upper()
+            self.assertEqual(len(f.threads), 1)
+            native_thread_id = f.threads[0]["id"]
 
             # 2. Native Resolve/Unresolve UI events are unsubscribed no-ops on trigger.py & webhooks.py
             pull_file = Path(directory) / "pull.json"
@@ -724,7 +834,7 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
                     {
                         "action": act,
                         "pull_request": {"number": 7},
-                        "thread": {"node_id": "thread-0"},
+                        "thread": {"node_id": native_thread_id},
                     },
                     separators=(",", ":"),
                 ).encode("utf-8")
@@ -792,7 +902,8 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
 
             # 4. Human clicks native Resolve WITHOUT disposition; `@reviewsensei verify` keeps
             #    approval withheld and charges 0 model inference!
-            f.resolved_threads.add("thread-0")
+            f.resolved_threads.add(native_thread_id)
+            f.threads[0]["isResolved"] = True
             f.SOURCE_ID += 1
             f.select_command("@reviewsensei verify", new_run=True)
             self.assertEqual(f.invoke_command(), 0, f.error)
@@ -814,6 +925,7 @@ class ThreadResolutionConvergenceG26Tests(unittest.TestCase):
 
             # Simulate human manually unresolving the decided thread in GitHub UI
             f.resolved_threads.clear()
+            f.threads[0]["isResolved"] = False
             f.SOURCE_ID += 1
             f.select_command("@reviewsensei verify", new_run=True)
             self.assertEqual(f.invoke_command(), 0, f.error)

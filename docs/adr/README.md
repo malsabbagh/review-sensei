@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0138](0138-bounded-shared-base-lifecycle-checkpoints.md) | Proposed | Compress complete pending lifecycle checkpoints against an authenticated immutable base | User-directed G10/G14/G16 qualification | No recursive bases, lost history, capacity increase or activation; exact-head qualification pending |
 | [0130](0130-known-check-rejection-accounting.md) | Proposed | Close fresh publication accounting after a confirmed check rejection | User-directed lifecycle qualification; PR pending | Original dispatch/negative response, unchanged caller guards, failed gate and exit 1; no historical recovery |
 | [0129](0129-bounded-pull-request-lookup-diagnostics.md) | Proposed | Preserve closed PR lookup failure evidence | User-directed broker diagnosis | Additive observations only; no retry, deployment identity fabrication or recovery authority |
 | [0128](0128-unconnected-recovery-authority-candidate.md) | Proposed | Qualify an unconnected canonical authority and forwarding candidate | User-directed recovery-gap work; issue/PR pending | Local SQLite plus explicit host frontier; no runtime integration, settlement or activation |

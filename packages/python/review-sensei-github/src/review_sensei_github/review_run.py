@@ -221,6 +221,13 @@ class ReviewRunHooks(ApiRunReviewHooks):
 class ReviewRunLedger(ApiRunSessionLedger):
     """One funded exact readback on an uncertain write, never a replay."""
 
+    def __init__(self, native, caller, identity):
+        super().__init__(native, caller, identity)
+        # Reader-first source integration: the current admitted review always
+        # retains its complete finding lifecycle using the existing owner,
+        # evidence destination and original physical caller meter.
+        self.enable_finding_lifecycle_writes = True
+
     def replace(self, identity, mutate, *, now=None):
         try:
             confirmed = super().replace(identity, mutate, now=now)
@@ -252,6 +259,7 @@ class ActionRunLedger(ApiRunSessionLedger):
         # ledger. Snapshot staging uses its existing conditional mutation and
         # physical caller budget, just as a newly constructed action ledger.
         self.enable_disposition_snapshot_writes = True
+        self.enable_finding_lifecycle_writes = True
 
     def replace(self, identity, mutate, *, now=None):
         if self.business_guard is not None:
@@ -434,9 +442,39 @@ class ReviewRun:
             tuple(analyze_diff(diff, allow_incomplete=True).changed_paths),
         )
 
+    def finding_inventory_migration_required(self) -> bool:
+        # Reuse the exact authenticated enrollment root, not a new census or
+        # diagnostic file. Missing retained inventory is not an empty inventory.
+        record = self.caller._effect_record
+        if record is None or record.record_sha256 != self.caller._root:
+            raise ReviewInputError(
+                "authenticated finding inventory admission is unavailable"
+            )
+        return record.finding_lifecycle is None and (
+            record.completed_initial_reviews > 0
+            or record.completed_verification_rounds > 0
+            or record.convergence_history is not None
+            or record.transaction is not None
+            or record.publication_staging is not None
+        )
+
     def execute(self, argv: list[str], *, publication_output: Path) -> int:
         lifecycle_diagnostics.phase("analysis")
         retained = self.retained_analysis(argv)
+        if retained is None and self.finding_inventory_migration_required():
+            migration_outcome = {
+                "status": "handoff",
+                "publication_status": "handoff",
+                "accounting_terminal": False,
+                "terminal_reason": "finding_inventory_migration_required",
+                "review_id": None,
+                "diagnostic": "durable_finding_inventory_recovery_required",
+            }
+            lifecycle_diagnostics.publication(migration_outcome)
+            publication_output.write_text(
+                json.dumps(migration_outcome, indent=2) + "\n"
+            )
+            return 1
         if retained is None and self.plan.runner_kind == "local":
             # Provider discovery is caller API work; inference remains governed
             # by the independent provider budget. Never send a GitHub credential.
@@ -600,34 +638,66 @@ class ReviewRun:
                 )
             )
         lifecycle_diagnostics.phase("publication")
-        publication: PublicationResult = hooks.publish_review(
-            application,
-            options=GitHubWriteOptions(
-                github_writes=True,
-                auto_review=True,
-                auto_approve=(
-                    self.restart_id is None
-                    and self.plan.policy.reviews == "auto-approve"
+        try:
+            publication: PublicationResult = hooks.publish_review(
+                application,
+                options=GitHubWriteOptions(
+                    github_writes=True,
+                    auto_review=True,
+                    auto_approve=(
+                        self.restart_id is None
+                        and self.plan.policy.reviews == "auto-approve"
+                    ),
+                    complete_inventory=True,
+                    max_active_findings=analysis.result.limits.max_comments,
+                    enable_drift_tracking=True,
                 ),
-                complete_inventory=True,
-            ),
-            oidc_token=self.oidc,
-            repository=self.identity.repository,
-            repository_id=self.identity.repository_id,
-            pull_request=self.identity.pull_request,
-            head_sha=self.head_sha,
-            base_sha=self.base_sha,
-            base_branch=self.base_branch,
-            result=analysis.result,
-            diff=analysis.diff,
-            app_slug="reviewsensei[bot]",
-            convergence_policy=analysis.policy,
-            configuration_context=analysis.configuration_context,
-            evidence_context=analysis.evidence_context,
-            baseline=analysis.baseline,
-            current_key=analysis.current_key,
-            changed_paths=analysis.changed_paths,
-        )
+                oidc_token=self.oidc,
+                repository=self.identity.repository,
+                repository_id=self.identity.repository_id,
+                pull_request=self.identity.pull_request,
+                head_sha=self.head_sha,
+                base_sha=self.base_sha,
+                base_branch=self.base_branch,
+                result=analysis.result,
+                diff=analysis.diff,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=analysis.policy,
+                configuration_context=analysis.configuration_context,
+                evidence_context=analysis.evidence_context,
+                baseline=analysis.baseline,
+                current_key=analysis.current_key,
+                changed_paths=analysis.changed_paths,
+            )
+        except ReviewSenseiError:
+            # A durable native intent may stop a later effect before the
+            # publisher returns. Preserve an outcome without promoting the
+            # attempted publication or its journal into a confirmed receipt.
+            observed = getattr(application, "_last_publication_result", None)
+            confirmed_review = (
+                observed.review_id
+                if isinstance(observed, PublicationResult)
+                and observed.status
+                in {"published", "already_published", "auto_approval_disabled"}
+                and type(observed.review_id) is int
+                and observed.review_id > 0
+                else None
+            )
+            outcome = {
+                "status": "published_terminal_pending"
+                if confirmed_review is not None
+                else "publication_incomplete",
+                "publication_status": "published"
+                if confirmed_review is not None
+                else "unknown",
+                "accounting_terminal": False,
+                "terminal_reason": "publication_interrupted",
+                "review_id": confirmed_review,
+                "diagnostic": "publication_outcome_incomplete",
+            }
+            lifecycle_diagnostics.publication(outcome)
+            publication_output.write_text(json.dumps(outcome, indent=2) + "\n")
+            raise
         lifecycle_diagnostics.publication(
             {
                 "status": publication.status,
@@ -646,6 +716,7 @@ class ReviewRun:
             else "publication_finalization_incomplete"
         )
         accounting_terminal = False
+        from .action_completion import finalization_confirmed
         from .check_accounting import denied_accounting_details
 
         check_rejection = denied_accounting_details(
@@ -656,10 +727,14 @@ class ReviewRun:
             in {"published", "already_published", "auto_approval_disabled"}
             and (
                 check_rejection is not None
+                or (
+                    publication.diagnostic
+                    in {"required_fixes_open", "human_adjudication_open"}
+                    and finalization_confirmed(publication)
+                )
                 or publication.diagnostic
                 in {
                     None,
-                    "human_adjudication_open",
                     "approval_withheld",
                     "review_incomplete",
                 }
@@ -1038,6 +1113,10 @@ def bootstrap(
         or head["repo"].get("fork") is not False
     ):
         raise ReviewInputError("live reviewed base or head conflicts")
+    if purpose in {"command", "reply"}:
+        setattr(
+            caller, "_accepted_semantic_target", (purpose, args.base_sha, args.head_sha)
+        )
     title = pull.get("title", "")
     if not isinstance(title, str) or len(title.encode("utf-8")) > 256:
         raise ReviewInputError("live pull request title exceeds its 256-byte bound")

@@ -239,3 +239,101 @@ ADR and permission gate must define queue-commit diff scope, multi-PR attributio
 funding, and required-check naming before enabling `merge_group` triggers.
 Cross-writer atomic fencing (`G02`/`G08`) and unstarted source-edit cancellation
 (`G32`) remain tracked on their dedicated authority tracks.
+
+## Bounded ordinary accepted semantic history (2026-11-13 candidate)
+
+The ordinary action runner now distinguishes accepted result observations from
+semantic progress. A qualified action records `accepted-semantic-history-v1`
+in its version-2 finding reference, within the existing 8 KiB reference limit.
+The version-2 action-result carrier commits to those exact canonical summary
+bytes with a fixed-width SHA-256 outside its compressed business envelope.
+Legacy version-1 full-summary result carriers remain strictly readable. No new
+top-level root field, history census, polling subscription, caller allowance,
+evidence limit, or cancellation authority is added. The summary retains at most
+the two latest
+accepted operation identities and exact source tuples; older results remain in
+the existing immutable predecessor archives. Its saturated two-attempt streak
+survives ordinary different-run rollover and fresh processes.
+
+Semantic observations describe the complete **reviewed carrier state**, not a
+new observation of mutable native GitHub state. They bind reviewed base/head,
+full inventory identity, unresolved obligations, changed-file coverage, pending
+native intents, trust uncertainty, and retained native receipts. Root hashes,
+request accounting, round numbers, terminal command outcomes and new receipt
+bytes alone are not progress. Positive progress requires an authenticated
+reviewed-state advance, such as fewer unresolved obligations in the same full
+inventory, more reviewed coverage in the same enumerated diff, or resolution of
+an uncertain native binding. A completed command never becomes a completed
+review record.
+
+The pre-admission consumer opens the current owned carrier and at most the exact
+immediate predecessor when needed. Rollover also consumes the result it already
+authenticates, refusing an exhausted unchanged streak **before** successor
+archive/allocation. Pending publication and uncertain original effects retain
+priority over no-progress refusal; observation never settles those liabilities.
+Settlement uses the source-issued, integrity-revalidated current caller
+checkpoint: unchanged carriers reuse the bound observation, and changed inline
+carriers are decoded without another remote read. The existing final expected-root
+CAS and native readback authenticate the resulting summary. The ordinary command
+representability preview reserves bounded summary bytes within the unchanged
+root limit. The admitted-intent preflight prices a worst-width new observation,
+its retained predecessor, future reference metadata, and the existing maximum
+inline action-result envelope before dispatch. Final exact representability remains
+a separate check, including business-root changes and original request funding.
+The command preview uses the identical business-result encoder and prices the
+fixed-width external commitment. Unknown semantic digest entropy therefore cannot
+change result width. Results without a finding reference keep version-1 carriers;
+unknown inline metadata there retains a conservative compression/base64 bound. Every future
+finding checkpoint reserves the same new summary against its actual and maximum
+future manifest, plus the maximum existing terminal result width in the same
+root. Separate old/new widths fitting is not sufficient for admission.
+
+Reference metadata amendments do not rewrite the finding manifest or its lineage.
+Core validation independently decodes the terminal inline action result using its
+exact intent, owner generation, configuration and producer binding, then verifies
+the SHA-256 of the exact reference summary against the closed version-2 carrier
+commitment (or literal summary equality for legacy version-1 results). A decoder
+must receive the summary from that authenticated current or archived root, not
+from a newer root or a caller assertion. Missing, mismatched, mixed-version and
+foreign history refuses; no reconstruction or empty-history fallback is allowed.
+All other rollover fields retain exact equality with the
+ordinary predecessor transition. This works with partitioned finding carriers;
+partitioned action-result proof is deliberately unsupported and held. Metadata
+cannot be cleared/downgraded or lost at the next finding checkpoint. Version-2
+reference data takes precedence over older inner-journal history.
+
+Qualification includes a synthetic-native, four-process ordinary CLI chain:
+review, first status command, second distinct-source status command, then finite
+refusal with no additional review/provider effect. A separate five-process chain
+includes an intervening ordinary review and confirms the same finite stop, without
+ancestor traversal. An actual owned partition checkpoint issues a digest-bound
+semantic observation; changed document bytes and stale root observations reject.
+This is not the old supplied
+`AcceptedOperationRecord` simulator. Original-source mutation and unstarted
+cancellation tests remain separate; no process-issued cancellation receipt is
+serialized or reconstructed from these history observations.
+
+Remaining limits are explicit, not closure claims. A changed partitioned carrier
+needs a semantic observation from its actual checkpoint producer; until then the
+confirmed action result retains a named semantic-unavailable observation and
+prior summary instead of adding an unpriced post-effect census. Intervening
+review-only runs preserve reference metadata without interpreting the review as a
+new accepted command. Legacy results lacking this summary do not silently become
+empty accepted history. Existing command, discussion and recovery executors may
+continue without semantic qualification, under their unchanged source-authority,
+reviewed-snapshot and finalization gates, retaining explicit unavailable metadata.
+That compatibility route cannot assert reviewed-snapshot convergence or authorize
+cancellation. Semantic convergence claims hold on missing/incomplete history;
+malformed summary data refuses rather than taking that compatibility path.
+Queue replacement still needs an actual authenticated producer. Cold G32 recovery
+still requires genuine zero-dispatch plus cessation/epoch evidence and is not
+conferred by action observation, history, terminal accounting or this summary.
+
+The command finalizer prices both complete and contingent override projections
+before native cleanup. A remaining G12/G14 boundary is named
+`finding_lifecycle_verified_fixed_subset_capacity_unqualified`: multiple eligible,
+receipt-bound, previously verified-fixed contingent targets may release arbitrary
+subsets after partial cleanup. Until a structural bound covers those subsets,
+this path holds before PUT/check/cleanup; unrelated fixed history and the existing
+single-target path are not blocked. Endpoint projections alone are not a proof
+for every mixed subset, and this hold is not full-gap closure.

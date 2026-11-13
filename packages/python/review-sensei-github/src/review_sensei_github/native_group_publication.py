@@ -54,6 +54,7 @@ class NativeGroupPublication:
     authority_fence: Callable[[], bool]
     now: datetime | None = None
     manifest_store: NativeManifestStore | None = None
+    reused_roots: tuple = ()
     _physical_attempts: dict[str, tuple[Any, int]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -481,7 +482,10 @@ class NativeGroupPublication:
             )
         state, own_manifest_claim = self._publish_parts(claim_manifest=True)
         receipt = NativeUnionReceipt.from_staging(
-            self.plan, state, producer_id=self.producer_id
+            self.plan,
+            state,
+            producer_id=self.producer_id,
+            reused_roots=self.reused_roots,
         )
         known_manifest = None
         if not state.manifest_attempted:

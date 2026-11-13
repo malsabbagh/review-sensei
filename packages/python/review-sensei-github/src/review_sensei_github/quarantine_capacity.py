@@ -546,6 +546,29 @@ class NativeCapacityGuard:
                 self.objects[surface, identifier] = bound
         self.require(self.stats)
 
+    def preflight_native_edits(self, edits):
+        """Prove the whole edit batch fits without spending its dispatch tail.
+
+        Preview the existing guard rather than inventing a parallel accounting
+        formula. Physical requests still consume the original guard once each.
+        """
+        from copy import copy
+
+        preview = copy(self)
+        for field in (
+            "stats",
+            "objects",
+            "certificates",
+            "comment_bounds",
+            "review_bounds",
+            "check_bounds",
+            "inline_bounds",
+            "reaction_bounds",
+        ):
+            setattr(preview, field, deepcopy(getattr(self, field)))
+        for method, path, body in edits:
+            preview.before_request(method, path, body)
+
     def before_request(self, method, path, body):
         # A response may bind only its own physical create. A later GraphQL
         # POST or a read after an unknown write cannot inherit that pending ID.

@@ -1832,6 +1832,48 @@ class PendingReassessmentG30Tests(unittest.TestCase):
             source_actor="maintainer-user",
             pending_receipt=receipt_408,
         )
+
+        # A lookalike/foreign repository must not inherit this historical incident label.
+        for foreign_repository in (
+            "other/review-sensei",
+            "malsabbagh/review-sensei-copy",
+        ):
+            with self.subTest(foreign_repository=foreign_repository):
+                foreign_packet = build_pending_reassessment_attempt_packet(
+                    identity=SessionIdentity(
+                        repository=foreign_repository,
+                        pull_request=id_408.pull_request,
+                        repository_id=id_408.repository_id,
+                    ),
+                    original_eligibility=orig_elig,
+                    latest_eligibility=orig_elig,
+                    bound_source_comment_id=40810,
+                    bound_source_updated_at="2026-10-15T14:22:00Z",
+                    bound_source_body_sha256=source_sha,
+                    bound_source_kind="issue",
+                    bound_base_sha=BASE,
+                    bound_head_sha=HEAD,
+                    current_base_sha=BASE,
+                    current_head_sha=HEAD,
+                    pr_merged=True,
+                    record=SessionRecord._construct(
+                        **{
+                            **{
+                                key: value
+                                for key, value in vars(rec_408).items()
+                                if key != "record_sha256" and not key.startswith("_")
+                            },
+                            "repository": foreign_repository,
+                        }
+                    ),
+                    source_actor="maintainer-user",
+                    pending_receipt=receipt_408,
+                )
+                self.assertNotEqual(foreign_packet.case_id, REVIEWSENSEI_408_CASE_ID)
+                self.assertTrue(
+                    foreign_packet.case_id.startswith(foreign_repository + "#")
+                )
+                self.assertFalse(foreign_packet.authority)
         self.assertIsInstance(pkt_408, PendingReassessmentAttemptPacket)
         self.assertEqual(pkt_408.case_id, REVIEWSENSEI_408_CASE_ID)
         self.assertFalse(pkt_408.authority)

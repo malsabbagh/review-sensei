@@ -1178,7 +1178,20 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
             self.assertEqual(f.invoke(human=True), 0, f.error)
             patch_path.write_text(original_patch, encoding="utf-8", newline="\n")
             f.next_run()
-            self.assertEqual(f.invoke(human=True), 1, f.error)
+            # A source-confirmed human hold now legitimately closes caller
+            # accounting. Construct the historical unclosed-tail predicate
+            # explicitly, rather than depending on that obsolete close omission.
+            # Fail locally before terminal mutation, not via an unknown write.
+            with patch(
+                "review_sensei_github.review_run.close_review_run",
+                side_effect=ReviewInputError("synthetic local terminal close failure"),
+            ) as failed_close:
+                self.assertEqual(f.invoke(human=True), 1, f.error)
+            failed_close.assert_called_once()
+            self.assertIn("terminal_close_unconfirmed", f.error)
+            unclosed = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertEqual(unclosed.transaction.phase, "publication_succeeded")
+            self.assertIsNone(unclosed.api_run_accounting["terminal_transaction"])
 
             # Resolve superseded threads externally (no ReviewSensei write yet).
             from review_sensei_github.publication import finding_publication_scope
@@ -2069,6 +2082,52 @@ class HistoricalRecoveryMatrixG03Tests(unittest.TestCase):
             current_head=HEAD_A,
             diagnostics_available=False,
         )
+
+        # A lookalike/foreign repository must not inherit this historical incident label.
+        for foreign_repository in (
+            "other/review-sensei",
+            "malsabbagh/review-sensei-copy",
+        ):
+            with self.subTest(foreign_repository=foreign_repository):
+                foreign_packet = build_attempt_evidence_packet(
+                    SessionRecord._construct(
+                        **{
+                            **{
+                                key: value
+                                for key, value in vars(record_443).items()
+                                if key != "record_sha256" and not key.startswith("_")
+                            },
+                            "repository": foreign_repository,
+                            "transaction": replace(
+                                record_443.transaction,
+                                repository=foreign_repository,
+                                transaction_id=ReviewTransaction.derive_id(
+                                    repository=foreign_repository,
+                                    **{
+                                        key: getattr(record_443.transaction, key)
+                                        for key in (
+                                            "pull_request",
+                                            "base_sha",
+                                            "head_sha",
+                                            "policy_digest",
+                                            "configuration_digest",
+                                            "evidence_digest",
+                                            "reservation_id",
+                                        )
+                                    },
+                                ),
+                            ),
+                        }
+                    ),
+                    current_base=BASE_A,
+                    current_head=HEAD_A,
+                    diagnostics_available=False,
+                )
+                self.assertNotEqual(foreign_packet.case_id, REVIEWSENSEI_443_CASE_ID)
+                self.assertTrue(
+                    foreign_packet.case_id.startswith(foreign_repository + "#")
+                )
+                self.assertFalse(foreign_packet.authority)
         # Strict read-only invariant: ledger record is bit-for-bit untouched.
         self.assertEqual(record_443.record_sha256, original_record_digest)
         self.assertEqual(

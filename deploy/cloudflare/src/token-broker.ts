@@ -1,3 +1,4 @@
+import { parseCurrentObservation } from "./current-observation";
 import { authorizeControlledRestart } from "./controlled-restart";
 import type { BrokerObservation } from "./broker-observation";
 import { BrokerLifetime } from "./broker-lifetime";
@@ -339,6 +340,7 @@ export class TokenBroker {
     });
     // Reject obsolete or wrong-purpose authority before requesting installation tokens.
     const requestedAuthority = bindRunAuthority(body.session_attestation, claims);
+    if (requestedAuthority.version === 4 && (requested !== "review_session" || body.release_only === true)) throw new Error("broker_current_observation_scope_unsupported");
     authorizeRunCapability(requestedAuthority, requested);
     authorizeControlledRestart(requestedAuthority, requested, claims.event_name);
     const configuredTag = validatePublicWorkflowTag(this.env.PUBLIC_WORKFLOW_TAG ?? "");
@@ -348,7 +350,10 @@ export class TokenBroker {
     );
     const runtime = await github.publicWorkflowRuntimeShas(observedTag);
     this.authorizeClaims(claims, observedTag, runtime);
-    const installationId = await github.installationFor(claims.repository);
+    const installationObservation = requestedAuthority.version === 4
+      ? await github.installationObservationFor(claims.repository) : undefined;
+    const installationId = requestedAuthority.version === 4
+      ? installationObservation?.id ?? null : await github.installationFor(claims.repository);
     if (installationId === null) {
       throw new Error("broker_installation_unavailable");
     }
@@ -360,10 +365,9 @@ export class TokenBroker {
       claims.repository,
       REPOSITORY_METADATA_PERMISSIONS,
     );
-    const info = await github.repositoryInfo(
-      claims.repository,
-      metadataToken.token,
-    );
+    const info = requestedAuthority.version === 4
+      ? await github.repositoryInfo(claims.repository, metadataToken.token, true)
+      : await github.repositoryInfo(claims.repository, metadataToken.token);
     if (info === null || info.fork || info.id !== claims.repository_id) {
       throw new Error("broker_repository_rejected");
     }
@@ -374,7 +378,10 @@ export class TokenBroker {
       requestedSession.pull_request !== requestedAuthority.pull_request ||
       requestedSession.head_sha !== requestedAuthority.head_sha
     )) throw new Error("broker_session_attestation_invalid");
-    const token = await github.capabilityToken(
+    const capabilityObservation = requestedAuthority.version === 4
+      ? await github.capabilityTokenObservation(installationId, claims.repository, CAPABILITIES[requested], CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ.has(requested)) : undefined;
+    if (requestedAuthority.version === 4 && (typeof capabilityObservation?.token !== "string" || !capabilityObservation.token.trim())) throw new Error("broker_current_observation_invalid");
+    const token = requestedAuthority.version === 4 ? capabilityObservation!.token : await github.capabilityToken(
       installationId, claims.repository, CAPABILITIES[requested],
       CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ.has(requested),
     );
@@ -393,6 +400,15 @@ export class TokenBroker {
     const attestation = await authorizeRunSource(
       github, requestedAuthority, claims, validationToken, recognizedCommand,
     );
+    if (requestedAuthority.version === 4) {
+      attestation.current_observation = parseCurrentObservation({
+        schema_version: "current-observation-v1",
+        repository: { id: info.id, full_name: info.full_name, owner_id: info.owner_id, owner_login: info.owner_login, fork: info.fork },
+        installation: { ...installationObservation, repository_access: true },
+        capability: { name: requested, permissions: capabilityObservation?.permissions },
+        actor: { id: claims.actor_id, login: claims.actor, source_association: attestation.actor?.association ?? null },
+      }, attestation);
+    }
     if (requestedSession !== undefined) {
       if (body.release_only === true) {
         return {

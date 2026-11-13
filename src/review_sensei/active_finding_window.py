@@ -1823,6 +1823,7 @@ def reconcile_uncertain_slot(
     target: str,
     resolved_state: str,
     proof_sha256: str,
+    confirmed_target: str | None = None,
 ) -> ActiveWindowRoundState:
     """Reconcile an uncertain native slot after exact owned readback.
 
@@ -1846,13 +1847,24 @@ def reconcile_uncertain_slot(
     existing = slot_map.get(target)
     if existing is None or existing.state != "uncertain":
         raise ReviewInputError("reconcile_uncertain_slot requires an uncertain target")
-    slot_map[target] = PublishedSlot(
-        target=target, state=resolved_state, proof_sha256=proof_sha256
+    destination = (
+        target
+        if confirmed_target is None
+        else _require_target_id(confirmed_target, label="confirmed_target")
+    )
+    if destination != target:
+        if resolved_state != "active" or destination in slot_map:
+            raise ReviewInputError("confirmed target conflicts with retained slots")
+        slot_map[target] = PublishedSlot(
+            target=target, state="released", proof_sha256=proof_sha256
+        )
+    slot_map[destination] = PublishedSlot(
+        target=destination, state=resolved_state, proof_sha256=proof_sha256
     )
     updated_obligations = tuple(
         replace(
             item,
-            native_target=target if resolved_state == "active" else None,
+            native_target=destination if resolved_state == "active" else None,
             target_state=resolved_state if resolved_state == "active" else None,
             target_proof_sha256=proof_sha256 if resolved_state == "active" else None,
         )

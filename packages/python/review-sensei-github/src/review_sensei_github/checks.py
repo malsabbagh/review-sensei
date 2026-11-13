@@ -445,6 +445,48 @@ class ReviewCheckPublisher:
             conclusion="cancelled",
         )
 
+    def plan_completion(self, *, token, repository, head_sha, app_slug, outcome):
+        """Observe the selected check and return exact sizing data, never a write."""
+        if type(self) is not ReviewCheckPublisher:
+            raise GitHubPublicationError("check capacity source is unsupported")
+        existing = self._find_own_run(
+            token=token, repository=repository, head_sha=head_sha, app_slug=app_slug
+        )
+        body = self._mutation_body(
+            repository=repository,
+            head_sha=head_sha,
+            status="completed",
+            title=outcome.title,
+            summary=outcome.summary,
+            conclusion=outcome.conclusion,
+            create=existing is None,
+        )
+        return (
+            "POST" if existing is None else "PATCH",
+            self._repository_path(
+                repository,
+                "/check-runs" if existing is None else f"/check-runs/{existing}",
+            ),
+            body,
+        )
+
+    def _mutation_body(
+        self, *, repository, head_sha, status, title, summary, conclusion, create
+    ):
+        body: dict[str, object] = {
+            "status": status,
+            "output": {"title": title, "summary": summary},
+        }
+        if create:
+            body.update(
+                name=REVIEW_CHECK_NAME,
+                head_sha=head_sha,
+                external_id=self._external_id(repository, head_sha),
+            )
+        if conclusion is not None:
+            body["conclusion"] = conclusion
+        return body
+
     def _write(
         self,
         *,
@@ -604,15 +646,15 @@ class ReviewCheckPublisher:
         summary: str,
         conclusion: str | None,
     ) -> CheckPublicationResult:
-        body: dict[str, object] = {
-            "name": REVIEW_CHECK_NAME,
-            "head_sha": head_sha,
-            "status": status,
-            "external_id": self._external_id(repository, head_sha),
-            "output": {"title": title, "summary": summary},
-        }
-        if conclusion is not None:
-            body["conclusion"] = conclusion
+        body = self._mutation_body(
+            repository=repository,
+            head_sha=head_sha,
+            status=status,
+            title=title,
+            summary=summary,
+            conclusion=conclusion,
+            create=True,
+        )
         path = self._repository_path(repository, "/check-runs")
         with native_check_call(
             self.http,
@@ -653,12 +695,15 @@ class ReviewCheckPublisher:
         summary: str,
         conclusion: str | None,
     ) -> CheckPublicationResult:
-        body: dict[str, object] = {
-            "status": status,
-            "output": {"title": title, "summary": summary},
-        }
-        if conclusion is not None:
-            body["conclusion"] = conclusion
+        body = self._mutation_body(
+            repository=repository,
+            head_sha=head_sha,
+            status=status,
+            title=title,
+            summary=summary,
+            conclusion=conclusion,
+            create=False,
+        )
         path = self._repository_path(repository, f"/check-runs/{check_run_id}")
         with native_check_call(
             self.http,

@@ -390,7 +390,7 @@ class NativeThreadBinding:
     """Native review thread/comment binding independent of host UI resolution."""
 
     thread_id: str
-    comment_id: int
+    comment_id: int | None
     placement: str
     body_reason: str | None
     slot_state: str
@@ -400,8 +400,17 @@ class NativeThreadBinding:
 
     def __post_init__(self) -> None:
         _require_target_id(self.thread_id, label="thread_id")
-        if type(self.comment_id) is not int or self.comment_id < 1:
+        if self.comment_id is None:
+            if self.slot_state != "uncertain" or not self.thread_id.startswith(
+                "intent:"
+            ):
+                raise ReviewInputError(
+                    "missing comment_id requires an uncertain intent"
+                )
+        elif type(self.comment_id) is not int or self.comment_id < 1:
             raise ReviewInputError("comment_id must be a positive integer")
+        elif self.thread_id.startswith("intent:"):
+            raise ReviewInputError("pending intent cannot carry a native comment_id")
         if self.placement not in {INLINE_PLACEMENT, BODY_PLACEMENT}:
             raise ReviewInputError("placement is invalid")
         if self.placement == INLINE_PLACEMENT and self.body_reason is not None:
@@ -482,6 +491,14 @@ class DriftTrackedObligation:
         }
 
     @property
+    def effective_blocking_now(self) -> bool:
+        """Keep human-required approval gates distinct from blocking findings."""
+        return self.unresolved and (
+            self.criterion.blocking
+            or self.lifecycle_state in {"omitted-uncertain", "ambiguous-multi-target"}
+        )
+
+    @property
     def implicated_paths(self) -> tuple[str, ...]:
         paths: list[str] = []
         for candidate in (
@@ -510,7 +527,7 @@ class DriftTrackedObligation:
                 blocking=self.criterion.blocking,
                 needs_human=self.criterion.needs_human
                 or self.lifecycle_state == "ambiguous-multi-target",
-                effective_blocking=self.blocks_approval_now,
+                effective_blocking=self.effective_blocking_now,
             )
         anchor_path = (
             self.present_anchor.path or self.criterion.origin_path or "UNANCHORED"
@@ -534,7 +551,7 @@ class DriftTrackedObligation:
             blocking=self.criterion.blocking,
             needs_human=self.criterion.needs_human
             or self.lifecycle_state == "ambiguous-multi-target",
-            effective_blocking=self.blocks_approval_now,
+            effective_blocking=self.effective_blocking_now,
             symbol=self.present_anchor.symbol or self.criterion.origin_symbol,
             defect_kind=self.criterion.defect_kind,
         )
@@ -810,6 +827,26 @@ def _expected_paths_for_prior(
     """Determine expected drift kind and candidate target paths for one prior."""
 
     current_path = prior.present_anchor.path or prior.criterion.origin_path
+    if prior.lifecycle_state == "ambiguous-multi-target":
+        # Ambiguity is an obligation, not a description of only this diff.
+        # A later empty/single-target result or a deletion cannot erase a
+        # previously implicated destination before all-path disposition.
+        candidates = list(prior.present_anchor.candidate_paths)
+        if current_path is not None and current_path not in candidates:
+            candidates.append(current_path)
+        drift_kind = prior.present_anchor.drift_kind
+        for descriptor in descriptors:
+            if descriptor.source_path in candidates:
+                for target in descriptor.target_paths:
+                    if target not in candidates:
+                        candidates.append(target)
+                if descriptor.drift_kind in {
+                    "file_copy",
+                    "cross_file_move",
+                    "duplicate_code",
+                }:
+                    drift_kind = descriptor.drift_kind
+        return drift_kind, tuple(candidates)
     if current_path is None:
         return "unchanged", ()
 
@@ -1386,7 +1423,11 @@ def evaluate_drift_round(
             "cross_file_move",
             "duplicate_code",
         }
-        if prior.obligation_id in ambiguous_prior_ids or structural_multi_target:
+        if (
+            prior.obligation_id in ambiguous_prior_ids
+            or structural_multi_target
+            or prior.lifecycle_state == "ambiguous-multi-target"
+        ):
             cand_paths = list(expected_paths)
             for idx in matched_indices:
                 c_path = result.comments[idx].path
@@ -2266,7 +2307,7 @@ def project_drift_review_result(
                 blocking=ob.criterion.blocking,
                 needs_human=ob.criterion.needs_human
                 or ob.lifecycle_state == "ambiguous-multi-target",
-                effective_blocking=ob.blocks_approval_now,
+                effective_blocking=ob.effective_blocking_now,
             )
         else:
             body_text = base.body
@@ -2294,7 +2335,7 @@ def project_drift_review_result(
                 in {"omitted-uncertain", "ambiguous-multi-target"},
                 needs_human=ob.criterion.needs_human
                 or ob.lifecycle_state == "ambiguous-multi-target",
-                effective_blocking=ob.blocks_approval_now,
+                effective_blocking=ob.effective_blocking_now,
             )
         display_comments.append(projected)
         fp = finding_lifecycle_for_comment(
@@ -2330,7 +2371,7 @@ def commit_drift_publication(
     evaluation: DriftEvaluationResult,
     *,
     created_threads: Mapping[str, tuple[str, int]] | None = None,
-    uncertain_threads: Mapping[str, tuple[str, int, str]] | None = None,
+    uncertain_threads: Mapping[str, tuple[str, int | None, str]] | None = None,
 ) -> DriftEvaluationResult:
     """Record confirmed or uncertain native GitHub thread bindings after publication."""
 
@@ -2385,6 +2426,11 @@ def commit_drift_publication(
             updated_obligations.append(replace(item, thread_binding=binding))
             continue
         if entry is not None and item.thread_binding is not None:
+            # Planning or a confirmed review alone cannot confirm a native
+            # thread mutation. Retain uncertainty until an exact receipt arrives.
+            if item.thread_binding.slot_state == "uncertain":
+                updated_obligations.append(item)
+                continue
             proof = hashlib.sha256(
                 canonical_bytes(
                     {

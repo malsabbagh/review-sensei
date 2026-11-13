@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from .publication import FindingIndex
 
 UNION_VERSION = "native-review-union-v1"
+REUSED_UNION_VERSION = "native-review-union-v2"
 MAX_UNION_BYTES = 4096
 # The v8 envelope wraps the existing canonical eligibility document. Base64
 # growth is at most four bytes per added three input bytes, plus one quantum
@@ -111,6 +112,64 @@ class NativeUnionPart:
 
 
 @dataclass(frozen=True)
+class NativeUnionReusedRoot:
+    """Current inline membership on an authenticated existing native root.
+
+    Repository, PR, current head/base and producer are inherited from the union.
+    Native review and native commit remain immutable when GitHub edits a body.
+    """
+
+    instance: str
+    thread_id: str
+    comment_id: int
+    review_id: int
+    native_head_sha: str
+    body_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            any(
+                type(value) is not int or not 1 <= value <= 2**63 - 1
+                for value in (self.comment_id, self.review_id)
+            )
+            or not isinstance(self.thread_id, str)
+            or not self.thread_id
+            or len(self.thread_id.encode("utf-8")) > 256
+            or self.thread_id.startswith("intent:")
+            or any(
+                not isinstance(value, str) or _SHA.fullmatch(value) is None
+                for value in (self.instance, self.body_sha256)
+            )
+            or not isinstance(self.native_head_sha, str)
+            or _GIT_SHA.fullmatch(self.native_head_sha) is None
+        ):
+            raise ReviewInputError("native reused-root identity or digest is invalid")
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "instance": self.instance,
+            "thread_id": self.thread_id,
+            "comment_id": self.comment_id,
+            "review_id": self.review_id,
+            "native_head_sha": self.native_head_sha,
+            "body_sha256": self.body_sha256,
+        }
+
+    @classmethod
+    def from_document(cls, value: object) -> NativeUnionReusedRoot:
+        if not isinstance(value, dict) or set(value) != {
+            "instance",
+            "thread_id",
+            "comment_id",
+            "review_id",
+            "native_head_sha",
+            "body_sha256",
+        }:
+            raise ReviewInputError("native reused-root document is unsupported")
+        return cls(**value)
+
+
+@dataclass(frozen=True)
 class NativeUnionReceipt:
     repository_id: int
     pull_request: int
@@ -122,6 +181,7 @@ class NativeUnionReceipt:
     plan_sha256: str
     inline_count: int
     parts: tuple[NativeUnionPart, ...]
+    reused_roots: tuple[NativeUnionReusedRoot, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -143,14 +203,35 @@ class NativeUnionReceipt:
             or not isinstance(self.parts, tuple)
             or len(self.parts) > 8
             or any(type(part) is not NativeUnionPart for part in self.parts)
-            or sum(part.finding_count for part in self.parts) != self.inline_count
+            or not isinstance(self.reused_roots, tuple)
+            or len(self.reused_roots) > 50
+            or any(
+                type(root) is not NativeUnionReusedRoot for root in self.reused_roots
+            )
+            or sum(part.finding_count for part in self.parts) + len(self.reused_roots)
+            != self.inline_count
             or len({part.native_id for part in self.parts}) != len(self.parts)
+            or len({root.instance for root in self.reused_roots})
+            != len(self.reused_roots)
+            or len({root.comment_id for root in self.reused_roots})
+            != len(self.reused_roots)
+            or len({root.thread_id for root in self.reused_roots})
+            != len(self.reused_roots)
+            or any(
+                str(root.review_id) in {part.native_id for part in self.parts}
+                for root in self.reused_roots
+            )
         ):
             raise ReviewInputError("native union scope or complete part set is invalid")
         if len(canonical_bytes(self.to_document())) > MAX_UNION_BYTES:
             raise ReviewInputError("native union exceeds its reserved frame capacity")
 
     def context(self) -> dict[str, object]:
+        """Existing bounded census context for newly allocated part items.
+
+        Reused-root membership is additionally bound by the complete v2 frame
+        digest and exact old-root evidence; it is not a new part allocation.
+        """
         return {
             "repository_id": self.repository_id,
             "pull_request": self.pull_request,
@@ -160,7 +241,7 @@ class NativeUnionReceipt:
             "transaction_id": self.transaction_id,
             "result_sha256": self.result_sha256,
             "plan_sha256": self.plan_sha256,
-            "inline_count": self.inline_count,
+            "inline_count": self.inline_count - len(self.reused_roots),
         }
 
     @property
@@ -176,11 +257,17 @@ class NativeUnionReceipt:
         ).hexdigest()
 
     def to_document(self) -> dict[str, object]:
-        return {
-            "schema_version": UNION_VERSION,
+        value = {
+            "schema_version": REUSED_UNION_VERSION
+            if self.reused_roots
+            else UNION_VERSION,
             **self.context(),
+            "inline_count": self.inline_count,
             "parts": [part.to_document() for part in self.parts],
         }
+        if self.reused_roots:
+            value["reused_roots"] = [root.to_document() for root in self.reused_roots]
+        return value
 
     @classmethod
     def from_document(cls, value: object) -> NativeUnionReceipt:
@@ -197,10 +284,23 @@ class NativeUnionReceipt:
             "inline_count",
             "parts",
         }
+        reused = (
+            isinstance(value, dict)
+            and value.get("schema_version") == REUSED_UNION_VERSION
+        )
+        if reused:
+            fields.add("reused_roots")
         if (
             not isinstance(value, dict)
             or set(value) != fields
-            or value["schema_version"] != UNION_VERSION
+            or value["schema_version"] not in {UNION_VERSION, REUSED_UNION_VERSION}
+            or (
+                reused
+                and (
+                    not isinstance(value["reused_roots"], list)
+                    or not 1 <= len(value["reused_roots"]) <= 50
+                )
+            )
             or not isinstance(value["parts"], list)
             or len(value["parts"]) > 8
         ):
@@ -208,16 +308,25 @@ class NativeUnionReceipt:
         context = {
             key: item
             for key, item in value.items()
-            if key not in {"schema_version", "parts"}
+            if key not in {"schema_version", "parts", "reused_roots"}
         }
         return cls(
             **context,
             parts=tuple(NativeUnionPart.from_document(part) for part in value["parts"]),
+            reused_roots=tuple(
+                NativeUnionReusedRoot.from_document(root)
+                for root in value.get("reused_roots", [])
+            ),
         )
 
     @classmethod
     def from_staging(
-        cls, plan: NativeReviewPlan, state: PublicationStaging, *, producer_id: int
+        cls,
+        plan: NativeReviewPlan,
+        state: PublicationStaging,
+        *,
+        producer_id: int,
+        reused_roots: tuple[NativeUnionReusedRoot, ...] = (),
     ) -> NativeUnionReceipt:
         if (
             (
@@ -235,8 +344,16 @@ class NativeUnionReceipt:
             )
         return cls.from_document(
             {
-                "schema_version": UNION_VERSION,
+                "schema_version": REUSED_UNION_VERSION
+                if reused_roots
+                else UNION_VERSION,
                 **plan.context(producer_id),
+                "inline_count": len(plan.items) + len(reused_roots),
+                **(
+                    {"reused_roots": [root.to_document() for root in reused_roots]}
+                    if reused_roots
+                    else {}
+                ),
                 "parts": [
                     NativeUnionPart(
                         receipt.native_id, receipt.content_sha256, len(group)
@@ -274,6 +391,80 @@ class NativeUnionReceipt:
             ):
                 raise ReviewInputError("native union part or native membership changed")
             seen.update(group.comment_ids)
+        if self.reused_roots:
+            from .publication import (
+                finding_instance_from_body,
+                finding_publication_scope,
+            )
+
+            # The census context intentionally counts only new allocations.
+            # Bind the extra membership to the exact authenticated final frame,
+            # even when the caller did not supply an additional document hash.
+            frame = native_union_frame_document(evidence.main_body, self)
+            if (
+                evidence.document_sha256
+                != hashlib.sha256(canonical_bytes(frame)).hexdigest()
+            ):
+                raise ReviewInputError(
+                    "native union reused-root frame evidence conflicts"
+                )
+            roots = {root.comment_id: root for root in evidence.roots}
+            threads = dict(evidence.thread_ids)
+            bodies = {}
+            for row in evidence.root_bodies:
+                raw_identifier = row.get("n") if isinstance(row, dict) else None
+                if type(raw_identifier) is int:
+                    identifier = raw_identifier
+                elif isinstance(raw_identifier, str) and re.fullmatch(
+                    r"[1-9][0-9]*", raw_identifier
+                ):
+                    identifier = int(raw_identifier)
+                else:
+                    raise ReviewInputError("native union root body identity is invalid")
+                if identifier in bodies:
+                    raise ReviewInputError("native union root bodies are duplicated")
+                bodies[identifier] = row
+            if len(roots) != len(evidence.roots) or len(threads) != len(
+                evidence.thread_ids
+            ):
+                raise ReviewInputError("native union root identities are duplicated")
+            for reused in self.reused_roots:
+                root = roots.get(reused.comment_id)
+                observed = bodies.get(reused.comment_id)
+                body = observed.get("b") if isinstance(observed, dict) else None
+                scope = finding_publication_scope(body)
+                if (
+                    reused.comment_id in seen
+                    or root is None
+                    or not isinstance(observed, dict)
+                    or threads.get(reused.comment_id) != reused.thread_id
+                    or root.review_id != reused.review_id
+                    or root.producer_id != self.producer_id
+                    or root.head_sha != reused.native_head_sha
+                    or root.resolved
+                    or not isinstance(body, str)
+                    or hashlib.sha256(body.encode("utf-8")).hexdigest()
+                    != reused.body_sha256
+                    or finding_instance_from_body(body) != reused.instance
+                    or scope is None
+                    or scope[:4]
+                    != (
+                        self.repository_id,
+                        self.pull_request,
+                        self.head_sha,
+                        self.base_sha,
+                    )
+                    or observed.get("a") != {"t": "Bot", "n": self.producer_id}
+                    or observed.get("c") != {"o": reused.native_head_sha}
+                    or observed.get("r")
+                    not in ({"n": reused.review_id}, {"n": str(reused.review_id)})
+                    or observed.get("q") is not None
+                    or observed.get("u") != root.updated_at
+                ):
+                    raise ReviewInputError(
+                        "native union reused root membership changed"
+                    )
+                seen.add(reused.comment_id)
         if len(seen) != self.inline_count:
             raise ReviewInputError(
                 "native union does not cover the complete inline set"
@@ -319,6 +510,13 @@ class NativeUnionReceipt:
         if len(entries) != len(index.entries):
             raise ReviewInputError(
                 "native union original admission duplicates an instance"
+            )
+        reused = {root.instance: root for root in self.reused_roots}
+        if not set(reused) <= set(entries) or any(
+            entries[instance].body_placed for instance in reused
+        ):
+            raise ReviewInputError(
+                "native union reused roots conflict with original index"
             )
         states = {item.fingerprint: item.state for item in result.finding_lifecycles}
         originals = {}
@@ -383,6 +581,13 @@ class NativeUnionReceipt:
                     fingerprint=fingerprint,
                     state=state,
                 )
+                if instance in reused:
+                    if (
+                        hashlib.sha256(body.encode("utf-8")).hexdigest()
+                        != reused[instance].body_sha256
+                    ):
+                        body_complete = False
+                    continue
                 items.append(
                     NativeInline.from_prepared(
                         comment, body, anchor=comment.side.lower()
@@ -399,7 +604,7 @@ class NativeUnionReceipt:
             )
             if (
                 plan.sha256 == self.plan_sha256
-                and len(plan.items) == self.inline_count
+                and len(plan.items) + len(reused) == self.inline_count
                 and body_complete
             ):
                 return plan

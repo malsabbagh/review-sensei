@@ -1928,7 +1928,7 @@ def build_pending_reassessment_attempt_packet(
     if resolved_case_id is None:
         if (
             identity.pull_request == REVIEWSENSEI_408_PULL_REQUEST
-            and "review-sensei" in identity.repository.casefold()
+            and identity.repository.casefold() == REVIEWSENSEI_408_REPOSITORY.casefold()
         ):
             resolved_case_id = REVIEWSENSEI_408_CASE_ID
         else:

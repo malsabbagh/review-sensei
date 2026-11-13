@@ -205,3 +205,81 @@ describe("current token broker authorization", () => {
     await expect(broker.verifySessionGrant(result.session_grant, result.session_attestation)).rejects.toThrow("broker_workflow_rejected");
   });
 });
+
+describe("opt-in v4 current observations", () => {
+  function observedHarness() {
+    const h = harness();
+    const observed = {
+      installationObservationFor: vi.fn(async () => ({ id: 2468, repository_selection: "selected", permissions: { metadata: "read", pull_requests: "write" } })),
+      capabilityTokenObservation: vi.fn(async () => ({ token: "observed-token", permissions: { metadata: "read", pull_requests: "write" } })),
+    };
+    Object.assign(h.github, observed);
+    h.github.repositoryInfo.mockResolvedValue({ id: 987654321, fork: false, full_name: "acme/widgets", owner_id: 987, owner_login: "acme" } as never);
+    return { ...h, observed };
+  }
+  it("MAC-binds only source-derived observations without additional reads or grants", async () => {
+    const { broker, github, observed } = observedHarness();
+    const result = await broker.exchange(sessionBody(request("review", { version: 4 })));
+    expect(result.session_attestation?.version).toBe(4);
+    expect(result.session_attestation?.current_observation).toEqual({
+      schema_version: "current-observation-v1",
+      repository: { id: 987654321, full_name: "acme/widgets", owner_id: 987, owner_login: "acme", fork: false },
+      installation: { id: 2468, repository_selection: "selected", repository_access: true, permissions: { metadata: "read", pull_requests: "write" } },
+      capability: { name: "review_session", permissions: { metadata: "read", pull_requests: "write" } },
+      actor: { id: 12345678, login: "octocat", source_association: null },
+    });
+    expect(observed.installationObservationFor).toHaveBeenCalledTimes(1);
+    expect(observed.capabilityTokenObservation).toHaveBeenCalledTimes(1);
+    expect(github.installationFor).not.toHaveBeenCalled();
+    expect(github.capabilityToken).not.toHaveBeenCalled();
+    expect(github.repositoryInfo).toHaveBeenCalledTimes(1);
+    expect(github.feedbackComment).not.toHaveBeenCalled();
+    expect(await broker.verifySessionGrant(result.session_grant, result.session_attestation)).toEqual(result.session_attestation);
+    for (const mutate of [
+      (a: any) => a.current_observation.actor.id++,
+      (a: any) => a.current_observation.repository.owner_id++,
+      (a: any) => a.current_observation.installation.id++,
+      (a: any) => a.run_id = "10000000002",
+      (a: any) => a.head_sha = "c".repeat(40),
+      (a: any) => a.current_observation.installation.repository_selection = "all",
+    ]) {
+      const altered = structuredClone(result.session_attestation); mutate(altered);
+      await expect(broker.verifySessionGrant(result.session_grant, altered)).rejects.toThrow();
+    }
+  });
+  it("keeps authenticated numeric source author and association distinct from permission", async () => {
+    oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment" }));
+    const { broker } = observedHarness();
+    const result = await broker.exchange(sessionBody(request("command", { version: 4 })));
+    expect(result.session_attestation?.current_observation?.actor).toEqual({ id: 12345678, login: "octocat", source_association: "OWNER" });
+    expect(JSON.stringify(result.session_attestation)).not.toContain("permission_epoch");
+    expect(JSON.stringify(result.session_attestation)).not.toContain("actor_permission");
+  });
+  it.each(["missing owner", "foreign owner", "fork", "foreign repository", "missing installation permissions", "permission downgrade", "extra effective permission", "missing actor", "unknown selection"])("refuses incomplete/contradictory v4: %s", async mode => {
+    const { broker, github, observed } = observedHarness();
+    if (mode === "missing owner") github.repositoryInfo.mockResolvedValue({ id: 987654321, fork: false });
+    if (mode === "foreign owner") github.repositoryInfo.mockResolvedValue({ id: 987654321, fork: false, full_name: "acme/widgets", owner_id: 987, owner_login: "other" } as never);
+    if (mode === "fork") github.repositoryInfo.mockResolvedValue({ id: 987654321, fork: true });
+    if (mode === "foreign repository") github.repositoryInfo.mockResolvedValue({ id: 7, fork: false });
+    if (mode === "missing installation permissions") observed.installationObservationFor.mockResolvedValue({ id: 2468, repository_selection: "selected" } as never);
+    if (mode === "permission downgrade") observed.installationObservationFor.mockResolvedValue({ id: 2468, repository_selection: "selected", permissions: { metadata: "read", pull_requests: "read" } });
+    if (mode === "extra effective permission") observed.capabilityTokenObservation.mockResolvedValue({ token: "observed-token", permissions: { metadata: "read", pull_requests: "write", checks: "write" } } as never);
+    if (mode === "missing actor") oidc.verify.mockResolvedValue(claims({ actor_id: undefined }));
+    if (mode === "unknown selection") observed.installationObservationFor.mockResolvedValue({ id: 2468, repository_selection: "unknown", permissions: { metadata: "read", pull_requests: "write" } });
+    await expect(broker.exchange(sessionBody(request("review", { version: 4 })))).rejects.toThrow();
+    expect(github.capabilityToken).not.toHaveBeenCalled();
+    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
+  });
+  it.each(["other capability", "release", "missing session", "injected observation", "foreign actor", "wrong head"])("never downgrades unsupported v4: %s", async mode => {
+    const { broker, github } = observedHarness();
+    const body: any = sessionBody(request(mode === "foreign actor" ? "command" : "review", { version: 4 }));
+    if (mode === "other capability") { body.capability = "review_publish"; delete body.session; }
+    if (mode === "release") body.release_only = true;
+    if (mode === "missing session") delete body.session;
+    if (mode === "injected observation") body.session_attestation.current_observation = {};
+    if (mode === "foreign actor") { oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment", actor_id: 99 })); }
+    if (mode === "wrong head") github.pullRequestHead.mockResolvedValue("c".repeat(40));
+    await expect(broker.exchange(body)).rejects.toThrow();
+    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
+  });
+});

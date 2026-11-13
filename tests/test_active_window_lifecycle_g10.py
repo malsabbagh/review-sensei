@@ -1743,6 +1743,9 @@ class _WindowGitHubHost:
                     if c.get("pull_request_review_id") == rid
                 ]
                 return self._resp(matched)
+            if "/reviews/" in path and not path.endswith("/comments"):
+                rid = int(path.rsplit("/", 1)[-1])
+                return self._resp(next((r for r in self.reviews if r["id"] == rid), {}))
             if path.endswith("/pulls/1/comments"):
                 return self._resp([])
             if "/pulls/comments/" in path:
@@ -1815,10 +1818,15 @@ class _WindowGitHubHost:
                                         "id": f"PRRC_{review_id}_{idx}",
                                         "databaseId": review_id * 100 + idx,
                                         "pull_request_review_id": review_id,
+                                        "pullRequestReview": {"databaseId": review_id},
+                                        "commit": {"oid": body["commit_id"]},
                                         "body": comment["body"],
+                                        "path": comment["path"],
+                                        "line": comment["line"],
                                         "author": {
                                             "login": self.app_slug,
                                             "__typename": "Bot",
+                                            "databaseId": 9001,
                                         },
                                     }
                                 ]
@@ -1836,7 +1844,7 @@ class _WindowGitHubHost:
                     "status": body.get("status"),
                     "conclusion": body.get("conclusion"),
                     "output": body.get("output", {}),
-                    "app": {"slug": "reviewsensei"},
+                    "app": {"id": 999, "slug": "reviewsensei"},
                 }
                 self.check_runs.append(run)
                 return self._resp(run, 201)
@@ -1850,12 +1858,20 @@ class _WindowGitHubHost:
                     ) or variables.get("threadId")
                     for thread in self.threads:
                         if thread["id"] == tid:
-                            thread["isResolved"] = True
+                            reopening = "unresolveReviewThread" in query
+                            thread["isResolved"] = not reopening
                             return self._resp(
                                 {
                                     "data": {
-                                        "resolveReviewThread": {
-                                            "thread": {"id": tid, "isResolved": True}
+                                        (
+                                            "unresolveReviewThread"
+                                            if reopening
+                                            else "resolveReviewThread"
+                                        ): {
+                                            "thread": {
+                                                "id": tid,
+                                                "isResolved": not reopening,
+                                            }
                                         }
                                     }
                                 }
@@ -1913,6 +1929,25 @@ class _WindowGitHubHost:
                 if rev["id"] == rid:
                     rev["body"] = body["body"]
                     return self._resp(rev, 200)
+
+        if request.method == "PATCH" and "/pulls/comments/" in path:
+            cid = int(path.rsplit("/", 1)[-1])
+            for thread in self.threads:
+                for comment in thread["comments"]["nodes"]:
+                    if comment["databaseId"] == cid:
+                        comment["body"] = body["body"]
+                        return self._resp(
+                            {
+                                "id": cid,
+                                "body": comment["body"],
+                                "user": {
+                                    "id": 9001,
+                                    "type": "Bot",
+                                    "login": self.app_slug,
+                                },
+                            }
+                        )
+            return self._resp({}, 404)
 
         if request.method == "PATCH" and "/check-runs/" in path:
             assert isinstance(body, dict)

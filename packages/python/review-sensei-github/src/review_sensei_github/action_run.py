@@ -760,6 +760,32 @@ def run_action(
             was_queued_replaced=was_queued_replaced,
             current_state_fingerprint=current_state_fingerprint,
         )
+    # Ordinary admission consumes authenticated retained semantic history.
+    # Supplied convergence records remain model inputs, never its replacement.
+    from .accepted_semantic_history import prepare_action
+
+    semantic_command = (
+        parse_maintainer_command(
+            args.comment_body,
+            actor="classification-only",
+            head_sha=run.head_sha,
+            command_id=str(source["id"]),
+        )
+        if purpose == "command"
+        else None
+    )
+    prepare_action(
+        run,
+        allow_unqualified=purpose == "reply"
+        or (
+            purpose == "command"
+            and (
+                parse_historical_command(args.comment_body) is not None
+                or parse_quarantine_command(args.comment_body) is not None
+            )
+        )
+        or (semantic_command is not None),
+    )
     if purpose == "command":
         return execute_command(run, args)
     from .action_reply import execute_reply

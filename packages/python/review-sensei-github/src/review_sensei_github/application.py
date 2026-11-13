@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, TypedDict, cast
 
@@ -390,6 +391,35 @@ class _PreparedReviewCapability:
         return self._token
 
 
+class _PreparedCheckCapability:
+    """Existing check_publish capability moved earlier, never minted twice."""
+
+    __slots__ = ("_broker", "_assertion_digest", "_budget", "_token")
+
+    def __init__(self, broker, assertion, budget, token):
+        self._broker = broker
+        self._assertion_digest = sha256(assertion.encode("utf-8")).digest()
+        self._budget = budget
+        self._token = token
+
+    def redeem(self, broker, assertion, budget):
+        if (
+            broker is not self._broker
+            or budget is not self._budget
+            or not isinstance(assertion, str)
+            or sha256(assertion.encode("utf-8")).digest() != self._assertion_digest
+        ):
+            raise GitHubPublicationError("prepared check capability scope changed")
+        return self._token
+
+
+@dataclass(frozen=True)
+class _PreparedCommandFinalization:
+    plan: Any
+    check_capability: _PreparedCheckCapability
+    reuse_lifecycle: bool
+
+
 class GitHubApplication:
     """Thin composition seam for workflow callers."""
 
@@ -407,10 +437,14 @@ class GitHubApplication:
         self.broker = broker
         self.http = http
         self.reviewer = reviewer
+        self._last_publication_result: PublicationResult | None = None
         self.learner = learner
         self.replier = replier
         self.session_ledger = session_ledger
         self.enable_disposition_snapshot_writes = enable_disposition_snapshot_writes
+        self._finding_lifecycle_contexts: dict[
+            tuple[int, int], tuple[Any, SessionIdentity, str, str]
+        ] = {}
         self._quarantine_hold_readers: dict[tuple[str, int], Any] = {}
         self._human_inventory_readers: dict[tuple, Any] = {}
         self._historical_assessment_readers: dict[tuple[str, int], Any] = {}
@@ -585,6 +619,13 @@ class GitHubApplication:
                 )
             raise
         if isinstance(self.reviewer, ReviewPublisher):
+            from .finding_lifecycle import restore_finding_lifecycle
+
+            restore_finding_lifecycle(
+                self.reviewer,
+                ledger,
+                SessionIdentity(repository, pull_request, repository_id),
+            )
             digest = recovered.content_digest()
             self.reviewer.observe_artifact(
                 repository_id=repository_id,
@@ -598,6 +639,50 @@ class GitHubApplication:
                 ),
             )
         return recovered
+
+    def _bind_finding_lifecycle_finalizer(
+        self,
+        finalizer,
+        *,
+        options,
+        repository,
+        pull_request,
+        head_sha,
+        app_slug,
+        token,
+        repository_id=None,
+        evidence_budget=None,
+    ):
+        """Bind the actual invocation consumer, never a cache-only substitute."""
+        if not isinstance(self.reviewer, ReviewPublisher):
+            return None
+        ledger = self.session_ledger
+        if ledger is None:
+            if not options.github_session_ledger:
+                return None  # Explicit standalone legacy projection profile.
+            ledger = GitHubIssueCommentSessionLedger(
+                self.http,
+                token=token,
+                app_slug=app_slug,
+                evidence_budget=evidence_budget,
+            )  # Read-only: no session mutation grant or writer is invented.
+        identity = SessionIdentity(repository, pull_request, repository_id)
+        if repository_id is None:
+            selected = ledger.load(identity)
+            if selected.record is not None:
+                identity = selected.record.identity()
+        from .finding_lifecycle_consumers import finding_lifecycle_consumer
+
+        consumer = finding_lifecycle_consumer(
+            self.reviewer,
+            ledger,
+            identity,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            review_token=token,
+        )
+        consumer.bind(finalizer)
+        return consumer
 
     def active_window_state(
         self, *, repository_id: int, pull_request: int
@@ -617,6 +702,45 @@ class GitHubApplication:
             )
         return None
 
+    def _reconcile_durable_finding(
+        self,
+        *,
+        mode,
+        repository_id,
+        pull_request,
+        target,
+        resolved_state,
+        proof_sha256,
+        repository=None,
+        token=None,
+        app_slug=None,
+    ):
+        selected = self._finding_lifecycle_contexts.get((repository_id, pull_request))
+        ledger = self.session_ledger or (selected[0] if selected is not None else None)
+        if ledger is None:
+            return None
+        if repository is None and selected is not None:
+            identity = selected[1]
+        elif repository is not None:
+            identity = SessionIdentity(repository, pull_request, repository_id)
+        else:
+            raise ReviewInputError(
+                "durable finding reconciliation requires selected repository identity"
+            )
+        from .finding_lifecycle_reconciliation import reconcile_finding_lifecycle
+
+        return reconcile_finding_lifecycle(
+            self.reviewer,
+            ledger,
+            identity,
+            mode=mode,
+            target=target,
+            resolved_state=resolved_state,
+            proof_sha256=proof_sha256,
+            token=token or (selected[3] if selected is not None else None),
+            app_slug=app_slug or (selected[2] if selected is not None else None),
+        )
+
     def reconcile_active_window_slot(
         self,
         *,
@@ -625,11 +749,27 @@ class GitHubApplication:
         target: str,
         resolved_state: str,
         proof_sha256: str,
+        repository: str | None = None,
+        token: str | None = None,
+        app_slug: str | None = None,
     ) -> ActiveWindowRoundState:
         if not isinstance(self.reviewer, ReviewPublisher):
             raise ReviewInputError(
                 "active window reconciliation requires a ReviewPublisher"
             )
+        durable = self._reconcile_durable_finding(
+            mode="window",
+            repository_id=repository_id,
+            pull_request=pull_request,
+            target=target,
+            resolved_state=resolved_state,
+            proof_sha256=proof_sha256,
+            repository=repository,
+            token=token,
+            app_slug=app_slug,
+        )
+        if durable is not None:
+            return durable
         return self.reviewer.reconcile_active_window_slot(
             repository_id=repository_id,
             pull_request=pull_request,
@@ -679,11 +819,27 @@ class GitHubApplication:
         thread_id: str,
         resolved_state: str,
         proof_sha256: str,
+        repository: str | None = None,
+        token: str | None = None,
+        app_slug: str | None = None,
     ) -> DriftEvaluationResult:
         if not isinstance(self.reviewer, ReviewPublisher):
             raise ReviewInputError(
                 "drift thread reconciliation requires a ReviewPublisher"
             )
+        durable = self._reconcile_durable_finding(
+            mode="drift",
+            repository_id=repository_id,
+            pull_request=pull_request,
+            target=thread_id,
+            resolved_state=resolved_state,
+            proof_sha256=proof_sha256,
+            repository=repository,
+            token=token,
+            app_slug=app_slug,
+        )
+        if durable is not None:
+            return durable
         return self.reviewer.reconcile_drift_thread(
             repository_id=repository_id,
             pull_request=pull_request,
@@ -941,6 +1097,8 @@ class GitHubApplication:
         | None = None,
         observed_trust: AuthenticatedTrustSnapshot | None = None,
     ) -> PublicationResult:
+        # Diagnostic receipt only; never reused as publication or funding authority.
+        self._last_publication_result = None
         reviewer = self.reviewer
         resume_thread_cleanup = (
             isinstance(reviewer, ReviewPublisher) and options.complete_inventory
@@ -1178,6 +1336,22 @@ class GitHubApplication:
                     transaction_ledger, commit_analysis=False
                 )
                 if (
+                    isinstance(reviewer, ReviewPublisher)
+                    and transaction_record.finding_lifecycle is not None
+                ):
+                    from review_sensei.session import SessionLoadResult
+
+                    from .finding_lifecycle import restore_finding_lifecycle
+
+                    restore_finding_lifecycle(
+                        reviewer,
+                        transaction_ledger,
+                        identity,
+                        loaded=SessionLoadResult(
+                            status="ok", record=transaction_record
+                        ),
+                    )
+                if (
                     transaction_record.transaction is not None
                     and transaction_record.transaction.phase == "publication_succeeded"
                     and not resume_thread_cleanup
@@ -1227,12 +1401,26 @@ class GitHubApplication:
             )
         if budget is not None:
             budget.check()
-        ledger = self._session_ledger_for_token(
-            session_token if session_token is not None else token,
-            options=options,
-            app_slug=app_slug,
-            evidence_budget=budget,
+        # Reuse this invocation's already-bound injected ledger. Rewrapping
+        # the identical authority would lose identity and force a second load
+        # even when the selected transaction has no lifecycle carrier.
+        ledger = (
+            transaction_ledger
+            if self.session_ledger is not None and transaction_ledger is not None
+            else self._session_ledger_for_token(
+                session_token if session_token is not None else token,
+                options=options,
+                app_slug=app_slug,
+                evidence_budget=budget,
+            )
         )
+        if ledger is not None:
+            self._finding_lifecycle_contexts[(repository_id, pull_request)] = (
+                ledger,
+                identity,
+                app_slug,
+                token,
+            )
         reviewer_had_prior_round = isinstance(reviewer, ReviewPublisher) and (
             (repository_id, pull_request) in reviewer._active_window_states
             or (repository_id, pull_request) in reviewer._drift_states
@@ -1255,6 +1443,66 @@ class GitHubApplication:
             else options.max_active_findings
         )
         effective_drift = enable_drift_tracking or options.enable_drift_tracking
+        # Current run-owned admission already grants this exact session writer
+        # and funds it through the original physical caller. Selecting the
+        # lifecycle selects its purpose-specific storage, not another allowance.
+        from .api_run_requests import ApiRunSessionLedger
+
+        if isinstance(ledger, ApiRunSessionLedger) and (
+            effective_max_active is not None or effective_drift
+        ):
+            ledger.enable_finding_lifecycle_writes = True
+        lifecycle_document = None
+        lifecycle_record = None
+        if isinstance(reviewer, ReviewPublisher) and ledger is not None:
+            from review_sensei.session import SessionLoadResult
+
+            from .finding_lifecycle import restore_finding_lifecycle
+
+            lifecycle_loaded = present_loaded
+            if (
+                lifecycle_loaded is None
+                and ledger is transaction_ledger
+                and transaction_record is not None
+            ):
+                lifecycle_loaded = SessionLoadResult(
+                    status="ok", record=transaction_record
+                )
+            try:
+                lifecycle_record, lifecycle_document = restore_finding_lifecycle(
+                    reviewer, ledger, identity, loaded=lifecycle_loaded
+                )
+            except ReviewInputError as exc:
+                raise GitHubPublicationError(
+                    "finding inventory session ledger load failed: " + str(exc)
+                ) from exc
+        if (
+            lifecycle_document is not None
+            and operator_baseline_requested
+            and result.transaction is None
+            and current_key is None
+        ):
+            # Restoring findings does not admit an unbound broader-review result.
+            # Return the existing original-context handoff before validating an
+            # incomplete new configuration or reserving another review round.
+            return PublicationResult(
+                status="handoff", diagnostic="durable_baseline_recovery_required"
+            )
+        if (
+            isinstance(reviewer, ReviewPublisher)
+            and ledger is not None
+            and getattr(ledger, "enable_finding_lifecycle_writes", False)
+            and (effective_max_active is not None or effective_drift)
+            and result.transaction is None
+        ):
+            # A legacy unbound review still needs its real effective settings
+            # before admission can create a durable lifecycle operation. Refuse
+            # before reserving a round, not after publishing native effects.
+            if configuration_context is None:
+                raise GitHubPublicationError(
+                    "finding lifecycle publication requires trusted configuration context"
+                )
+            ReviewTransaction.compute_configuration_digest(configuration_context)
         if (
             isinstance(reviewer, ReviewPublisher)
             and ledger is not None
@@ -1600,7 +1848,8 @@ class GitHubApplication:
             and result.coverage_mode == "full"
         )
         verification_transaction_recovery_required = (
-            not quarantine_full_analysis
+            lifecycle_document is None
+            and not quarantine_full_analysis
             and validated_transaction_recovery
             and transaction_record is not None
             and (
@@ -1609,6 +1858,26 @@ class GitHubApplication:
             )
             and (baseline is None or current_key is None)
         )
+        if (
+            lifecycle_document is not None
+            and transaction_record is not None
+            and transaction_record.transaction is not None
+        ):
+            assert (
+                lifecycle_record is not None
+                and lifecycle_record.finding_lifecycle is not None
+            )
+            retained_binding = lifecycle_record.finding_lifecycle["manifest"]["binding"]
+            current_transaction = transaction_record.transaction
+            if (
+                retained_binding["policy_digest"] != current_transaction.policy_digest
+                or retained_binding["configuration_digest"]
+                != current_transaction.configuration_digest
+            ):
+                return PublicationResult(
+                    status="handoff",
+                    diagnostic="durable_finding_inventory_recovery_required",
+                )
         authorized_dispositions: tuple[object, ...] = ()
         durable_baseline = baseline
         baseline_recovery_required = False
@@ -1720,6 +1989,7 @@ class GitHubApplication:
             and isinstance(result, ReviewResult)
         )
         result_retained = False
+        lifecycle_custody_lost = False
         publisher_started = False
         admission_recovery_held = False
         try:
@@ -2257,6 +2527,120 @@ class GitHubApplication:
                 )
             if isinstance(reviewer, ReviewPublisher):
                 reviewer = copy(reviewer)
+                if (
+                    ledger is not None
+                    and (
+                        effective_max_active is not None
+                        or effective_drift
+                        or lifecycle_document is not None
+                    )
+                    and getattr(ledger, "enable_finding_lifecycle_writes", False)
+                ):
+                    from .finding_lifecycle import FindingLifecycleJournal
+
+                    lifecycle_loaded = ledger.load(identity)
+                    if lifecycle_loaded.record is None:
+                        raise ReviewInputError(
+                            "finding lifecycle has no selected session"
+                        )
+                    selected_reference = (
+                        None
+                        if lifecycle_record is None
+                        else lifecycle_record.finding_lifecycle
+                    )
+                    if lifecycle_loaded.record.finding_lifecycle != selected_reference:
+                        lifecycle_custody_lost = True
+                        raise ReviewInputError(
+                            "finding lifecycle selected state changed before publication"
+                        )
+                    if (
+                        prepared is not None
+                        and lifecycle_loaded.record.transaction is None
+                        and lifecycle_loaded.record.record_sha256
+                        != prepared.record.record_sha256
+                    ):
+                        lifecycle_custody_lost = True
+                        raise ReviewInputError(
+                            "finding lifecycle prepared root changed before publication"
+                        )
+                    lifecycle_owner = lifecycle_loaded.record.transaction
+                    expected_lifecycle_owner = result.transaction
+                    if (
+                        (lifecycle_owner is None) != (expected_lifecycle_owner is None)
+                        or (
+                            lifecycle_owner is not None
+                            and expected_lifecycle_owner is not None
+                            and (
+                                not lifecycle_owner.logical_identity_matches(
+                                    expected_lifecycle_owner
+                                )
+                                or lifecycle_owner.phase
+                                != expected_lifecycle_owner.phase
+                                or lifecycle_owner.result_sha256
+                                != expected_lifecycle_owner.result_sha256
+                            )
+                        )
+                        or (
+                            transaction_record is not None
+                            and lifecycle_loaded.record.reservation_id
+                            != transaction_record.reservation_id
+                        )
+                    ):
+                        lifecycle_custody_lost = True
+                        raise ReviewInputError(
+                            "finding lifecycle transaction owner changed before publication"
+                        )
+                    if lifecycle_owner is None:
+                        operation_id = lifecycle_loaded.record.reservation_id
+                        if (
+                            operation_id is None
+                            or prepared is None
+                            or prepared.reservation_id != operation_id
+                        ):
+                            raise ReviewInputError(
+                                "finding lifecycle requires an admitted operation"
+                            )
+                        lifecycle_policy_digest = policy.digest()
+                        lifecycle_configuration_digest = (
+                            ReviewTransaction.compute_configuration_digest(
+                                configuration_context or {}
+                            )
+                        )
+                    else:
+                        operation_id = lifecycle_owner.transaction_id
+                        lifecycle_policy_digest = lifecycle_owner.policy_digest
+                        lifecycle_configuration_digest = (
+                            lifecycle_owner.configuration_digest
+                        )
+                    carried_document = lifecycle_document
+                    reference = lifecycle_loaded.record.finding_lifecycle
+                    if (
+                        reference is not None
+                        and reference["operation_id"] != operation_id
+                    ):
+                        if carried_document is not None and any(
+                            e["status"] == "pending"
+                            for e in carried_document["effects"]
+                        ):
+                            raise ReviewInputError(
+                                "finding lifecycle prior effect requires reconciliation"
+                            )
+                        carried_document = None
+                    reviewer._finding_lifecycle_journal = FindingLifecycleJournal(
+                        reviewer,
+                        ledger,
+                        identity,
+                        operation_id=operation_id,
+                        base_sha=base_sha,
+                        head_sha=head_sha,
+                        policy_digest=lifecycle_policy_digest,
+                        configuration_digest=lifecycle_configuration_digest,
+                        document=carried_document,
+                        app_slug=app_slug,
+                        record=lifecycle_loaded.record,
+                        review_token=token,
+                        check_token=capability.token,
+                    )
 
                 def cleanup_capability() -> str:
                     # Supersession needs separate authority from publication.
@@ -2299,7 +2683,17 @@ class GitHubApplication:
                 )
                 else reviewer.publish(**publisher_arguments)
             )
+            # Keep the exact returned native receipt for truthful failure output
+            # if subsequent durable bookkeeping cannot complete. Not authority.
+            self._last_publication_result = publication
         except BaseException as publication_error:
+            if lifecycle_custody_lost:
+                # Another writer owns this selected root. Neither a diagnostic
+                # check nor failure cleanup may mutate its effects/reservation.
+                publication_error.add_note(
+                    "finding lifecycle changed; competing state retained"
+                )
+                raise
             publication_error.add_note(
                 "publication result retained"
                 if result_retained
@@ -2438,6 +2832,9 @@ class GitHubApplication:
                     published=publication.status in success_statuses,
                 )
         elif ledger is not None and prepared is not None:
+            lifecycle_journal = getattr(reviewer, "_finding_lifecycle_journal", None)
+            if lifecycle_journal is not None:
+                prepared = lifecycle_journal.prepared_completion(prepared)
             complete_session_round(
                 ledger,
                 identity,
@@ -2503,6 +2900,7 @@ class GitHubApplication:
                     check_proof_hook_failed("publication")
                 except BaseException:
                     pass
+        self._last_publication_result = completed
         return completed
 
     def _publish_human_file_request(
@@ -2616,71 +3014,6 @@ class GitHubApplication:
         typed_priors = cast(
             Sequence[tuple[str, Sequence[FindingIdentity]]], prior_inventories
         )
-        if (
-            typed_inventory is None
-            and not finding_fingerprints
-            and isinstance(self.reviewer, ReviewPublisher)
-        ):
-            window_state = self.reviewer.active_window_state(
-                repository_id=repository_id, pull_request=pull_request
-            )
-            if window_state is not None and window_state.head_sha == head_sha:
-                displayed_ids = {
-                    entry.obligation_id
-                    for entry in window_state.display_active_findings.entries
-                }
-                typed_inventory = tuple(
-                    FindingIdentity(
-                        instance=finding_instance_fingerprint(ob.comment),
-                        concern=ob.fingerprint,
-                        overridable=ob.required,
-                    )
-                    for ob in window_state.authoritative_decision_inventory.obligations
-                    if ob.obligation_id in displayed_ids
-                    and ob.unresolved
-                    and ob.comment is not None
-                )
-            else:
-                drift_state = self.reviewer.drift_state(
-                    repository_id=repository_id, pull_request=pull_request
-                )
-                if drift_state is not None and drift_state.head_sha == head_sha:
-                    projected_drift = project_drift_review_result(
-                        ReviewResult(
-                            summary="drift-command-inventory",
-                            comments=(),
-                            provider="internal",
-                            review_status=(
-                                "complete" if drift_state.review_complete else "partial"
-                            ),
-                        ),
-                        drift_state,
-                    )
-                    by_oid = {
-                        ob.obligation_id: ob for ob in drift_state.inventory.obligations
-                    }
-                    drift_identities: list[FindingIdentity] = []
-                    seen_drift_inst: set[str] = set()
-                    for entry, p_comment in zip(
-                        drift_state.active_entries,
-                        projected_drift.comments,
-                        strict=False,
-                    ):
-                        ob = by_oid.get(entry.obligation_id)
-                        if ob is None or not ob.unresolved:
-                            continue
-                        inst = finding_instance_fingerprint(p_comment)
-                        if inst not in seen_drift_inst:
-                            seen_drift_inst.add(inst)
-                            drift_identities.append(
-                                FindingIdentity(
-                                    instance=inst,
-                                    concern=ob.criterion.original_fingerprint,
-                                    overridable=ob.blocks_approval_now,
-                                )
-                            )
-                    typed_inventory = tuple(drift_identities)
-
         # Parse only the command spelling before choosing an authority path.
         # This placeholder deliberately prevents untrusted event actor/head
         # values from becoming persisted command identity in the hosted path.
@@ -2947,6 +3280,19 @@ class GitHubApplication:
             if effective_policy not in REVIEW_POLICY_MODES:
                 raise GitHubPublicationError("review policy mode is invalid")
             auto_approve_enabled = effective_policy == "auto-approve"
+            media_finalizer = getattr(media_publisher, "finalizer", None)
+            if media_finalizer is not None:
+                self._bind_finding_lifecycle_finalizer(
+                    media_finalizer,
+                    options=options,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    token=media_read_token or getattr(self.session_ledger, "token", ""),
+                    evidence_budget=media_budget,
+                )
             confirmer = getattr(media_publisher, "confirm", None)
             finalizer = getattr(media_publisher, "publish_mixed_approval", None)
             if (
@@ -3143,6 +3489,78 @@ class GitHubApplication:
             )
         if ledger is None:
             raise GitHubPublicationError("maintainer commands require a session ledger")
+        lifecycle_record = lifecycle_document = None
+        if isinstance(self.reviewer, ReviewPublisher):
+            from .finding_lifecycle import restore_finding_lifecycle
+
+            lifecycle_record, lifecycle_document = restore_finding_lifecycle(
+                self.reviewer, ledger, identity
+            )
+        if (
+            typed_inventory is None
+            and not finding_fingerprints
+            and isinstance(self.reviewer, ReviewPublisher)
+        ):
+            window_state = self.reviewer.active_window_state(
+                repository_id=repository_id, pull_request=pull_request
+            )
+            if window_state is not None and window_state.head_sha == head_sha:
+                displayed_ids = {
+                    entry.obligation_id
+                    for entry in window_state.display_active_findings.entries
+                }
+                typed_inventory = tuple(
+                    FindingIdentity(
+                        instance=finding_instance_fingerprint(ob.comment),
+                        concern=ob.fingerprint,
+                        overridable=ob.required,
+                    )
+                    for ob in window_state.authoritative_decision_inventory.obligations
+                    if ob.obligation_id in displayed_ids
+                    and ob.unresolved
+                    and ob.comment is not None
+                )
+            else:
+                drift_state = self.reviewer.drift_state(
+                    repository_id=repository_id, pull_request=pull_request
+                )
+                if drift_state is not None and drift_state.head_sha == head_sha:
+                    projected_drift = project_drift_review_result(
+                        ReviewResult(
+                            summary="drift-command-inventory",
+                            comments=(),
+                            provider="internal",
+                            review_status=(
+                                "complete" if drift_state.review_complete else "partial"
+                            ),
+                        ),
+                        drift_state,
+                    )
+                    by_oid = {
+                        ob.obligation_id: ob for ob in drift_state.inventory.obligations
+                    }
+                    drift_identities: list[FindingIdentity] = []
+                    seen_drift_inst: set[str] = set()
+                    for entry, p_comment in zip(
+                        drift_state.active_entries,
+                        projected_drift.comments,
+                        strict=False,
+                    ):
+                        ob = by_oid.get(entry.obligation_id)
+                        if ob is None or not ob.unresolved:
+                            continue
+                        inst = finding_instance_fingerprint(p_comment)
+                        if inst not in seen_drift_inst:
+                            seen_drift_inst.add(inst)
+                            drift_identities.append(
+                                FindingIdentity(
+                                    instance=inst,
+                                    concern=ob.criterion.original_fingerprint,
+                                    overridable=ob.blocks_approval_now,
+                                )
+                            )
+                    typed_inventory = tuple(drift_identities)
+
         grant_bound_ledger = getattr(ledger, "_broker", None) is not None
         if grant_bound_ledger and not callable(
             getattr(ledger, "initialize_with_mutation", None)
@@ -3253,7 +3671,10 @@ class GitHubApplication:
             derived_incomplete_coverage = incomplete_coverage_from_result(
                 coverage_source
             )
+        command_now = datetime.now(timezone.utc)
+        command_finalization_plan = None
         if current_action is not None:
+            capacity_preview: dict[str, object] = {}
             pre_effect_refusal = guard_current_command_representability(
                 current_action=current_action,
                 ledger=ledger,
@@ -3268,9 +3689,45 @@ class GitHubApplication:
                 policy_digest=command_policy_digest,
                 provenance=command_provenance,
                 incomplete_coverage=derived_incomplete_coverage,
+                capacity_preview=capacity_preview,
+                now=command_now,
             )
             if pre_effect_refusal is not None:
                 return pre_effect_refusal
+            if (
+                options.github_writes
+                and oidc_token
+                and command.action
+                in {
+                    "verify",
+                    "accept-risk",
+                    "dismiss",
+                    "defer",
+                    "accept-coverage-uncertainty",
+                }
+                and lifecycle_record is not None
+                and lifecycle_record.finding_lifecycle is not None
+            ):
+                capacity_outcome = self._preflight_command_finalization(
+                    command=command,
+                    oidc_token=oidc_token,
+                    capacity_preview=capacity_preview,
+                    record=lifecycle_record,
+                    document=lifecycle_document,
+                    ledger=ledger,
+                    read_token=token,
+                    evidence_budget=command_budget,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    incomplete_coverage=derived_incomplete_coverage,
+                    policy_digest=command_policy_digest,
+                )
+                if isinstance(capacity_outcome, MaintainerCommandResult):
+                    return capacity_outcome
+                command_finalization_plan = capacity_outcome
         if command.action == "reenroll" and isinstance(self.reviewer, ReviewPublisher):
             active_blocking = self.reviewer.active_blocking_obligations_count(
                 repository_id=repository_id, pull_request=pull_request
@@ -3326,6 +3783,7 @@ class GitHubApplication:
                     ledger,
                     identity,
                     command,
+                    now=command_now,
                     finding_fingerprints=finding_fingerprints,
                     finding_inventory=typed_inventory,
                     prior_inventories=typed_priors,
@@ -3358,6 +3816,7 @@ class GitHubApplication:
                     incomplete_coverage=derived_incomplete_coverage,
                     policy_digest=command_policy_digest,
                     _prepared_review_capability=prepared_review_capability,
+                    _capacity_plan=command_finalization_plan,
                 )
                 if isinstance(refinalized, MaintainerCommandResult):
                     produced = refinalized
@@ -3366,6 +3825,7 @@ class GitHubApplication:
             ledger,
             identity,
             command,
+            now=command_now,
             finding_fingerprints=finding_fingerprints,
             finding_inventory=typed_inventory,
             prior_inventories=typed_priors,
@@ -3405,6 +3865,7 @@ class GitHubApplication:
                 incomplete_coverage=derived_incomplete_coverage,
                 policy_digest=command_policy_digest,
                 _prepared_review_capability=prepared_review_capability,
+                _capacity_plan=command_finalization_plan,
             )
             if isinstance(refinalized, MaintainerCommandResult):
                 result = refinalized
@@ -3681,6 +4142,9 @@ class GitHubApplication:
             actions_token_provider=actions_token_provider,
             evidence_budget=evidence_budget,
             enable_disposition_snapshot_writes=self.enable_disposition_snapshot_writes,
+            enable_finding_lifecycle_writes=(
+                options.max_active_findings is not None or options.enable_drift_tracking
+            ),
         )
         if evidence_budget is not None:
             from .publication_recovery import publication_session_ledger
@@ -3839,15 +4303,12 @@ class GitHubApplication:
             raise GitHubPublicationError(
                 "operator-mode recovery cannot re-admit a serialized result"
             )
-        exchange_input = oidc_token or self.broker.request_oidc_token()
-        token = self.broker.exchange(exchange_input, capability="review_publish")
-        review_policy = options.review_policy()
-        # A recovery publishes through the same gate as the run it replaces, so
-        # the check conclusion always describes the review that is standing for
-        # this head rather than whichever attempt happened to finish last.
-        capability = self._check_capability(exchange_input)
-        return self.reviewer.publish(
-            token=token,
+        # Recovery is an ordinary publication consumer. Artifact bytes cannot
+        # replace independently selected session authority or an original
+        # admitted transaction, and never create a fresh inference allowance.
+        return self.publish_review(
+            options=options,
+            oidc_token=oidc_token,
             repository=repository,
             repository_id=repository_id,
             pull_request=pull_request,
@@ -3857,14 +4318,6 @@ class GitHubApplication:
             result=result,
             diff=diff,
             app_slug=app_slug,
-            auto_approve=review_policy == "auto-approve",
-            reviews_policy=review_policy,
-            check_token=capability.token,
-            check_capability_failure=capability.failure,
-            qualification=qualification_state_for_publication(
-                provider=result.provider,
-                model=result.model,
-            ),
             convergence_policy=convergence_policy,
             configuration_context=configuration_context,
         )
@@ -3959,6 +4412,17 @@ class GitHubApplication:
             oidc_token or self.broker.request_oidc_token(),
             capability=capability,
         )
+        if isinstance(self.replier, ConversationPublisher):
+            self._bind_finding_lifecycle_finalizer(
+                self.replier.finalizer,
+                options=options,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                token=token,
+                evidence_budget=getattr(self.session_ledger, "evidence_budget", None),
+            )
         publish = getattr(self.replier, "publish_current", self.replier.publish)
         return publish(
             token=token,
@@ -4088,6 +4552,150 @@ class GitHubApplication:
             parts=parts,
         )
 
+    def _preflight_command_finalization(
+        self,
+        *,
+        command,
+        capacity_preview,
+        record,
+        document,
+        ledger,
+        read_token,
+        evidence_budget,
+        repository,
+        repository_id,
+        pull_request,
+        head_sha,
+        app_slug,
+        incomplete_coverage,
+        policy_digest,
+        oidc_token=None,
+    ):
+        """Observe and price the entire command before its first business write.
+
+        The preview root is sizing data only. The journal retains the actual
+        selected root, original funding and authenticated retained document.
+        Planning uses an existing read credential and never acquires a native
+        mutation capability. Unsupported source paths fail closed here.
+        """
+        from review_sensei.disposition import (
+            MaintainerCommandResult,
+            decode_session_dispositions,
+        )
+        from review_sensei.session import SessionRecord
+
+        from .finding_lifecycle import FindingLifecycleJournal
+
+        preview_result = capacity_preview.get("result")
+        if not isinstance(preview_result, MaintainerCommandResult):
+            raise ReviewInputError("command capacity preview result is unavailable")
+        if not preview_result.applied and command.action != "verify":
+            return None
+        try:
+            preview_record = capacity_preview.get("record")
+            details = capacity_preview.get("details")
+            finalizer = getattr(self.reviewer, "finalizer", None)
+            if (
+                type(finalizer) is not ReviewApprovalFinalizer
+                or not isinstance(preview_record, SessionRecord)
+                or not isinstance(details, dict)
+                or not isinstance(details.get("dispositions"), bytes)
+                or not isinstance(read_token, str)
+                or not read_token
+                or evidence_budget is None
+            ):
+                raise ReviewInputError(
+                    "command finalization capacity source is unavailable"
+                )
+            existing_budget = finalizer.evidence_budget or finalizer._operation_budget
+            if existing_budget is not None and existing_budget is not evidence_budget:
+                raise ReviewInputError(
+                    "command finalization budget identity mismatches"
+                )
+            finalizer = copy(finalizer)
+            finalizer.evidence_budget = evidence_budget
+            reference = record.finding_lifecycle
+            binding = reference["manifest"]["binding"]
+            journal = FindingLifecycleJournal(
+                self.reviewer,
+                ledger,
+                record.identity(),
+                operation_id=reference["operation_id"],
+                base_sha=binding["base_sha"],
+                head_sha=binding["head_sha"],
+                policy_digest=binding["policy_digest"],
+                configuration_digest=binding["configuration_digest"],
+                app_slug=app_slug,
+                record=record,
+                document=document,
+                review_token=read_token,
+                native_budget=evidence_budget,
+            )
+            if (
+                not isinstance(oidc_token, str)
+                or not oidc_token
+                or not isinstance(self.broker, BrokerClient)
+                or self.broker.control is None
+                or self.broker.control.budget is not evidence_budget
+            ):
+                raise ReviewInputError(
+                    "command check capability accounting is unavailable"
+                )
+            evidence_budget.check()
+            check_token = self.broker.exchange(oidc_token, capability="check_publish")
+            evidence_budget.check()
+            prepared_check = _PreparedCheckCapability(
+                self.broker, oidc_token, evidence_budget, check_token
+            )
+            with journal.transports(finalizer=finalizer):
+                plan = finalizer.prepare_command_capacity(
+                    token=read_token,
+                    check_token=check_token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    actor=command.actor,
+                    finding_ids=tuple(
+                        item.reference
+                        for item in preview_result.receipts
+                        if item.outcome in {"recorded", "already-recorded"}
+                        and item.reference.startswith("RS-")
+                    ),
+                    dispositions=decode_session_dispositions(
+                        json.loads(details["dispositions"])
+                    ),
+                    incomplete_coverage=incomplete_coverage,
+                    policy_digest=policy_digest,
+                    command_finalization_reserve=7,
+                )
+                journal.preflight_command_finalization(
+                    plan,
+                    preview_record=preview_record,
+                    capacity_details=details,
+                    http=finalizer.http,
+                    budget=evidence_budget,
+                )
+        except Exception as error:
+            # No dispositions, review-body update, cleanup, check or approval
+            # has been attempted. Existing action audit/terminal obligations
+            # remain on their original caller allocation.
+            reason = " ".join(str(error).split())
+            reason = reason.encode("utf-8")[:512].decode("utf-8", errors="ignore")
+            return MaintainerCommandResult(
+                action=command.action,
+                applied=False,
+                operator_paused=record.operator_paused,
+                summary=(
+                    "command finalization capacity unavailable before business writes: "
+                    + reason
+                ),
+            )
+        return _PreparedCommandFinalization(
+            plan, prepared_check, plan.can_reuse_retained_lifecycle(preview_record)
+        )
+
     def _refinalize_command(
         self,
         result: object,
@@ -4107,6 +4715,7 @@ class GitHubApplication:
         # Private cross-call reuse: None, or the capability this operation's
         # broker exchange minted. Never a caller-supplied token.
         _prepared_review_capability: _PreparedReviewCapability | None = None,
+        _capacity_plan=None,
     ) -> object:
         """Re-check approval after a hosted override. A failed check leaves the ledger write."""
 
@@ -4118,6 +4727,16 @@ class GitHubApplication:
         if not isinstance(result, MaintainerCommandResult):
             return result
         command_result: MaintainerCommandResult = result
+        prepared_check = None
+        reuse_lifecycle = False
+        if _capacity_plan is not None:
+            if type(_capacity_plan) is not _PreparedCommandFinalization:
+                raise ReviewInputError("command finalization preparation is invalid")
+            prepared_check = _capacity_plan.check_capability
+            reuse_lifecycle = _capacity_plan.reuse_lifecycle
+            if type(prepared_check) is not _PreparedCheckCapability:
+                raise ReviewInputError("command prepared check capability is invalid")
+            _capacity_plan = _capacity_plan.plan
         finalizer = getattr(self.reviewer, "finalizer", None)
         if evidence_budget is not None and isinstance(
             finalizer, ReviewApprovalFinalizer
@@ -4141,7 +4760,7 @@ class GitHubApplication:
         # Reserve caller requests only: one broker POST, two check requests,
         # and five approval reads. Worker internal fanout has its own service
         # allowance and cannot narrow this caller's cleanup capacity.
-        command_finalization_reserve = 1 + 2 + 5
+        command_finalization_reserve = (0 if prepared_check is not None else 1) + 2 + 5
         failed = (
             command_result.summary
             + "; recorded; gate re-evaluation failed, comment `@reviewsensei verify` to retry"
@@ -4197,6 +4816,91 @@ class GitHubApplication:
                 if item.outcome in {"recorded", "already-recorded"}
                 and item.reference.startswith("RS-")
             )
+            if (
+                isinstance(self.reviewer, ReviewPublisher)
+                and ledger is not None
+                and isinstance(record, SessionRecord)
+                and record.finding_lifecycle is not None
+                and getattr(ledger, "enable_finding_lifecycle_writes", False)
+            ):
+                from .finding_lifecycle import (
+                    FindingLifecycleJournal,
+                    restore_finding_lifecycle,
+                )
+
+                if reuse_lifecycle:
+                    # Admission priced this exact same-caller transfer, not a
+                    # second read. A failed custody check cannot fall back to
+                    # unpriced reads or restore a competing writer's state.
+                    selected_record, retained_journal = (
+                        _capacity_plan.reuse_retained_lifecycle(
+                            ledger, record, dispositions=dispositions
+                        )
+                    )
+                else:
+                    selected_record, retained_journal = restore_finding_lifecycle(
+                        self.reviewer, ledger, record.identity()
+                    )
+                if (
+                    selected_record is None
+                    or selected_record.record_sha256 != record.record_sha256
+                ):
+                    raise ReviewInputError(
+                        "finding lifecycle command authority changed"
+                    )
+                binding = cast(Mapping[str, Any], record.finding_lifecycle["manifest"])[
+                    "binding"
+                ]
+                journal = FindingLifecycleJournal(
+                    self.reviewer,
+                    ledger,
+                    record.identity(),
+                    operation_id=record.finding_lifecycle["operation_id"],
+                    base_sha=binding["base_sha"],
+                    head_sha=binding["head_sha"],
+                    policy_digest=binding["policy_digest"],
+                    configuration_digest=binding["configuration_digest"],
+                    app_slug=app_slug,
+                    record=record,
+                    document=retained_journal,
+                    review_token=review_token,
+                    native_budget=evidence_budget,
+                )
+                journal._armed = True
+                original_refinalize = refinalize
+
+                def refinalize(**arguments):
+                    with journal.transports(finalizer=finalizer):
+                        execute_refinalize = original_refinalize
+                        if _capacity_plan is not None:
+                            if prepared_check is None:
+                                raise ReviewInputError(
+                                    "command prepared check capability is absent"
+                                )
+                            from .command_finalization_plan import (
+                                attach_execution_reads,
+                            )
+
+                            bounded_finalizer = attach_execution_reads(
+                                _capacity_plan,
+                                finalizer,
+                                journal,
+                                dispositions=dispositions,
+                                check_token=_PreparedCheckCapability.redeem(
+                                    prepared_check,
+                                    self.broker,
+                                    oidc_token,
+                                    evidence_budget,
+                                ),
+                            )
+                            execute_refinalize = (
+                                bounded_finalizer.refinalize_with_dispositions
+                            )
+                        try:
+                            return execute_refinalize(**arguments)
+                        finally:
+                            journal.finish()
+
             publication = refinalize(
                 token=review_token,
                 check_token=None,
@@ -4213,8 +4917,14 @@ class GitHubApplication:
                 thread_cleanup_token_provider=lambda budget: command_token(
                     budget, "thread_resolve"
                 ),
-                check_token_provider=lambda budget: command_token(
-                    budget, "check_publish"
+                check_token_provider=(
+                    (
+                        lambda budget: _PreparedCheckCapability.redeem(
+                            prepared_check, self.broker, oidc_token, budget
+                        )
+                    )
+                    if prepared_check is not None
+                    else lambda budget: command_token(budget, "check_publish")
                 ),
                 command_finalization_reserve=command_finalization_reserve,
             )
@@ -4227,7 +4937,11 @@ class GitHubApplication:
             publication, "status", None
         ) == "gate_reevaluation_failed" and getattr(
             publication, "diagnostic", None
-        ) in {"command_body_capacity_exceeded", "command_body_capacity_unverifiable"}:
+        ) in {
+            "command_body_capacity_exceeded",
+            "command_body_capacity_unverifiable",
+            "finding_lifecycle_verified_fixed_subset_capacity_unqualified",
+        }:
             return render_command_progress(
                 replace(
                     command_result,
@@ -4408,7 +5122,11 @@ class GitHubApplication:
         work_tracker = ResourceBudgetTracker(budget or ResourceBudget.create())
         replier = self.replier
         broker = self.broker
-        shared_evidence_budget = evidence_budget or EvidenceReadBudget()
+        shared_evidence_budget = (
+            evidence_budget
+            or getattr(self.session_ledger, "evidence_budget", None)
+            or EvidenceReadBudget()
+        )
         if isinstance(replier, ConversationPublisher):
             from .publication_recovery import publication_http
 
@@ -4455,6 +5173,37 @@ class GitHubApplication:
         )
         if not isinstance(prepared, PreparedConversation):
             return prepared
+        finding_consumer = None
+        if isinstance(replier, ConversationPublisher):
+            finding_consumer = operation_owner._bind_finding_lifecycle_finalizer(
+                replier.finalizer,
+                options=options,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=prepared.head_sha,
+                app_slug=app_slug,
+                token=read_token,
+                evidence_budget=shared_evidence_budget,
+            )
+        if (
+            isinstance(replier, ConversationPublisher)
+            and operation_entry == "disabled"
+            and finding_consumer is not None
+            and finding_consumer.enrolled
+        ):
+            existing = replier.existing_replied(
+                token=read_token,
+                repository=repository,
+                pull_request=pull_request,
+                prepared=prepared,
+                app_slug=app_slug,
+                producer_id=finding_consumer.authenticated_producer_id(),
+            )
+            if existing is not None:
+                # Legacy delivery proves no structured model decision. Keep
+                # approval withheld rather than infer again or guess from prose.
+                return existing
         context_binding: _ConversationBaseBinding = (
             {
                 "context_base_sha": prepared.context.base_sha,
@@ -4516,6 +5265,8 @@ class GitHubApplication:
                 human_inventory_reader_factory=operation_owner._human_inventory_reader,
                 human_inventory_read_token=read_token,
             )
+            if finding_consumer is not None:
+                finding_consumer.bind(assessor.finalizer)
             human = assessor.prepare(
                 token=read_token,
                 repository=repository,

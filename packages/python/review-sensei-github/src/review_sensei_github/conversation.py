@@ -48,7 +48,7 @@ from .errors import (
     GitHubPublicationError,
 )
 from .http import HISTORY_PAGE_SIZES, GitHubHttp
-from .pending import PendingReplyPage, pending_reply_pages
+from .pending import MAX_PENDING_PAGES, PendingReplyPage, pending_reply_pages
 from .publication import (
     ReviewApprovalFinalizer,
     finding_declares_blocking,
@@ -2266,6 +2266,41 @@ class ConversationPublisher:
             "replied",
             "already_replied",
         }:
+            consumer = getattr(self.finalizer, "_finding_lifecycle_consumer", None)
+            if (
+                consumer is not None
+                and consumer.enrolled
+                and arguments.get("source_kind", "inline") == "inline"
+                and outcome.assessment_status is None
+            ):
+                # This call just authenticated the entire report and its final
+                # source/head/authority fence. Do not publish/read that same
+                # page a second time merely to reach resolution. The resolver
+                # still freshly authenticates the source, root, exact finding,
+                # eligibility and PR before any durable resolution or mutation.
+                resolution = self._resolve_and_finalize(
+                    token=arguments.get("resolution_token"),
+                    repository=arguments["repository"],
+                    pull_request=arguments["pull_request"],
+                    root_comment_id=arguments["root_comment_id"],
+                    head_sha=arguments["head_sha"],
+                    app_slug=arguments["app_slug"],
+                    root_is_blocking_finding=False,
+                    source_comment_id=arguments["source_comment_id"],
+                    source_updated_at=arguments["source_updated_at"],
+                    evidence_sha256=arguments.get("resolution_evidence"),
+                    base_sha=arguments.get("resolution_base_sha"),
+                )
+                return _carry_finalization(
+                    resolution,
+                    replace(
+                        outcome,
+                        resolved=resolution.resolved,
+                        resolution_status=resolution.resolution_status,
+                        approval_status=resolution.approval_status,
+                        approval_diagnostic=resolution.approval_diagnostic,
+                    ),
+                )
             last_page = pending_reply_pages(
                 body=arguments["reply"].body,
                 head_sha=arguments["head_sha"],
@@ -2295,7 +2330,13 @@ class ConversationPublisher:
             )
         return outcome
 
-    def _resolve_and_finalize(
+    def _resolve_and_finalize(self, **kwargs) -> ReplyResult:
+        consumer = getattr(self.finalizer, "_finding_lifecycle_consumer", None)
+        if consumer is not None:
+            return consumer.run(lambda: self._resolve_and_finalize_current(**kwargs))
+        return self._resolve_and_finalize_current(**kwargs)
+
+    def _resolve_and_finalize_current(
         self,
         *,
         token: str | None,
@@ -2349,8 +2390,16 @@ class ConversationPublisher:
                 or str(root.get("user", {}).get("login", "")).casefold()
                 != app_slug.casefold()
                 or root.get("user", {}).get("type") != "Bot"
+                or root.get("id") != root_comment_id
+                or root.get("in_reply_to_id") is not None
             ):
                 return result
+            self._require_comment_association(
+                comment=root,
+                repository=repository,
+                pull_request=pull_request,
+                source_kind="inline",
+            )
             scope = finding_publication_scope(root.get("body"))
             instance = finding_instance_from_body(root.get("body"))
             if (
@@ -2451,7 +2500,7 @@ class ConversationPublisher:
                     + resolution_marker(record)
                 )
                 try:
-                    self.http.request(
+                    self.finalizer.http.request(
                         "POST",
                         self.http.repository_path(
                             repository, f"/pulls/{pull_request}/reviews"
@@ -2466,6 +2515,14 @@ class ConversationPublisher:
                 )
                 if record not in resolution_records(reviews, app_slug):
                     return result
+            apply_authenticated_finding_resolution(
+                self.finalizer,
+                repository_id=scope[0],
+                pull_request=pull_request,
+                head_sha=head_sha,
+                instances=(instance,),
+                evidence_sha256=evidence_sha256,
+            )
             resolution = self.finalizer.reconcile_decided_threads(
                 token=token,
                 repository=repository,
@@ -2548,6 +2605,136 @@ class ConversationPublisher:
         ):
             return result
 
+    def existing_replied(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        prepared: PreparedConversation,
+        app_slug: str,
+        producer_id: int | None = None,
+    ) -> ReplyResult | None:
+        """Bounded pre-inference receipt check, never a decision reconstruction.
+
+        The caller first prepares/authenticates this exact source and live head.
+        A legacy text receipt proves delivery only, not the provider's structured
+        resolution decision. Return a held already-replied result rather than
+        infer again or derive approval authority from natural language.
+        """
+        marker = reply_marker(
+            source_comment_id=prepared.source_comment_id,
+            source_updated_digest=_digest(prepared.source_updated_at),
+            pull_request=pull_request,
+            head_sha=prepared.head_sha,
+        )
+        if producer_id is None:
+            status, producer = self.http.request(
+                "GET",
+                "/users/" + quote(app_slug, safe=""),
+                token=token,
+            )
+            if (
+                status != 200
+                or not isinstance(producer, dict)
+                or type(producer.get("id")) is not int
+                or producer["id"] < 1
+                or producer.get("type") != "Bot"
+                or str(producer.get("login", "")).casefold() != app_slug.casefold()
+            ):
+                raise GitHubConversationError("reply receipt producer is unavailable")
+            producer_id = producer["id"]
+        elif type(producer_id) is not int or producer_id < 1:
+            raise GitHubConversationError("reply receipt producer is invalid")
+        path = self.http.repository_path(
+            repository,
+            f"/pulls/{pull_request}/comments"
+            if prepared.source_kind == "inline"
+            else f"/issues/{pull_request}/comments",
+        )
+        rows = self.http.paginate(
+            path=path, token=token, page_sizes=CONVERSATION_COMMENT_PAGE_SIZES
+        )
+        found = []
+        pages = {}
+        prefix = marker[:-4]
+        for comment in rows:
+            if not isinstance(comment, dict):
+                continue
+            user, body = comment.get("user"), comment.get("body")
+            if not isinstance(body, str) or prefix not in body:
+                continue
+            if (
+                not isinstance(user, dict)
+                or user.get("id") != producer_id
+                or user.get("type") != "Bot"
+                or str(user.get("login", "")).casefold() != app_slug.casefold()
+            ):
+                continue
+            self._require_comment_association(
+                comment=comment,
+                repository=repository,
+                pull_request=pull_request,
+                source_kind=prepared.source_kind,
+            )
+            content, separator, tail = body.rpartition("\n\n" + prefix)
+            page = re.fullmatch(
+                r" report=([a-f0-9]{64}) part=([1-9][0-9]*)/([1-9][0-9]*) content=([a-f0-9]{64}) -->",
+                tail,
+            )
+            if (
+                not separator
+                or body.count(prefix) != 1
+                or (tail != " -->" and page is None)
+                or len(body.encode()) > MAX_REPLY_BYTES
+                or type(comment.get("id")) is not int
+                or comment["id"] < 1
+                or (
+                    prepared.source_kind == "inline"
+                    and comment.get("in_reply_to_id") != prepared.root_comment_id
+                )
+            ):
+                raise GitHubConversationError("reply receipt conflicts")
+            if page is not None:
+                report, index, count, digest = page.groups()
+                index, count = int(index), int(count)
+                if (
+                    not 1 <= index <= count <= MAX_PENDING_PAGES
+                    or _digest(content) != digest
+                ):
+                    raise GitHubConversationError("pending reply receipt conflicts")
+                key = (report, index)
+                if key in pages:
+                    raise GitHubConversationError("pending reply receipt is duplicated")
+                pages[key] = (count, comment["id"])
+            else:
+                found.append(comment["id"])
+        if len(found) > 1:
+            raise GitHubConversationError("reply receipt is duplicated")
+        if pages:
+            reports = {report for report, _ in pages}
+            counts = {count for count, _ in pages.values()}
+            if found or len(reports) != 1 or len(counts) != 1:
+                raise GitHubConversationError("pending reply receipt conflicts")
+            count = next(iter(counts))
+            if {index for _, index in pages} != set(range(1, count + 1)):
+                return ReplyResult(
+                    status="already_replied",
+                    approval_status="approval_withheld",
+                    approval_diagnostic="pending_reply_delivery_incomplete",
+                    resolution_status="unconfirmed",
+                )
+            found.append(next(iter(pages.values()))[1])
+        if not found:
+            return None
+        return ReplyResult(
+            status="already_replied",
+            comment_id=found[0],
+            approval_status="approval_withheld",
+            approval_diagnostic="retained_structured_decision_unavailable",
+            resolution_status="unconfirmed",
+        )
+
     def _find_existing(
         self,
         *,
@@ -2603,3 +2790,90 @@ class ConversationPublisher:
         if len(found) > 1:
             raise GitHubConversationError("pending reply page is duplicated")
         return found[0] if found else None
+
+
+def apply_authenticated_finding_resolution(
+    finalizer, *, repository_id, pull_request, head_sha, instances, evidence_sha256
+):
+    """Project exact, freshly authenticated resolution authority into full state.
+
+    This is not host-resolved inference or a maintainer override. Uncertain
+    native bindings and ambiguous multi-target criteria cannot be discharged by
+    a single-instance reply. Slots remain contingent until native confirmation.
+    The consumer journal checkpoints this shared projection before its next
+    native mutation and on exit.
+    """
+    import hashlib
+    from dataclasses import replace
+
+    from review_sensei.active_finding_window import apply_dispositions_to_window_state
+    from review_sensei.bounded_evidence import canonical_bytes
+    from review_sensei.finding_drift import apply_dispositions_to_drift_state
+
+    if (
+        not isinstance(evidence_sha256, str)
+        or re.fullmatch(r"[a-f0-9]{64}", evidence_sha256) is None
+    ):
+        raise GitHubConversationError("finding resolution evidence is invalid")
+    key = (repository_id, pull_request)
+    for attr, apply, inventory_attr in (
+        (
+            "_active_window_states",
+            apply_dispositions_to_window_state,
+            "authoritative_decision_inventory",
+        ),
+        ("_drift_states", apply_dispositions_to_drift_state, "inventory"),
+    ):
+        states = getattr(finalizer, attr, {})
+        state = states.get(key)
+        if state is None or state.head_sha != head_sha:
+            continue
+        inventory = getattr(state, inventory_attr)
+        # Existing instance matching handles projected moved anchors. Restrict
+        # its selected candidates first so no ambiguous whole concern is waived.
+        held = {
+            item.obligation_id
+            for item in inventory.obligations
+            if item.lifecycle_state in {"ambiguous-multi-target", "ambiguous-identity"}
+        }
+        candidate = apply(
+            state,
+            honored_fingerprints=(),
+            honored_instances=instances,
+            actor="authenticated-resolution",
+            head_sha=head_sha,
+            slot_released=False,
+        )
+        before = {item.obligation_id: item for item in inventory.obligations}
+        updated = []
+        for item in getattr(candidate, inventory_attr).obligations:
+            old = before[item.obligation_id]
+            if old.unresolved and not item.unresolved:
+                if item.obligation_id in held:
+                    # Whole-obligation ambiguity needs all-path authority, not
+                    # a one-instance response; leave the entire state held.
+                    return
+                proof = hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "kind": "authenticated-finding-resolution-v1",
+                            "obligation_id": item.obligation_id,
+                            "head_sha": head_sha,
+                            "evidence_sha256": evidence_sha256,
+                        }
+                    )
+                ).hexdigest()
+                item = replace(
+                    item,
+                    lifecycle_state="verified-fixed",
+                    resolution_proof_sha256=proof,
+                )
+            updated.append(item)
+        states[key] = replace(
+            candidate,
+            **{
+                inventory_attr: replace(
+                    getattr(candidate, inventory_attr), obligations=tuple(updated)
+                )
+            },
+        )

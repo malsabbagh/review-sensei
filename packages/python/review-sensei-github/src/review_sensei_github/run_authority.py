@@ -80,13 +80,16 @@ def _positive(value: object) -> bool:
 
 
 def parse_authority(value: object, *, grant: bool = False) -> dict[str, Any]:
-    """Closed current schema, deliberately rejecting obsolete v1/v2 values."""
+    """Closed v3/v4 schemas, deliberately rejecting obsolete v1/v2 values."""
 
     def invalid() -> None:
         raise GitHubBrokerClientError("Broker current run authority is invalid")
 
+    grant_keys = {"actor"}
+    if isinstance(value, Mapping) and value.get("version") == 4:
+        grant_keys.add("current_observation")
     if not isinstance(value, Mapping) or set(value) != (
-        REQUEST_KEYS | {"actor"} if grant else REQUEST_KEYS
+        REQUEST_KEYS | grant_keys if grant else REQUEST_KEYS
     ):
         invalid()
     try:
@@ -100,7 +103,7 @@ def parse_authority(value: object, *, grant: bool = False) -> dict[str, Any]:
     purpose, source = result["purpose"], result["source"]
     if (
         type(result["version"]) is not int
-        or result["version"] != 3
+        or result["version"] not in {3, 4}
         or not isinstance(purpose, str)
         or purpose not in CAPABILITIES
         or not isinstance(result["repository"], str)
@@ -172,6 +175,12 @@ def parse_authority(value: object, *, grant: bool = False) -> dict[str, Any]:
             or actor["association"] not in {"OWNER", "MEMBER", "COLLABORATOR"}
         ):
             invalid()
+        if result["version"] == 4:
+            from .current_trust_observation import parse_current_observation
+
+            result["current_observation"] = parse_current_observation(
+                result["current_observation"], authority=result
+            )
     return result
 
 

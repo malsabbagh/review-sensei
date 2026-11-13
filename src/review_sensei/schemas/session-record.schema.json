@@ -38,7 +38,10 @@
       ],
       "properties": {
         "schema_version": {
-          "enum": ["1.0", "2.0"]
+          "enum": [
+            "1.0",
+            "2.0"
+          ]
         },
         "result_digest": {
           "type": "string",
@@ -820,7 +823,10 @@
           "type": "array",
           "maxItems": 8,
           "uniqueItems": true,
-          "items": {"type": "string", "pattern": "^[a-f0-9]{32}$"}
+          "items": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{32}$"
+          }
         },
         "receipts": {
           "type": "array",
@@ -849,29 +855,55 @@
         },
         "final_token": {
           "anyOf": [
-            {"type": "string", "pattern": "^[a-f0-9]{32}$"},
-            {"type": "null"}
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{32}$"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
-        "manifest_required": {"type": "boolean"},
-        "manifest_attempted": {"type": "boolean"},
+        "manifest_required": {
+          "type": "boolean"
+        },
+        "manifest_attempted": {
+          "type": "boolean"
+        },
         "manifest_token": {
           "anyOf": [
-            {"type": "string", "pattern": "^[a-f0-9]{32}$"},
-            {"type": "null"}
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{32}$"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "manifest_receipt": {
           "anyOf": [
             {
-              "type": "object", "additionalProperties": false,
-              "required": ["native_id", "content_sha256"],
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "native_id",
+                "content_sha256"
+              ],
               "properties": {
-                "native_id": {"type": "string", "pattern": "^[A-Za-z0-9_:.=-]{1,64}$"},
-                "content_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+                "native_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_:.=-]{1,64}$"
+                },
+                "content_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
               }
             },
-            {"type": "null"}
+            {
+              "type": "null"
+            }
           ]
         },
         "final_receipt": {
@@ -900,6 +932,631 @@
           ]
         }
       }
+    },
+    "finding_lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "operation_id",
+        "previous_root_sha256",
+        "previous_snapshot_sha256",
+        "manifest"
+      ],
+      "properties": {
+        "schema_version": {
+          "enum": [
+            "finding-lifecycle-reference-v1",
+            "finding-lifecycle-reference-v2"
+          ]
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "previous_root_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "previous_snapshot_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "encoding",
+                "binding",
+                "item_count",
+                "sha256",
+                "document"
+              ],
+              "properties": {
+                "encoding": {
+                  "const": "inline-json-v1"
+                },
+                "binding": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "repository",
+                    "repository_id",
+                    "pull_request",
+                    "base_sha",
+                    "head_sha",
+                    "policy_digest",
+                    "configuration_digest",
+                    "generation",
+                    "producer",
+                    "purpose",
+                    "schema_version"
+                  ],
+                  "properties": {
+                    "repository": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+                      "maxLength": 256
+                    },
+                    "repository_id": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 1,
+                      "maximum": 2147483647
+                    },
+                    "pull_request": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 2147483647
+                    },
+                    "base_sha": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{40}$"
+                    },
+                    "head_sha": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{40}$"
+                    },
+                    "policy_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "configuration_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 2147483647
+                    },
+                    "producer": {
+                      "type": "string",
+                      "pattern": "^(local-ledger|github-bot:[1-9][0-9]{0,18})$"
+                    },
+                    "purpose": {
+                      "enum": [
+                        "baseline",
+                        "human-inventory",
+                        "feedback",
+                        "evidence",
+                        "queue",
+                        "dispositions",
+                        "finding-lifecycle"
+                      ]
+                    },
+                    "schema_version": {
+                      "const": "1.0"
+                    }
+                  }
+                },
+                "item_count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4096
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "document": {
+                  "type": "object"
+                }
+              }
+            }
+          ]
+        },
+        "accepted_semantic_history": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "schema_version",
+                "repository_id",
+                "pull_request",
+                "streak",
+                "records"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "accepted-semantic-history-v1"
+                },
+                "repository_id": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "pull_request": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "streak": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2
+                },
+                "records": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 2,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "operation_key",
+                      "purpose",
+                      "source",
+                      "snapshot",
+                      "made_progress",
+                      "target_base_sha",
+                      "target_head_sha"
+                    ],
+                    "properties": {
+                      "operation_key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "purpose": {
+                        "enum": [
+                          "command",
+                          "reply"
+                        ]
+                      },
+                      "source": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "kind",
+                          "id",
+                          "updated_at",
+                          "body_sha256"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "enum": [
+                              "issue_comment",
+                              "review_comment"
+                            ]
+                          },
+                          "id": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9007199254740991
+                          },
+                          "updated_at": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "body_sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          }
+                        }
+                      },
+                      "snapshot": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "inventory_sha256",
+                          "unresolved_sha256",
+                          "enumerated_sha256",
+                          "reviewed_sha256",
+                          "uncertain_sha256",
+                          "pending_sha256",
+                          "receipts_sha256",
+                          "base_sha",
+                          "head_sha",
+                          "unresolved_count",
+                          "reviewed_count",
+                          "uncertain_count",
+                          "pending_count",
+                          "review_complete",
+                          "enumeration_complete",
+                          "fully_reviewed",
+                          "unknown_trust_effect"
+                        ],
+                        "properties": {
+                          "inventory_sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "unresolved_sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "enumerated_sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "reviewed_sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "uncertain_sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "pending_sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "receipts_sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "base_sha": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{40}$"
+                          },
+                          "head_sha": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{40}$"
+                          },
+                          "unresolved_count": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100000
+                          },
+                          "reviewed_count": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100000
+                          },
+                          "uncertain_count": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100000
+                          },
+                          "pending_count": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100000
+                          },
+                          "review_complete": {
+                            "type": "boolean"
+                          },
+                          "enumeration_complete": {
+                            "type": "boolean"
+                          },
+                          "fully_reviewed": {
+                            "type": "boolean"
+                          },
+                          "unknown_trust_effect": {
+                            "type": "boolean"
+                          }
+                        }
+                      },
+                      "made_progress": {
+                        "type": "boolean"
+                      },
+                      "target_base_sha": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{40}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "target_head_sha": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{40}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "schema_version",
+                "qualification",
+                "reason"
+              ],
+              "properties": {
+                "schema_version": {
+                  "const": "accepted-semantic-history-v1"
+                },
+                "qualification": {
+                  "const": "unavailable"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "prior": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "schema_version",
+                        "repository_id",
+                        "pull_request",
+                        "streak",
+                        "records"
+                      ],
+                      "properties": {
+                        "schema_version": {
+                          "const": "accepted-semantic-history-v1"
+                        },
+                        "repository_id": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "pull_request": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "streak": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 2
+                        },
+                        "records": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 2,
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "operation_key",
+                              "purpose",
+                              "source",
+                              "snapshot",
+                              "made_progress",
+                              "target_base_sha",
+                              "target_head_sha"
+                            ],
+                            "properties": {
+                              "operation_key": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              },
+                              "purpose": {
+                                "enum": [
+                                  "command",
+                                  "reply"
+                                ]
+                              },
+                              "source": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "kind",
+                                  "id",
+                                  "updated_at",
+                                  "body_sha256"
+                                ],
+                                "properties": {
+                                  "kind": {
+                                    "enum": [
+                                      "issue_comment",
+                                      "review_comment"
+                                    ]
+                                  },
+                                  "id": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "updated_at": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 128
+                                  },
+                                  "body_sha256": {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{64}$"
+                                  }
+                                }
+                              },
+                              "snapshot": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "inventory_sha256",
+                                  "unresolved_sha256",
+                                  "enumerated_sha256",
+                                  "reviewed_sha256",
+                                  "uncertain_sha256",
+                                  "pending_sha256",
+                                  "receipts_sha256",
+                                  "base_sha",
+                                  "head_sha",
+                                  "unresolved_count",
+                                  "reviewed_count",
+                                  "uncertain_count",
+                                  "pending_count",
+                                  "review_complete",
+                                  "enumeration_complete",
+                                  "fully_reviewed",
+                                  "unknown_trust_effect"
+                                ],
+                                "properties": {
+                                  "inventory_sha256": {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{64}$"
+                                  },
+                                  "unresolved_sha256": {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{64}$"
+                                  },
+                                  "enumerated_sha256": {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{64}$"
+                                  },
+                                  "reviewed_sha256": {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{64}$"
+                                  },
+                                  "uncertain_sha256": {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{64}$"
+                                  },
+                                  "pending_sha256": {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{64}$"
+                                  },
+                                  "receipts_sha256": {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{64}$"
+                                  },
+                                  "base_sha": {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{40}$"
+                                  },
+                                  "head_sha": {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{40}$"
+                                  },
+                                  "unresolved_count": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 100000
+                                  },
+                                  "reviewed_count": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 100000
+                                  },
+                                  "uncertain_count": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 100000
+                                  },
+                                  "pending_count": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 100000
+                                  },
+                                  "review_complete": {
+                                    "type": "boolean"
+                                  },
+                                  "enumeration_complete": {
+                                    "type": "boolean"
+                                  },
+                                  "fully_reviewed": {
+                                    "type": "boolean"
+                                  },
+                                  "unknown_trust_effect": {
+                                    "type": "boolean"
+                                  }
+                                }
+                              },
+                              "made_progress": {
+                                "type": "boolean"
+                              },
+                              "target_base_sha": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{40}$"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "target_head_sha": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "pattern": "^[a-f0-9]{40}$"
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "schema_version": {
+                "const": "finding-lifecycle-reference-v2"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "accepted_semantic_history"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "accepted_semantic_history"
+              ]
+            }
+          }
+        }
+      ]
     }
   },
   "allOf": [

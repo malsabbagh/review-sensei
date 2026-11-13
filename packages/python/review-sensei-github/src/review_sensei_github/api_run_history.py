@@ -27,7 +27,6 @@ from review_sensei.bounded_evidence import (
     MAX_STORED_PARTS,
     EvidenceReadBudget,
     canonical_bytes,
-    decode_evidence,
     evidence_manifest,
     partition_evidence,
     read_inline_evidence,
@@ -119,7 +118,8 @@ def _read_bound_action_result(ledger, identity, record, *, budget):
     manifest = action["result"]
     if manifest.get("encoding") == INLINE_ENCODING:
         value = decode_action_result_carrier(
-            read_inline_evidence(manifest, expected_binding=binding)
+            read_inline_evidence(manifest, expected_binding=binding),
+            history=(record.finding_lifecycle or {}).get("accepted_semantic_history"),
         )
     else:
         validated = validate_manifest(manifest)
@@ -280,34 +280,16 @@ def action_result_binding(
     }
 
 
-def decode_action_result_carrier(value: object) -> dict[str, Any]:
-    """Bound lossless action-result expansion; this does not authenticate it."""
-    if (
-        not isinstance(value, dict)
-        or set(value) != {"schema_version", "payload"}
-        or value["schema_version"] != "caller-action-result-v1"
-    ):
-        raise ReviewInputError("caller action result carrier is unsupported")
-    document = decode_evidence(
-        value["payload"],
-        max_encoded_bytes=MAX_MANIFEST_BYTES,
-        max_decoded_bytes=MAX_PARTITION_DECODED_BYTES,
-    )
-    return _validate_action_result_envelope(document)
+def decode_action_result_carrier(value: object, *, history=None) -> dict[str, Any]:
+    from review_sensei.action_result_codec import decode_action_result_carrier as decode
+
+    return decode(value, history=history)
 
 
 def _validate_action_result_envelope(document: object) -> dict[str, Any]:
-    if (
-        not isinstance(document, dict)
-        or set(document) != {"schema_version", "intent_sha256", "outcome", "result"}
-        or document["schema_version"] != "caller-action-result-v1"
-        or not isinstance(document["intent_sha256"], str)
-        or re.fullmatch(r"[a-f0-9]{64}", document["intent_sha256"]) is None
-        or not isinstance(document["outcome"], dict)
-        or not isinstance(document["result"], dict)
-    ):
-        raise ReviewInputError("caller action result envelope is unsupported")
-    return document
+    from review_sensei.action_result_codec import validate_action_result_envelope
+
+    return validate_action_result_envelope(document)
 
 
 def read_action_result(ledger, identity, record) -> dict[str, Any]:
@@ -322,7 +304,8 @@ def read_action_result(ledger, identity, record) -> dict[str, Any]:
         raise ReviewInputError("caller action has no terminal retained result")
     binding = action_result_binding(identity, state, ledger.evidence_producer())
     value = decode_action_result_carrier(
-        read_inline_evidence(action["result"], expected_binding=binding)
+        read_inline_evidence(action["result"], expected_binding=binding),
+        history=(record.finding_lifecycle or {}).get("accepted_semantic_history"),
     )
     return _match_action_result(value, binding, action)
 
@@ -418,13 +401,16 @@ def preview_retained_reference(ledger, previous, *, completion):
     manifest = evidence_manifest(
         document, binding=binding, item_count=1, parts=parts, storage_ids=("9" * 19,)
     )
-    return {
-        "schema_version": "caller-run-reference-v2",
+    reference = {
         "run_id": state.identity.run_id,
         "root_sha256": previous.record_sha256,
         "manifest": manifest,
-        "completion": completion.receipt,
     }
+    if completion is not None:
+        reference.update(
+            schema_version="caller-run-reference-v2", completion=completion.receipt
+        )
+    return reference
 
 
 def retain_previous_run(

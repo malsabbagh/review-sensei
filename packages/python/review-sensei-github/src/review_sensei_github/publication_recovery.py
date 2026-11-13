@@ -279,6 +279,13 @@ class _PaginationObservationHttp(GitHubHttp):
         operation = _PAGINATION_OBSERVATIONS.setdefault(budget, WeakKeyDictionary())
         self._oversized_page_ceilings = operation.setdefault(base, {})
 
+    @property
+    def preflight_native_batch(self):
+        # Preserve the source journal's pure complete-batch admission across
+        # this accounting-only wrapper. Absence must remain AttributeError;
+        # no wrapper can manufacture a successful admission callback.
+        return getattr(self.transport, "preflight_native_batch")
+
     def pagination_page_size(self, path: str, offset: int = 0) -> int:
         parsed = urlsplit(path)
         query = parse_qs(parsed.query)
@@ -346,6 +353,13 @@ class PublicationBudgetHttp(GitHubHttp):
             raise GitHubPublicationError("publication budget identity mismatches")
         self._already_charged = known_wrapper or known_feedback
         self.transport = _PaginationObservationHttp(http, budget)
+
+    @property
+    def preflight_native_batch(self):
+        # Preserve the source journal's pure complete-batch admission across
+        # this accounting-only wrapper. Absence must remain AttributeError;
+        # no wrapper can manufacture a successful admission callback.
+        return getattr(self.transport, "preflight_native_batch")
 
     def pagination_page_size(self, path: str, offset: int = 0) -> int:
         """Reuse only oversized-request ceilings at this exact item offset."""

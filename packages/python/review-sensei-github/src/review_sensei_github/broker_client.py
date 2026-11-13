@@ -641,6 +641,14 @@ class BrokerClient:
             authority = {**authority, "issued_at": now, "expires_at": now + 600}
             self.authority = authority
             requested_capability = payload.get("capability", "review_publish")
+            if authority["version"] == 4 and (
+                requested_capability != "review_session"
+                or payload.get("release_only") is not None
+                or not isinstance(payload.get("session"), dict)
+            ):
+                raise GitHubBrokerClientError(
+                    "Broker observed authority requires a signed session exchange"
+                )
             if requested_capability not in CAPABILITIES[str(authority["purpose"])]:
                 raise GitHubBrokerClientError(
                     "Broker capability conflicts with run purpose"

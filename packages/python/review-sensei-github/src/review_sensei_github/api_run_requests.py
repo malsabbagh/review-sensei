@@ -33,6 +33,7 @@ from review_sensei.api_work import (
     initial_accounting,
 )
 from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
+from review_sensei.finding_lifecycle_store import _register_checkpoint_pricer
 from review_sensei.models import ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
 
@@ -1355,7 +1356,30 @@ class ApiRunRequestTransport:
             if old.action is not None:
                 from .api_run_history import read_action_result
 
-                read_action_result(ledger, identity, record)
+                retained_action = read_action_result(ledger, identity, record)
+                from .accepted_semantic_history import guard_successor_admission
+
+                guard_successor_admission(
+                    self, ledger, identity, record, retained_action
+                )
+                # Data only: this cannot authorize cancellation or dispatch.
+                self._accepted_semantic_predecessor = retained_action["result"].get(
+                    "accepted_semantic_history", {"missing": True}
+                )
+            else:
+                from .accepted_semantic_history import history_from_record
+
+                carried_history = history_from_record(ledger, identity, record)
+                from .accepted_semantic_history import guard_carried_successor
+
+                guard_carried_successor(self, ledger, identity, record, carried_history)
+                self._accepted_semantic_predecessor = (
+                    carried_history
+                    if carried_history is not None
+                    else None
+                    if old.previous_record is None
+                    else {"missing": True}
+                )
             allocation = owner_allocations(configuration.limit, self.plan.liability)
 
             def candidate_state(reference):
@@ -1374,18 +1398,29 @@ class ApiRunRequestTransport:
                     .reserve("hosted-terminal", allocation.first_terminal)
                 )
 
+            from .accepted_semantic_history import carry_history_in_rollover
+
             if completion is not None:
                 from .api_run_history import preview_retained_reference
 
                 preview = preview_retained_reference(
                     ledger, record, completion=completion
                 )
-                # Capacity only: this value is never assigned to activation,
-                # granted to a writer, persisted or treated as archive evidence.
                 record.rollover_historical_api_accounting(
                     candidate_state(preview).to_document(),
                     assessments=completion.assessments,
                 )
+
+            # Qualify metadata capacity before any archive write; no preview
+            # archive identity is installed or treated as authority.
+            preview_candidate = carry_history_in_rollover(
+                ledger,
+                identity,
+                record,
+                record,
+                getattr(self, "_accepted_semantic_predecessor", None),
+            )
+            carried_reference = preview_candidate.finding_lifecycle
             before_archive = len(self.observations)
             if completion is not None:
                 # Existing complete archive/write/readback tail plus fresh old
@@ -1430,6 +1465,14 @@ class ApiRunRequestTransport:
                 if completion is not None
                 else record.rollover_api_accounting(state.to_document())
             )
+            if carried_reference != updated.finding_lifecycle:
+                updated = updated.evolve(
+                    now=datetime.fromisoformat(
+                        updated.updated_at.replace("Z", "+00:00")
+                    ),
+                    generation=updated.generation,
+                    finding_lifecycle=carried_reference,
+                )
             self._activation = updated, "hosted-review"
             return updated
 
@@ -1653,6 +1696,10 @@ class ApiRunRequestTransport:
                 "caller action execution is unavailable or may have started"
             )
 
+        from .accepted_semantic_history import preflight_history_capacity
+
+        preflight_history_capacity(self, identity, intent)
+
         def prepare(record):
             self._state = replace(
                 self.accounting, action={**action, "execution_started": True}
@@ -1683,8 +1730,6 @@ class ApiRunRequestTransport:
         deliberately not reconstructible from its serialized intent.
         """
         from review_sensei.bounded_evidence import (
-            MAX_PARTITION_DECODED_BYTES,
-            encode_evidence,
             inline_manifest,
             read_inline_evidence,
         )
@@ -1706,18 +1751,30 @@ class ApiRunRequestTransport:
             raise ReviewInputError(
                 "caller action result is not an owned confirmed outcome"
             )
+        from .accepted_semantic_history import enrich_settlement
+
+        result_document = enrich_settlement(
+            self, ledger, identity, action["intent"], result_document
+        )
         envelope = {
             "schema_version": "caller-action-result-v1",
             "intent_sha256": boundary.intent_sha256,
             "outcome": outcome,
             "result": json_copy(result_document),
         }
-        carrier = {
-            "schema_version": "caller-action-result-v1",
-            "payload": encode_evidence(
-                envelope, max_decoded_bytes=MAX_PARTITION_DECODED_BYTES
+        from review_sensei.action_result_codec import encode_action_result_carrier
+
+        history = result_document.get("accepted_semantic_history")
+        self._action_result_history = (
+            json_copy(history) if history is not None else None
+        )
+        carrier = encode_action_result_carrier(
+            envelope,
+            reference_history=(
+                self._effect_record is not None
+                and self._effect_record.finding_lifecycle is not None
             ),
-        }
+        )
         manifest = inline_manifest(
             carrier,
             binding=action_result_binding(
@@ -1734,7 +1791,8 @@ class ApiRunRequestTransport:
                 read_inline_evidence(
                     manifest,
                     expected_binding=cast(Mapping[str, object], manifest["binding"]),
-                )
+                ),
+                history=history,
             )
             != envelope
         ):
@@ -1804,7 +1862,18 @@ class ApiRunRequestTransport:
                     "outcome": proof.outcome,
                 },
             )
-            return record.evolve(generation=record.generation + 1)
+            from review_sensei.finding_lifecycle_store import (
+                reference_with_terminal_action_history,
+            )
+
+            reference = reference_with_terminal_action_history(
+                record,
+                accounting=self._state,
+                candidate_history=getattr(self, "_action_result_history", None),
+            )
+            return record.evolve(
+                generation=record.generation + 1, finding_lifecycle=reference
+            )
 
         confirmed = self._action_checkpoint(ledger, identity, prepare)
         read_action_result(ledger, identity, confirmed)
@@ -2158,6 +2227,665 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         self._terminal_claimed = False
         self._part_staging_identity: SessionIdentity | None = None
 
+    def preflight_finding_lifecycle_retention(
+        self, identity, *, added_parts, added_bytes, checkpoint_parts=None
+    ):
+        """Read-only proof against the existing complete run-owned frontier/tail.
+
+        No discovery, enlarged page envelope or allocation occurs here. Missing
+        authenticated context is unsupported, not permission to mint a budget.
+        Actual staging repeats its checkpoint-snapshot and capacity checks.
+        """
+        from copy import copy
+
+        from review_sensei.bounded_evidence import MAX_PART_BYTES, MAX_STORED_PARTS
+
+        from .quarantine_published_tail import retained_storage_reserve
+        from .session_ledger import parse_session_comment
+
+        self.caller._require_ledger(self, identity)
+        self.caller.accounting
+        if (
+            type(added_parts) is not int
+            or type(added_bytes) is not int
+            or not 0 <= added_parts <= MAX_STORED_PARTS
+            or added_bytes < 0
+            or (added_parts == 0 and (added_bytes != 0 or self._quarantine_required))
+            or (added_parts > 0 and added_bytes == 0)
+            or not self._inventory_complete
+            or self.caller._terminal_reason is not None
+        ):
+            raise ReviewInputError("finding lifecycle retained frontier is unsupported")
+        if not self._quarantine_required:
+            return self._preflight_plain_finding_parts(
+                identity,
+                added_parts=added_parts,
+                added_bytes=added_bytes,
+                checkpoint_parts=checkpoint_parts,
+            )
+        from .publication_recovery import _publication_transport
+
+        guard = getattr(
+            _publication_transport(self.http), "_quarantine_capacity_guard", None
+        )
+        if (
+            guard is None
+            or guard.identity != identity
+            or not guard.complete_tail
+            or guard.comment_bounds is None
+            or guard.comment_plan is None
+        ):
+            raise ReviewInputError(
+                "finding lifecycle original comment allocation is unavailable"
+            )
+        items = self._cached_comments()
+        roots = []
+        for item in items:
+            body = item.get("body") if isinstance(item, dict) else None
+            if not isinstance(body, str):
+                raise ReviewInputError(
+                    "finding lifecycle retained frontier is incomplete"
+                )
+            parsed = parse_session_comment(body, identity=identity)
+            if parsed is not None:
+                self._part_owner(item, identity)
+                roots.append(parsed)
+        if len(roots) != 1 or roots[0].record_sha256 != self.caller._root:
+            raise ReviewInputError("finding lifecycle retained session root changed")
+        # Canonical evidence parts contain only base64, digests and integers;
+        # 512 bytes covers fixed carrier framing and JSON quote/newline escapes.
+        # No arbitrary user text appears in the encoded part body. Bounds
+        # are consumed only in this detached proof, never expanded or reset.
+        maximum_wire = MAX_PART_BYTES + 512
+        projected = copy(guard)
+        projected.comment_bounds = list(guard.comment_bounds)
+        for _ in range(added_parts):
+            choices = [
+                bound for bound in projected.comment_bounds if bound >= maximum_wire
+            ]
+            if not choices:
+                raise ReviewInputError(
+                    "finding lifecycle original comment tail cannot fit complete parts"
+                )
+            projected.comment_bounds.remove(min(choices))
+        guard.require(guard.stats)
+        carriers = tuple(self._owned_carrier_items(items, identity))
+        reserve_parts, reserve_bytes = retained_storage_reserve(self)
+        # Existing admitted tail still owns its storage promise. New lifecycle
+        # bytes cannot silently consume that independent recovery reservation.
+        retained_parts = len(carriers) + reserve_parts + added_parts
+        retained_bytes = (
+            sum(len(item["body"].encode()) for item in carriers)
+            + reserve_bytes
+            + added_bytes
+        )
+        comments = (
+            guard.stats["issue_comments"]["count"]
+            + guard.reserve["issue_comments"]["new_objects"]
+            + guard.future_parts
+        )
+        assert self.evidence_budget is not None
+        self.evidence_budget.preflight(2 * added_parts + 5)
+        return {
+            "additional_calls": 0,
+            "comment_allocations": comments,
+            "retained_parts": retained_parts,
+            "retained_bytes": retained_bytes,
+        }
+
+    def preflight_finding_lifecycle_checkpoint_pricing(
+        self, record, *, added_parts, added_bytes, checkpoint_parts
+    ):
+        """Issue a sealed price only for the exact already-owned plain writer."""
+        from review_sensei.bounded_evidence import canonical_bytes
+        from review_sensei.finding_lifecycle_store import _issue_checkpoint_pricing
+
+        from .review_run import ActionRunLedger
+        from .run_authority import VerifiedRunAction
+
+        if type(self) not in {ApiRunSessionLedger, ActionRunLedger}:
+            return None
+        expected_replace = (
+            ApiRunSessionLedger.replace
+            if type(self) is ApiRunSessionLedger
+            else ActionRunLedger.replace
+        )
+        implementations = (
+            ("replace", expected_replace),
+            (
+                "replace_finding_lifecycle_inline",
+                ApiRunSessionLedger.replace_finding_lifecycle_inline,
+            ),
+            (
+                "preflight_finding_lifecycle_inline",
+                ApiRunSessionLedger.preflight_finding_lifecycle_inline,
+            ),
+            (
+                "replace_finding_lifecycle_parts",
+                ApiRunSessionLedger.replace_finding_lifecycle_parts,
+            ),
+            (
+                "_preflight_plain_finding_parts",
+                ApiRunSessionLedger._preflight_plain_finding_parts,
+            ),
+            (
+                "_plain_finding_selected_input",
+                ApiRunSessionLedger._plain_finding_selected_input,
+            ),
+            ("stage_evidence", ApiRunSessionLedger.stage_evidence),
+            (
+                "preflight_finding_lifecycle_retention",
+                ApiRunSessionLedger.preflight_finding_lifecycle_retention,
+            ),
+        )
+        if any(
+            getattr(getattr(self, name), "__func__", None) is not implementation
+            for name, implementation in implementations
+        ):
+            return None
+        identity = record.identity()
+        if self._plain_finding_selected_input(identity) is not record:
+            return None
+        original = canonical_bytes(record.to_dict())
+        guard = getattr(self, "business_guard", None)
+        owner = getattr(guard, "__self__", None)
+        run = getattr(owner, "run", None)
+        guard_calls = 0
+        if type(self) is ActionRunLedger:
+            if (
+                getattr(guard, "__func__", None) is not VerifiedRunAction.fence
+                or type(owner) is not VerifiedRunAction
+                or run is None
+                or run.ledger is not self
+                or run.caller is not self.caller
+                or run.identity != identity
+                or owner.owner != self.caller.accounting.owner
+            ):
+                return None
+            guard_calls = 2  # actual fresh source GET and PR GET, outside checkpoint
+        elif guard is not None:
+            return None
+        authority_bytes = canonical_bytes(owner.document) if owner is not None else None
+
+        def validate():
+            if (
+                self._plain_finding_selected_input(identity) is not record
+                or canonical_bytes(record.to_dict()) != original
+                or any(
+                    getattr(getattr(self, name), "__func__", None) is not implementation
+                    for name, implementation in implementations
+                )
+                or getattr(self, "business_guard", None) is not guard
+            ):
+                return False
+            return owner is None or (
+                owner.run is run
+                and run.ledger is self
+                and run.caller is self.caller
+                and owner.owner == self.caller.accounting.owner
+                and canonical_bytes(owner.document) == authority_bytes
+            )
+
+        observed = self.preflight_finding_lifecycle_retention(
+            identity,
+            added_parts=added_parts,
+            added_bytes=added_bytes,
+            checkpoint_parts=checkpoint_parts,
+        )
+        if not validate():
+            raise ReviewInputError(
+                "finding lifecycle checkpoint pricing source changed"
+            )
+        return _issue_checkpoint_pricing(
+            self,
+            record,
+            checkpoint_parts=checkpoint_parts,
+            capacity=observed,
+            calls=tuple(
+                (5 if n == 0 else 4 + 3 * n) + guard_calls for n in checkpoint_parts
+            ),
+            validate=validate,
+        )
+
+    def preflight_finding_lifecycle_inline(self, record):
+        from review_sensei.finding_lifecycle_store import (
+            _consume_checkpoint_pricing,
+            _inline_checkpoint_read_free,
+        )
+
+        if not _inline_checkpoint_read_free(record):
+            return None
+        proof = self.preflight_finding_lifecycle_checkpoint_pricing(
+            record,
+            added_parts=0,
+            added_bytes=0,
+            checkpoint_parts=(0,),
+        )
+        if proof is None:
+            return None
+        _consume_checkpoint_pricing(proof, self, record, (0,))
+        return {
+            "conditional_calls": 4,
+            "post_mutator_calls": 3,
+            "page_size": 100,
+            "sealed": bool(getattr(self, "_plain_finding_scope_active", False)),
+        }
+
+    def replace_finding_lifecycle_inline(self, identity, mutate, *, record):
+        plan = self.preflight_finding_lifecycle_inline(record)
+        if plan is None or plan["sealed"]:
+            raise ReviewInputError(
+                "finding lifecycle inline source scope is unavailable"
+            )
+        return self.replace_finding_lifecycle_parts(
+            identity,
+            mutate,
+            record=record,
+            parts=0,
+            retained_bytes=0,
+        )
+
+    def _preflight_plain_finding_parts(
+        self, identity, *, added_parts, added_bytes, checkpoint_parts
+    ):
+        from review_sensei.bounded_evidence import canonical_bytes
+        from review_sensei.session import MAX_SESSION_RECORD_BYTES
+
+        from .api_run_plan import NATIVE_OPERATION_REQUESTS
+        from .caller_operation import prewrite_fence_requests
+        from .session_ledger import parse_session_comment
+
+        checkpoints = (added_parts,) if checkpoint_parts is None else checkpoint_parts
+        if (
+            not isinstance(checkpoints, tuple)
+            or not checkpoints
+            or any(type(n) is not int or n < 0 for n in checkpoints)
+            or sum(checkpoints) != added_parts
+        ):
+            raise ReviewInputError("finding lifecycle checkpoint part plan conflicts")
+        fences = prewrite_fence_requests(self.caller)
+        selected = self._plain_finding_selected_input(identity)
+        root_calls = 4 if selected is not None else 5
+        # A source-owned selected input omits only the initial redundant listing.
+        # Independent preactivation/final listings, live head and root PATCH remain.
+        # Each new part needs live-head GET, POST and independent part GET =3.
+        # Restart fences are existing additional physical liabilities, not room.
+        if any(
+            root_calls + 3 * n + (n + 1) * fences > NATIVE_OPERATION_REQUESTS + fences
+            for n in checkpoints
+        ):
+            raise EvidenceBudgetExhausted(
+                "finding lifecycle parts exceed original checkpoint operation"
+            )
+        items = self._cached_comments()
+        if (
+            not self._inventory_complete
+            or self._history_reading
+            or self._broker is not None
+            or self._activation_ticket is not None
+            or self._tail_scan_pages is not None
+        ):
+            raise ReviewInputError("finding lifecycle plain frontier is unsupported")
+        roots = []
+        root_bodies = []
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("body"), str):
+                raise ReviewInputError("finding lifecycle plain frontier is incomplete")
+            parsed = parse_session_comment(item["body"], identity=identity)
+            if parsed is not None:
+                self._part_owner(item, identity)
+                roots.append(parsed)
+                root_bodies.append(item["body"])
+        if len(roots) != 1 or roots[0].record_sha256 != self.caller._root:
+            raise ReviewInputError("finding lifecycle retained session root changed")
+        record = roots[0]
+        history = record.convergence_history
+        baseline = history.get("baseline") if isinstance(history, Mapping) else None
+        disposition_needs_reads = record.disposition_snapshot is not None
+        if record.disposition_snapshot is not None:
+            from review_sensei.bounded_evidence import read_inline_evidence
+            from review_sensei.disposition_snapshot import (
+                normalize_snapshot,
+                snapshot_document,
+            )
+
+            snapshot = normalize_snapshot(record.disposition_snapshot)
+            assert snapshot is not None
+            manifest = snapshot["state_manifest"]
+            if (
+                snapshot["schema_version"] == "1.0"
+                and manifest["encoding"] == "inline-json-v1"
+            ):
+                binding = manifest["binding"]
+                if binding["producer"] != self.evidence_producer():
+                    raise ReviewInputError(
+                        "disposition snapshot producer does not match session"
+                    )
+                # This exact decoder cannot call a reader/transport. Validate
+                # the committed bytes before granting the zero-read plan.
+                document = read_inline_evidence(manifest, expected_binding=binding)
+                snapshot_document(
+                    document,
+                    result_digest=snapshot["result_digest"],
+                    item_count=manifest["item_count"],
+                )
+                disposition_needs_reads = False
+            elif (
+                snapshot["schema_version"] == "1.0"
+                and manifest["encoding"] == "partitioned-json-v1"
+                and selected is not None
+            ):
+                from review_sensei.bounded_evidence import read_partitioned_evidence
+
+                if manifest["binding"]["producer"] != self.evidence_producer():
+                    raise ReviewInputError("disposition snapshot producer changed")
+                assert self.evidence_budget is not None
+                document = read_partitioned_evidence(
+                    manifest,
+                    expected_binding=manifest["binding"],
+                    reader=lambda sid: self._current_plain_snapshot_part(identity, sid),
+                    budget=self.evidence_budget,
+                )
+                snapshot_document(
+                    document,
+                    result_digest=snapshot["result_digest"],
+                    item_count=manifest["item_count"],
+                )
+                disposition_needs_reads = False
+        if (
+            record.assessment_queue is not None
+            or disposition_needs_reads
+            or record.historical_assessments is not None
+            or isinstance(baseline, Mapping)
+            and baseline.get("encoding") == "partitioned-json-v1"
+        ):
+            raise ReviewInputError(
+                "finding lifecycle plain root needs unpriced evidence reads"
+            )
+        # Original single-page 512KiB response cap. Root replacement is bounded
+        # independently of compression; each carrier retains existing audited
+        # 4096-byte response metadata and canonical encoded-part wire reserve.
+        from .session_ledger import plain_session_comment_json_bound
+
+        root_wire = 6 * MAX_SESSION_RECORD_BYTES
+        if getattr(self, "_controlled_restart", None) is None:
+            grants = set(self._observed_consumed_grants)
+            if self._accepted_consumed_grant is not None:
+                grants.add(self._accepted_consumed_grant)
+            root_wire = plain_session_comment_json_bound(
+                consumed_grants=grants,
+                repository_id=identity.repository_id,
+                pull_request=identity.pull_request,
+            )
+        # The scoped source-owned path PATCHes the one selected comment. Its
+        # old body and replacement cannot coexist in a listing. Retain every
+        # metadata field/immutable part, and subtract only this exact JSON string.
+        replaced_body = (
+            len(canonical_bytes(root_bodies[0])) if selected is not None else 0
+        )
+        wire = len(canonical_bytes(items)) - replaced_body + root_wire + 4096
+        # Core supplies the sum of canonical part wire maxima (compressBound
+        # included, with the short final part), not arbitrary payload lengths.
+        # Actual staging repeats this with canonical rendered-part lengths.
+        # Keep framing/outer-JSON escapes and native metadata for every part.
+        wire += added_bytes + added_parts * (512 + 4096)
+        if len(items) + added_parts >= 100 or wire >= 512 * 1024:
+            raise ReviewInputError(
+                "finding lifecycle plain single-page capacity exceeded"
+            )
+        carriers = tuple(self._owned_carrier_items(items, identity))
+        assert self.evidence_budget is not None
+        self.evidence_budget.preflight(
+            sum(root_calls + 3 * n + (n + 1) * fences for n in checkpoints)
+        )
+        return {
+            "additional_calls": 0,
+            "comment_allocations": len(items) + added_parts,
+            "retained_parts": len(carriers) + added_parts,
+            "retained_bytes": sum(len(i["body"].encode()) for i in carriers)
+            + added_bytes,
+        }
+
+    def _current_plain_snapshot_part(self, identity, storage_id):
+        """Authenticate only the complete currently observed listing body."""
+        if not self._inventory_complete or self._list_refresh:
+            raise ReviewInputError("finding lifecycle snapshot listing is stale")
+        if not isinstance(storage_id, str) or not storage_id.isdecimal():
+            raise ReviewInputError("finding lifecycle snapshot part identity changed")
+        item = self._comments_by_id.get(int(storage_id))
+        if not isinstance(item, dict):
+            raise ReviewInputError("finding lifecycle snapshot part is missing")
+        return self._part_from_item(item, identity, storage_id)
+
+    def _plain_finding_document(self, record, manifest):
+        """Decode only bytes in the source-owned complete current listing."""
+        from review_sensei.bounded_evidence import (
+            read_inline_evidence,
+            read_partitioned_evidence,
+        )
+
+        from .finding_lifecycle_dictionary import _manifest
+
+        current_binding = record.finding_lifecycle["manifest"]["binding"]
+        binding = _manifest(manifest, current_binding)
+        if (
+            binding["producer"] != self.evidence_producer()
+            or binding["repository"] != record.repository
+            or binding["repository_id"] != record.repository_id
+            or binding["pull_request"] != record.pull_request
+            or binding["generation"] > record.generation
+            or not self._inventory_complete
+            or self._list_refresh
+        ):
+            raise ReviewInputError("finding dictionary complete listing scope changed")
+        if self.evidence_budget is None:
+            raise ReviewInputError("finding dictionary original read budget is missing")
+        self.evidence_budget.check()
+        if manifest["encoding"] == "inline-json-v1":
+            return read_inline_evidence(manifest, expected_binding=binding)
+        return read_partitioned_evidence(
+            manifest,
+            expected_binding=binding,
+            reader=lambda sid: self._current_plain_snapshot_part(
+                record.identity(), sid
+            ),
+            budget=self.evidence_budget,
+        )
+
+    def _require_plain_finding_dictionary(self, record):
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .finding_lifecycle_dictionary import is_dictionary, unpack
+
+        scope = getattr(self, "_plain_finding_dictionary_scope", None)
+        if scope is None and not getattr(self, "_plain_finding_scope_active", False):
+            return
+        if record.finding_lifecycle is None:
+            if scope is not None:
+                raise ReviewInputError("finding dictionary current root disappeared")
+            return
+        manifest = record.finding_lifecycle["manifest"]
+        envelope = self._plain_finding_document(record, manifest)
+        if not isinstance(envelope, dict) or "lifecycle" not in envelope:
+            raise ReviewInputError("finding dictionary selected carrier is invalid")
+        current = envelope["lifecycle"]
+        if is_dictionary(current):
+            base = self._plain_finding_document(record, current["dictionary_manifest"])
+            unpack(current, base=base, current_binding=manifest["binding"])
+        if scope is not None:
+            identity, carrier_bytes = scope
+            if record.identity() != identity:
+                raise ReviewInputError("finding dictionary checkpoint identity changed")
+            carrier = json.loads(carrier_bytes)
+            base = self._plain_finding_document(record, carrier["dictionary_manifest"])
+            unpack(carrier, base=base, current_binding=manifest["binding"])
+            if canonical_bytes(carrier) != carrier_bytes:
+                raise ReviewInputError("finding dictionary checkpoint bytes changed")
+
+    @contextmanager
+    def finding_dictionary_checkpoint(self, record, carrier):
+        """Additional negative dependency fences; this grants no writer authority."""
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .finding_lifecycle_dictionary import is_dictionary
+
+        if (
+            not is_dictionary(carrier)
+            or getattr(self, "_plain_finding_dictionary_scope", None) is not None
+        ):
+            raise ReviewInputError("finding dictionary checkpoint scope is invalid")
+        self._plain_finding_dictionary_scope: tuple[Any, bytes] | None = (
+            record.identity(),
+            canonical_bytes(carrier),
+        )
+        try:
+            self._require_plain_finding_dictionary(record)
+            yield
+        finally:
+            self._plain_finding_dictionary_scope = None
+
+    def _require_plain_finding_snapshot(self, record):
+        self._require_plain_finding_dictionary(record)
+        scope = getattr(self, "_plain_finding_snapshot_scope", None)
+        if scope is None:
+            return
+        identity, root, snapshot, _ids = scope
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        if (
+            record.identity() != identity
+            or canonical_bytes(record.disposition_snapshot) != snapshot
+            or self.caller._root != root
+            or self.caller._checkpoint_operation is None
+            or self.caller._active_operation is not self.caller._checkpoint_operation
+            or not self._plain_finding_scope_active
+        ):
+            raise ReviewInputError("finding lifecycle retained snapshot scope changed")
+
+    def _read_plain_finding_snapshot_part(self, identity, storage_id):
+        scope = getattr(self, "_plain_finding_snapshot_scope", None)
+        if scope is None or storage_id not in scope[3]:
+            return None
+        record = getattr(self.caller, "_effect_record", None)
+        if record is None or identity != scope[0]:
+            raise ReviewInputError("finding lifecycle snapshot scope identity changed")
+        self._require_plain_finding_snapshot(record)
+        return self._current_plain_snapshot_part(identity, storage_id)
+
+    def _plain_finding_selected_input(self, identity):
+        """Validate the existing owned complete frontier without another read."""
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .session_ledger import parse_session_comment
+
+        record = getattr(self.caller, "_effect_record", None)
+        if (
+            record is None
+            or record.identity() != identity
+            or record.record_sha256 != self.caller._root
+            or not self._inventory_complete
+            or self._history_reading
+            or self._broker is not None
+            or self._activation_ticket is not None
+            or self._tail_scan_pages is not None
+            or getattr(self, "_controlled_restart", None) is not None
+            or self._quarantine_required
+        ):
+            return None
+        self.caller._require_ledger(self, identity)
+        roots = []
+        for item in self._cached_comments():
+            if not isinstance(item, dict) or not isinstance(item.get("body"), str):
+                return None
+            parsed = parse_session_comment(item["body"], identity=identity)
+            if parsed is not None:
+                self._part_owner(item, identity)
+                roots.append((item.get("id"), parsed))
+        if len(roots) != 1 or type(roots[0][0]) is not int or roots[0][0] <= 0:
+            return None
+        if canonical_bytes(roots[0][1].to_dict()) != canonical_bytes(record.to_dict()):
+            raise ReviewInputError("finding lifecycle selected input bytes changed")
+        return record
+
+    def _consume_plain_finding_input(self, identity):
+        capability = getattr(self, "_plain_finding_input", None)
+        if capability is None:
+            if getattr(self, "_plain_finding_scope_active", False):
+                raise ReviewInputError(
+                    "finding lifecycle selected input already consumed"
+                )
+            return None
+        self._plain_finding_input = None
+        record, commitment = capability
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        if (
+            record is not getattr(self.caller, "_effect_record", None)
+            or record is not self._plain_finding_selected_input(identity)
+            or canonical_bytes(record.to_dict()) != commitment
+            or self.caller._checkpoint_operation is None
+            or self.caller._active_operation is not self.caller._checkpoint_operation
+        ):
+            raise ReviewInputError("finding lifecycle selected input authority changed")
+        # Run the full existing marker/producer/conflict validation over the
+        # independently observed frontier, not only the lightweight preflight.
+        self._list_refresh = False
+        comment_id, parsed = self._discover(identity)
+        if parsed is None or canonical_bytes(parsed.to_dict()) != commitment:
+            raise ReviewInputError("finding lifecycle selected frontier changed")
+        return comment_id, record
+
+    def replace_finding_lifecycle_parts(
+        self, identity, mutate, *, record, parts, retained_bytes
+    ):
+        self.preflight_finding_lifecycle_retention(
+            identity,
+            added_parts=parts,
+            added_bytes=retained_bytes,
+            checkpoint_parts=(parts,),
+        )
+        if self._quarantine_required:
+            return self.replace(identity, mutate)
+        if getattr(self, "_finding_lifecycle_page_size", None) is not None:
+            raise ReviewInputError("finding lifecycle scoped mutation cannot nest")
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        selected = self._plain_finding_selected_input(identity)
+        if selected is not None and record is not selected:
+            raise ReviewInputError(
+                "finding lifecycle selected input is not source-owned"
+            )
+        if getattr(self, "_plain_finding_scope_active", False):
+            raise ReviewInputError("finding lifecycle selected input cannot nest")
+        self._finding_lifecycle_page_size = 100
+        self._plain_finding_input = (
+            (record, canonical_bytes(record.to_dict()))
+            if selected is not None
+            else None
+        )
+        self._plain_finding_scope_active = selected is not None
+        self._plain_finding_snapshot_scope = None
+        snapshot = record.disposition_snapshot
+        if (
+            selected is not None
+            and snapshot is not None
+            and snapshot["schema_version"] == "1.0"
+            and snapshot["state_manifest"]["encoding"] == "partitioned-json-v1"
+        ):
+            self._plain_finding_snapshot_scope = (
+                identity,
+                record.record_sha256,
+                canonical_bytes(snapshot),
+                frozenset(p["storage_id"] for p in snapshot["state_manifest"]["parts"]),
+            )
+        try:
+            return self.replace(identity, mutate)
+        finally:
+            self._plain_finding_snapshot_scope = None
+            self._plain_finding_input = None
+            self._plain_finding_scope_active = False
+            self._finding_lifecycle_page_size = None
+
     def stage_disposition_snapshot_batch(self, identity, **kwargs):
         if self._part_staging_identity is not None:
             raise ReviewInputError("immutable part staging cannot nest")
@@ -2262,7 +2990,21 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
 
     def load(self, identity: SessionIdentity, **kwargs: Any) -> Any:
         with self.caller.read_operation("native-load"):
-            return super().load(identity, **kwargs)
+            loaded = super().load(identity, **kwargs)
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        owned = self.caller._effect_record
+        observed = loaded.record
+        if (
+            loaded.status in {"ok", "migrated"}
+            and owned is not None
+            and observed is not None
+            and observed.identity() == owned.identity() == identity
+            and observed.record_sha256 == owned.record_sha256 == self.caller._root
+            and canonical_bytes(observed.to_dict()) == canonical_bytes(owned.to_dict())
+        ):
+            return replace(loaded, record=owned)
+        return loaded
 
     def _fetch_pages(
         self, identity: SessionIdentity, *, since: str | None
@@ -2296,3 +3038,10 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         now: datetime | None = None,
     ) -> SessionRecord:
         return self.caller.replace_checkpoint(self, identity, mutate, now=now)
+
+
+# Register the exact source implementation, not a generic cheaper-count hook.
+
+_register_checkpoint_pricer(
+    ApiRunSessionLedger.preflight_finding_lifecycle_checkpoint_pricing
+)
