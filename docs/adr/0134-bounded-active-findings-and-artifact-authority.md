@@ -500,3 +500,22 @@ original without actor role, partitioned prospective writes, quarantine, and
 restart are explicit holds rather than generic lower-price fallbacks. This
 pricing grants no business dispatch permit. Existing default profiles, total
 funding, retention bounds, and unknown histories remain unchanged.
+
+
+The initial fresh-effect command route is source-qualified only for `status`
+on a current plain root with no retained lifecycle, disposition snapshot,
+historical lineage, reservation, or review transaction. It captures the actual
+ordinary command implementation and pins its transport, ledger, source fence,
+and HTTP methods. Before publishing intent it reserves the existing bounded
+work requirements: 57 calls (one admission load, two root operations including
+one refresh each, two status loads, two source/head fences, and the existing
+grant-verification exchange), plus 11 calls from the already-reserved terminal
+block. No allowance or operation limit is increased. The three permitted native
+writes are exact source-prepared root PATCH transitions: intent, execution entry,
+and terminal status result. Each receives its own fresh exact-effect observation.
+An unknown write keeps its original debit and only the existing exact-root
+readback may settle it; the permit never admits a replay. The invocation-local
+permit disappears on success or failure. Other commands and retained-history
+routes remain explicit holds, and no public effect-mode switch is exposed by
+this source slice. This qualifies neither continuous permission history nor
+live deployment, and does not close G15.

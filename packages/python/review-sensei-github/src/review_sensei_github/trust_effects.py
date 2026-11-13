@@ -47,6 +47,7 @@ def _unavailable(*args, **kwargs):
 enable = verification_profile = verification_calls = before_request = consume = (
     require_native_attempt
 ) = _unavailable
+_install_command_source = _unavailable
 
 
 def _install_transport_source(source_class):
@@ -57,7 +58,8 @@ def _install_transport_source(source_class):
         verification_calls, \
         before_request, \
         consume, \
-        require_native_attempt
+        require_native_attempt, \
+        _install_command_source
     from .api_run_requests import ApiRunRequestTransport
 
     if _source is not None or source_class is not ApiRunRequestTransport:
@@ -70,6 +72,155 @@ def _install_transport_source(source_class):
     _attempts: WeakKeyDictionary = WeakKeyDictionary()
     _admitted_routes: WeakKeyDictionary = WeakKeyDictionary()
     _initializing: WeakKeyDictionary = WeakKeyDictionary()
+    command_registered = False
+
+    def install_command_source(module):
+        nonlocal command_registered
+        from . import action_run
+        from .application import GitHubApplication
+        from .broker_client import BrokerClient
+        from .http import GitHubHttp
+        from .review_run import ActionRunLedger
+        from .run_authority import VerifiedRunAction
+        from .trust_status import _StatusRoute
+
+        if command_registered or module is not action_run:
+            raise ReviewInputError("trust command source registration is invalid")
+        command_registered = True
+        execute_source = module.execute_command
+        module_sources = {
+            name: getattr(module, name)
+            for name in ("application", "_options", "parse_maintainer_command")
+        }
+        source_methods = tuple(
+            (cls, name, getattr(cls, name))
+            for cls, names in (
+                (
+                    source_class,
+                    (
+                        "admit_action",
+                        "begin_action_effect",
+                        "settle_action_effect",
+                        "close_action",
+                        "_action_checkpoint",
+                        "replace_checkpoint",
+                        "reconcile_checkpoint",
+                    ),
+                ),
+                (
+                    ActionRunLedger,
+                    tuple(
+                        name
+                        for name in dir(ActionRunLedger)
+                        if not name.startswith("__")
+                        and callable(getattr(ActionRunLedger, name))
+                    ),
+                ),
+                (VerifiedRunAction, ("__init__", "require", "fence")),
+                (GitHubApplication, ("apply_maintainer_command",)),
+                (
+                    GitHubHttp,
+                    tuple(
+                        name
+                        for name in dir(GitHubHttp)
+                        if not name.startswith("__")
+                        and callable(getattr(GitHubHttp, name))
+                    ),
+                ),
+                (
+                    BrokerClient,
+                    tuple(
+                        name
+                        for name in dir(BrokerClient)
+                        if not name.startswith("__")
+                        and callable(getattr(BrokerClient, name))
+                    ),
+                ),
+                (_StatusRoute, ("__init__", "require_request", "consumed", "business")),
+            )
+            for name in names
+        )
+
+        @wraps(execute_source)
+        def execute(run, args):
+            profile = verification_profile(run.caller)
+            if profile is None:
+                return execute_source(run, args)
+
+            original_args = (
+                args.comment_body,
+                args.source_comment_id,
+                args.app_slug,
+                getattr(args, "review_mode", None),
+            )
+
+            def require_source():
+                if (
+                    module.execute_command is not execute
+                    or (
+                        args.comment_body,
+                        args.source_comment_id,
+                        args.app_slug,
+                        getattr(args, "review_mode", None),
+                    )
+                    != original_args
+                    or type(run.http) is not GitHubHttp
+                    or type(run.broker) is not BrokerClient
+                    or not bound_to(run.http.opener, run.caller)
+                    or not bound_to(run.broker.opener, run.caller)
+                    or run.broker.broker_url != profile.broker_url
+                    or any(
+                        getattr(module, name) is not fn
+                        for name, fn in module_sources.items()
+                    )
+                    or any(
+                        getattr(cls, name) is not fn for cls, name, fn in source_methods
+                    )
+                    or verification_profile(run.caller) is not profile
+                    or profile in _admitted_routes
+                    and _admitted_routes[profile].run is not run
+                ):
+                    raise ReviewInputError("trust status execution source changed")
+                for cls, name, fn in source_methods:
+                    owner = (
+                        run.caller
+                        if cls is source_class
+                        else run.ledger
+                        if cls is ActionRunLedger
+                        else run.http
+                        if cls is GitHubHttp
+                        else run.broker
+                        if cls is BrokerClient
+                        else None
+                    )
+                    if owner is not None and (
+                        name in owner.__dict__
+                        or (
+                            getattr(getattr(owner, name), "__func__", None) is not fn
+                            and getattr(owner, name) is not fn
+                        )
+                    ):
+                        raise ReviewInputError("trust status instance source changed")
+
+            require_source()
+            if profile in _admitted_routes:
+                raise ReviewInputError("trust status route cannot reenter")
+            route = _StatusRoute(run, args, profile, require_source)
+            _admitted_routes[profile] = route
+            try:
+                result = execute_source(run, args)
+                if (
+                    route.count != 3
+                    or run.caller.accounting.action["phase"] != "terminal"
+                ):
+                    raise ReviewInputError("trust status route did not finish")
+                return result
+            finally:
+                _admitted_routes.pop(profile, None)
+
+        setattr(module, "execute_command", execute)
+
+    _install_command_source = install_command_source
     initialize_source = source_class.initialize_and_activate
     require_ledger_source = source_class._require_ledger
 
@@ -261,7 +412,9 @@ def _install_transport_source(source_class):
         # Stronger routes are deliberately not inferred from this transport mode.
         if getattr(caller, "_controlled_restart_admission", None) is not None:
             raise ReviewInputError("trust effect restart pricing is unsupported")
-        if profile not in _admitted_routes:
+        if profile in _admitted_routes:
+            _admitted_routes[profile].require_request(caller, request)
+        else:
             initial = _initializing.get(caller)
             if initial is None:
                 raise ReviewInputError(
@@ -375,6 +528,9 @@ def _install_transport_source(source_class):
         if receipt[0] is not profile or receipt[1] != canonical_bytes(binding):
             raise ReviewInputError("trust effect fresh receipt changed or was reused")
 
+        route = _admitted_routes.get(profile)
+        if route is not None:
+            route.consumed(caller, request)
         # Capture only a fully consumed, exact fresh receipt after Caller.open's
         # physical debit. A later lost response cannot confuse the preceding
         # broker refresh POST with this native attempt.

@@ -797,3 +797,12 @@ def run_action(
     from .action_reply import execute_reply
 
     return execute_reply(run, args)
+
+
+# One-time registration captures the actual ordinary command source. Merely
+# constructing a status plan cannot install a transport dispatch permit.
+import sys as _sys  # noqa: E402
+
+from .trust_effects import _install_command_source  # noqa: E402
+
+_install_command_source(_sys.modules[__name__])
