@@ -1,0 +1,203 @@
+"""Real diff-derived cold location drift, without supplied drift descriptors."""
+
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+from test_review_run import EntryFixture
+
+from tests.test_ordinary_native_recovery_cold import subprocess_environment
+
+CHILD = r"""
+import copy,json,sys
+from dataclasses import asdict
+from pathlib import Path
+from unittest.mock import patch
+from test_review_run import EntryFixture
+from review_sensei_github import finding_lifecycle as lifecycle
+from review_sensei_github.session_ledger import parse_session_comment
+from review_sensei.finding_lifecycle import decode_lifecycle_state
+from test_api_work_persistence import IDENTITY
+p=json.loads(Path(sys.argv[1]).read_text())
+f=EntryFixture(sys.argv[2],limit=512)
+f.root=Path(p['root']);f.policy=f.policy_ref=p['policy'];f.config_bytes=bytes.fromhex(p['config'])
+for k,v in p['remote'].items():
+    if k=='extra_comments':v={int(a):b for a,b in v.items()}
+    setattr(f,k,copy.deepcopy(v))
+f.next_run();f.active_finding_cap=1
+f.run_id=p.get('run_id',f.run_id)
+f.live_head=f.requested_head=p.get('head',f.live_head)
+(f.root/'review.patch').write_text(p['diff'])
+f.provider_comments=p['comments']
+seen=[];original=lifecycle.restore_finding_lifecycle
+def capture(*a,**kw):
+    result=original(*a,**kw);seen.append((a[0],result[1]));return result
+with patch.object(lifecycle,'restore_finding_lifecycle',capture):code=f.invoke()
+state=seen[-1][0]._drift_states.get((123,7)) if seen else None
+initial=decode_lifecycle_state(next(doc for _,doc in seen if doc is not None)['lifecycle']).state if any(doc is not None for _,doc in seen) else None
+def describe(s):
+    return None if s is None else {'obligations':[asdict(o) for o in s.inventory.obligations],'slots':[asdict(x) for x in s.slots]}
+Path(sys.argv[3]).write_text(json.dumps({'code':code,'error':f.error,'initial_document':next((doc for _,doc in seen if doc is not None),None),'initial':describe(initial),'state':describe(state),'threads':f.threads,'reviews':f.reviews,'provider_calls':f.provider_calls,'remote':{k:getattr(f,k) for k in p['remote']}}))
+"""
+
+
+class OrdinaryColdLocationDriftTests(unittest.TestCase):
+    def test_rename_diff_cold_retains_criterion_and_unique_native_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            f = EntryFixture(str(source), limit=512)
+            f.active_finding_cap = 1
+            comment = {
+                "path": "src/app.py",
+                "line": 2,
+                "side": "RIGHT",
+                "body": "Confirm the caller interface contract.",
+                "severity": "high",
+                "blocking": False,
+                "needs_human": True,
+                "symbol": "verify_token",
+                "defect_kind": "missing_validation",
+            }
+            f.provider_comments = [comment]
+            self.assertEqual(f.invoke(), 0, f.error)
+            self.assertEqual(len(f.threads), 1)
+            diff = (
+                "diff --git a/src/app.py b/src/renamed.py\n"
+                "similarity index 90%\nrename from src/app.py\nrename to src/renamed.py\n"
+                "--- a/src/app.py\n+++ b/src/renamed.py\n@@ -1,2 +1,2 @@\n keep\n-change\n+changed\n"
+            )
+            if getattr(self, "copy_case", False):
+                diff = diff.replace("rename from", "copy from").replace(
+                    "rename to", "copy to"
+                )
+            packet = root / "packet.json"
+            output = root / "result.json"
+            child = root / "child"
+            child.mkdir()
+            packet.write_text(
+                json.dumps(
+                    {
+                        "root": str(f.root),
+                        "policy": f.policy,
+                        "config": f.config_bytes.hex(),
+                        "diff": diff,
+                        "comments": (
+                            [comment, dict(comment, path="src/renamed.py")]
+                            if getattr(self, "copy_case", False)
+                            else [dict(comment, path="src/renamed.py")]
+                        ),
+                        "remote": {
+                            k: getattr(f, k)
+                            for k in (
+                                "comment",
+                                "extra_comments",
+                                "reviews",
+                                "inline",
+                                "check_runs",
+                                "trace",
+                                "threads",
+                            )
+                        },
+                    }
+                )
+            )
+            done = subprocess.run(
+                [sys.executable, "-c", CHILD, str(packet), str(child), str(output)],
+                capture_output=True,
+                text=True,
+                env=subprocess_environment(),
+                timeout=90,
+            )
+            self.assertEqual(done.returncode, 0, done.stderr)
+            result = json.loads(output.read_text())
+            self.assertEqual(result["code"], 0, result["error"])
+            initial = result["initial"]["obligations"][0]
+            # This is the actual authenticated pre-transition carrier, not an
+            # expected model assembled from the later conservative projection.
+            original_document_bytes = json.dumps(
+                result["initial_document"], sort_keys=True
+            )
+            self.assertFalse(initial["criterion"]["blocking"])
+            self.assertTrue(initial["criterion"]["needs_human"])
+            self.assertFalse(initial["latest_comment"]["effective_blocking"])
+            self.assertTrue(initial["latest_comment"]["needs_human"])
+            obligations = result["state"]["obligations"]
+            self.assertEqual(len(obligations), 1, result["state"])
+            current = obligations[0]
+            expected_criterion = dict(initial["criterion"])
+            if getattr(self, "copy_case", False):
+                # Ambiguity conservatively strengthens gates, never identity.
+                expected_criterion.update(blocking=True, needs_human=True)
+            self.assertEqual(current["criterion"], expected_criterion)
+            self.assertIsNone(current["resolution_proof_sha256"])
+            self.assertEqual(current["thread_binding"]["thread_id"], f.threads[0]["id"])
+            self.assertEqual(
+                current["thread_binding"]["comment_id"],
+                f.threads[0]["comments"]["nodes"][0]["databaseId"],
+            )
+            self.assertEqual(len(result["threads"]), 1)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in result["reviews"]))
+            if getattr(self, "copy_case", False):
+                self.assertEqual(current["lifecycle_state"], "ambiguous-multi-target")
+                self.assertEqual(
+                    set(current["present_anchor"]["candidate_paths"]),
+                    {"src/app.py", "src/renamed.py"},
+                )
+                later = json.loads(packet.read_text())
+                later.update(
+                    remote=result["remote"],
+                    run_id=458,
+                    head="e" * 40,
+                    comments=[],
+                    diff="diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1,2 +1,2 @@\n keep\n-change\n+validate_contract()\n",
+                )
+                packet.write_text(json.dumps(later))
+                partial_root = root / "partial"
+                partial_root.mkdir()
+                done = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        CHILD,
+                        str(packet),
+                        str(partial_root),
+                        str(output),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=subprocess_environment(),
+                    timeout=90,
+                )
+                self.assertEqual(done.returncode, 0, done.stderr)
+                partial = json.loads(output.read_text())
+                self.assertEqual(partial["code"], 0, partial["error"])
+                held = partial["state"]["obligations"][0]
+                self.assertEqual(held["criterion"], current["criterion"])
+                self.assertEqual(held["lifecycle_state"], "ambiguous-multi-target")
+                self.assertEqual(
+                    set(held["present_anchor"]["candidate_paths"]),
+                    {"src/app.py", "src/renamed.py"},
+                )
+                self.assertIsNone(held["resolution_proof_sha256"])
+                self.assertNotEqual(held["thread_binding"]["slot_state"], "released")
+                self.assertEqual(len(partial["threads"]), 1)
+                self.assertFalse(
+                    any(r["state"] == "APPROVED" for r in partial["reviews"])
+                )
+                self.assertEqual(
+                    json.dumps(result["initial_document"], sort_keys=True),
+                    original_document_bytes,
+                )
+            else:
+                self.assertEqual(current["present_anchor"]["path"], "src/renamed.py")
+                self.assertEqual(current["present_anchor"]["drift_kind"], "file_rename")
+                self.assertEqual(current["thread_binding"]["slot_state"], "active")
+
+    def test_copy_diff_cold_preserves_ambiguity_without_duplicate_thread(self):
+        self.copy_case = True
+        self.test_rename_diff_cold_retains_criterion_and_unique_native_binding()
