@@ -218,7 +218,19 @@ class SelectedPartsTests(unittest.TestCase):
                     IDENTITY, added_parts=1, added_bytes=100, checkpoint_parts=(1,)
                 )
                 filler["body"] += "x"
-                with self.assertRaisesRegex(ReviewInputError, "single-page capacity"):
+                from review_sensei_github.api_run_requests import _PLAIN_FINDING_PLANS
+
+                ledger._preflight_plain_finding_parts(
+                    IDENTITY, added_parts=1, added_bytes=100, checkpoint_parts=(1,)
+                )
+                plan = _PLAIN_FINDING_PLANS[ledger]
+                self.assertLess(plan.page_size, 100)
+                self.assertLessEqual(len(plan.page_bounds), 10)
+                self.assertTrue(all(bound < 512 * 1024 for bound in plan.page_bounds))
+                # A single oversized response object still cannot be split or
+                # accepted by selecting a smaller page.
+                filler["body"] = "x" * (512 * 1024)
+                with self.assertRaisesRegex(ReviewInputError, "page capacity"):
                     ledger._preflight_plain_finding_parts(
                         IDENTITY, added_parts=1, added_bytes=100, checkpoint_parts=(1,)
                     )

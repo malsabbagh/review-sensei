@@ -195,8 +195,21 @@ class SnapshotScopeTests(unittest.TestCase):
             self.assertEqual(len(f.service.trace), before)
             rows[-1]["body"] += "x"
             ledger._replace_inventory(rows)
-            with self.assertRaisesRegex(ReviewInputError, "single-page capacity"):
+            # Crossing the old single-page envelope now chooses one fixed,
+            # bounded multi-page plan; it does not raise the response ceiling.
+            from review_sensei_github.api_run_requests import _PLAIN_FINDING_PLANS
+
+            ledger.preflight_finding_lifecycle_retention(f.identity, **args)
+            plan = _PLAIN_FINDING_PLANS[ledger]
+            self.assertLess(plan.page_size, 100)
+            self.assertLessEqual(len(plan.page_bounds), 10)
+            self.assertTrue(all(bound < 512 * 1024 for bound in plan.page_bounds))
+            self.assertEqual(len(f.service.trace), before)
+            rows[-1]["body"] = "x" * (512 * 1024)
+            ledger._replace_inventory(rows)
+            with self.assertRaisesRegex(ReviewInputError, "page capacity"):
                 ledger.preflight_finding_lifecycle_retention(f.identity, **args)
+            self.assertEqual(len(f.service.trace), before)
             for defect in ("missing", "duplicate", "changed"):
                 with self.subTest(defect=defect):
                     values = json.loads(json.dumps(original))
