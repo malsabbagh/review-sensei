@@ -122,7 +122,7 @@ class PreentryCapacityTests(unittest.TestCase):
             plan.require(plan.journal, http=plan.http, budget=plan.budget)
             before_sizing = len(run.caller.observations)
             original_effects = copy.deepcopy(plan.journal.effects)
-            branches, pending, item_count, requests = (
+            branches, pending, item_count, requests, dictionary_base = (
                 plan.journal._command_branch_documents(
                     plan, http=plan.http, budget=plan.budget
                 )

@@ -1304,7 +1304,6 @@ class FindingLifecycleJournal:
                 "schema_version": "finding-lifecycle-evidence-v2",
                 "lifecycle": _pack_journal(self._document()),
             }
-            plan.bind_dictionary_base(dictionary_base)
         shadow = copy.copy(self)
         shadow.reviewer = copy.copy(self.reviewer)
         shadow.effects = copy.deepcopy(self.effects)
@@ -1499,7 +1498,13 @@ class FindingLifecycleJournal:
         # after a source-planned cleanup stop, not silently added to that branch.
         alternatives = tuple(reversed(branches))
 
-        return alternatives, pending_commitments, len(shadow.effects) + 1, requests
+        return (
+            alternatives,
+            pending_commitments,
+            len(shadow.effects) + 1,
+            requests,
+            dictionary_base,
+        )
 
     @_sizing_producer
     def preflight_command_finalization(
@@ -1554,9 +1559,11 @@ class FindingLifecycleJournal:
         from review_sensei.source_registry import require_instance_source
 
         require_instance_source(self, methods=("_command_branch_documents",))
-        alternatives, pending_commitments, item_count, requests = (
+        alternatives, pending_commitments, item_count, requests, dictionary_base = (
             self._command_branch_documents(plan, http=http, budget=budget)
         )
+        if dictionary_base is not None:
+            plan.bind_dictionary_base(dictionary_base)
         documents = list(alternatives[0][0])
 
         def valid():
