@@ -140,3 +140,52 @@ class TrustPauseRouteTests(unittest.TestCase):
                 execute_command(f.run, f.args)
             self.assertEqual(f.comment["body"], original)
             self.assertFalse(any(m == "PATCH" for m, _, _ in f.native))
+
+    def test_exact_wrapper_rejects_nested_budget_and_source_mutation(self):
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        from review_sensei_github.publication_recovery import _PaginationObservationHttp
+
+        from review_sensei.errors import ReviewInputError
+
+        for fault in ("nested", "budget", "request", "foreign-class"):
+            for after_first in (False, True):
+                with (
+                    self.subTest(fault=fault, after_first=after_first),
+                    tempfile.TemporaryDirectory() as directory,
+                    patch("time.time", return_value=NOW),
+                    patch.object(status_fixture, "BODY", "@reviewsensei review pause"),
+                ):
+                    f = PauseFixture(directory)
+                    base = f.http
+                    wrapper = _PaginationObservationHttp(base, f.caller.budget_view)
+                    f.http = f.ledger.http = f.action_ledger.http = wrapper
+                    f.run = replace(f.run, http=wrapper)
+                    boundary = []
+
+                    def tamper():
+                        boundary.append(len(f.native))
+                        if fault == "nested":
+                            wrapper.transport = _PaginationObservationHttp(
+                                base, f.caller.budget_view
+                            )
+                        elif fault == "budget":
+                            wrapper.observation_budget = SimpleNamespace()
+                        elif fault == "foreign-class":
+                            wrapper.__class__ = type(
+                                "ForeignWrapper", (_PaginationObservationHttp,), {}
+                            )
+                        else:
+                            wrapper.request = lambda *a, **k: (200, {})
+
+                    if after_first:
+                        f.after_root = tamper
+                    else:
+                        tamper()
+                    with self.assertRaises(ReviewInputError):
+                        execute_command(f.run, f.args)
+                    self.assertEqual(len(f.native), boundary[0])
+                    self.assertEqual(
+                        sum(m == "PATCH" for m, _, _ in f.native), int(after_first)
+                    )

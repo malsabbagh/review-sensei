@@ -149,6 +149,37 @@ def _install_transport_source(source_class):
             if profile is None:
                 return execute_source(run, args)
 
+            from review_sensei.source_registry import require_instance_source
+
+            from .publication_recovery import _PaginationObservationHttp
+
+            http = run.http
+            base_http = (
+                http.transport if type(http) is _PaginationObservationHttp else http
+            )
+
+            def require_http_source():
+                if type(http) is _PaginationObservationHttp:
+                    require_instance_source(http, methods=("request", "paginate"))
+                    if (
+                        http.transport is not base_http
+                        or http.observation_budget is not run.caller.budget_view
+                        or http.api_url != base_http.api_url
+                    ):
+                        raise ReviewInputError(
+                            "trust status HTTP wrapper source changed"
+                        )
+                elif type(http) is not GitHubHttp:
+                    raise ReviewInputError("trust status HTTP wrapper is unsupported")
+                if (
+                    run.http is not http
+                    or type(base_http) is not GitHubHttp
+                    or not bound_to(base_http.opener, run.caller)
+                    or base_http.api_url != profile.api_origin
+                ):
+                    raise ReviewInputError("trust status HTTP transport source changed")
+                require_instance_source(base_http, methods=("request", "paginate"))
+
             original_args = (
                 args.comment_body,
                 args.source_comment_id,
@@ -162,6 +193,7 @@ def _install_transport_source(source_class):
                         "trust status source definition is incomplete"
                     )
                 source_seal()
+                require_http_source()
                 if (
                     module.execute_command is not execute
                     or any(
@@ -175,9 +207,7 @@ def _install_transport_source(source_class):
                         getattr(args, "review_mode", None),
                     )
                     != original_args
-                    or type(run.http) is not GitHubHttp
                     or type(run.broker) is not BrokerClient
-                    or not bound_to(run.http.opener, run.caller)
                     or not bound_to(run.broker.opener, run.caller)
                     or run.broker.broker_url != profile.broker_url
                     or any(
@@ -198,7 +228,7 @@ def _install_transport_source(source_class):
                         if cls is source_class
                         else run.ledger
                         if cls is ActionRunLedger
-                        else run.http
+                        else base_http
                         if cls is GitHubHttp
                         else run.broker
                         if cls is BrokerClient

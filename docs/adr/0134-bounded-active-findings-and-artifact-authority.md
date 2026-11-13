@@ -502,23 +502,40 @@ pricing grants no business dispatch permit. Existing default profiles, total
 funding, retention bounds, and unknown histories remain unchanged.
 
 
-The initial fresh-effect command route is source-qualified only for `status`
-on a current plain root with no retained lifecycle, disposition snapshot,
-historical lineage, reservation, or review transaction. It captures the actual
-ordinary command implementation and pins its transport, ledger, source fence,
-and HTTP methods. Before publishing intent it reserves the existing bounded
-work requirements: 57 calls (one admission load, two root operations including
-one refresh each, two status loads, two source/head fences, and the existing
-grant-verification exchange), plus 11 calls from the already-reserved terminal
-block. No allowance or operation limit is increased. The three permitted native
-writes are exact source-prepared root PATCH transitions: intent, execution entry,
-and terminal status result. Each receives its own fresh exact-effect observation.
-An unknown write keeps its original debit and only the existing exact-root
-readback may settle it; the permit never admits a replay. The invocation-local
-permit disappears on success or failure. Other commands and retained-history
-routes remain explicit holds, and no public effect-mode switch is exposed by
-this source slice. This qualifies neither continuous permission history nor
-live deployment, and does not close G15.
+The initial fresh-effect command family admits `status`, `pause`, and ordinary
+`continue` on a current plain root with no retained lifecycle, disposition
+snapshot, historical lineage, reservation, or review transaction. Exhausted
+failed-attempt continuation requiring successor authority remains unsupported.
+The source closure pins the command implementation, transport, ledger, source
+fences, HTTP methods, and collaborator-permission producer. Before intent it
+admits 57 work calls for status, 70 for pause, or 71 for continue, plus 11 calls
+from the already-reserved terminal block. Status includes one admission load,
+two refreshed root operations, two status loads, two source/head fences, and
+the existing grant-verification exchange. Pause/continue additionally protect
+the possible business root operation and its two-read source/head fence;
+continue also prices its live collaborator-permission read. These quotes use
+existing work and terminal allocations, never increased total funding.
+
+Status has three exact source-prepared root PATCH transitions: intent, entry,
+and terminal result. A changed pause flag adds precisely one business CAS;
+no-op pause/continue omit that write without admitting another mutation. Each
+native mutation receives its own fresh exact-effect observation. Unknown writes
+retain their original debit and only exact-root readback may settle them, never
+replay. The invocation-local permit disappears on success or failure. The
+ordinary bootstrap's exact pagination-observation wrapper is preserved with its
+original caller budget and sealed underlying transport; arbitrary nested,
+substituted, or differently funded wrappers are not admitted.
+
+Local qualification includes actual pause, no-op continue, and an original
+paused enrollment carried through a fresh run's existing bootstrap/cessation/
+retention rollover before source effect mode is enabled for actual unpause.
+That cold path preserves original enrollment, retained history, and the 512-call
+configuration; it does not claim the earlier default activation used per-effect
+refresh. Pause/continue produce no command receipt, so this is not receipt-route
+qualification. Disposition, quarantine, general publication, and recovery
+activation routes remain held. No public effect-mode switch is exposed. This
+qualifies neither continuous permission history nor live deployment and does
+not close G15.
 
 The status source seal includes its explicit transitive helper and constructor
 bindings, including locally imported disposition/settlement functions. It is
