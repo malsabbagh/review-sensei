@@ -240,6 +240,9 @@ class _CheckpointPricing:
 _CHECKPOINT_PRICING: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 _CHECKPOINT_PRICERS: set[Any] = set()
 _CHECKPOINT_PRODUCERS: set[Any] = set()
+_CHECKPOINT_CANDIDATES: dict[Any, Any] = {}
+_CHECKPOINT_SOURCE: Any = None
+_CHECKPOINT_SUPPORTS: Any = None
 
 
 def _checkpoint_pricer(method):
@@ -248,7 +251,6 @@ def _checkpoint_pricer(method):
     from functools import wraps
 
     token = object()
-    _CHECKPOINT_PRICERS.add(token)
 
     def supported(owner):
         module = sys.modules.get("review_sensei_github.api_run_requests")
@@ -260,7 +262,8 @@ def _checkpoint_pricer(method):
             getattr(run_module, "ReviewRunLedger", None),
         }
         return (
-            cls is not None
+            wrapped is _CHECKPOINT_SOURCE
+            and cls is not None
             and type(owner) in allowed
             and method.__name__ == "preflight_finding_lifecycle_checkpoint_pricing"
             and getattr(cls, method.__name__, None) is wrapped
@@ -270,7 +273,24 @@ def _checkpoint_pricer(method):
 
     @wraps(method)
     def wrapped(owner, *args, **kwargs):
-        if "_checkpoint_factory" in kwargs or not supported(owner):
+        if "_checkpoint_factory" in kwargs:
+            raise ReviewInputError(
+                "finding lifecycle checkpoint producer is unsupported"
+            )
+        if not supported(owner):
+            module = sys.modules.get("review_sensei_github.api_run_requests")
+            cls = getattr(module, "ApiRunSessionLedger", None)
+            if (
+                wrapped is _CHECKPOINT_SOURCE
+                and cls is not None
+                and getattr(cls, method.__name__, None) is wrapped
+                and isinstance(owner, cls)
+                and getattr(getattr(owner, method.__name__, None), "__func__", None)
+                is wrapped
+            ):
+                # A custom inherited adapter gets the existing generic guard,
+                # never the installed source body or its issuing factory.
+                return None
             raise ReviewInputError(
                 "finding lifecycle checkpoint producer is unsupported"
             )
@@ -287,8 +307,47 @@ def _checkpoint_pricer(method):
         finally:
             active = False
 
-    _CHECKPOINT_PRODUCERS.add(wrapped)
+    def install():
+        if _CHECKPOINT_SOURCE is not wrapped:
+            raise ReviewInputError(
+                "finding lifecycle checkpoint source is not installed"
+            )
+        _CHECKPOINT_PRICERS.add(token)
+
+    _CHECKPOINT_CANDIDATES[wrapped] = (install, supported)
     return wrapped
+
+
+def _install_checkpoint_pricer(source):
+    """Pin the actual adapter producer once, during its trusted module install."""
+    import sys
+
+    global _CHECKPOINT_SOURCE, _CHECKPOINT_SUPPORTS
+    module = sys.modules.get("review_sensei_github.api_run_requests")
+    cls = getattr(module, "ApiRunSessionLedger", None)
+    if (
+        _CHECKPOINT_SOURCE is not None
+        or cls is None
+        or getattr(cls, "preflight_finding_lifecycle_checkpoint_pricing", None)
+        is not source
+        or source not in _CHECKPOINT_CANDIDATES
+    ):
+        raise ReviewInputError("finding lifecycle checkpoint source cannot be replaced")
+    install, supported = _CHECKPOINT_CANDIDATES.pop(source)
+    _CHECKPOINT_SOURCE, _CHECKPOINT_SUPPORTS = source, supported
+    _CHECKPOINT_PRODUCERS.add(source)
+    install()
+
+
+def _qualified_checkpoint_pricer(ledger):
+    method = getattr(ledger, "preflight_finding_lifecycle_checkpoint_pricing", None)
+    if (
+        _CHECKPOINT_SOURCE is None
+        or getattr(method, "__func__", None) is not _CHECKPOINT_SOURCE
+        or not _CHECKPOINT_SUPPORTS(ledger)
+    ):
+        return None
+    return method
 
 
 def _issue_checkpoint_pricing(
@@ -302,6 +361,7 @@ def _issue_checkpoint_pricing(
     page_counts=None,
     profile="plain-v1",
     _source=None,
+    staging_target=None,
 ):
     source = getattr(
         getattr(ledger, "preflight_finding_lifecycle_checkpoint_pricing", None),
@@ -325,11 +385,14 @@ def _issue_checkpoint_pricing(
         tuple(1 for _ in checkpoint_parts) if page_counts is None else page_counts,
         profile,
         _source,
+        canonical_bytes(staging_target) if staging_target is not None else None,
     )
     return proof
 
 
-def _consume_checkpoint_pricing(proof, ledger, record, checkpoint_parts):
+def _consume_checkpoint_pricing(
+    proof, ledger, record, checkpoint_parts, *, staging_target=None
+):
     if type(proof) is not _CheckpointPricing:
         raise ReviewInputError("finding lifecycle checkpoint pricing is unissued")
     issued = _CHECKPOINT_PRICING.pop(proof, None)
@@ -358,7 +421,16 @@ def _consume_checkpoint_pricing(proof, ledger, record, checkpoint_parts):
     ):
         raise ReviewInputError("finding lifecycle checkpoint page pricing is invalid")
     profile = issued[9]
-    if profile not in {"plain-v1", "quarantine-complete-census-v1"}:
+    if (
+        profile == "quarantine-staging-v1"
+        and (staging_target is None or issued[11] != canonical_bytes(staging_target))
+    ) or (profile != "quarantine-staging-v1" and staging_target is not None):
+        raise ReviewInputError("finding lifecycle staging target changed or absent")
+    if profile not in {
+        "plain-v1",
+        "quarantine-complete-census-v1",
+        "quarantine-staging-v1",
+    }:
         raise ReviewInputError(
             "finding lifecycle checkpoint pricing profile is invalid"
         )
@@ -376,6 +448,10 @@ def _consume_checkpoint_pricing(proof, ledger, record, checkpoint_parts):
             or (
                 profile == "quarantine-complete-census-v1"
                 and (n < 0 or page < 3 or price != (17 if n == 0 else page + 6 + 2 * n))
+            )
+            or (
+                profile == "quarantine-staging-v1"
+                and (n < 1 or page != 1 or price != 2 * n + 5)
             )
             for n, price, page in zip(checkpoint_parts, prices, pages)
         )
@@ -621,11 +697,8 @@ def _consume_projected_root(proof, ledger, record):
 def _refine_checkpoint_pricing(
     ledger, record, checkpoints, *, added_parts, added_bytes
 ):
-    pricer = getattr(ledger, "preflight_finding_lifecycle_checkpoint_pricing", None)
-    if (
-        not callable(pricer)
-        or getattr(pricer, "__func__", None) not in _CHECKPOINT_PRODUCERS
-    ):
+    pricer = _qualified_checkpoint_pricer(ledger)
+    if pricer is None:
         return None
     counts = tuple(checkpoint["parts"] for checkpoint in checkpoints)
     proof = pricer(
@@ -636,6 +709,11 @@ def _refine_checkpoint_pricing(
     )
     if proof is None:
         return None
+    issued = _CHECKPOINT_PRICING.get(proof)
+    if issued is not None and issued[9] == "quarantine-staging-v1":
+        raise ReviewInputError(
+            "finding lifecycle staging proof cannot price future checkpoints"
+        )
     capacity, prices = _consume_checkpoint_pricing(proof, ledger, record, counts)
     for checkpoint, price in zip(checkpoints, prices):
         # ApiRun's inline path does not use the selected-parts capability.
@@ -645,6 +723,42 @@ def _refine_checkpoint_pricing(
         ):
             checkpoint["conditional_calls"] = price
     return capacity
+
+
+def _remaining_staging_price(
+    ledger, record, parts, *, envelope, binding, item_count, allowance
+):
+    pricer = _qualified_checkpoint_pricer(ledger)
+    if pricer is None:
+        return None
+    target = {
+        "binding": binding,
+        "document_sha256": hashlib.sha256(canonical_bytes(envelope)).hexdigest(),
+        "parts": tuple(
+            hashlib.sha256(canonical_bytes(part)).hexdigest() for part in parts
+        ),
+        "item_count": item_count,
+        "manifest_allowance": allowance,
+    }
+    proof = pricer(
+        record,
+        added_parts=len(parts),
+        added_bytes=0,
+        checkpoint_parts=(len(parts),),
+        checkpoint_stage=True,
+        checkpoint_target=target,
+    )
+    if proof is None:
+        return None
+    issued = _CHECKPOINT_PRICING.get(proof)
+    if issued is None or issued[9] != "quarantine-staging-v1":
+        raise ReviewInputError(
+            "finding lifecycle remaining stage pricing is unsupported"
+        )
+    _, prices = _consume_checkpoint_pricing(
+        proof, ledger, record, (len(parts),), staging_target=target
+    )
+    return prices[0]
 
 
 def _inline_checkpoint_read_free(record):
@@ -1160,7 +1274,27 @@ def stage_finding_lifecycle(
                 post_calls = remote_plan["post_mutator_calls"]
                 assert type(post_calls) is int
                 commit_calls = post_calls
-            budget.preflight(part_calls + commit_calls + reserved_tail_calls)
+            remaining_price = (
+                _remaining_staging_price(
+                    ledger,
+                    current,
+                    parts,
+                    envelope=envelope,
+                    binding=binding,
+                    item_count=item_count,
+                    allowance=allowance,
+                )
+                if part_calls
+                else None
+            )
+            budget.preflight(
+                (
+                    part_calls + commit_calls
+                    if remaining_price is None
+                    else remaining_price
+                )
+                + reserved_tail_calls
+            )
         manifest = ledger.stage_evidence(
             current.identity(),
             binding=binding,

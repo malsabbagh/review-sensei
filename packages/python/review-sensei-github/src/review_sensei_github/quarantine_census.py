@@ -899,3 +899,104 @@ def lifecycle_checkpoint_pricing(
         page_counts=tuple(pages for _ in checkpoint_parts),
         profile="quarantine-complete-census-v1",
     )
+
+
+def lifecycle_staging_pricing(ledger, record, *, checkpoint_parts, target, factory):
+    """Remaining work in the existing fresh-owned quarantine checkpoint only."""
+    from review_sensei.bounded_evidence import canonical_bytes
+
+    from .quarantine_checkpoint import _ISSUED, _CheckpointSnapshot
+
+    scope = getattr(ledger, "_quarantine_lifecycle_capacity", None)
+    snapshot = getattr(ledger, "_quarantine_checkpoint_snapshot", None)
+    if (
+        type(scope) is not _LifecycleCapacity
+        or type(snapshot) is not _CheckpointSnapshot
+    ):
+        return None
+    issued = _LIFECYCLE_ACTIVE.get(scope)
+    original_profile = json.loads(scope.profile)
+    from .api_run_requests import ApiRunSessionLedger
+    from .quarantine_evidence import CurrentReadScope
+    from .quarantine_origin import QuarantineOriginReader
+    from .session_ledger import GitHubIssueCommentSessionLedger
+
+    reader = ledger._quarantine_origin_reader
+    methods = (
+        (ledger, "replace", type(ledger).replace),
+        (ledger, "_discover", GitHubIssueCommentSessionLedger._discover),
+        (ledger, "stage_evidence", ApiRunSessionLedger.stage_evidence),
+        (
+            ledger,
+            "replace_finding_lifecycle_parts",
+            ApiRunSessionLedger.replace_finding_lifecycle_parts,
+        ),
+        (reader, "read", QuarantineOriginReader.read),
+        (reader.current_scope, "require", CurrentReadScope.require),
+        (snapshot, "require", _CheckpointSnapshot.require),
+        (snapshot, "get", _CheckpointSnapshot.get),
+        (snapshot, "preflight_staging", _CheckpointSnapshot.preflight_staging),
+    )
+    target_bytes = canonical_bytes(target)
+    if (
+        not isinstance(target, dict)
+        or set(target)
+        != {"binding", "document_sha256", "parts", "item_count", "manifest_allowance"}
+        or not isinstance(target["parts"], tuple)
+        or len(target["parts"]) != scope.parts
+    ):
+        return None
+
+    def validate():
+        active = _LIFECYCLE_ACTIVE.get(scope)
+        if (
+            active is None
+            or active != issued
+            or active[0] != _LifecycleCapacity._seal(scope)
+            or snapshot not in _ISSUED
+            or snapshot.ledger is not ledger
+            or snapshot.caller is not scope.caller
+            or snapshot.operation is not active[1]
+            or snapshot.record is not record
+            or snapshot.candidate is not None
+            or snapshot.staged
+            or snapshot.operation.write_attempted
+            or canonical_bytes(target) != target_bytes
+            or not ledger._mutation_active
+            or scope.caller._effect_record is not scope.record
+            or scope.caller._root != scope.root
+            or canonical_bytes(record.to_dict()) != scope.record_bytes
+            or canonical_bytes(scope.record.to_dict()) != scope.record_bytes
+            or checkpoint_parts != (scope.parts,)
+            or scope.parts < 1
+            or any(
+                getattr(getattr(obj, name), "__func__", None) is not source
+                for obj, name, source in methods
+            )
+        ):
+            return False
+        _CheckpointSnapshot.require(snapshot)
+        # Fresh discovery legitimately replaces the authenticated object; the
+        # issued snapshot, not byte equality alone, establishes this handoff.
+        current = _lifecycle_profile(ledger)
+        current.pop("authenticated_source")
+        previous = dict(original_profile)
+        previous.pop("authenticated_source")
+        return (
+            canonical_bytes(current) == canonical_bytes(previous)
+            and ledger._quarantine_authenticated.record_sha256 == scope.root
+        )
+
+    if not validate():
+        return None
+    return factory(
+        ledger,
+        record,
+        checkpoint_parts=checkpoint_parts,
+        capacity={},
+        calls=(2 * scope.parts + 5,),
+        validate=validate,
+        page_counts=(1,),
+        profile="quarantine-staging-v1",
+        staging_target=target,
+    )

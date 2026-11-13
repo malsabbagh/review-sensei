@@ -85,7 +85,7 @@ class CheckpointPricingIssuerTests(unittest.TestCase):
         consume = core._consume_checkpoint_pricing
         prices = []
 
-        def observe(proof, ledger, record, parts):
+        def observe(proof, ledger, record, parts, **kwargs):
             issued = core._CHECKPOINT_PRICING.get(proof)
             if issued is not None and issued[9] == "quarantine-complete-census-v1":
                 self.assertTrue(all(3 <= pages <= 10 for pages in issued[8]))
@@ -98,10 +98,87 @@ class CheckpointPricingIssuerTests(unittest.TestCase):
                     ),
                 )
                 prices.append(issued[5])
-            return consume(proof, ledger, record, parts)
+            return consume(proof, ledger, record, parts, **kwargs)
 
         with patch.object(core, "_consume_checkpoint_pricing", observe):
             quarantine.QuarantineLifecycleCapacityTests().test_actual_partial_successor_preserves_two_roots_and_seals_capacity()
         self.assertTrue(
             prices, "actual route fell back instead of issuing source prices"
         )
+
+    def test_class_substitution_cannot_install_or_execute_an_issuing_body(self):
+        from review_sensei_github.api_run_requests import ApiRunSessionLedger
+
+        from review_sensei import finding_lifecycle_store as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, record, _ = fixtures.CurrentRunFindingPartsTests().fixture(
+                directory
+            )
+            count = len(fixture.service.trace)
+
+            @_checkpoint_pricer
+            def preflight_finding_lifecycle_checkpoint_pricing(
+                owner, record, *, _checkpoint_factory, **kwargs
+            ):
+                self.fail("replacement class body received source factory")
+
+            with patch.object(
+                ApiRunSessionLedger,
+                "preflight_finding_lifecycle_checkpoint_pricing",
+                preflight_finding_lifecycle_checkpoint_pricing,
+            ):
+                with self.assertRaisesRegex(ReviewInputError, "cannot be replaced"):
+                    core._install_checkpoint_pricer(
+                        preflight_finding_lifecycle_checkpoint_pricing
+                    )
+                with self.assertRaisesRegex(
+                    ReviewInputError, "producer is unsupported"
+                ):
+                    fixture.ledger.preflight_finding_lifecycle_checkpoint_pricing(
+                        record, added_parts=1, added_bytes=100, checkpoint_parts=(1,)
+                    )
+                self.assertIsNone(core._qualified_checkpoint_pricer(fixture.ledger))
+            self.assertEqual(len(fixture.service.trace), count)
+
+    def test_inherited_unknown_adapter_retains_generic_plain_and_staging_guards(self):
+        from review_sensei import finding_lifecycle_store as core
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, record, kwargs = fixtures.CurrentRunFindingPartsTests().fixture(
+                directory
+            )
+            count = len(fixture.service.trace)
+
+            class Unqualified(type(fixture.ledger)):
+                pass
+
+            original_class = type(fixture.ledger)
+            fixture.ledger.__class__ = Unqualified
+            try:
+                self.assertIsNone(
+                    fixture.ledger.preflight_finding_lifecycle_checkpoint_pricing(
+                        record, added_parts=1, added_bytes=100, checkpoint_parts=(1,)
+                    )
+                )
+                self.assertIsNone(
+                    fixture.ledger.preflight_finding_lifecycle_inline(record)
+                )
+                self.assertIsNone(
+                    core._remaining_staging_price(
+                        fixture.ledger,
+                        record,
+                        (),
+                        envelope={},
+                        binding={},
+                        item_count=0,
+                        allowance=8192,
+                    )
+                )
+                plan = core.preflight_finding_lifecycle(
+                    fixture.ledger, record, **kwargs
+                )
+                self.assertGreaterEqual(plan["conditional_calls"], 25)
+            finally:
+                fixture.ledger.__class__ = original_class
+            self.assertEqual(len(fixture.service.trace), count)

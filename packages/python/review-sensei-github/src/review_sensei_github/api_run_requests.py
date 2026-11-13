@@ -34,7 +34,10 @@ from review_sensei.api_work import (
     initial_accounting,
 )
 from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
-from review_sensei.finding_lifecycle_store import _checkpoint_pricer
+from review_sensei.finding_lifecycle_store import (
+    _checkpoint_pricer,
+    _install_checkpoint_pricer,
+)
 from review_sensei.models import ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
 
@@ -2164,6 +2167,9 @@ class ApiRunRequestTransport:
                 ledger, self, identity
             )
             if specialized_quarantine is not None:
+                # Admit the complete source-priced census/fence/stage tail,
+                # not a truncated min(capacity, remaining) operation.
+                self.budget_view.preflight(specialized_quarantine)
                 capacity = specialized_quarantine
         confirmation_tail = WRITE_CONFIRMATION_TAIL
         if not quarantine and isinstance(ledger, ApiRunSessionLedger):
@@ -2373,9 +2379,23 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         added_parts,
         added_bytes,
         checkpoint_parts,
+        checkpoint_stage=False,
+        checkpoint_target=None,
         _checkpoint_factory=None,
     ):
         """Issue a sealed price only for an exact source-owned checkpoint writer."""
+        if checkpoint_stage:
+            if not self._quarantine_required:
+                return None
+            from .quarantine_census import lifecycle_staging_pricing
+
+            return lifecycle_staging_pricing(
+                self,
+                record,
+                checkpoint_parts=checkpoint_parts,
+                target=checkpoint_target,
+                factory=_checkpoint_factory,
+            )
         if self._quarantine_required:
             from .quarantine_census import lifecycle_checkpoint_pricing
 
@@ -2543,7 +2563,12 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
 
         if not _inline_checkpoint_read_free(record):
             return None
-        proof = self.preflight_finding_lifecycle_checkpoint_pricing(
+        from review_sensei.finding_lifecycle_store import _qualified_checkpoint_pricer
+
+        pricer = _qualified_checkpoint_pricer(self)
+        if pricer is None:
+            return None
+        proof = pricer(
             record,
             added_parts=0,
             added_bytes=0,
@@ -3298,3 +3323,8 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
 
 
 # Register the exact source implementation, not a generic cheaper-count hook.
+
+
+_install_checkpoint_pricer(
+    ApiRunSessionLedger.preflight_finding_lifecycle_checkpoint_pricing
+)

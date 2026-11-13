@@ -1329,6 +1329,26 @@ class GitHubIssueCommentSessionLedger:
             existing[body] = storage_id
             return storage_id
 
+        # The generic codec keeps its conservative guard. Only an exact
+        # registered caller executing the already-issued quarantine checkpoint
+        # may supply the same target-bound remaining-work proof used by core.
+        checkpoint_calls = None
+        if self._quarantine_required and binding.get("purpose") == "finding-lifecycle":
+            from review_sensei.finding_lifecycle_store import _remaining_staging_price
+
+            selected = getattr(
+                getattr(self, "_quarantine_checkpoint_snapshot", None), "record", None
+            )
+            if selected is not None:
+                checkpoint_calls = _remaining_staging_price(
+                    self,
+                    selected,
+                    prospective_parts,
+                    envelope=document,
+                    binding=binding,
+                    item_count=item_count,
+                    allowance=max_manifest_bytes,
+                )
         return stage_partitioned_evidence(
             document,
             binding=binding,
@@ -1338,11 +1358,17 @@ class GitHubIssueCommentSessionLedger:
             reader=lambda storage_id: self._read_part(identity, storage_id),
             budget=self.evidence_budget,
             preflight_calls=(
-                len(missing_bodies) * (2 if self._broker is not None else 1)
-                + len(prospective_parts)
-            )
-            if self._tail_preparing
-            else None,
+                checkpoint_calls
+                if checkpoint_calls is not None
+                else (
+                    (
+                        len(missing_bodies) * (2 if self._broker is not None else 1)
+                        + len(prospective_parts)
+                    )
+                    if self._tail_preparing
+                    else None
+                )
+            ),
         )
 
     def _cached_comments(self) -> list[Any]:
