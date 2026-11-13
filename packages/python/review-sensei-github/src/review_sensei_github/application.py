@@ -1487,8 +1487,8 @@ class GitHubApplication:
             is ApiRunSessionLedger.load
         )
         same_selected_authority = ledger is transaction_ledger or (
-            ledger is not None
-            and transaction_ledger is not None
+            isinstance(ledger, GitHubIssueCommentSessionLedger)
+            and isinstance(transaction_ledger, GitHubIssueCommentSessionLedger)
             and (
                 type(ledger) is GitHubIssueCommentSessionLedger
                 and type(transaction_ledger) is GitHubIssueCommentSessionLedger
