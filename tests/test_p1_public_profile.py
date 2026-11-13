@@ -148,6 +148,21 @@ class P1PublicProfileTests(unittest.TestCase):
                 for identifier, body, _ in comments:
                     self.assertEqual(current.extra_comments[identifier]["body"], body)
 
+    def test_native_fixture_preserves_creation_order_when_the_session_root_is_created(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            current = self._entry(directory, [(3000, "earlier native comment", False)])
+            self.assertEqual(current.invoke(), 0, current.error)
+            self._assert_complete(current)
+            order = current.comment_creation_order
+            self.assertEqual(order[0], 3000)
+            self.assertGreater(order.index(current.comment["id"]), 0)
+            self.assertEqual(len(order), len(set(order)))
+            self.assertEqual(
+                [row["id"] for row in current._ordered_comment_rows()], order
+            )
+
     def test_three_hundred_comments_hold_at_the_unchanged_lifecycle_allocation_bound(
         self,
     ):
