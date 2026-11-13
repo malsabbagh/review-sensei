@@ -31,15 +31,27 @@ def require_durable_floor(journal, *, checks_enabled):
     from review_sensei.source_registry import require_instance_source
 
     try:
-        require_instance_source(
-            journal.reviewer,
-            methods=("_check_state_or_diagnostic", "_publish_check_state"),
-        )
-        require_instance_source(
-            journal.reviewer.checks,
-            methods=("start", "complete", "_write", "_create", "_update"),
-        )
-        require_instance_source(journal, methods=("request", "checkpoint", "finish"))
+        for owner in (journal.reviewer, journal.reviewer.checks, journal):
+            # First authenticate the class namespace against its definition,
+            # then enumerate that original source rather than a supplied list
+            # of just the visible entry methods.
+            require_instance_source(owner, methods=())
+            methods = tuple(
+                name
+                for name in dir(type(owner))
+                if callable(getattr(type(owner), name))
+            )
+            if any(name in vars(owner) for name in methods):
+                return
+            require_instance_source(
+                owner,
+                methods=tuple(
+                    name
+                    for name in methods
+                    if hasattr(getattr(type(owner), name), "__code__")
+                    or hasattr(getattr(type(owner), name), "__func__")
+                ),
+            )
     except ReviewInputError:
         return  # A custom source cannot inherit the closed success floor.
     record, ledger = journal._record, journal.ledger

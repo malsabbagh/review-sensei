@@ -46,3 +46,24 @@ class GuardedFloorSourceTests(unittest.TestCase):
                         require_durable_floor(journal, checks_enabled=True)
                     )
                 self.assertEqual(calls, [])
+
+    def test_transitive_instance_dispatch_shadows_do_not_reach_pricing(self):
+        for name in ("_is_effect", "_dispatch_effect"):
+            with self.subTest(method=name):
+                journal = object.__new__(FindingLifecycleJournal)
+                journal.effects = []
+                journal.reviewer = object.__new__(ReviewPublisher)
+                journal.reviewer.checks = object.__new__(ReviewCheckPublisher)
+                calls = []
+                setattr(journal, name, lambda *args, **kwargs: calls.append(1))
+                # No record/ledger/budget: exclusion must precede all pricing.
+                self.assertIsNone(require_durable_floor(journal, checks_enabled=True))
+                self.assertEqual(calls, [])
+
+    def test_original_unmodified_producer_reaches_record_validation(self):
+        journal = object.__new__(FindingLifecycleJournal)
+        journal.effects = []
+        journal.reviewer = object.__new__(ReviewPublisher)
+        journal.reviewer.checks = object.__new__(ReviewCheckPublisher)
+        with self.assertRaisesRegex(AttributeError, "_record"):
+            require_durable_floor(journal, checks_enabled=True)
