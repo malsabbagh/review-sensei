@@ -1121,6 +1121,8 @@ class ApiRunRequestTransport:
         identity: SessionIdentity,
         configuration: FrozenApiConfiguration,
         owner: ApiExecutionOwner,
+        *,
+        trust_source: tuple[Any, Any] | None = None,
     ) -> ApiRunAccounting:
         """Confirm a first run record before enabling its ordinary tranche.
 
@@ -1157,6 +1159,30 @@ class ApiRunRequestTransport:
                 "hosted-terminal", allocation.first_terminal
             )
             updated = record.evolve(api_run_accounting=state.to_document())
+            if trust_source is not None:
+                from .trust_enrollment import (
+                    current_observation,
+                    prepare_original_enrollment,
+                )
+
+                observed = current_observation(*trust_source)
+                authority = observed["authority"]
+                if (
+                    authority["run_id"] != str(self.run.run_id)
+                    or authority["run_attempt"] != owner.run_attempt
+                    or authority["job"] != owner.job
+                    or observed["app_id"] != ledger.authenticated_app_id
+                    or ledger.token != trust_source[1].token
+                    or ledger._reservation_owner
+                    != {
+                        "run_id": str(self.run.run_id),
+                        "head_sha": authority["head_sha"],
+                    }
+                ):
+                    raise ReviewInputError(
+                        "trust enrollment original caller source conflicts"
+                    )
+                updated = prepare_original_enrollment(*trust_source, updated)
             self._activation = updated, "hosted-review"
             return updated
 

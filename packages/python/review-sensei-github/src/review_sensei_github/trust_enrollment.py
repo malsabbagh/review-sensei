@@ -219,7 +219,7 @@ def _install_native_source(source_class):
         loaded = methods["load"](ledger, identity, now=now)
         guard(ledger)
         if loaded.status not in {"ok", "migrated"} or loaded.record is None:
-            raise ReviewInputError("trust cold original root unavailable")
+            return loaded, None
         if loaded.record.trust_enrollment is None:
             return loaded, None
         original_observation(loaded.record)

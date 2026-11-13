@@ -165,8 +165,9 @@ print(record.record_sha256)
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(budget.calls, 1)
             else:
-                with self.assertRaises(ReviewInputError):
-                    load_original_enrollment(ledger, IDENTITY, now=STAMP)
+                loaded, restored = load_original_enrollment(ledger, IDENTITY, now=STAMP)
+                self.assertEqual(loaded.status, "missing")
+                self.assertIsNone(restored)
             self.assertTrue(all(method == "GET" for method, _, _ in calls))
 
     def test_source_issuer_is_closed_and_decorated_dispatch_cannot_issue(self):
@@ -329,6 +330,12 @@ print(record.record_sha256)
         size = len(canonical_bytes(record.trust_enrollment))
         with patch("review_sensei.trust_enrollment.MAX_MANIFEST_BYTES", size - 1):
             with self.assertRaisesRegex(ReviewInputError, "unsupported"):
+                prepare_original_enrollment(fixture.client, session, original)
+        with patch(
+            "review_sensei.session.MAX_SESSION_RECORD_BYTES",
+            len(canonical_bytes(record.to_dict())) - 1,
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "size limit"):
                 prepare_original_enrollment(fixture.client, session, original)
         self.assertIsNone(original.trust_enrollment)
         self.assertEqual(len(fixture.calls), 1)

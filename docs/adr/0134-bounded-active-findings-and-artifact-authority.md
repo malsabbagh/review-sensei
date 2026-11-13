@@ -391,3 +391,35 @@ existing caller meter still apply. Native edits or a foreign/unprojected digest
 refuse before new inference or publication. A historical rescan receipt without
 its current transaction does not establish a current lifecycle projection;
 that retry remains held pending a separately authenticated historical contract.
+
+### Source-produced original observation enrollment (opt-in)
+
+`review-run`, `command-run` and `reply-run` accept
+`--enable-current-trust-enrollment` before their `--` argument separator. This
+requires a compatible broker supporting the existing signed v4 session protocol;
+normal token-only exchanges and the default no-enrollment v3 route are unchanged.
+No deployment or live activation is implied by this source implementation.
+
+The actual validated session exchange issues a process-local observation receipt.
+A supplied snapshot/model, copied receipt or substituted source method cannot
+issue one. Initial enrollment retains a closed, integrity-bound inline original
+observation in the existing native session root, before its first POST. It stores
+no token, opaque session grant or OIDC credential. The original observation is
+immutable across ordinary session evolution; it cannot be silently replaced with
+today's facts or removed to make a migration succeed. Existing root and 8 KiB
+component limits apply, with complete serialization checked before the write.
+
+Opted-in admission reuses the ordinary authenticated native root load. Its cold
+receipt binds immutable original root/enrollment bytes and the actual Bot owner;
+it is not a fresh installation observation or a writer capability. A new v4
+session exchange supplies the separately observed current facts for comparison.
+A retained enrollment with the flag disabled holds rather than downgrading to v3;
+a legacy existing session cannot manufacture original enrollment by enabling the
+flag. Both cases require explicit supported recovery/migration, not a reset.
+
+This qualifies original observation retention and current admission comparisons,
+not continuous permission/selection history, an invented permission epoch, actor
+repository permission, or fresh trust at every native effect. Existing native
+source/actor and finalization gates remain in force. A per-effect observation
+producer and its complete prepaid cost remain separate work. Reverification of
+an old session grant must never be described as a new observation.

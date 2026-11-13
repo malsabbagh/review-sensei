@@ -685,6 +685,11 @@ def run_action(
     parser.add_argument("--policy-commit", required=True)
     parser.add_argument("--run-directory", type=Path, required=True)
     parser.add_argument(
+        "--enable-current-trust-enrollment",
+        action="store_true",
+        help="Observe original enrollment with a compatible v4 broker; not continuous trust or effect authorization.",
+    )
+    parser.add_argument(
         "--verify-source-before-intent",
         action="store_true",
         default=False,
@@ -729,6 +734,7 @@ def run_action(
             purpose=purpose,
             source=source,
             rollover_service=rollover_service,
+            enable_current_trust_enrollment=options.enable_current_trust_enrollment,
         )
     same_run_gate = (
         unstarted_recovery

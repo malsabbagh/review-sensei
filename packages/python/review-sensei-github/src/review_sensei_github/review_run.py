@@ -877,6 +877,7 @@ def bootstrap(
     recovery_context_key_file: Path | None = None,
     recovery_context_ttl_seconds: int = DEFAULT_RECOVERY_TTL_SECONDS,
     rollover_service: RolloverService | None = None,
+    enable_current_trust_enrollment: bool = False,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
     lifecycle_diagnostics.phase("bootstrap")
@@ -1168,8 +1169,17 @@ def bootstrap(
         control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
         authority=authority,
     )
+    session_broker = (
+        BrokerClient(
+            opener=caller.open,
+            control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
+            authority={**authority, "version": 4},
+        )
+        if enable_current_trust_enrollment
+        else broker
+    )
     lifecycle_diagnostics.step("broker_session")
-    session = broker.open_session(
+    session = session_broker.open_session(
         oidc,
         repository_id=args.repository_id,
         pull_request=args.pull_request,
@@ -1255,7 +1265,23 @@ def bootstrap(
         )
         install_admission(native, proof)
     lifecycle_diagnostics.step("ledger_discovery")
-    loaded = native.load(identity)
+    from .trust_enrollment import compare_restored_observation, load_original_enrollment
+
+    if enable_current_trust_enrollment:
+        loaded, original_trust = load_original_enrollment(native, identity)
+    else:
+        loaded, original_trust = native.load(identity), None
+    if loaded.status == "ok" and loaded.record is not None:
+        if loaded.record.trust_enrollment is not None:
+            if not enable_current_trust_enrollment:
+                raise ReviewInputError(
+                    "trust enrolled current observation unavailable; v4 opt-in required"
+                )
+            compare_restored_observation(session_broker, session, original_trust)
+        elif enable_current_trust_enrollment:
+            raise ReviewInputError(
+                "trust original enrollment unavailable; legacy migration required"
+            )
     if int(attempt) == 1:
         try:
             if quarantine_predecessor_comment_id is not None:
@@ -1278,7 +1304,15 @@ def bootstrap(
                 create_quarantine(prepared, actions_token=actions_token)
             elif loaded.status == "missing":
                 lifecycle_diagnostics.step("initial_enrollment")
-                caller.initialize_and_activate(native, identity, frozen, owner)
+                caller.initialize_and_activate(
+                    native,
+                    identity,
+                    frozen,
+                    owner,
+                    trust_source=(session_broker, session)
+                    if enable_current_trust_enrollment
+                    else None,
+                )
             elif loaded.status == "ok" and loaded.record is not None:
                 previous_root = loaded.record
                 previous = ApiRunAccounting.from_document(
@@ -1507,6 +1541,11 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
     parser.add_argument("--run-directory", type=Path, required=True)
     parser.add_argument("--publication-outcome", type=Path, required=True)
     parser.add_argument("--quarantine-predecessor-comment-id", type=int)
+    parser.add_argument(
+        "--enable-current-trust-enrollment",
+        action="store_true",
+        help="Opt in to original observed trust enrollment with a compatible v4 broker; not continuous trust history or effect authorization.",
+    )
     parser.add_argument("--recovery-context-dir", type=Path, default=None)
     parser.add_argument("--recovery-context-key-file", type=Path, default=None)
     parser.add_argument(
@@ -1545,6 +1584,7 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
         recovery_context_dir=options.recovery_context_dir,
         recovery_context_key_file=options.recovery_context_key_file,
         recovery_context_ttl_seconds=options.recovery_context_ttl_seconds,
+        enable_current_trust_enrollment=options.enable_current_trust_enrollment,
     )
     core = [*core]
     if not _has_option(core, "--base-sha"):
