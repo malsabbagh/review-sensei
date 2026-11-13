@@ -435,6 +435,8 @@ class _Observation:
             if populated
             else _ROLES
         )
+        if populated and assembled.body_explanations:
+            roles = (*roles, ("review", 1))
         _REMAINING[self] = dict(roles)
         self.witness = OrdinaryPublicationReadWitness(
             roles, sum(calls for _, calls in roles)
@@ -456,6 +458,12 @@ class _Observation:
                 return "pr"
             if parsed.path == f"{prefix}/pulls/{scope.pull_request}/reviews":
                 return "reviews"
+            if re.fullmatch(
+                re.escape(f"{prefix}/pulls/{scope.pull_request}/reviews/")
+                + r"[1-9][0-9]*",
+                parsed.path,
+            ):
+                return "review"
             if re.fullmatch(
                 re.escape(f"{prefix}/pulls/{scope.pull_request}/reviews/")
                 + r"[1-9][0-9]*/comments",

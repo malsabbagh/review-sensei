@@ -7074,6 +7074,12 @@ class ReviewPublisher:
                 ):
                     return receipts
                 body = review["body"]
+                if getattr(self, "_ordinary_publication_observation", None) is not None:
+                    # Fresh ordinary body custody comes from the exact producer,
+                    # not finding substrings in possibly amended native prose.
+                    produced = context.get("ordinary_body_source")
+                    if not isinstance(produced, tuple) or produced != (review_id, body):
+                        return receipts
                 index = parse_finding_index(
                     body,
                     repository_id=repository_id,
@@ -10686,6 +10692,12 @@ class ReviewPublisher:
                 coverage_uncertainty_accepted=window_coverage_accepted,
             )
 
+        native_body_context = getattr(self, "_native_finding_context", None)
+        if (
+            native_body_context is not None
+            and getattr(self, "_ordinary_publication_observation", None) is not None
+        ):
+            native_body_context["ordinary_body_source"] = (None, body)
         try:
             status, payload = self.http.request(
                 "POST",
@@ -10798,6 +10810,10 @@ class ReviewPublisher:
             if isinstance(review_id, int):
                 if type(review_id) is int and review_id > 0:
                     self._check_accounting_review_id = review_id
+                    if native_body_context is not None and native_body_context.get(
+                        "ordinary_body_source"
+                    ) == (None, body):
+                        native_body_context["ordinary_body_source"] = (review_id, body)
                 self._commit_active_window_success(
                     repository_id=repository_id,
                     pull_request=pull_request,
