@@ -1172,7 +1172,9 @@ class SessionRecord:
         object.__setattr__(self, "trust_enrollment", trust)
         if trust is not None:
             if self._digest_shape != "current":
-                raise ReviewInputError("trust enrollment requires current integrity shape")
+                raise ReviewInputError(
+                    "trust enrollment requires current integrity shape"
+                )
             original = trust["document"]
             authority = original["authority"]
             if (
