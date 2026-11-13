@@ -71,3 +71,36 @@ class OrdinaryPublicationReadCustodyTests(unittest.TestCase):
                 observation._require(journal, publisher)
         with self.assertRaises(ReviewInputError):
             reads._install_publication_source(ReviewPublisher)
+
+    def test_wrapper_delegate_observer_and_request_are_pinned(self):
+        for field, replacement in (
+            ("transport", GitHubHttp()),
+            ("observation", object()),
+            ("request", lambda *args, **kwargs: (200, [])),
+        ):
+            publisher, journal, _ = self.fixture()
+            with self.subTest(field=field):
+                with reads.observe_publication(publisher, journal) as observation:
+                    setattr(publisher.http, field, replacement)
+                    with self.assertRaises(ReviewInputError):
+                        observation._require(journal, publisher)
+
+    def test_private_issued_identity_cannot_be_reset_by_public_field(self):
+        # Component-only setup of the post-qualification registry. This is not
+        # source admission or a substitute for the actual hosted route tests.
+        publisher, journal, _ = self.fixture()
+        with reads.observe_publication(publisher, journal) as observation:
+            witness = reads.OrdinaryPublicationReadWitness(reads._ROLES, 14)
+            reads._ISSUED_WITNESS[observation] = witness
+            observation.witness = witness
+            observation._require(journal, publisher)
+            observation.witness = None
+            with self.assertRaises(ReviewInputError):
+                observation._require(journal, publisher)
+
+    def test_observer_method_replacement_is_not_qualified(self):
+        publisher, journal, _ = self.fixture()
+        with reads.observe_publication(publisher, journal) as observation:
+            observation.read = lambda *args: (200, [])
+            with self.assertRaises(ReviewInputError):
+                reads._Observation._require(observation, journal, publisher)

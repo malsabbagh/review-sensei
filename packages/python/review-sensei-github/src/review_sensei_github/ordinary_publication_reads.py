@@ -31,6 +31,7 @@ _WITNESSES: WeakKeyDictionary = WeakKeyDictionary()
 _OBSERVED: WeakKeyDictionary = WeakKeyDictionary()
 _REMAINING: WeakKeyDictionary = WeakKeyDictionary()
 _QUALIFIED: WeakKeyDictionary = WeakKeyDictionary()
+_ISSUED_WITNESS: WeakKeyDictionary = WeakKeyDictionary()
 
 
 def _install_publication_source(source_class):
@@ -143,7 +144,7 @@ class OrdinaryPublicationReadWitness:
             raise ReviewInputError(
                 "ordinary publication read witness is unissued or changed"
             )
-        observation._require(journal, publisher)
+        _Observation._require(observation, journal, publisher)
         return self.read_calls
 
 
@@ -159,7 +160,7 @@ class _Observation:
         )
         _OBSERVED[self] = {}
         self.bindings: list[tuple[Any, str, Any, Any, Any]] = []
-        self.record = None
+        self.record: Any = None
         self.record_bytes = None
         self.result: Any = None
         self.result_bytes = None
@@ -182,10 +183,25 @@ class _Observation:
             )
         ):
             raise ReviewInputError("ordinary publication read scope expired or changed")
+        if type(self) is not _Observation or any(
+            name in self.__dict__ or getattr(_Observation, name) is not method
+            for name, method in _OBSERVATION_METHODS.items()
+        ):
+            raise ReviewInputError(
+                "ordinary publication observer implementation changed"
+            )
+        issued_witness = _ISSUED_WITNESS.get(self)
+        if self.witness is not issued_witness:
+            raise ReviewInputError("ordinary publication issued witness changed")
         _source_guard(publisher, journal)
         for owner, attr, old, wrapper, signature in self.bindings:
             if (
                 getattr(owner, attr) is not wrapper
+                or type(wrapper) is not _ClosedPublicationHttp
+                or wrapper.transport is not old
+                or wrapper.observation is not self
+                or type(wrapper).request is not _WRAPPER_REQUEST
+                or getattr(wrapper.request, "__func__", None) is not _WRAPPER_REQUEST
                 or _transport_signature(old, journal, self.budget) != signature
             ):
                 raise ReviewInputError("ordinary publication transport custody changed")
@@ -223,7 +239,7 @@ class _Observation:
         from .publication import review_result_digest
 
         if (
-            self.witness is not None
+            self in _ISSUED_WITNESS
             or record is not journal._record
             or not isinstance(result, ReviewResult)
             or not isinstance(projected_result, ReviewResult)
@@ -302,6 +318,7 @@ class _Observation:
         _REMAINING[self] = dict(_ROLES)
         self.witness = OrdinaryPublicationReadWitness(_ROLES, 14)
         _WITNESSES[self.witness] = self
+        _ISSUED_WITNESS[self] = self.witness
         return self.witness
 
     def role(self, method, path, body):
@@ -438,7 +455,15 @@ class _ClosedPublicationHttp(GitHubHttp):
         return getattr(self.transport, "preflight_native_batch")
 
     def request(self, method, path, **kwargs):
-        return self.observation.read(self.transport, method, path, kwargs)
+        if type(self.observation) is not _Observation:
+            raise ReviewInputError("ordinary publication observer changed")
+        return _Observation.read(self.observation, self.transport, method, path, kwargs)
+
+
+_WRAPPER_REQUEST = _ClosedPublicationHttp.request
+_OBSERVATION_METHODS = {
+    name: method for name, method in vars(_Observation).items() if callable(method)
+}
 
 
 @contextmanager
@@ -469,5 +494,6 @@ def observe_publication(publisher, journal):
         _OBSERVED.pop(observation, None)
         _REMAINING.pop(observation, None)
         _QUALIFIED.pop(observation, None)
+        _ISSUED_WITNESS.pop(observation, None)
         for owner, attr, old, wrapper, _ in reversed(observation.bindings):
             setattr(owner, attr, old)
