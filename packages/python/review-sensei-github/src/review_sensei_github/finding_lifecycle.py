@@ -1281,6 +1281,11 @@ class FindingLifecycleJournal:
 
         if type(plan) is not CommandFinalizationPlan:
             raise ReviewInputError("command finalization capacity plan is unissued")
+        from review_sensei.source_registry import require_instance_source
+
+        require_instance_source(
+            plan, methods=("require", "can_reuse_retained_lifecycle")
+        )
         plan.require(self, http=http, budget=budget)
         payload = json.loads(plan.payload)
         requests = tuple(
@@ -1507,6 +1512,135 @@ class FindingLifecycleJournal:
         )
 
     @_sizing_producer
+    def _preflight_preentry_command_branches(self, plan, *, _sizing_factories):
+        """Price source-observed finalization branches, not a whole action route.
+
+        Intent/entry, receipt publication, final action settlement and own-CAS
+        transfer remain separate obligations. This method never binds _PREVIEW.
+        """
+        import sys
+
+        from review_sensei.finding_lifecycle_store import preflight_finding_lifecycle
+        from review_sensei.source_registry import (
+            require_instance_source,
+            require_module_seal,
+        )
+
+        from . import trust_disposition
+        from .trust_effects import verification_calls
+
+        require_instance_source(
+            plan, methods=("require", "can_reuse_retained_lifecycle")
+        )
+        require_module_seal(sys.modules[trust_disposition.__name__])
+        require_instance_source(
+            self,
+            methods=(
+                "_command_branch_documents",
+                "_document",
+                "_preflight_effect",
+                "_body_receipts",
+                "_check_precondition",
+                "_native_review_commitment",
+                "_receipts_match_update_precondition",
+                "_updated_binding_proof_state",
+            ),
+        )
+        if getattr(self.ledger, "business_guard", None) is not None:
+            raise ReviewInputError(
+                "command pre-entry sizing cannot replace an existing guard"
+            )
+        preview, details, intent, valid, guard = (
+            trust_disposition.consume_preentry_sizing_context(plan, self)
+        )
+        alternatives, _, item_count, requests, _ = self._command_branch_documents(
+            plan, http=plan.http, budget=plan.budget
+        )
+        payload = json.loads(plan.payload)
+        reads, capabilities = (
+            payload.get("execution_read_tail"),
+            payload.get("execution_capability_tail"),
+        )
+        if (
+            payload.get("read_contract") != "closed-plain-single-complete-page-v1"
+            or not isinstance(reads, dict)
+            or not isinstance(capabilities, dict)
+            or any(
+                type(n) is not int or n < 0
+                for n in (*reads.values(), *capabilities.values())
+            )
+        ):
+            raise ReviewInputError("command pre-entry read tail is unqualified")
+        # No own-CAS transfer has happened, so retain the complete restore price.
+        reference = self._record.finding_lifecycle["manifest"]
+        restore = (
+            10
+            if reference["encoding"] == "inline-json-v1"
+            else 20 + len(reference["parts"])
+        )
+        snapshot = preview.disposition_snapshot
+        if (
+            snapshot is not None
+            and snapshot["state_manifest"]["encoding"] != "inline-json-v1"
+        ):
+            raise ReviewInputError(
+                "command pre-entry disposition partition pricing is unsupported"
+            )
+        native_calls = sum(reads.values()) + sum(capabilities.values())
+        native_calls += payload.get("cleanup_native_calls", 0)
+        native_calls += 2 * sum(path != "/graphql" for _, path, _ in requests)
+        native_calls += int(
+            bool(
+                payload.get("review_update")
+                and self._body_receipts(
+                    int(payload["review_update"][1].rsplit("/", 1)[-1])
+                )
+            )
+        )
+        native_calls += restore + verification_calls(self.ledger.caller) * len(requests)
+        branch_proof = _sizing_factories[2](
+            self.ledger, self._record, alternatives, valid
+        )
+        projected = _sizing_factories[1](
+            self.ledger,
+            self._record,
+            preview,
+            details["staged_parts"],
+            intent,
+            plan,
+            valid,
+        )
+        documents = alternatives[0][0]
+        previous_guard = getattr(self.ledger, "business_guard", None)
+        self.ledger.business_guard = guard
+        try:
+            result = preflight_finding_lifecycle(
+                self.ledger,
+                self._record,
+                document=documents[0],
+                future_documents=documents[1:],
+                operation_id=self.operation_id,
+                base_sha=self.base_sha,
+                head_sha=self.head_sha,
+                policy_digest=self.policy_digest,
+                configuration_digest=self.configuration_digest,
+                item_count=item_count,
+                reserved_tail_calls=native_calls + 6,
+                projected_root=projected,
+                branch_documents=branch_proof,
+            )
+        finally:
+            self.ledger.business_guard = previous_guard
+        valid()
+        return {
+            **result,
+            "scope": "finalization-checkpoint-branches-only",
+            "native_requests": len(requests),
+            "restore_calls": restore,
+            "whole_route_admitted": False,
+        }
+
+    @_sizing_producer
     def preflight_command_finalization(
         self, plan, *, preview_record, capacity_details, http, budget, _sizing_factories
     ):
@@ -1515,6 +1649,11 @@ class FindingLifecycleJournal:
 
         if type(plan) is not CommandFinalizationPlan:
             raise ReviewInputError("command finalization capacity plan is unissued")
+        from review_sensei.source_registry import require_instance_source
+
+        require_instance_source(
+            plan, methods=("require", "can_reuse_retained_lifecycle")
+        )
         plan.require(self, http=http, budget=budget)
         if (
             not isinstance(capacity_details, dict)
@@ -1556,8 +1695,6 @@ class FindingLifecycleJournal:
             or _digest(action["intent"]) != capacity_details["intent_sha256"]
         ):
             raise ReviewInputError("command finalization admitted intent changed")
-        from review_sensei.source_registry import require_instance_source
-
         require_instance_source(self, methods=("_command_branch_documents",))
         alternatives, pending_commitments, item_count, requests, dictionary_base = (
             self._command_branch_documents(plan, http=http, budget=budget)

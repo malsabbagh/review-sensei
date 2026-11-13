@@ -562,3 +562,35 @@ by placement. The complete criterion and human/blocking classification survive
 serialization even when the active display cap hides another obligation.
 A file-level obligation with a line is invalid. This validation correction does
 not establish native body-slot readback or response-loss recovery on its own.
+
+### Detached disposition preparation
+
+The source-only disposition preparation path can retain a process-local,
+immutable observation of one authenticated `accept-risk` command and run the
+ordinary finalizer's bounded source readers before admitting action intent.
+Its predicted disposition and receipt are sizing data, not an accepted decision
+or a published receipt. Copied, changed, foreign and expired observations do not
+qualify. Repeated branch projection is detached; dictionary execution bindings
+are installed only by the existing admitted runtime preflight.
+
+An internal bootstrap option can request the existing v2 actor-role observation
+before original enrollment is captured. It requires opted-in v4 enrollment,
+keeps the existing server ceiling, and has no CLI switch or default change.
+A v1 original remains v1: a later current-role observation does not repair its
+missing original role for the stronger checkpoint contract.
+
+The pre-entry quote covers only the selected finalization checkpoint branches,
+including their unknown/stop outcomes, fresh-verification calls and complete
+restore tail. It temporarily prices the genuine source fence and restores the
+prior empty guard on success or failure; it never replaces a foreign guard.
+The focused fresh-v2 fixture quotes 57 checkpoint/disposition calls plus a
+47-call native/read/restore tail. Actual charged reads can leave exactly 104
+ordinary calls and the quote fits; with 103 it refuses without a business write.
+The original total allowance and separately protected terminal reservation do
+not change. These are source-derived fixture results, not universal constants.
+
+Intent and entry checkpoints, accepted-intent/own-CAS transfer, command receipt
+publication and final action settlement still need whole-route admission.
+Neither this preparation nor its quote installs a disposition dispatch route,
+binds a hypothetical intent for execution, changes native state, or establishes
+continuous permission history. The broader disposition route remains held.

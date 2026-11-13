@@ -505,6 +505,7 @@ def _sizing_producer(method):
                 "preflight_native_batch",
                 "_exact_pending_proof",
                 "preflight_command_finalization",
+                "_preflight_preentry_command_branches",
                 "preflight_reply_finalization",
             }
             and getattr(cls, method.__name__, None) is wrapped
