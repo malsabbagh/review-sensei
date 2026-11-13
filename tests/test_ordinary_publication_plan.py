@@ -2,6 +2,7 @@
 
 import copy
 import hashlib
+import itertools
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,6 +17,26 @@ from tests import test_recovery_context_g17 as recovery
 
 
 class OrdinaryPublicationPlanTests(unittest.TestCase):
+    def test_review_event_uses_same_actual_approval_and_author_rules(self):
+        changes = {
+            (True, True, False, False),
+            (True, False, True, False),
+            (True, True, True, False),
+        }
+        for case in itertools.product((False, True), repeat=4):
+            with self.subTest(case=case):
+                self.assertEqual(
+                    ReviewPublisher._ordinary_review_event(
+                        approval_enabled=case[0],
+                        requests_changes=case[1],
+                        retained_blocking=case[2],
+                        app_authored=case[3],
+                    ),
+                    ("REQUEST_CHANGES", "CHANGES_REQUESTED")
+                    if case in changes
+                    else ("COMMENT", "COMMENTED"),
+                )
+
     def test_inline_payload_preserves_actual_prepared_prose_and_anchor(self):
         comment = ReviewComment(path="src/app.py", line=12, body="Original criterion")
         for anchor, side in (("left", "LEFT"), ("right", "RIGHT")):

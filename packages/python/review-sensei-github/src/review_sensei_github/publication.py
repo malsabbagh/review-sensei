@@ -6860,6 +6860,18 @@ class ReviewPublisher:
             scoped[instance] = native_receipt.to_dict()
 
     @staticmethod
+    def _ordinary_review_event(
+        *, approval_enabled, requests_changes, retained_blocking, app_authored
+    ):
+        if (
+            approval_enabled
+            and (requests_changes or retained_blocking)
+            and not app_authored
+        ):
+            return "REQUEST_CHANGES", "CHANGES_REQUESTED"
+        return "COMMENT", "COMMENTED"
+
+    @staticmethod
     def _inline_comment_payload(comment, comment_body, anchor) -> dict[str, object]:
         """Pure native body producer shared with ordinary capacity planning."""
         return {
@@ -10454,14 +10466,12 @@ class ReviewPublisher:
             retained_eligibility is not None
             and retained_eligibility.facts.has_blocking_findings
         )
-        if (
-            approval_enabled
-            and (assembled.requests_changes or retained_blocking)
-            and not write_preflight.app_authored
-        ):
-            event, published_state = "REQUEST_CHANGES", "CHANGES_REQUESTED"
-        else:
-            event, published_state = "COMMENT", "COMMENTED"
+        event, published_state = self._ordinary_review_event(
+            approval_enabled=approval_enabled,
+            requests_changes=assembled.requests_changes,
+            retained_blocking=retained_blocking,
+            app_authored=write_preflight.app_authored,
+        )
         path = self.http.repository_path(
             repository,
             f"/pulls/{pull_request}/reviews",
