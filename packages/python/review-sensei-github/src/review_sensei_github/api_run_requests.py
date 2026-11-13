@@ -2422,9 +2422,30 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         _checkpoint_factory=None,
     ):
         """Issue a sealed price only for an exact source-owned checkpoint writer."""
+        from .trust_effects import verification_profile
+
+        trust_profile = verification_profile(self.caller)
+
+        def unsupported():
+            if trust_profile is not None:
+                raise ReviewInputError("trust checkpoint source scope is unsupported")
+            return None
+
+        if trust_profile is not None and (
+            self._quarantine_required
+            or checkpoint_stage
+            or added_parts != 0
+            or not isinstance(checkpoint_parts, tuple)
+            or any(type(n) is not int or n != 0 for n in checkpoint_parts)
+            or getattr(self.caller, "_controlled_restart_admission", None) is not None
+            or getattr(self, "_controlled_restart", None) is not None
+        ):
+            raise ReviewInputError(
+                "trust checkpoint pricing supports plain inline only"
+            )
         if checkpoint_stage:
             if not self._quarantine_required:
-                return None
+                return unsupported()
             from .quarantine_census import lifecycle_staging_pricing
 
             return lifecycle_staging_pricing(
@@ -2452,9 +2473,9 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         from .run_authority import VerifiedRunAction
 
         if type(self) not in {ApiRunSessionLedger, ActionRunLedger, ReviewRunLedger}:
-            return None
+            return unsupported()
         if type(self) is ReviewRunLedger and self.caller._abort_source is not None:
-            return None
+            return unsupported()
         expected_replace = (
             ApiRunSessionLedger.replace
             if type(self) is ApiRunSessionLedger
@@ -2503,10 +2524,27 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             getattr(getattr(self, name), "__func__", None) is not implementation
             for name, implementation in implementations
         ):
-            return None
+            return unsupported()
         identity = record.identity()
         if self._plain_finding_selected_input(identity) is not record:
-            return None
+            return unsupported()
+        if trust_profile is not None:
+            from .trust_enrollment import (
+                compare_current_observation,
+                original_observation,
+            )
+
+            historical = original_observation(record)
+            if (
+                historical["authority"]["current_observation"]["schema_version"]
+                != "current-observation-v2"
+            ):
+                raise ReviewInputError(
+                    "trust checkpoint original actor role is unavailable"
+                )
+            compare_current_observation(
+                trust_profile.broker, trust_profile.session, record
+            )
         original = canonical_bytes(record.to_dict())
         guard = getattr(self, "business_guard", None)
         owner = getattr(guard, "__self__", None)
@@ -2522,15 +2560,16 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 or run.identity != identity
                 or owner.owner != self.caller.accounting.owner
             ):
-                return None
+                return unsupported()
             guard_calls = 2  # actual fresh source GET and PR GET, outside checkpoint
         elif guard is not None:
-            return None
+            return unsupported()
         authority_bytes = canonical_bytes(owner.document) if owner is not None else None
 
         def validate():
             if (
                 self._plain_finding_selected_input(identity) is not record
+                or verification_profile(self.caller) is not trust_profile
                 or canonical_bytes(record.to_dict()) != original
                 or any(
                     getattr(getattr(self, name), "__func__", None) is not implementation
@@ -2586,9 +2625,11 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 (5 if n == 0 else 4 + 3 * n)
                 + 2 * ((len(page_plan.page_bounds) if page_plan is not None else 1) - 1)
                 + guard_calls
+                + int(trust_profile is not None)
                 for n in checkpoint_parts
             ),
             validate=validate_page_plan,
+            profile="plain-v1" if trust_profile is None else "plain-trust-inline-v1",
             page_counts=tuple(
                 (len(page_plan.page_bounds) if page_plan is not None else 1)
                 for _ in checkpoint_parts
@@ -2601,6 +2642,12 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         )
 
         if not self._quarantine_required and not _inline_checkpoint_read_free(record):
+            from .trust_effects import verification_profile
+
+            if verification_profile(self.caller) is not None:
+                raise ReviewInputError(
+                    "trust checkpoint inline source reads are unsupported"
+                )
             return None
         from review_sensei.finding_lifecycle_store import _qualified_checkpoint_pricer
 

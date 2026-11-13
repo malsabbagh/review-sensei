@@ -88,6 +88,7 @@ class InitialEffectFixture(EffectSourceFixture):
         if method == "POST" and path.endswith("/issues/7/comments"):
             self.comment = {
                 "id": 1000000,
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
                 "body": json.loads(request.data)["body"],
                 "user": {"id": 999, "type": "Bot", "login": "reviewsensei[bot]"},
             }

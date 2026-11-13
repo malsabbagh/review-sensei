@@ -490,3 +490,13 @@ issue no unsupported provenance. Looking up provenance spends no request and
 **does not make a reused token fresh**: business dispatch still needs a complete
 prepaid route and a separate exact-effect refresh. This source facility enables
 neither a public effect-mode flag nor an unpriced business mutation.
+
+The first stronger checkpoint pricing profile is deliberately plain and inline
+only (`plain-trust-inline-v1`). It binds the actual immutable effect profile and
+authenticated v2 original root, adds exactly one root verification to each
+source-issued checkpoint quote, and carries that addition through both outer
+conditional and inner post-mutator reservations. Missing source scope, an old
+original without actor role, partitioned prospective writes, quarantine, and
+restart are explicit holds rather than generic lower-price fallbacks. This
+pricing grants no business dispatch permit. Existing default profiles, total
+funding, retention bounds, and unknown histories remain unchanged.

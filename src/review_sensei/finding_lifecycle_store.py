@@ -431,6 +431,7 @@ def _consume_checkpoint_pricing(
         raise ReviewInputError("finding lifecycle staging target changed or absent")
     if profile not in {
         "plain-v1",
+        "plain-trust-inline-v1",
         "quarantine-complete-census-v1",
         "quarantine-staging-v1",
         "quarantine-inline-v1",
@@ -449,6 +450,10 @@ def _consume_checkpoint_pricing(
                 profile == "plain-v1"
                 and price - 2 * (page - 1)
                 not in ({5, 7} if n == 0 else {4 + 3 * n, 6 + 3 * n})
+            )
+            or (
+                profile == "plain-trust-inline-v1"
+                and (n != 0 or price - 2 * (page - 1) not in {6, 8})
             )
             or (
                 profile == "quarantine-complete-census-v1"
@@ -854,12 +859,18 @@ def _remote_inline_plan(ledger: Any, record: Any) -> Mapping[str, object] | None
         # These counts come only from the consumed source/root-bound proof.
         # The core's outer stage has already supplied the initial read.
         plan["conditional_calls"] = prices[0] - 1
-        if issued[9] not in {"plain-v1", "quarantine-inline-v1"}:
+        if issued[9] not in {
+            "plain-v1",
+            "plain-trust-inline-v1",
+            "quarantine-inline-v1",
+        }:
             raise ReviewInputError(
                 "finding lifecycle inline checkpoint profile is unsupported"
             )
         plan["post_mutator_calls"] = (
-            5 if issued[9] == "quarantine-inline-v1" else 3 + 2 * (pages - 1)
+            5
+            if issued[9] == "quarantine-inline-v1"
+            else 3 + 2 * (pages - 1) + int(issued[9] == "plain-trust-inline-v1")
         )
         if (
             set(plan)
