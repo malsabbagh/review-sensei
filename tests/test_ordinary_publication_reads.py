@@ -104,3 +104,21 @@ class OrdinaryPublicationReadCustodyTests(unittest.TestCase):
             observation.read = lambda *args: (200, [])
             with self.assertRaises(ReviewInputError):
                 reads._Observation._require(observation, journal, publisher)
+
+    def test_opaque_callbacks_refuse_at_entry_and_after_observation(self):
+        for target, name in (
+            ("finalizer", "_operation_observer"),
+            ("finalizer", "_thread_cleanup_token_provider"),
+            ("publisher", "_thread_cleanup_token_provider"),
+            ("publisher", "_pending_thread_cleanup"),
+        ):
+            publisher, journal, _ = self.fixture()
+            owner = publisher.finalizer if target == "finalizer" else publisher
+            with self.subTest(target=target, name=name):
+                with reads.observe_publication(publisher, journal) as observation:
+                    setattr(owner, name, object())
+                    with self.assertRaisesRegex(ReviewInputError, "callback"):
+                        observation._require(journal, publisher)
+                with self.assertRaisesRegex(ReviewInputError, "callback"):
+                    with reads.observe_publication(publisher, journal):
+                        self.fail("opaque callback cannot enter source-bound route")
