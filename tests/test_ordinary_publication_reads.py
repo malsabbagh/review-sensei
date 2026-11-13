@@ -4,12 +4,13 @@ import copy
 import unittest
 from types import SimpleNamespace
 
-from review_sensei.bounded_evidence import EvidenceReadBudget
-from review_sensei.errors import ReviewInputError
 from review_sensei_github import ordinary_publication_reads as reads
 from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.publication import ReviewPublisher
+
+from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.errors import ReviewInputError
 
 
 class OrdinaryPublicationReadCustodyTests(unittest.TestCase):
