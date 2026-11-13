@@ -235,7 +235,11 @@ def creation_census(prepared, plan):
 
 
 def selected_plan(ledger, identity):
-    active = _ACTIVE.get(ledger)
+    try:
+        active = _ACTIVE.get(ledger)
+    except TypeError:
+        # Legacy adapters cannot hold this private weak-key capability.
+        return None
     if active is None:
         return None
     prepared, issued, remaining, started = active[:4]
