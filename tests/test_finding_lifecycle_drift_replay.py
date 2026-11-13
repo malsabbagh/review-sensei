@@ -144,7 +144,13 @@ def _worker(root: Path, action: str):
 class DriftEditRestartTests(unittest.TestCase):
     def run_worker(self, root, action, expected_exit=0):
         process = subprocess.run(
-            [sys.executable, "-m", __name__, str(root), action],
+            [
+                sys.executable,
+                "-m",
+                "tests.test_finding_lifecycle_drift_replay",
+                str(root),
+                action,
+            ],
             cwd=Path(__file__).resolve().parents[1],
             env=os.environ.copy(),
             capture_output=True,
