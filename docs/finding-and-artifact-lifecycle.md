@@ -469,7 +469,13 @@ explicit held routes after source edits/deletion, revision restoration, changed
 head, started work or landed business effects. Terminal second-attempt entry is
 an ordinary already-terminal bootstrap refusal, not a newly supported replay.
 Stopping a test interpreter supplies no production cancellation, cessation or
-non-dispatch authority. Reply-source composition remains separately qualified.
+non-dispatch authority. `test_reply_source_process_matrix` separately qualifies
+the hosted issue-reply CLI under its original 512-call allowance: unchanged
+unstarted continuation (including reordered comment listings), retained started
+and landed-reply holds, and already-terminal refusal. Edited, deleted or restored
+source revisions are rejected by the modeled actual broker HTTP boundary, not
+claimed to be authenticated by Python alone. Inline finding-specific recovery
+and genuine cold pending-result/cancellation producers remain separate gaps.
 
 Worker-backed disposition snapshots distinguish historical and current carriers.
 The historical 25-decision fault matrix uses five commands of five decisions at
