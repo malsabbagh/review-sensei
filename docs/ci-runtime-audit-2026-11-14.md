@@ -8,11 +8,21 @@ a Linux-specific seed instead of macOS weights, and removal of two proven,
 negligible-cost duplicate assertions. It does not remove a platform, a recovery
 scenario, a process boundary, an accounting assertion, or any safety limit.
 
-The audit baseline is `c021eeb205d0ca3c5293d572ef2c2dc45c4b087b`. Discovery-only
-inspection found **6,969 test IDs in 833 classes**. After removing two duplicates
-and adding eight timing-import regressions, discovery finds **6,975 IDs in 834
-classes**. Every other original ID is retained. This is discovery evidence,
-not evidence that the complete candidate passed.
+The initial audit baseline is `c021eeb205d0ca3c5293d572ef2c2dc45c4b087b`.
+Discovery-only inspection found **6,969 test IDs in 833 classes**, and the initial
+audit working tree contained 6,975 IDs after removing two duplicates and adding
+eight timing-import regressions.
+
+For publication, only the audit change is stacked onto remote PR #462 head
+`50dbc4a234ac23eee9bf901a92d300f7e1298e6a`. This intentionally excludes the three
+unpublished source-hardening commits between that head and c021, including their
+ten new source-registry tests. It is not deletion of those tests by this PR.
+The publication base has **6,959 IDs in 833 classes**; this audit candidate has
+**6,965 IDs in 834 classes**. Every other publication-base identity is retained.
+The candidate inventory SHA-256 is
+`32863b68c94e7032b6ad2943a5bb522144b657d6ad0656c8c84171d5962e00f3`.
+This is discovery evidence, not a full-candidate pass. The matrix below describes
+this publication candidate, not the unpublished source-hardening branch.
 
 The complete per-class matrix is
 [`ci-runtime-class-matrix-2026-11-14.csv`](ci-runtime-class-matrix-2026-11-14.csv).
@@ -185,6 +195,8 @@ installed-consumer dependencies matter to total elapsed time; their individual
   explicitly excluded that one held method and passed **166 tests in 7.456
   seconds**. The runtime difference is due to a different selection and is not
   claimed as a speed improvement. No other known held selection overlaps it.
+  The same explicit 166-test selection also passed on the stacked publication
+  candidate in **10.714 seconds**, excluding the held method.
 - Full checkout/coverage/installed-suite executions remain held until the original
   selections are reconciled. Targeted success is not a full-candidate pass. No
   replacement CI run was started.

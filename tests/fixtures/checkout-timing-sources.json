@@ -108,5 +108,7 @@
       "unmeasured_class_count_after_audit": 153,
       "unmeasured_class_count_at_base_refresh": 152
     }
-  ]
+  ],
+  "publication_base_sha": "50dbc4a234ac23eee9bf901a92d300f7e1298e6a",
+  "publication_inventory_sha256": "32863b68c94e7032b6ad2943a5bb522144b657d6ad0656c8c84171d5962e00f3"
 }
