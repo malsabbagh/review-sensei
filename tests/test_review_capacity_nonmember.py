@@ -102,7 +102,14 @@ class ReviewCapacityNonmemberTests(unittest.TestCase):
         ledger, guard = self.installed_transport()
         http = ledger.http
         self.assertFalse(membership.never_installed(http))
-        for replacement in (None, object()):
+        callbacks = []
+
+        class FakeGuard:
+            def __getattr__(self, name):
+                callbacks.append(name)
+                raise AssertionError("callback")
+
+        for replacement in (None, object(), FakeGuard()):
             with self.subTest(replacement=type(replacement).__name__):
                 http._quarantine_capacity_guard = replacement
                 try:
@@ -111,11 +118,14 @@ class ReviewCapacityNonmemberTests(unittest.TestCase):
                         capacity_review_walk(http, "/repos/owner/repo/pulls/7/reviews")
                 finally:
                     http._quarantine_capacity_guard = guard
+        self.assertEqual(callbacks, [])
         reader = guard.comment_reader
         guard.comment_reader = None
         try:
             with self.assertRaises(ReviewInputError):
                 capacity_review_walk(http, "/repos/owner/repo/pulls/7/reviews")
+            with self.assertRaises(ReviewInputError):
+                capacity_review_walk(http, "/repos/owner/repo/issues/comments")
         finally:
             guard.comment_reader = reader
 

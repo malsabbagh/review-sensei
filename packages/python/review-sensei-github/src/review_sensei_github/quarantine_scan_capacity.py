@@ -193,6 +193,15 @@ def capacity_review_walk(http, path):
     _publication_transport = publication_recovery._publication_transport
     base = http.transport if type(http) is _BudgetedReviewPagination else http
     transport = _publication_transport(base)
+    # An installed lifetime cannot become an ordinary fallback by losing its
+    # owner/reader attribute. Validate exact custody before touching a replaced
+    # guard or considering a non-review path.
+    if capacity_transport_membership.was_installed(transport):
+        raw = object.__getattribute__(transport, "__dict__")
+        guard = raw.get("_quarantine_capacity_guard") if type(raw) is dict else None
+        if type(guard) is not quarantine_capacity.NativeCapacityGuard:
+            raise ReviewInputError("installed review capacity guard was replaced")
+        review_walk_owner(transport)
     from . import historical_review_census
 
     require_module_seal(historical_review_census)
