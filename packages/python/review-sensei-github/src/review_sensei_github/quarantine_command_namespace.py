@@ -71,6 +71,33 @@ def _registry():
     observed: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
     current: dict[str, Any] = {}
     definition_file = cast(Any, inspect.currentframe()).f_code.co_filename
+    defining_module = sys.modules[__name__]
+    defining_spec = defining_module.__spec__
+    if defining_spec is None:
+        raise ReviewInputError("namespace defining loader is unavailable")
+    defining_loader = defining_spec.loader
+
+    def loader_binding(loader):
+        descriptor = inspect.getattr_static(type(loader), "get_code", None)
+        if (
+            descriptor is None
+            or inspect.getattr_static(loader, "get_code", None) is not descriptor
+        ):
+            raise ReviewInputError("current namespace loader implementation changed")
+        implementation = getattr(descriptor, "__func__", descriptor)
+        return (
+            type(loader),
+            descriptor,
+            getattr(implementation, "__code__", None),
+            getattr(implementation, "__globals__", None),
+            getattr(implementation, "__defaults__", None),
+            getattr(implementation, "__kwdefaults__", None),
+        )
+
+    defining_loader_binding = loader_binding(defining_loader)
+    defining_origin = defining_spec.origin
+    defining_file = getattr(defining_module, "__file__", None)
+    defining_loader_state = tuple(vars(defining_loader).items())
 
     def install(caller_type):
         module = sys.modules.get("review_sensei_github.api_run_requests")
@@ -96,7 +123,6 @@ def _registry():
         )
 
     def install_current_validator(function):
-        from importlib.machinery import SourceFileLoader
         from pathlib import Path
         from types import FunctionType
 
@@ -106,20 +132,64 @@ def _registry():
         frame = cast(Any, inspect.currentframe()).f_back
         spec = getattr(module, "__spec__", None)
         loader = getattr(spec, "loader", None)
-        expected = str(
-            Path(definition_file).with_name("current_quarantine_finalization.py")
+        expected = (
+            f"<frozen {name}>"
+            if definition_file == f"<frozen {__name__}>"
+            else str(
+                Path(definition_file).with_name("current_quarantine_finalization.py")
+            )
+        )
+
+        def sibling(value):
+            if value in (None, "frozen"):
+                return value
+            return str(
+                Path(value).with_name(
+                    "current_quarantine_finalization" + Path(value).suffix
+                )
+            )
+
+        expected_state = {}
+        replacements = {
+            __name__: name,
+            definition_file: expected,
+            defining_origin: sibling(defining_origin),
+            defining_file: sibling(defining_file),
+        }
+        for key, value in defining_loader_state:
+            expected_state[key] = (
+                replacements.get(value, value) if type(value) is str else value
+            )
+        actual_state = vars(loader) if hasattr(loader, "__dict__") else {}
+        original_state = vars(defining_loader)
+        state_intact = (
+            set(actual_state) == set(expected_state)
+            and set(original_state) == {key for key, _ in defining_loader_state}
+            and all(
+                original_state[key] is value for key, value in defining_loader_state
+            )
+            and all(
+                (
+                    actual_state[key] == value
+                    if type(value) in (str, int, bool, type(None))
+                    else actual_state[key] is value
+                )
+                for key, value in expected_state.items()
+            )
         )
         if (
             current
+            or not state_intact
             or module is None
             or type(function) is not FunctionType
             or frame.f_globals is not vars(module)
             or frame.f_locals is not frame.f_globals
             or not getattr(spec, "_initializing", False)
-            or type(loader) is not SourceFileLoader
-            or getattr(spec, "origin", None) != expected
-            or getattr(module, "__file__", None) != expected
-            or loader.path != expected
+            or loader_binding(loader) != defining_loader_binding
+            or loader_binding(defining_loader) != defining_loader_binding
+            or getattr(spec, "origin", None) != sibling(defining_origin)
+            or getattr(module, "__file__", None) != sibling(defining_file)
+            or frame.f_code.co_filename != expected
             or function.__module__ != name
             or function.__qualname__ != "validate_namespace_request"
             or id(getattr(module, "validate_namespace_request", None)) != id(function)
@@ -133,7 +203,7 @@ def _registry():
                 "current namespace requires original defining source"
             )
         try:
-            original_code = loader.get_code(name)
+            original_code = cast(Any, loader).get_code(name)
         except (OSError, ImportError) as error:
             raise ReviewInputError(
                 "current namespace defining source is unavailable"
