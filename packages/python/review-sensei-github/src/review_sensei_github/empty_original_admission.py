@@ -1,7 +1,8 @@
 """Same-invocation evidence that an empty original needs no comment flags.
 
-Only the original restore producer can record historical namespace validation.
-This receipt cannot make that namespace current, release its obligations, or
+Only the original restore producer can record namespace validation. An ordinary
+empty original additionally requires its accepted payload and exact selected root.
+This receipt cannot make a historical namespace current, release obligations, or
 replace any later quarantine, native, or checkpoint fence.
 """
 
@@ -72,15 +73,23 @@ def _build():
                 entry is None
                 or record is None
                 or document is not None
-                or record.finding_lifecycle is None
-                or record.quarantine_lineage is None
                 or record.transaction is None
             ):
                 return record, document
-            # A successful original restore with a nonempty reference and no
-            # document is its fully validated inherited-historical branch.
-            # Ordinary missing-reference and caller-supplied documents cannot
-            # issue this observation.
+            historical = (
+                record.finding_lifecycle is not None
+                and record.quarantine_lineage is not None
+            )
+            original_empty = (
+                record.finding_lifecycle is None and record.quarantine_lineage is None
+            )
+            if not historical and not original_empty:
+                return record, document
+            # The actual restore has either validated inherited historical
+            # authority or authenticated that this root has no lifecycle or
+            # quarantine namespace. Only a separately selected empty original
+            # may omit per-comment flags; native/history gates still run.
+            # Mixed or caller-supplied namespaces cannot issue this receipt.
             caller = getattr(ledger, "caller", None)
             if caller is None or caller._checkpoint is not None:
                 return record, document
@@ -181,6 +190,40 @@ def _build():
         except (ReviewInputError, ValueError):
             return False
 
+    def plain_after_selected_intent(old_record, raw, record):
+        """Validate only the original pending-to-failed business transition.
+
+        The consumer separately requires the actual load producer's exact
+        current record to be the caller's owned root. No cached root or generic
+        receipt can substitute for that independently selected current state.
+        """
+        from review_sensei import session
+
+        from . import accepted_result
+
+        if (
+            old_record.finding_lifecycle is not None
+            or old_record.quarantine_lineage is not None
+            or old_record.transaction is None
+            or old_record.transaction.phase != "publication_pending"
+            or record.transaction is None
+            or record.transaction.phase != "publication_failed"
+            or canonical_bytes(old_record.to_dict()) != raw
+        ):
+            return False
+        try:
+            require_module_seal(session)
+            require_module_seal(accepted_result)
+            now = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+            expected = session._publication_state_mutation(
+                old_record.transaction, published=False, now=now
+            )(old_record).evolve(api_run_accounting=record.api_run_accounting, now=now)
+            return canonical_bytes(expected.to_dict()) == canonical_bytes(
+                record.to_dict()
+            )
+        except (ReviewInputError, ValueError):
+            return False
+
     def consume(owner, ledger, record, result):
         entry = active.get()
         if entry is None or entry.get("owner") is not owner:
@@ -213,14 +256,51 @@ def _build():
             or caller._checkpoint is not None
             or caller._root != record.record_sha256
             or caller._effect_record is not record
-            or not retained_after_owned_intent(ledger, caller, old_record, raw, record)
+            or not (
+                retained_after_owned_intent(ledger, caller, old_record, raw, record)
+                or plain_after_selected_intent(old_record, raw, record)
+            )
             or canonical_bytes(record.finding_lifecycle) != reference
             or record.transaction is None
             or result.transaction is None
             or result.transaction.to_dict() != record.transaction.to_dict()
             or result.content_digest() != digest
+            or result.content_digest() != record.transaction.result_sha256
         ):
             return False
+        if old_record.finding_lifecycle is None:
+            # This optimization is only the first original invocation, never a
+            # cold retry with missing admission artifacts. Independently bind
+            # the exact empty accepted payload, not an empty projected result.
+            import json
+
+            from review_sensei.models import ReviewResult
+
+            from . import accepted_result
+
+            try:
+                require_module_seal(accepted_result)
+                source = accepted_result.selected_accepted_result(
+                    ledger.http,
+                    record.transaction,
+                    app_id=ledger.authenticated_app_id,
+                )
+                accepted = ReviewResult.from_dict(json.loads(source.payload))
+            except (ReviewInputError, ValueError):
+                return False
+            reference = source.reference
+            if (
+                old_record.transaction is None
+                or old_record.transaction.phase != "publication_pending"
+                or not old_record.transaction.logical_identity_matches(
+                    record.transaction
+                )
+                or accepted.comments
+                or accepted.content_digest() != result.content_digest()
+                or reference["run_id"] != str(caller.run.run_id)
+                or reference["run_attempt"] != str(caller.attempt)
+            ):
+                return False
         from .checkpoint_result_store import uses_grouped_publication
 
         if uses_grouped_publication(ledger.http, result):
