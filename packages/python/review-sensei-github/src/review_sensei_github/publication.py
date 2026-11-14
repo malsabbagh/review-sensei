@@ -1751,6 +1751,13 @@ class _BudgetedReviewPagination(GitHubHttp):
         self.budget = budget
         self.last_page_size = 100
 
+        from review_sensei.source_registry import require_module_seal
+
+        from . import capacity_transport_membership
+
+        require_module_seal(capacity_transport_membership)
+        capacity_transport_membership.register_wrapper(self)
+
     def request(
         self,
         method: str,

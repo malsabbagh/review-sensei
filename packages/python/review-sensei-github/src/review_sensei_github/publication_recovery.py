@@ -279,6 +279,13 @@ class _PaginationObservationHttp(GitHubHttp):
         operation = _PAGINATION_OBSERVATIONS.setdefault(budget, WeakKeyDictionary())
         self._oversized_page_ceilings = operation.setdefault(base, {})
 
+        from review_sensei.source_registry import require_module_seal
+
+        from . import capacity_transport_membership
+
+        require_module_seal(capacity_transport_membership)
+        capacity_transport_membership.register_wrapper(self)
+
     @property
     def preflight_native_batch(self):
         # Preserve the source journal's pure complete-batch admission across
@@ -353,6 +360,13 @@ class PublicationBudgetHttp(GitHubHttp):
             raise GitHubPublicationError("publication budget identity mismatches")
         self._already_charged = known_wrapper or known_feedback
         self.transport = _PaginationObservationHttp(http, budget)
+
+        from review_sensei.source_registry import require_module_seal
+
+        from . import capacity_transport_membership
+
+        require_module_seal(capacity_transport_membership)
+        capacity_transport_membership.register_wrapper(self)
 
     @property
     def preflight_native_batch(self):

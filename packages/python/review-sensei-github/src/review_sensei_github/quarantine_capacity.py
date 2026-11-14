@@ -1878,6 +1878,12 @@ def install_capacity(
         else:
             raise ReviewInputError("quarantine check census is incomplete")
     guard.seed("checks", list(checks.values()))
+    from review_sensei.source_registry import require_module_seal
+
+    from . import capacity_transport_membership
+
+    require_module_seal(capacity_transport_membership)
+    capacity_transport_membership.register_install(transport, guard)
     transport._quarantine_capacity_guard = guard
     ledger._quarantine_capacity_cursor = True
     guard.comment_reader = CapacityCommentReader(ledger, identity, transport)

@@ -177,6 +177,12 @@ def capacity_review_walk(http, path):
     known and unknown native allocations remain in the guard's original totals.
     An uninstalled preview, arbitrary path or alternate query cannot issue it.
     """
+    from . import capacity_transport_membership
+
+    require_module_seal(capacity_transport_membership)
+    if capacity_transport_membership.never_installed(http):
+        return None
+
     from . import publication, publication_recovery, quarantine_capacity
 
     require_module_seal(publication)
@@ -196,6 +202,8 @@ def capacity_review_walk(http, path):
     if resolved is not None:
         ledger, guard, transport = resolved
     elif guard is None or type(reader) is not CapacityCommentReader:
+        if capacity_transport_membership.was_installed(transport):
+            raise ReviewInputError("installed review capacity or reader was removed")
         return None
     # Installed readers use the authenticated defining method, never an
     # instance callback supplied during the preceding external response.
