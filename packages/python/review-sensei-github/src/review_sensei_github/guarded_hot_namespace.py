@@ -17,6 +17,10 @@ from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
 from review_sensei.source_registry import require_instance_source, require_module_seal
 
+from .guarded_hot_namespace_projection import (
+    project_initial_accounting as _project_hot_accounting,
+)
+
 
 def _function(function):
     return (
@@ -287,6 +291,7 @@ def _registry():
 
     sources: dict[str, Any] = {}
     active: WeakKeyDictionary[Any, dict[str, Any]] = WeakKeyDictionary()
+    sizing: dict[object, dict[str, Any]] = {}
     context: ContextVar[Any] = ContextVar("original_hot_namespace", default=None)
 
     def install_caller(cls):
@@ -333,6 +338,7 @@ def _registry():
                 entry = scope["entry"]
                 if entry is not None:
                     active.pop(entry["caller"], None)
+                    sizing.pop(entry.get("sizing_token"), None)
                     entry["expired"] = True
                     entry.pop("run_frame", None)
                 context.reset(token)
@@ -623,6 +629,56 @@ def _registry():
         scope["entry"] = entry
         active[caller] = entry
         require(entry, caller)
+        # Source-qualified inert data only. No writer consumes this result.
+        from . import guarded_hot_namespace_projection
+
+        require_module_seal(guarded_hot_namespace_projection)
+        if (
+            _project_hot_accounting
+            is not guarded_hot_namespace_projection.project_initial_accounting
+        ):
+            raise ReviewInputError("hot namespace projection source changed")
+        entry["sizing_bytes"] = _project_hot_accounting(entry["initial_bytes"], blocks)
+        token = object()
+        entry["sizing_token"] = token
+        sizing[token] = entry
+        entry["sizing_observed"] = sizing_bound(token, caller, record)
+
+    def sizing_bound(token, caller, record):
+        """Original-begin-only inert observation, not a runtime consumer API."""
+        require_module_seal(sys.modules[__name__])
+        if type(token) is not object:
+            raise ReviewInputError("hot namespace sizing token is not original")
+        entry = sizing.get(token)
+        if entry is None or entry["caller"] is not caller:
+            raise ReviewInputError("hot namespace sizing token is copied or expired")
+        require(entry, caller)
+        frame = sys._getframe(1)
+        if (
+            frame.f_code is not begin.__code__
+            or frame.f_globals is not globals()
+            or frame.f_locals.get("entry") is not entry
+            or frame.f_locals.get("caller") is not caller
+            or frame.f_locals.get("record") is not record
+            or record is not entry["record"]
+            or record.record_sha256 != entry["root"]
+        ):
+            raise ReviewInputError("hot namespace sizing producer or root changed")
+        from . import guarded_hot_namespace_projection
+
+        require_module_seal(guarded_hot_namespace_projection)
+        if (
+            _project_hot_accounting
+            is not guarded_hot_namespace_projection.project_initial_accounting
+        ):
+            raise ReviewInputError("hot namespace projection source changed")
+        expected = _project_hot_accounting(entry["initial_bytes"], entry["blocks"])
+        if (
+            type(entry["sizing_bytes"]) is not bytes
+            or entry["sizing_bytes"] != expected
+        ):
+            raise ReviewInputError("hot namespace sizing data changed")
+        return expected
 
     def before_sequence(caller, deadline):
         entry = active.get(caller)
@@ -680,6 +736,7 @@ def _registry():
         begin,
         before_sequence,
         confirm_checkpoint,
+        sizing_bound,
     )
 
 
@@ -690,6 +747,7 @@ def _registry():
     begin,
     before_sequence,
     confirm_checkpoint,
+    sizing_bound,
 ) = _registry()
 del _registry
 

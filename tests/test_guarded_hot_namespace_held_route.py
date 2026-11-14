@@ -19,6 +19,9 @@ from review_sensei.errors import ReviewInputError
 
 
 class GuardedHotNamespaceHeldRouteTests(unittest.TestCase):
+    def inspect_namespace_entry(self, entry):
+        """Passive extension seam for additional inert source-data controls."""
+
     def test_original_held512_confirms_root_and_preserves_namespace_until_cleanup(self):
         require = inspect.getclosurevars(namespace.begin).nonlocals["require"]
         entries, initial_roots, guards, accepted, failures, refused = (
@@ -57,6 +60,7 @@ class GuardedHotNamespaceHeldRouteTests(unittest.TestCase):
                 )
                 entries.append(entry)
                 initial_roots.append(entry["root"])
+                self.inspect_namespace_entry(entry)
                 caller = entry["caller"]
                 require(entry, caller)
                 reject("copied", dict(entry), caller)
