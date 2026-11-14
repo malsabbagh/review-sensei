@@ -54,7 +54,10 @@ def _pack_journal(document):
     # A closed pair includes hashes and a PATCH path derived from a future
     # native ID. Independent slots keep their entropy AND equality relationships
     # outside the compressed skeleton. Existing v3 readers already support it.
-    paired = document.get("schema_version") == "finding-lifecycle-journal-v3"
+    paired = document.get("schema_version") == "finding-lifecycle-journal-v3" or (
+        document.get("schema_version") == "finding-lifecycle-journal-v4"
+        and document.get("base_schema_version") == "finding-lifecycle-journal-v3"
+    )
 
     variable_digests = {
         "request_sha256",
