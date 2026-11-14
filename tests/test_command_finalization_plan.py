@@ -2,11 +2,24 @@
 
 import copy
 import json
+import sys
 import unittest
+from contextlib import contextmanager
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 from tests import test_plain_cleanup_fence as cleanup_fixtures
+
+
+@contextmanager
+def observe_original_calls(observer):
+    """Inspect source-owned frames without replacing authenticated methods."""
+    previous = sys.getprofile()
+    try:
+        sys.setprofile(observer)
+        yield
+    finally:
+        sys.setprofile(previous)
 
 
 class CommandFinalizationPlanTests(unittest.TestCase):
@@ -221,7 +234,17 @@ class CommandFinalizationPlanTests(unittest.TestCase):
             self.assertNotEqual(result[1], plan.journal._document())
             return original(plan, ledger, record, dispositions=dispositions)
 
-        with patch.object(CommandFinalizationPlan, "reuse_retained_lifecycle", checked):
+        def observe(frame, event, arg):
+            if frame.f_code is original.__code__ and event == "call":
+                values = frame.f_locals
+                checked(
+                    values["self"],
+                    values["ledger"],
+                    values["record"],
+                    dispositions=values["dispositions"],
+                )
+
+        with observe_original_calls(observe):
             CommandCapacityBindingTests(
                 "test_default_budget_two_finding_command_and_cold_verify_use_one_check_capability"
             ).test_default_budget_two_finding_command_and_cold_verify_use_one_check_capability()
@@ -317,8 +340,6 @@ class CommandFinalizationPlanTests(unittest.TestCase):
             self.assertEqual(fixture.resolved_threads, set())
 
     def test_real_dictionary_plan_custody_rejects_tampering_without_io(self):
-        from unittest.mock import patch
-
         from review_sensei_github import command_finalization_plan as plans
         from review_sensei_github.finding_lifecycle import _unpack_journal
 
@@ -337,16 +358,11 @@ class CommandFinalizationPlanTests(unittest.TestCase):
             changed["lifecycle"]["schema_version"] = "changed"
             with self.assertRaises(ReviewInputError):
                 original_bind(plan, changed)
-            original_bind(plan, base)
-            with self.assertRaises(ReviewInputError):
-                original_bind(plan, base)
             self.assertEqual(len(plan.journal.ledger.caller.observations), before)
-            bound.append(plan)
 
         def attach(plan, finalizer, journal, **kwargs):
-            result = original_attach(plan, finalizer, journal, **kwargs)
             if plan not in bound:
-                return result
+                return
             before = len(journal.ledger.caller.observations)
             with self.assertRaises(ReviewInputError):
                 original_attach(plan, finalizer, journal, **kwargs)
@@ -357,7 +373,7 @@ class CommandFinalizationPlanTests(unittest.TestCase):
                 )
                 self.assertEqual(len(journal.ledger.caller.observations), before)
                 exercised.append(plan)
-                return result
+                return
             packed = next(iter(pending.values()))
             logical = _unpack_journal(json.loads(packed))
             expected = plans.pack_authorized_pending(journal, logical)
@@ -393,12 +409,31 @@ class CommandFinalizationPlanTests(unittest.TestCase):
             )
             self.assertEqual(len(journal.ledger.caller.observations), before)
             exercised.append(plan)
-            return result
 
-        with (
-            patch.object(plans.CommandFinalizationPlan, "bind_dictionary_base", bind),
-            patch.object(plans, "attach_execution_reads", attach),
-        ):
+        def observe(frame, event, arg):
+            values = frame.f_locals
+            if frame.f_code is original_bind.__code__:
+                plan, base = values["self"], values["base"]
+                if event == "call":
+                    bind(plan, base)
+                elif event == "return":
+                    before = len(plan.journal.ledger.caller.observations)
+                    with self.assertRaises(ReviewInputError):
+                        original_bind(plan, base)
+                    self.assertEqual(
+                        len(plan.journal.ledger.caller.observations), before
+                    )
+                    bound.append(plan)
+            elif frame.f_code is original_attach.__code__ and event == "return":
+                attach(
+                    values["plan"],
+                    values["finalizer"],
+                    values["journal"],
+                    dispositions=values["dispositions"],
+                    check_token=values["check_token"],
+                )
+
+        with observe_original_calls(observe):
             CommandCapacityBindingTests(
                 "test_default_budget_two_finding_command_and_cold_verify_use_one_check_capability"
             ).test_default_budget_two_finding_command_and_cold_verify_use_one_check_capability()
