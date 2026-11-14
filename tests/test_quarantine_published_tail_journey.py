@@ -85,7 +85,7 @@ class PublishedTailJourneyFixture(JourneyFixture):
             "id": 8_100_000,
             "body": "Late old bot reply: @reviewsensei verify. This is not a new human decision.",
             "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
-            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            "issue_url": f"{self.api_url}/repos/owner/repo/issues/7",
         }
         self.late_effects.extend(("old-reply-comment", "old-reaction-and-metadata"))
 
@@ -349,7 +349,7 @@ class NativePublishedTailJourneyFixture(PublishedTailJourneyFixture):
                 self._meter(request)
                 assert self.accounted.observations[-1]["mutation"] is False
                 snapshot = object.__new__(NativeCensusBackend)
-                snapshot.http = GitHubHttp(api_url="https://api.github.test")
+                snapshot.http = GitHubHttp(api_url=self.api_url)
                 snapshot.plan = SimpleNamespace(
                     repository_id=123,
                     pull_request=7,
@@ -757,7 +757,7 @@ class HeavyPublishedTailJourneyFixture(PublishedTailJourneyFixture):
                 "id": identifier,
                 "body": body,
                 "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
-                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+                "issue_url": f"{self.api_url}/repos/owner/repo/issues/7",
                 "created_at": "2026-10-28T00:02:00Z",
                 "updated_at": "2026-10-28T00:02:00Z",
             }

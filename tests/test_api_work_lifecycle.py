@@ -305,7 +305,7 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
                     else "COMMENTED",
                     "body": payload["body"],
                     "user": bot,
-                    "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/7",
+                    "pull_request_url": f"{self.api_url}/repos/owner/repo/pulls/7",
                     "html_url": "https://github.test/reviews/100",
                     "submitted_at": "2026-10-25T22:00:00Z",
                 }

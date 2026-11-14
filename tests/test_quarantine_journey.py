@@ -105,9 +105,9 @@ class JourneyFixture(CreationFixture, CommandEntryFixture):
                                             "pullRequest": subject
                                             if item.get(
                                                 "issue_url",
-                                                "https://api.github.test/repos/owner/repo/issues/7",
+                                                f"{self.api_url}/repos/owner/repo/issues/7",
                                             )
-                                            == "https://api.github.test/repos/owner/repo/issues/7"
+                                            == f"{self.api_url}/repos/owner/repo/issues/7"
                                             else {**subject, "number": 8},
                                         }
                                         for item in selected
@@ -223,7 +223,7 @@ class JourneyFixture(CreationFixture, CommandEntryFixture):
         response = super().external(request, timeout)
         if self.comment is not None:
             self.comment.setdefault(
-                "issue_url", "https://api.github.test/repos/owner/repo/issues/7"
+                "issue_url", f"{self.api_url}/repos/owner/repo/issues/7"
             )
         return response
 

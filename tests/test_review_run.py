@@ -406,7 +406,7 @@ class EntryFixture(LifecycleFixture):
             )
 
         def http_factory(**kwargs):
-            http = GitHubHttp(api_url="https://api.github.test", **kwargs)
+            http = GitHubHttp(api_url=fixture.api_url, **kwargs)
             fixture.http = http
             return http
 

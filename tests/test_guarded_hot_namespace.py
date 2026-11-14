@@ -214,6 +214,8 @@ class GuardedHotNamespaceEligibleTests(unittest.TestCase):
             NativePublishedTailJourneyFixture,
         )
 
+        from hot_original_entry import invoke_original
+
         original = finding_lifecycle.FindingLifecycleJournal
         observed = []
         replacement = object()
@@ -240,6 +242,7 @@ class GuardedHotNamespaceEligibleTests(unittest.TestCase):
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             fixture = NativePublishedTailJourneyFixture(directory)
+            fixture.api_url = "https://api.github.com"
             old, registration = fixture.original_origins()
             old_accounting = copy.deepcopy(old.api_run_accounting)
             reviews = copy.deepcopy(fixture.reviews)
@@ -259,13 +262,15 @@ class GuardedHotNamespaceEligibleTests(unittest.TestCase):
             try:
                 with registered_resource([registration]):
                     sys.setprofile(observe)
-                    result = fixture.invoke()
+                    result, _wire = invoke_original(fixture)
             finally:
                 sys.setprofile(previous)
                 finding_lifecycle.FindingLifecycleJournal = original
             self.assertEqual(observed, [True])
             self.assertEqual(result, 1)
-            self.assertIn("source", fixture.error)
+            self.assertIn(
+                "original module source changed: FindingLifecycleJournal", fixture.error
+            )
             self.assertEqual(fixture.reviews, reviews)
             self.assertEqual(fixture.check_runs, checks)
             self.assertEqual(old.api_run_accounting, old_accounting)
