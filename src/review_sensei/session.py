@@ -2728,10 +2728,23 @@ def prepare_review_transaction(
         raise ReviewInputError("review transaction configuration digest is invalid")
     if not re.fullmatch(r"[a-f0-9]{64}", evidence_digest):
         raise ReviewInputError("review transaction evidence digest is invalid")
-    prepared = prepare_session_round(
+    if not isinstance(policy, ReviewConvergencePolicy):
+        raise ReviewInputError("review convergence policy is invalid")
+    from . import reservation_transaction_fusion
+    from .source_registry import require_module_seal
+
+    require_module_seal(reservation_transaction_fusion)
+    prepared, fused = reservation_transaction_fusion.reserve_transaction(
         ledger,
         identity,
         policy,
+        binding={
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "policy_digest": policy.digest(),
+            "configuration_digest": configuration_digest,
+            "evidence_digest": evidence_digest,
+        },
         reservation_id=reservation_id,
         now=now,
         head_sha=head_sha,
@@ -2751,6 +2764,16 @@ def prepare_review_transaction(
         reservation_id=prepared.reservation_id,
         generation=prepared.record.generation,
     )
+
+    if fused:
+        if prepared.record.transaction != transaction:
+            raise ReviewInputError("atomic reservation transaction changed")
+        return PreparedSessionRound(
+            record=prepared.record,
+            decision=prepared.decision,
+            reservation_id=prepared.reservation_id,
+            transaction=transaction,
+        )
 
     def attach(record: SessionRecord) -> SessionRecord:
         if record.generation != prepared.record.generation:
@@ -6755,6 +6778,12 @@ def resolve_local_session_ledger(
     except (OSError, TypeError, ValueError) as exc:
         raise ReviewInputError("session ledger path is invalid") from exc
     return LocalSessionLedger(root)
+
+
+from .reservation_transaction_fusion import install as _install_reservation_fusion  # noqa: E402
+
+_install_reservation_fusion(globals())
+del _install_reservation_fusion
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

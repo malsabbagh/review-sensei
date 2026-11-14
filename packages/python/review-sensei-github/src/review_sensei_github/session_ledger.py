@@ -21,6 +21,7 @@ import copy
 import hashlib
 import json
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping, Sequence, cast
@@ -3194,9 +3195,16 @@ class GitHubIssueCommentSessionLedger:
             rescan_request, AuthorizedRescan
         ):
             raise ReviewInputError("explicit rescan authority is invalid")
-        return self.replace(
-            identity,
-            lambda record: self._own_reservation(
+
+        def mutate(record: SessionRecord) -> SessionRecord:
+            from review_sensei import models, reservation_transaction_fusion, session
+            from review_sensei.source_registry import require_module_seal
+
+            require_module_seal(session)
+            require_module_seal(models)
+            require_module_seal(reservation_transaction_fusion)
+            require_module_seal(sys.modules[__name__])
+            reserved = self._own_reservation(
                 record,
                 mutate_reserved(
                     record,
@@ -3207,9 +3215,13 @@ class GitHubIssueCommentSessionLedger:
                     rescan_request=rescan_request,
                     now=now,
                 ),
-            ),
-            now=now,
-        )
+            )
+            require_module_seal(reservation_transaction_fusion)
+            return reservation_transaction_fusion.attach_reserved(
+                self, identity, record, reserved
+            )
+
+        return self.replace(identity, mutate, now=now)
 
     def commit(
         self,
@@ -3343,6 +3355,14 @@ from .trust_enrollment import _install_native_source  # noqa: E402
 
 _install_native_source(GitHubIssueCommentSessionLedger)
 del _install_native_source
+
+
+from review_sensei.reservation_transaction_fusion import (  # noqa: E402
+    install as _install_reservation_fusion,
+)
+
+_install_reservation_fusion(globals())
+del _install_reservation_fusion
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
