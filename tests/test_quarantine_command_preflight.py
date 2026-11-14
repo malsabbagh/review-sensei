@@ -24,13 +24,20 @@ class ColdCommandPreflightTests(unittest.TestCase):
     def test_genuine_plain_target_does_not_require_a_native_guard(self):
         self.exercise_guard("plain")
 
+    def test_plain_first_decision_uses_shared_projection_without_changing_authority(
+        self,
+    ):
+        self.exercise_guard("plain-positive")
+
     def exercise_guard(self, fault):
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             fixture = (
-                JourneyFixture if fault == "plain" else PublishedTailJourneyFixture
+                JourneyFixture
+                if fault.startswith("plain")
+                else PublishedTailJourneyFixture
             )(directory)
             old, registration = fixture.original_origins(
                 failed_count=1, published_count=1
@@ -95,7 +102,11 @@ class ColdCommandPreflightTests(unittest.TestCase):
                 previous = sys.getprofile()
                 try:
                     sys.setprofile(observe)
-                    self.assertNotEqual(fixture.invoke_command(), 0)
+                    status = fixture.invoke_command()
+                    if fault == "plain-positive":
+                        self.assertEqual(status, 0, fixture.error)
+                    else:
+                        self.assertNotEqual(status, 0)
                 finally:
                     sys.setprofile(previous)
                 expected = (
@@ -105,9 +116,22 @@ class ColdCommandPreflightTests(unittest.TestCase):
                     if fault == "unsupported"
                     else "installed capacity source changed"
                 )
-                self.assertIn(expected, fixture.error)
+                if fault == "plain-positive":
+                    self.assertEqual(
+                        entered, ["begin_action_effect", "_stage_decision_event"]
+                    )
+                    self.assertEqual(
+                        len(
+                            fixture.selected.ledger._quarantine_authenticated.state[
+                                "settlements"
+                            ]
+                        ),
+                        1,
+                    )
+                else:
+                    self.assertIn(expected, fixture.error)
+                    self.assertEqual(entered, [])
                 self.assertEqual(len(touched), 1)
-                self.assertEqual(entered, [])
                 self.assertEqual(old.to_dict(), original_history)
 
 

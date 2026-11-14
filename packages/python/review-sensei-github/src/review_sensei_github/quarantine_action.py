@@ -11,13 +11,11 @@ from typing import Any
 from urllib.parse import quote
 
 from review_sensei.bounded_evidence import (
-    MAX_MANIFEST_BYTES,
     MAX_PART_BYTES,
     MAX_STORED_PART_BYTES,
     MAX_STORED_PARTS,
     canonical_bytes,
     evidence_manifest,
-    inline_manifest,
     partition_evidence,
     read_inline_evidence,
 )
@@ -27,7 +25,6 @@ from review_sensei.disposition import (
     authorized_override,
 )
 from review_sensei.errors import ReviewInputError
-from review_sensei.quarantine_assessments import require_assessment_successor
 from review_sensei.quarantine_state import assessment_cursor, next_assessment_event
 
 from .approval import ReviewApprovalEligibility
@@ -105,6 +102,7 @@ class QuarantineTarget:
     instance: str
     permission: str
     lifecycle_transfer: object | None = None
+    capacity_projection: object | None = None
 
 
 def decision_authority(run, authority):
@@ -529,12 +527,23 @@ def prepare_quarantine_target(run, authority, command, app, permission):
     # event changes only that origin's hold, never ordinary dispositions or a
     # fresh thread. A recurrence therefore retains its independent fresh gate.
     actual_permission = decision_authority(run, authority)
+    from .quarantine_command_projection import project_decision
+
+    # Pure sizing includes the maximum legal future generation and storage ID.
+    # This detached value cannot enter the ledger or stand in for the own CAS.
+    projected = project_decision(
+        authenticated,
+        record,
+        _decision_value(run, authority, command, instance, actual_permission),
+        binding={**_decision_binding(record, run), "generation": 2_147_483_647},
+    )
     target = QuarantineTarget(
         reader,
         authenticated,
         instance,
         actual_permission,
         lifecycle_capture[0] if lifecycle_capture else None,
+        projected,
     )
     from .quarantine_lifecycle_transfer import bind_target
 
@@ -650,8 +659,35 @@ def _stage_decision_event(run, authority, event, binding):
     )
 
 
-def apply_quarantine_target(run, authority, command, target, app):
+def _decision_value(run, authority, command, instance, permission):
     source, actor = authority.document["source"], authority.document["actor"]
+    return {
+        "origin_scope_sha256": command.scope,
+        "instance": instance,
+        "action": command.action,
+        "actor": actor["login"],
+        "role": permission,
+        "head_sha": run.head_sha,
+        "source_id": source["id"],
+        "source_updated_at": source["updated_at"],
+        "source_body_sha256": source["body_sha256"],
+        "reason": command.submitted_reason,
+        "policy_sha256": run.caller.accounting.configuration.digest,
+    }
+
+
+def _decision_binding(record, run):
+    return {
+        **record.quarantine_lineage["assessment_state_manifest"]["binding"],
+        "generation": record.generation + 1,
+        "head_sha": run.head_sha,
+        "base_sha": run.base_sha,
+        "configuration_digest": run.caller.accounting.configuration.digest,
+    }
+
+
+def apply_quarantine_target(run, authority, command, target, app):
+    actor = authority.document["actor"]
     before = target.authenticated
     existing = next(
         (
@@ -663,19 +699,9 @@ def apply_quarantine_target(run, authority, command, target, app):
         None,
     )
     if existing is None:
-        decision = {
-            "origin_scope_sha256": command.scope,
-            "instance": target.instance,
-            "action": command.action,
-            "actor": actor["login"],
-            "role": target.permission,
-            "head_sha": run.head_sha,
-            "source_id": source["id"],
-            "source_updated_at": source["updated_at"],
-            "source_body_sha256": source["body_sha256"],
-            "reason": command.submitted_reason,
-            "policy_sha256": run.caller.accounting.configuration.digest,
-        }
+        decision = _decision_value(
+            run, authority, command, target.instance, target.permission
+        )
 
         loaded = run.ledger.load(run.identity)
         current = getattr(run.ledger, "_quarantine_authenticated", None)
@@ -694,13 +720,7 @@ def apply_quarantine_target(run, authority, command, target, app):
             current_manifest, expected_binding=current_manifest["binding"]
         )
         event = next_assessment_event(cursor, decision)
-        binding = {
-            **current_manifest["binding"],
-            "generation": loaded.record.generation + 1,
-            "head_sha": run.head_sha,
-            "base_sha": run.base_sha,
-            "configuration_digest": run.caller.accounting.configuration.digest,
-        }
+        binding = _decision_binding(loaded.record, run)
         tail = _stage_decision_event(run, authority, event, binding)
 
         def mutate(record):
@@ -715,29 +735,15 @@ def apply_quarantine_target(run, authority, command, target, app):
                 raise ReviewInputError(
                     "quarantine complete assessment state changed before decision"
                 )
-            next_state = {
-                **authenticated.state,
-                "settlements": [*authenticated.state["settlements"], decision],
-            }
-            require_assessment_successor(
-                authenticated.archive["assessment_origins"],
-                authenticated.inventories,
-                authenticated.state,
-                next_state,
-                scope=authenticated.lineage["scope_sha256"],
-            )
-            value = assessment_cursor(
+            from .quarantine_command_projection import cursor_manifest, successor_state
+
+            next_state = successor_state(authenticated, decision)
+            manifest = cursor_manifest(
                 scope=authenticated.lineage["scope_sha256"],
                 count=len(next_state["settlements"]),
-                tail_manifest=tail,
-            )
-            manifest = inline_manifest(
-                value,
+                tail=tail,
                 binding={**binding, "generation": record.generation + 1},
-                item_count=len(next_state["settlements"]),
             )
-            if manifest is None or len(canonical_bytes(manifest)) > MAX_MANIFEST_BYTES:
-                raise ReviewInputError("quarantine decision cursor exceeds its bound")
             return record.evolve(
                 generation=record.generation + 1,
                 quarantine_lineage={
