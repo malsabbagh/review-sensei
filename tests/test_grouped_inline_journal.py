@@ -16,15 +16,15 @@ from review_sensei_github.original_admission_journal import (
 )
 
 from review_sensei.errors import ReviewInputError
-from tests.test_guarded_publication_batch import GuardedPairSchemaTests
-from tests.test_original_admission_projection import OriginalAdmissionProjectionTests
+from tests import test_guarded_publication_batch as guarded_fixture
+from tests import test_original_admission_projection as admission_fixture
 from tests.test_review_transaction import IDENTITY
 
 
 class GroupedInlineJournalTests(unittest.TestCase):
     def inputs(self):
         source, _, lifecycle, _, projection = (
-            OriginalAdmissionProjectionTests().inputs()
+            admission_fixture.OriginalAdmissionProjectionTests().inputs()
         )
         from review_sensei_github.native_review_groups import (
             NativeInline,
@@ -68,7 +68,7 @@ class GroupedInlineJournalTests(unittest.TestCase):
                 for comment, _, body, anchor in assembled.inline_comments
             ),
         )
-        base = GuardedPairSchemaTests().pair()
+        base = guarded_fixture.GuardedPairSchemaTests().pair()
         base.pop("guarded_publication_pair")
         base["schema_version"] = "finding-lifecycle-journal-v2"
         base["lifecycle"] = lifecycle

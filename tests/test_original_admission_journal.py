@@ -4,6 +4,8 @@ import copy
 import hashlib
 import unittest
 
+import test_guarded_publication_batch as guarded_fixture
+import test_original_admission_projection as admission_fixture
 from review_sensei_github.finding_lifecycle import _pack_journal, _validate
 from review_sensei_github.original_admission_journal import (
     original_admission_journal,
@@ -12,8 +14,6 @@ from review_sensei_github.original_admission_journal import (
     validate_original_admission_journal,
 )
 from test_finding_lifecycle_journal import document
-from test_guarded_publication_batch import GuardedPairSchemaTests
-from test_original_admission_projection import OriginalAdmissionProjectionTests
 from test_review_transaction import IDENTITY
 
 from review_sensei.bounded_evidence import canonical_bytes
@@ -30,11 +30,13 @@ class OriginalAdmissionJournalTests(unittest.TestCase):
                 "schema_version": "finding-lifecycle-journal-v2",
                 "accepted_semantic_history": None,
             },
-            GuardedPairSchemaTests().pair(),
+            guarded_fixture.GuardedPairSchemaTests().pair(),
         )
 
     def test_old_encodings_are_byte_identical_and_v4_round_trips(self):
-        source, _, _, _, projection = OriginalAdmissionProjectionTests().inputs()
+        source, _, _, _, projection = (
+            admission_fixture.OriginalAdmissionProjectionTests().inputs()
+        )
         old_hashes = (
             "e1d3d1132851797acb7f13768d230d56f01ac5364818341bdcfe68f161ba061b",
             "667ecfa54634cfaa6fc9b4adeb5e59a2c3fbb1271bc82614637dc2efeeda1eae",
@@ -64,7 +66,9 @@ class OriginalAdmissionJournalTests(unittest.TestCase):
                 self.assertNotEqual(framed["original_admission"], projection)
 
     def test_nested_unknown_missing_and_extra_base_fields_are_refused(self):
-        source, _, _, _, projection = OriginalAdmissionProjectionTests().inputs()
+        source, _, _, _, projection = (
+            admission_fixture.OriginalAdmissionProjectionTests().inputs()
+        )
         framed = original_admission_journal(
             self.bases()[0], projection, source, identity=IDENTITY
         )
@@ -97,8 +101,10 @@ class OriginalAdmissionJournalTests(unittest.TestCase):
         # Wrapping the old body-only pair in v4 must not broaden that contract.
         from review_sensei_github.finding_lifecycle import _digest, _request_identity
 
-        source, _, _, _, projection = OriginalAdmissionProjectionTests().inputs()
-        base = GuardedPairSchemaTests().pair()
+        source, _, _, _, projection = (
+            admission_fixture.OriginalAdmissionProjectionTests().inputs()
+        )
+        base = guarded_fixture.GuardedPairSchemaTests().pair()
         review = base["effects"][2]
         review["request"]["comments"] = _request_identity(
             {"comments": [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}]}
@@ -113,7 +119,9 @@ class OriginalAdmissionJournalTests(unittest.TestCase):
             original_admission_journal(base, projection, source, identity=IDENTITY)
 
     def test_combined_and_decompressed_bytes_share_original_limit(self):
-        source, _, _, _, projection = OriginalAdmissionProjectionTests().inputs()
+        source, _, _, _, projection = (
+            admission_fixture.OriginalAdmissionProjectionTests().inputs()
+        )
         framed = original_admission_journal(
             self.bases()[0], projection, source, identity=IDENTITY
         )
@@ -145,7 +153,9 @@ class OriginalAdmissionJournalTests(unittest.TestCase):
         ):
             with self.subTest(mode=evaluate.__name__):
                 source, state, lifecycle, index, projection = (
-                    OriginalAdmissionProjectionTests().inputs(evaluate)
+                    admission_fixture.OriginalAdmissionProjectionTests().inputs(
+                        evaluate
+                    )
                 )
                 if evaluate is fixture.evaluate_drift_round:
                     oid = state.inventory.obligations[0].obligation_id
