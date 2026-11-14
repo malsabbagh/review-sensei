@@ -257,6 +257,30 @@ def _build_registry():
         for cls in module_classes[module]:
             require_class(cls)
 
+    def require_original_class_identity(instance, *, module, name):
+        """Check defining class identity only, never executable source authority.
+
+        Negative optional-capacity classification may support public generic
+        method overrides. Guarded consumers must still require full source.
+        """
+        cls = type(instance)
+        if (
+            type(cls) is not type
+            or type(module) is not ModuleType
+            or type(name) is not str
+        ):
+            raise ReviewInputError("original source class identity is unavailable")
+        original = classes.get(cls)
+        if (
+            original is None
+            or original[0] is not module
+            or original[1] != name
+            or type(vars(module).get("__name__")) is not str
+            or sys.modules.get(vars(module)["__name__"]) is not module
+            or vars(module).get(name) is not cls
+        ):
+            raise ReviewInputError("original source class identity changed")
+
     def require_instance_source(instance, *, methods):
         cls = type(instance)
         for base in cls.__mro__:
@@ -275,9 +299,19 @@ def _build_registry():
         ):
             raise ReviewInputError("original source instance method changed")
 
-    return seal_module, require_module_seal, require_instance_source
+    return (
+        seal_module,
+        require_module_seal,
+        require_instance_source,
+        require_original_class_identity,
+    )
 
 
-seal_module, require_module_seal, require_instance_source = _build_registry()
+(
+    seal_module,
+    require_module_seal,
+    require_instance_source,
+    require_original_class_identity,
+) = _build_registry()
 del _build_registry
 seal_module()

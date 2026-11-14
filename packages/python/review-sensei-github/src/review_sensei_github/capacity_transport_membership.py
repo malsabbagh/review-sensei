@@ -16,7 +16,11 @@ from types import CellType, FunctionType
 from typing import Any
 
 from review_sensei.errors import ReviewInputError
-from review_sensei.source_registry import require_instance_source, require_module_seal
+from review_sensei.source_registry import (
+    require_instance_source,
+    require_module_seal,
+    require_original_class_identity,
+)
 
 
 def _cache_statistics(hits, misses, maxsize, size):
@@ -406,7 +410,6 @@ def _registry():
         _require_sources()
         from . import http as native_http
 
-        require_module_seal(native_http)
         seen = set()
         for _ in range(16):
             if id(value) in seen:
@@ -415,13 +418,15 @@ def _registry():
             if find(0, value) is not None:
                 return False
             cls = type(value)
-            if cls is native_http.GitHubHttp:
+            if cls is vars(native_http).get("GitHubHttp"):
                 raw = object.__getattribute__(value, "__dict__")
                 if type(raw) is not dict or any(type(key) is not str for key in raw):
                     raise ReviewInputError("capacity transport fields changed")
-                require_instance_source(
-                    value,
-                    methods=("__init__", "request", "_paginate", "repository_path"),
+                # Lifetime nonmembership is already established. This is only
+                # original base identity, not a reader or execution capability;
+                # ordinary request overrides remain the public generic seam.
+                require_original_class_identity(
+                    value, module=native_http, name="GitHubHttp"
                 )
                 raw = object.__getattribute__(value, "__dict__")
                 if (

@@ -501,3 +501,60 @@ for operation in (lambda:m.never_installed(GitHubHttp()), root, root.__wrapped__
         del ledger.http._quarantine_capacity_guard
         self.assertTrue(membership.was_installed(ledger.http))
         self.assertFalse(membership.never_installed(ledger.http))
+
+    def test_never_installed_generic_class_and_instance_request_overrides(self):
+        from review_sensei_github import capacity_transport_membership as membership
+
+        for instance_override in (False, True):
+            with self.subTest(instance_override=instance_override):
+                http = GitHubHttp()
+                target = http if instance_override else GitHubHttp
+                with patch.object(
+                    target, "request", side_effect=AssertionError("called")
+                ) as request:
+                    self.assertTrue(membership.never_installed(http))
+                    self.assertIsNone(
+                        capacity_review_walk(http, "/repos/o/r/pulls/1/reviews")
+                    )
+                    request.assert_not_called()
+
+    def test_negative_base_identity_rejects_replaced_export_and_subclass(self):
+        from review_sensei_github import capacity_transport_membership as membership
+        from review_sensei_github import http as native_http
+
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.source_registry import require_original_class_identity
+
+        class Lookalike:
+            pass
+
+        class Derived(GitHubHttp):
+            pass
+
+        for value in (Lookalike(), Derived()):
+            with self.assertRaises(ReviewInputError):
+                require_original_class_identity(
+                    value, module=native_http, name="GitHubHttp"
+                )
+        with patch.object(native_http, "GitHubHttp", Lookalike):
+            with self.assertRaises(ReviewInputError):
+                membership.never_installed(Lookalike())
+            with self.assertRaises(ReviewInputError):
+                require_original_class_identity(
+                    GitHubHttp(), module=native_http, name="GitHubHttp"
+                )
+
+    def test_installed_tombstone_precedes_generic_method_override(self):
+        from review_sensei_github import capacity_transport_membership as membership
+
+        from review_sensei.errors import ReviewInputError
+
+        ledger, guard = self.installed_transport()
+        del ledger.http._quarantine_capacity_guard
+        with patch.object(
+            GitHubHttp, "request", side_effect=AssertionError("called")
+        ) as request:
+            self.assertFalse(membership.never_installed(ledger.http))
+            with self.assertRaises(ReviewInputError):
+                capacity_review_walk(ledger.http, "/repos/o/r/pulls/1/reviews")
+            request.assert_not_called()
