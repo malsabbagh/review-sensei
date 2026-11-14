@@ -15,10 +15,9 @@ from review_sensei.bounded_evidence import canonical_bytes
 from tests.test_ordinary_native_recovery_cold import subprocess_environment
 
 CHILD = r"""
-import copy,json,sys
+import copy,dis,inspect,json,sys
 from dataclasses import asdict
 from pathlib import Path
-from unittest.mock import patch
 from test_review_run import EntryFixture
 from review_sensei_github import finding_lifecycle as lifecycle
 from review_sensei_github.session_ledger import parse_session_comment
@@ -35,10 +34,16 @@ f.run_id=p.get('run_id',f.run_id)
 f.live_head=f.requested_head=p.get('head',f.live_head)
 (f.root/'review.patch').write_bytes(p['diff'].encode('utf-8'))
 f.provider_comments=p['comments']
-seen=[];original=lifecycle.restore_finding_lifecycle
-def capture(*a,**kw):
-    result=original(*a,**kw);seen.append((a[0],result[1]));return result
-with patch.object(lifecycle,'restore_finding_lifecycle',capture):code=f.invoke()
+seen=[];original=inspect.unwrap(lifecycle.restore_finding_lifecycle)
+returns={i.offset for i in dis.get_instructions(original) if i.opname in {'RETURN_VALUE','RETURN_CONST'}}
+def capture(frame,event,value):
+    if event=='return' and frame.f_code is original.__code__ and frame.f_globals is original.__globals__ and frame.f_lasti in returns:
+        seen.append((frame.f_locals['reviewer'],value[1]))
+previous=sys.getprofile()
+try:
+    sys.setprofile(capture);code=f.invoke()
+finally:
+    sys.setprofile(previous)
 state=seen[-1][0]._drift_states.get((123,7)) if seen else None
 initial=decode_lifecycle_state(next(doc for _,doc in seen if doc is not None)['lifecycle']).state if any(doc is not None for _,doc in seen) else None
 def describe(s):
