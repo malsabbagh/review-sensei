@@ -944,6 +944,8 @@ def bootstrap(
     input_directory: Path | None = None,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
+    if purpose == "review" and args.diff is None and input_directory is None:
+        raise ReviewInputError("review requires an owned generated input workspace")
     if type(observe_original_actor_role) is not bool or (
         observe_original_actor_role and not enable_current_trust_enrollment
     ):
@@ -1654,14 +1656,18 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
         raise ReviewInputError(
             "controlled restart requires a freshly prepared current full diff"
         )
-    # The durable directory owns only the restart archive/claim. Fresh source
-    # bytes stay in a private temporary directory, including on failed or
-    # cancelled execution. Abrupt process death leaves only ephemeral storage.
+    # Keep generated inputs separate from existing runner files, including when
+    # later predecessor admission refuses. Retain every original startup claim
+    # and restart archive. Supplied inputs remain caller-owned and untouched.
+    # Abrupt process death leaves only ephemeral generated source storage.
     workspace = (
         TemporaryDirectory(
-            prefix="review-sensei-restart-", dir=os.environ.get("RUNNER_TEMP") or None
+            prefix="review-sensei-restart-"
+            if controlled_restart
+            else "review-sensei-input-",
+            dir=os.environ.get("RUNNER_TEMP") or None,
         )
-        if controlled_restart
+        if args.diff is None
         else nullcontext(str(options.run_directory))
     )
     with workspace as working_directory:

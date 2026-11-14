@@ -258,3 +258,128 @@ class ReviewStartupInputTests(unittest.TestCase):
             self.assertIn("do not share a merge base", fixture.error)
             self.assert_no_enrollment(fixture, previous)
             self.assertFalse((fixture.root / "review.patch").exists())
+
+    def test_generated_input_preserves_old_patch_when_predecessor_refuses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EntryFixture(directory)
+            fixture.before_provider = lambda: (_ for _ in ()).throw(
+                ReviewInputError("fixture entered provider refusal")
+            )
+            self.assertEqual(fixture.invoke(), 1)
+            previous = copy.deepcopy(fixture.comment)
+            original_patch = (fixture.root / "review.patch").read_bytes()
+            claims = {p.name: p.read_bytes() for p in fixture.root.glob("*.claim")}
+            self.assertEqual(len(claims), 1)
+
+            def git(*args):
+                return subprocess.check_output(
+                    [
+                        "git",
+                        "-c",
+                        "user.name=Fixture",
+                        "-c",
+                        "user.email=fixture@example.invalid",
+                        *args,
+                    ],
+                    cwd=fixture.root,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                ).strip()
+
+            (fixture.root / "fresh.txt").write_text(
+                "new bounded input\n", encoding="utf-8"
+            )
+            git("add", "fresh.txt")
+            git("commit", "-m", "fresh input fixture")
+            head = git("rev-parse", "HEAD")
+            git("checkout", "--detach", fixture.policy)
+            fixture.next_run()
+            fixture.before_provider = None
+            fixture.selected = None
+            fixture.live_base = fixture.requested_base = fixture.policy
+            fixture.live_head = fixture.requested_head = head
+            prepared = []
+            original_prepare = review_run.prepare_diff
+
+            def prepare(**kwargs):
+                original_prepare(**kwargs)
+                path = kwargs["output"]
+                prepared.append((path, path.read_bytes()))
+
+            with patch.object(review_run, "prepare_diff", side_effect=prepare):
+                self.assertEqual(self.invoke_generated(fixture), 1)
+            self.assertIn("previous caller run is not terminal", fixture.error)
+            self.assertEqual(fixture.comment, previous)
+            self.assertEqual(fixture.provider_calls, 1)
+            self.assertIsNone(fixture.selected)
+            self.assertEqual(
+                (fixture.root / "review.patch").read_bytes(), original_patch
+            )
+            self.assertEqual(
+                {name: (fixture.root / name).read_bytes() for name in claims}, claims
+            )
+            self.assertEqual(len(list(fixture.root.glob("*.claim"))), 2)
+            self.assertEqual(len(prepared), 1)
+            path, content = prepared[0]
+            self.assertIn(b"+new bounded input", content)
+            self.assertNotEqual(content, original_patch)
+            self.assertNotEqual(path, fixture.root / "review.patch")
+            self.assertFalse(path.exists())
+            self.assertFalse(path.parent.exists())
+
+    def test_direct_review_bootstrap_requires_owned_generated_input_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = b"retained original input\n"
+            (root / "review.patch").write_bytes(original)
+            with self.assertRaisesRegex(ReviewInputError, "generated input workspace"):
+                review_run.bootstrap(
+                    Namespace(diff=None), run_directory=root, policy_commit="a" * 40
+                )
+            self.assertEqual((root / "review.patch").read_bytes(), original)
+            self.assertFalse(list(root.glob("*.claim")))
+
+    def test_valid_generated_input_is_ephemeral_after_success(self):
+        from test_workflow import _git
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EntryFixture(directory)
+            original_patch = (fixture.root / "review.patch").read_bytes()
+            (fixture.root / "fresh.txt").write_text(
+                "new bounded input\n", encoding="utf-8"
+            )
+            _git(fixture.root, "add", "fresh.txt")
+            _git(
+                fixture.root,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "fresh input fixture",
+            )
+            head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=fixture.root, text=True
+            ).strip()
+            _git(fixture.root, "checkout", "--detach", fixture.policy)
+            fixture.live_base = fixture.requested_base = fixture.policy
+            fixture.live_head = fixture.requested_head = head
+            paths = []
+            original_prepare = review_run.prepare_diff
+
+            def prepare(**kwargs):
+                original_prepare(**kwargs)
+                paths.append(kwargs["output"])
+
+            with patch.object(review_run, "prepare_diff", side_effect=prepare):
+                self.assertEqual(self.invoke_generated(fixture), 0, fixture.error)
+            self.assertEqual(fixture.provider_calls, 1)
+            self.assertIsNotNone(fixture.accounted.accounting.terminal_transaction)
+            self.assertEqual(
+                (fixture.root / "review.patch").read_bytes(), original_patch
+            )
+            self.assertEqual(len(list(fixture.root.glob("*.claim"))), 1)
+            self.assertEqual(len(paths), 1)
+            self.assertFalse(paths[0].exists())
+            self.assertFalse(paths[0].parent.exists())
