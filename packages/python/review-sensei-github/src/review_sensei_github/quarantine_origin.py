@@ -693,6 +693,14 @@ class QuarantineOriginReader:
         return authenticated
 
 
+from .materialized_publication_phase import (  # noqa: E402
+    install_origin_reader as _install_materialized_reader,
+)
+
+_install_materialized_reader(QuarantineOriginReader)
+del _install_materialized_reader
+
+
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
 
 _seal_original_source()

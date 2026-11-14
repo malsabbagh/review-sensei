@@ -190,6 +190,36 @@ class MaterializedCheckpointCoalescingTests(unittest.TestCase):
                 self.assertEqual(len(fixture.writes), 1)
                 self.assertTrue(all(count == 1 for count in fixture.writes.values()))
 
+    def test_immutable_authentication_cache_change_holds_before_root_write(self):
+        changed = []
+
+        def trace(frame, event, _arg):
+            own = frame.f_code.co_name == "census" and frame.f_globals is vars(phase)
+            if own and event == "return" and not changed:
+                entry = frame.f_locals.get("entry")
+                if entry is not None and entry["source_cache"] is not None:
+                    cache = entry["source_cache"][4]
+                    key = next(iter(cache))
+                    cache[key] += b" "
+                    changed.append(True)
+            return trace if own else None
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = CoalescingFixture(directory)
+            _, registration = fixture.original_origins(
+                failed_count=1, published_count=1
+            )
+            previous = sys.gettrace()
+            try:
+                sys.settrace(trace)
+                with registered_resource([registration]):
+                    self.assertEqual(fixture.invoke(), 1)
+            finally:
+                sys.settrace(previous)
+            self.assertEqual(changed, [True])
+            self.assertIn("immutable authentication cache changed", fixture.error)
+            self.assertEqual(fixture.writes, {})
+
     def test_reconciled_loss_root_cannot_change_before_next_checkpoint(self):
         changed = []
 

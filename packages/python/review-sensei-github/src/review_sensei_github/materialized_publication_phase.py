@@ -35,6 +35,8 @@ def _build():
     journal_checkpoint_sources: dict[type, Any] = {}
     publication_sources: dict[type, Any] = {}
     checkpoint_get_source = None
+    hold_read_source = None
+    origin_receipts: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
     def definition(name):
         frame = inspect.currentframe()
@@ -191,6 +193,7 @@ def _build():
                     "coalesced": None,
                     "coalesced_reads": 0,
                     "read_losses": [],
+                    "source_cache": None,
                 }
             token = active.set(entry)
             try:
@@ -369,6 +372,91 @@ def _build():
 
         namespace["retain_review_result"] = retain
 
+    def source_cache_snapshot(reader):
+        cache = reader._authenticated_sources
+        if (
+            type(cache) is not dict
+            or not cache
+            or any(
+                type(key) is not tuple
+                or len(key) != 2
+                or any(type(part) is not str for part in key)
+                or type(value) is not bytes
+                for key, value in cache.items()
+            )
+        ):
+            raise ReviewInputError(
+                "materialized immutable authentication cache is absent"
+            )
+        return cache, tuple(sorted(cache.items()))
+
+    def require_source_cache(entry):
+        receipt = entry["source_cache"]
+        if receipt is None:
+            return
+        reader, ledger, caller, identity, cache, values, lineage = receipt
+        current, snapshot = source_cache_snapshot(reader)
+        if (
+            entry["ledger"] is not ledger
+            or entry["caller"] is not caller
+            or ledger._quarantine_origin_reader is not reader
+            or current is not cache
+            or snapshot != values
+            or caller._effect_record.identity() != identity
+            or canonical_bytes(caller._effect_record.quarantine_lineage) != lineage
+        ):
+            entry["poisoned"] = True
+            raise ReviewInputError(
+                "materialized immutable authentication cache changed"
+            )
+
+    def install_origin_reader(cls):
+        definition("review_sensei_github.quarantine_origin")
+        original = cls.read
+        original_functions.append((original, original.__code__))
+
+        @wraps(original)
+        def read(reader, ledger, identity, record):
+            if original.__code__ is not original_code:
+                raise ReviewInputError("materialized original origin reader changed")
+            entry = active.get()
+            if entry is not None and entry["closed"]:
+                require_source_cache(entry)
+            result = original(reader, ledger, identity, record)
+            caller = result.original_caller
+            from .quarantine_origin import (
+                _AUTHENTICATED_OWNERS,
+                require_authenticated_read_owner,
+            )
+
+            # Legacy/model reads retain their result but cannot issue this
+            # native hosted invocation capability.
+            if caller is not None and _AUTHENTICATED_OWNERS.get(result) is not None:
+                require_authenticated_read_owner(result, ledger, caller, identity)
+                cache, values = source_cache_snapshot(reader)
+                origin_receipts[reader] = (
+                    reader,
+                    ledger,
+                    caller,
+                    identity,
+                    cache,
+                    values,
+                    result.lineage_bytes,
+                )
+            return result
+
+        original_code = original.__code__
+        cls.read = read
+
+    def install_hold_reader(cls):
+        nonlocal hold_read_source
+        definition("review_sensei_github.quarantine_holds")
+        original = cls.read
+        if hasattr(original, "__wrapped__"):
+            raise ReviewInputError("materialized hold reader is not defining source")
+        hold_read_source = original.__code__
+        original_functions.append((original, original.__code__))
+
     def read_loss_seal(loss):
         try:
             binding = canonical_bytes(
@@ -502,6 +590,8 @@ def _build():
         _empty_state(journal)
         reader = ledger._quarantine_origin_reader
         _original_methods(reader)
+        if entry["source_cache"] is not None:
+            require_source_cache(entry)
         _original_methods(reader.current_scope)
         authenticated = ledger._quarantine_authenticated
         require_authenticated_read_owner(authenticated, ledger, caller, identity)
@@ -719,6 +809,7 @@ def _build():
                     raise ReviewInputError(
                         "materialized publication request source changed"
                     )
+                require_source_cache(entry)
                 require_adjacent_read(entry, request)
                 if request.get_method() not in {"GET", "HEAD"}:
                     path = urlsplit(request.full_url).path
@@ -1066,6 +1157,14 @@ def _build():
                 if entry["closed"] and not qualified:
                     raise ReviewInputError("materialized publication phase changed")
                 if qualified:
+                    if entry["source_cache"] is None:
+                        receipt = origin_receipts.get(ledger._quarantine_origin_reader)
+                        if receipt is None:
+                            raise ReviewInputError(
+                                "materialized immutable authentication receipt is absent"
+                            )
+                        entry["source_cache"] = receipt
+                        require_source_cache(entry)
                     entry["closed"] = True
                     if entry["censuses"] == 1:
                         try:
@@ -1105,6 +1204,8 @@ def _build():
         install_publisher,
         install_packed,
         install_checkpoint,
+        install_origin_reader,
+        install_hold_reader,
         observation,
     )
 
@@ -1120,6 +1221,8 @@ def _build():
     install_publisher,
     install_packed,
     install_checkpoint,
+    install_origin_reader,
+    install_hold_reader,
     phase_observation,
 ) = _build()
 del _build
