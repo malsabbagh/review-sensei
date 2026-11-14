@@ -78,6 +78,30 @@ class SourceRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ReviewInputError, "source changed"):
                 require_module_seal(review_run)
 
+    def test_module_validation_checks_each_class_binding_once_without_caching(self):
+        import inspect
+
+        from review_sensei_github import review_run
+        from review_sensei_github.review_run import ActionRunLedger
+
+        original = inspect.getattr_static
+        observed = []
+
+        def observe(owner, name, *args, **kwargs):
+            if owner is ActionRunLedger and name == "load":
+                observed.append(name)
+            return original(owner, name, *args, **kwargs)
+
+        with patch.object(inspect, "getattr_static", observe):
+            require_module_seal(review_run)
+        # One executable-membership lookup and one actual binding validation.
+        # Module validation must not repeat the complete class binding pass.
+        self.assertEqual(observed, ["load", "load"])
+        with patch.object(ActionRunLedger, "load", lambda *args, **kwargs: None):
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(review_run)
+        require_module_seal(review_run)
+
     def test_default_binding_replacement_and_content_mutation_reject(self):
         from review_sensei_github import http
 

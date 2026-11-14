@@ -19,6 +19,7 @@ def _build_registry():
     registered: dict[Any, tuple[tuple[Any, str, Any, Any], ...]] = {}
 
     classes: dict[type, Any] = {}
+    module_classes: dict[ModuleType, tuple[type, ...]] = {}
     function_defaults: dict[Any, Any] = {}
     function_wrappers: dict[Any, Any] = {}
     function_definitions: dict[Any, Any] = {}
@@ -121,6 +122,7 @@ def _build_registry():
         ):
             raise ReviewInputError("original source seal requires its defining module")
         bindings: list[tuple[Any, str, Any, Any]] = []
+        defined_classes: dict[type, None] = {}
         for key, value in tuple(vars(module).items()):
             if key.isupper() and isinstance(
                 value, (str, int, float, bool, tuple, frozenset)
@@ -164,6 +166,7 @@ def _build_registry():
                                 members.append(
                                     (member, accessor, function, function.__code__)
                                 )
+                defined_classes[value] = None
                 classes[value] = (
                     module,
                     str(getattr(value, "__name__", key))
@@ -180,7 +183,13 @@ def _build_registry():
         for _owner, _name, original, _code in bindings:
             if inspect.isfunction(original):
                 remember_function(original)
-        registered[module] = tuple(bindings)
+        # Each defining class is checked below through require_class, including
+        # all inherited methods, property accessors and wrapper/default seals.
+        # Keep only module bindings here instead of checking every class member
+        # twice on every call. This is an index of immutable definitions, never
+        # a cached successful validation: every request rechecks current source.
+        registered[module] = tuple(row for row in bindings if row[0] is module)
+        module_classes[module] = tuple(defined_classes)
 
     def require_bindings(bindings):
         for owner, name, original, code in bindings:
@@ -221,13 +230,14 @@ def _build_registry():
         require_bindings(bindings)
 
     def require_module_seal(module):
-        bindings = registered.get(module) if isinstance(module, ModuleType) else None
+        if not isinstance(module, ModuleType):
+            raise ReviewInputError("original source module seal is unavailable")
+        bindings = registered.get(module)
         if bindings is None or sys.modules.get(module.__name__) is not module:
             raise ReviewInputError("original source module seal is unavailable")
         require_bindings(bindings)
-        for cls, source in classes.items():
-            if source[0] is module:
-                require_class(cls)
+        for cls in module_classes[module]:
+            require_class(cls)
 
     def require_instance_source(instance, *, methods):
         cls = type(instance)
