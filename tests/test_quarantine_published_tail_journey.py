@@ -28,6 +28,7 @@ from review_sensei_github.quarantine_published_tail import (
     execution_manifest_digest,
 )
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_lifecycle import forbid_replacement_phase_budget
 from test_quarantine_activation import event, registered_resource
 from test_quarantine_evidence import original_objects
 from test_quarantine_journey import JourneyFixture
@@ -575,7 +576,8 @@ class PublishedTailJourneyTests(unittest.TestCase):
                 # A populated current admission authenticates the actual
                 # engine and owner. Keep its definitions intact and fake only
                 # the external wire, not EntryFixture's legacy engine wrapper.
-                result, _ = invoke_original(fixture)
+                with forbid_replacement_phase_budget():
+                    result, _ = invoke_original(fixture)
                 self.assertEqual(result, 0, fixture.error)
                 # Inspect the displayed current obligations structurally. The
                 # unaware parser must still refuse v8; runtime commands below

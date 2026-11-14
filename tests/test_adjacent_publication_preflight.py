@@ -7,11 +7,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from hot_original_entry import invoke_original
 from review_sensei_github import adjacent_publication_preflight as receipt
 from review_sensei_github import quarantine_native_scope, trust_effects
 from review_sensei_github.guarded_publication_plan import require_grouped_durable_floor
 from review_sensei_github.publication import ReviewPublisher
 from review_sensei_github.quarantine_published_tail import BROKER_QUALIFICATIONS
+from test_api_work_lifecycle import forbid_replacement_phase_budget
 from test_quarantine_activation import registered_resource
 from test_quarantine_published_tail_journey import NativePublishedTailJourneyFixture
 
@@ -25,6 +27,7 @@ class AdjacentPublicationPreflightTests(unittest.TestCase):
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             fixture = NativePublishedTailJourneyFixture(directory)
+            fixture.api_url = "https://api.github.com"
             old, registration = fixture.original_origins()
             prior = copy.deepcopy(old.api_run_accounting)
             reviews, checks = (
@@ -150,7 +153,8 @@ class AdjacentPublicationPreflightTests(unittest.TestCase):
                 previous = sys.getprofile()
                 try:
                     sys.setprofile(observe)
-                    rc = fixture.invoke()
+                    with forbid_replacement_phase_budget():
+                        rc, _ = invoke_original(fixture)
                 finally:
                     sys.setprofile(previous)
                     trust_effects.verification_profile = original_profile
