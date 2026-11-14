@@ -865,6 +865,67 @@ def _configuration(
     ), branch
 
 
+def _prepare_review_input(
+    args: argparse.Namespace,
+    *,
+    directory: Path,
+    configuration_path: Path | None,
+    head_repository: str,
+) -> None:
+    """Reject locally invalid input before any durable caller enrollment.
+
+    This is input validation, not an analysis/abort authority. The engine still
+    validates its input independently. Existing complete-diff preparation keeps
+    its default bounds; supplied large-change inputs keep their engine modes.
+    """
+    if args.diff is None:
+        args.diff = directory / "review.patch"
+        prepare_diff(
+            repository=Path.cwd(),
+            base_ref=args.base_sha,
+            head_ref=args.head_sha,
+            head_repository=head_repository
+            if head_repository != args.repository
+            else None,
+            output=args.diff,
+        )
+        return
+
+    from review_sensei.diff import analyze_diff
+    from review_sensei.planning import DEFAULT_TOTAL_WORK_BUDGET, plan_change
+    from review_sensei.validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
+
+    work = load_configuration(configuration_path).advanced.review_work
+    orchestrate = bool(getattr(args, "orchestrate_large_changes", False))
+    if work.mode == "unified" or orchestrate:
+        budget = DEFAULT_TOTAL_WORK_BUDGET
+        diff = read_bounded_utf8(
+            args.diff, maximum=budget.max_total_diff_bytes, label="diff"
+        )
+        if work.mode == "unified":
+            analyze_diff(
+                diff,
+                limits=DEFAULT_REVIEW_LIMITS,
+                allow_incomplete=True,
+                max_bytes=budget.max_total_diff_bytes,
+                max_lines=budget.max_total_diff_lines,
+                max_files=budget.max_total_files,
+                max_hunks=budget.max_total_hunks,
+            )
+        else:
+            plan_change(
+                diff,
+                limits=DEFAULT_REVIEW_LIMITS,
+                orchestrate=True,
+                work_budget=budget,
+            )
+    else:
+        diff = read_bounded_utf8(
+            args.diff, maximum=DEFAULT_REVIEW_LIMITS.max_diff_bytes, label="diff"
+        )
+        analyze_diff(diff, limits=DEFAULT_REVIEW_LIMITS)
+
+
 def bootstrap(
     args: argparse.Namespace,
     *,
@@ -880,6 +941,7 @@ def bootstrap(
     rollover_service: RolloverService | None = None,
     enable_current_trust_enrollment: bool = False,
     observe_original_actor_role: bool = False,
+    input_directory: Path | None = None,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
     if type(observe_original_actor_role) is not bool or (
@@ -1137,6 +1199,14 @@ def bootstrap(
         raise ReviewInputError("live pull request title exceeds its 256-byte bound")
     if getattr(args, "title", None) not in {None, "", title}:
         raise ReviewInputError("review title differs from the live pull request")
+    if purpose == "review":
+        lifecycle_diagnostics.step("review_input")
+        _prepare_review_input(
+            args,
+            directory=run_directory if input_directory is None else input_directory,
+            configuration_path=configuration_path,
+            head_repository=head["repo"]["full_name"],
+        )
     # Read-only authority/owner checks precede enrollment's durable witness.
     lifecycle_diagnostics.step("run_authority")
     authority = request_authority(
@@ -1584,26 +1654,6 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
         raise ReviewInputError(
             "controlled restart requires a freshly prepared current full diff"
         )
-    selected = bootstrap(
-        args,
-        run_directory=options.run_directory,
-        policy_commit=options.policy_commit,
-        quarantine_predecessor_comment_id=options.quarantine_predecessor_comment_id,
-        restart_id=getattr(options, "restart_id", None),
-        recovery_context_dir=options.recovery_context_dir,
-        recovery_context_key_file=options.recovery_context_key_file,
-        recovery_context_ttl_seconds=options.recovery_context_ttl_seconds,
-        enable_current_trust_enrollment=options.enable_current_trust_enrollment,
-    )
-    core = [*core]
-    if not _has_option(core, "--base-sha"):
-        core.extend(["--base-sha", selected.base_sha])
-    if not _has_option(core, "--head-sha"):
-        core.extend(["--head-sha", selected.head_sha])
-    if not _has_option(core, "--title") and selected.title:
-        core.append("--title=" + selected.title)
-    if args.config is None and selected.configuration_path is not None:
-        core.extend(["--config", str(selected.configuration_path)])
     # The durable directory owns only the restart archive/claim. Fresh source
     # bytes stay in a private temporary directory, including on failed or
     # cancelled execution. Abrupt process death leaves only ephemeral storage.
@@ -1621,18 +1671,29 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
             raise ReviewInputError(
                 "controlled restart diff cannot use retained history storage"
             )
-        if args.diff is None:
-            diff = Path(working_directory) / "review.patch"
-            prepare_diff(
-                repository=Path.cwd(),
-                base_ref=selected.base_sha,
-                head_ref=selected.head_sha,
-                head_repository=selected.head_repository
-                if selected.head_repository != selected.identity.repository
-                else None,
-                output=diff,
-            )
-            core.extend(["--diff", str(diff)])
+        selected = bootstrap(
+            args,
+            run_directory=options.run_directory,
+            policy_commit=options.policy_commit,
+            quarantine_predecessor_comment_id=options.quarantine_predecessor_comment_id,
+            restart_id=getattr(options, "restart_id", None),
+            recovery_context_dir=options.recovery_context_dir,
+            recovery_context_key_file=options.recovery_context_key_file,
+            recovery_context_ttl_seconds=options.recovery_context_ttl_seconds,
+            enable_current_trust_enrollment=options.enable_current_trust_enrollment,
+            input_directory=Path(working_directory),
+        )
+        core = [*core]
+        if not _has_option(core, "--base-sha"):
+            core.extend(["--base-sha", selected.base_sha])
+        if not _has_option(core, "--head-sha"):
+            core.extend(["--head-sha", selected.head_sha])
+        if not _has_option(core, "--title") and selected.title:
+            core.append("--title=" + selected.title)
+        if args.config is None and selected.configuration_path is not None:
+            core.extend(["--config", str(selected.configuration_path)])
+        if not _has_option(core, "--diff"):
+            core.extend(["--diff", str(args.diff)])
         if not args.transaction:
             core.append("--transaction")
         if not args.github_session_ledger:
