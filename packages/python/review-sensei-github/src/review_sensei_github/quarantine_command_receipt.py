@@ -40,9 +40,14 @@ class ReceiptPageProjection:
     known: tuple[tuple[int, int], ...]
     future: tuple[int, ...]
     maximum_bytes: int
+    protocol: str = "rest"
+    scope: tuple = ()
+    first: int = 100
 
 
-def project_receipt_page(rows, *, mutable_bounds=(), future_bounds=()):
+def project_receipt_page(
+    rows, *, mutable_bounds=(), future_bounds=(), allow_graphql=False, identity=None
+):
     """Bound every complete body plus REST metadata and list framing.
 
     A caller must supply each reachable own event/archive/receipt allocation.
@@ -83,7 +88,16 @@ def project_receipt_page(rows, *, mutable_bounds=(), future_bounds=()):
         2 + sum(known.values()) + sum(future_bounds) + count * (METADATA_BYTES + 1)
     )
     if maximum > MAX_GITHUB_RESPONSE_BYTES:
-        raise ReviewInputError("receipt complete single page exceeds wire bound")
+        if allow_graphql is not True:
+            raise ReviewInputError("receipt complete single page exceeds wire bound")
+        scope = _receipt_scope(identity)
+        _graphql_request(scope, count + 1)
+        maximum = 4096 + sum(known.values()) + sum(future_bounds) + count * 1024
+        if maximum > MAX_GITHUB_RESPONSE_BYTES:
+            raise ReviewInputError("receipt complete GraphQL page exceeds wire bound")
+        return ReceiptPageProjection(
+            tuple(known.items()), future_bounds, maximum, "graphql", scope, count + 1
+        )
     return ReceiptPageProjection(tuple(known.items()), future_bounds, maximum)
 
 
@@ -97,6 +111,103 @@ class ReceiptMembership:
     receipt_update_id: int | None
     app_id: int
     maximum_bytes: int
+    protocol: str = "rest"
+    scope: tuple = ()
+    first: int = 100
+
+
+def _receipt_scope(identity):
+    from review_sensei.session import SessionIdentity
+
+    if type(identity) is not SessionIdentity:
+        raise ReviewInputError("receipt GraphQL identity is unavailable")
+    values = vars(identity)
+    repository, number, identifier = (
+        values.get("repository"),
+        values.get("pull_request"),
+        values.get("repository_id"),
+    )
+    if (
+        type(repository) is not str
+        or repository.count("/") != 1
+        or type(number) is not int
+        or number <= 0
+        or type(identifier) is not int
+        or identifier <= 0
+    ):
+        raise ReviewInputError("receipt GraphQL scope is invalid")
+    return repository, number, identifier
+
+
+def _protocol_fields(value):
+    protocol, scope, first, maximum = (
+        value.protocol,
+        value.scope,
+        value.first,
+        value.maximum_bytes,
+    )
+    if (
+        type(protocol) is not str
+        or type(scope) is not tuple
+        or type(first) is not int
+        or type(maximum) is not int
+        or not 0 < maximum <= MAX_GITHUB_RESPONSE_BYTES
+    ):
+        raise ReviewInputError("receipt protocol fields are invalid")
+    if protocol == "rest":
+        if scope != () or first != 100:
+            raise ReviewInputError("receipt REST protocol changed")
+    elif protocol == "graphql":
+        if (
+            len(scope) != 3
+            or type(scope[0]) is not str
+            or type(scope[1]) is not int
+            or type(scope[2]) is not int
+            or not 2 <= first <= 100
+        ):
+            raise ReviewInputError("receipt GraphQL protocol changed")
+    else:
+        raise ReviewInputError("receipt protocol is unsupported")
+    return protocol, scope, first, maximum
+
+
+def _projection_binding(value):
+    if type(value) is not ReceiptPageProjection:
+        raise ReviewInputError("receipt projection is unavailable")
+    _protocol_fields(value)
+    if (
+        type(value.known) is not tuple
+        or type(value.future) is not tuple
+        or any(
+            type(pair) is not tuple
+            or len(pair) != 2
+            or any(type(part) is not int or part <= 0 for part in pair)
+            for pair in value.known
+        )
+        or any(type(part) is not int or part <= 0 for part in value.future)
+    ):
+        raise ReviewInputError("receipt projection bounds changed")
+    count = len(value.known) + len(value.future)
+    body = sum(bound for _, bound in value.known) + sum(value.future)
+    expected = (
+        2 + body + count * (METADATA_BYTES + 1)
+        if value.protocol == "rest"
+        else 4096 + body + count * 1024
+    )
+    if (
+        count >= 100
+        or value.maximum_bytes != expected
+        or (value.protocol == "graphql" and value.first != count + 1)
+    ):
+        raise ReviewInputError("receipt projection protocol bound changed")
+    return (
+        value.known,
+        value.future,
+        value.maximum_bytes,
+        value.protocol,
+        value.scope,
+        value.first,
+    )
 
 
 def _owner(row):
@@ -119,6 +230,7 @@ def freeze_receipt_membership(rows, *, projection, receipt_text, update_id, app_
         raise ReviewInputError("receipt page projection is invalid")
     if not isinstance(receipt_text, str) or type(app_id) is not int or app_id <= 0:
         raise ReviewInputError("receipt writer identity is invalid")
+    _projection_binding(projection)
     known, future, seen = dict(projection.known), list(projection.future), {}
     owners = {}
     for row in rows:
@@ -160,20 +272,35 @@ def freeze_receipt_membership(rows, *, projection, receipt_text, update_id, app_
         update_id,
         app_id,
         projection.maximum_bytes,
+        projection.protocol,
+        projection.scope,
+        projection.first,
     )
 
 
-def read_receipt_page(http, *, path, token, membership, reconcile=False):
+def read_receipt_page(
+    http, *, path, token, membership, reconcile=False, ledger=None, identity=None
+):
     """Perform exactly one fresh charged read, or refuse without a retry."""
     if type(membership) is not ReceiptMembership or type(reconcile) is not bool:
         raise ReviewInputError("receipt census input is invalid")
+    _protocol_fields(membership)
     if not isinstance(path, str) or "?" in path or not path.endswith("/comments"):
         raise ReviewInputError("receipt census path is invalid")
-    status, rows = http.request("GET", path + "?per_page=100&page=1", token=token)
-    if status != 200 or not isinstance(rows, list) or len(rows) >= 100:
-        raise ReviewInputError("receipt census lacks one complete page")
-    if _wire(rows) > min(membership.maximum_bytes, MAX_GITHUB_RESPONSE_BYTES):
-        raise ReviewInputError("receipt census exceeded complete wire bound")
+    if membership.protocol == "graphql":
+        rows = _read_graphql_receipt(http, path, token, membership, ledger, identity)
+    elif (
+        membership.protocol == "rest"
+        and membership.scope == ()
+        and membership.first == 100
+    ):
+        status, rows = http.request("GET", path + "?per_page=100&page=1", token=token)
+        if status != 200 or not isinstance(rows, list) or len(rows) >= 100:
+            raise ReviewInputError("receipt census lacks one complete page")
+        if _wire(rows) > min(membership.maximum_bytes, MAX_GITHUB_RESPONSE_BYTES):
+            raise ReviewInputError("receipt census exceeded complete wire bound")
+    else:
+        raise ReviewInputError("receipt census protocol changed")
     expected, observed = dict(membership.bodies), set()
     owners = dict(membership.owners)
     created = 0
@@ -219,9 +346,95 @@ def read_receipt_page(http, *, path, token, membership, reconcile=False):
     return rows
 
 
+def _graphql_request(scope, first):
+    from . import quarantine_census
+
+    require_module_seal(quarantine_census)
+    owner, name = scope[0].split("/", 1)
+    variables = {
+        "owner": owner,
+        "name": name,
+        "number": scope[1],
+        "first": first,
+        "after": None,
+    }
+    body = {"query": quarantine_census.QUERY, "variables": variables}
+    if not quarantine_census._variables(variables) or _wire(body) > 8192:
+        raise ReviewInputError("receipt GraphQL query exceeds its source bounds")
+    return body
+
+
+def _read_graphql_receipt(http, path, token, membership, ledger, identity):
+    from . import packed_comment_census, quarantine_census
+
+    require_module_seal(packed_comment_census)
+    require_module_seal(quarantine_census)
+    if (
+        ledger is None
+        or _receipt_scope(identity) != membership.scope
+        or type(membership.first) is not int
+        or not 2 <= membership.first <= 100
+        or path
+        != http.repository_path(
+            identity.repository, f"/issues/{identity.pull_request}/comments"
+        )
+    ):
+        raise ReviewInputError("receipt GraphQL source scope changed")
+    body = _graphql_request(membership.scope, membership.first)
+    binding = _membership_binding(membership)
+    status, response = http.request("POST", "/graphql", token=token, body=body)
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(packed_comment_census)
+    require_module_seal(quarantine_census)
+    packed_comment_census._single_plain(response)
+    if (
+        _membership_binding(membership) != binding
+        or _receipt_scope(identity) != membership.scope
+    ):
+        raise ReviewInputError("receipt GraphQL identity changed during read")
+    try:
+        if (
+            status != 200
+            or type(response) is not dict
+            or response.get("errors")
+            or set(response) - {"data", "errors", "extensions"}
+            or _wire(response)
+            > min(MAX_GITHUB_RESPONSE_BYTES, membership.maximum_bytes)
+        ):
+            raise ReviewInputError("receipt GraphQL complete response is unavailable")
+        repository = response["data"]["repository"]
+        quarantine_census._repository(repository, identity)
+        pr = repository["pullRequest"]
+        connection = pr["comments"]
+        nodes, page = connection["nodes"], connection["pageInfo"]
+        if (
+            type(pr["number"]) is not int
+            or pr["number"] != identity.pull_request
+            or type(nodes) is not list
+            or len(nodes) >= membership.first
+            or type(connection["totalCount"]) is not int
+            or connection["totalCount"] != len(nodes)
+            or page["hasNextPage"] is not False
+            or (nodes and not quarantine_census._cursor(page["endCursor"]))
+            or _wire(response) - sum(_wire(node) for node in nodes) > 4096
+        ):
+            raise ReviewInputError("receipt GraphQL membership is incomplete")
+        rows = []
+        for node in nodes:
+            if _wire({k: v for k, v in node.items() if k != "body"}) > 1024:
+                raise ReviewInputError("receipt GraphQL metadata exceeds wire bound")
+            rows.append(quarantine_census._comment(node, ledger, identity))
+        return rows
+    except ReviewInputError:
+        raise
+    except (KeyError, TypeError, ValueError) as error:
+        raise ReviewInputError("receipt GraphQL response is malformed") from error
+
+
 def _membership_binding(value):
     if type(value) is not ReceiptMembership:
         raise ReviewInputError("receipt phase membership is unavailable")
+    _protocol_fields(value)
     return (
         value.bodies,
         value.owners,
@@ -229,6 +442,9 @@ def _membership_binding(value):
         value.receipt_update_id,
         value.app_id,
         value.maximum_bytes,
+        value.protocol,
+        value.scope,
+        value.first,
     )
 
 
@@ -319,6 +535,8 @@ def _make_windows():
                 token=token,
                 membership=entry["membership"],
                 reconcile=reconcile,
+                ledger=run.ledger,
+                identity=run.identity,
             )
 
         def confirmation_requests(self):

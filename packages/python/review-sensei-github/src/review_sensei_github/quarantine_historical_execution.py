@@ -49,6 +49,16 @@ def _registry():
         if lease is None:
             return None
         entry = leases.get(lease)
+        from . import quarantine_command_receipt as receipt_source
+
+        require_module_seal(receipt_source)
+        from .quarantine_command_receipt import _projection_binding
+
+        if (
+            entry is not None
+            and _projection_binding(entry["page"]) != entry["page_binding"]
+        ):
+            raise ReviewInputError("historical receipt projection changed")
         _require_default_profile(caller)
         from .quarantine_capacity import installed_capacity
         from .quarantine_command_execution import _configuration, _execution_owner
@@ -182,6 +192,7 @@ def _registry():
             recipe=entry["recipe"],
             captured=entry["captured"],
             page=entry["page"],
+            page_binding=entry["page_binding"],
             witness=None,
             journal=None,
             ordinary=0,
@@ -406,6 +417,7 @@ def _registry():
             rows=rows,
             root_id=roots[0]["id"],
             projection=entry["page"],
+            projection_binding=entry["page_binding"],
             authority_bytes=entry["authority_bytes"],
             successor_witness=entry["witness"],
         )

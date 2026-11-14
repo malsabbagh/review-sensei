@@ -134,10 +134,16 @@ def _registry():
 
     def prepare(run, authority, target):
         from . import quarantine_action
+        from . import quarantine_command_receipt as receipt_source
         from .quarantine_capacity import _guard_state, installed_capacity
         from .quarantine_command_execution import _source_frame
         from .quarantine_command_namespace import project_current
-        from .quarantine_command_receipt import project_receipt_page
+
+        require_module_seal(receipt_source)
+        from .quarantine_command_receipt import (
+            _projection_binding,
+            project_receipt_page,
+        )
         from .quarantine_lifecycle_transfer import _target_binding, sizing_snapshot
         from .session_ledger import (
             parse_session_comment,
@@ -229,6 +235,8 @@ def _registry():
                 ),
             ),
             future_bounds=(event_wire, 65536),
+            allow_graphql=True,
+            identity=run.identity,
         )
         from .quarantine_command_finalization import intermediate_suffix_recipe
 
@@ -267,6 +275,7 @@ def _registry():
         if run.caller.budget_view.ordinary_remaining() < recipe["combined_loss_calls"]:
             raise ReviewInputError("guarded suffix complete ordinary tail is unfunded")
         token = SuffixProposal()
+        require_module_seal(receipt_source)
         proposals[token] = dict(
             run=run,
             authority=authority,
@@ -288,6 +297,7 @@ def _registry():
             ),
             preparation_calls=preparation_calls,
             page=page,
+            page_binding=_projection_binding(page),
             accounting=canonical_bytes(project_current(run.caller)),
         )
         return token
@@ -301,8 +311,14 @@ def _registry():
         if entry is None or entry["run"] is not run:
             raise ReviewInputError("guarded suffix proposal is copied or expired")
         guard = installed_capacity(run.ledger, run.identity)
+        from . import quarantine_command_receipt as receipt_source
+
+        require_module_seal(receipt_source)
+        from .quarantine_command_receipt import _projection_binding
+
         if (
-            guard is not entry["guard"]
+            _projection_binding(entry["page"]) != entry["page_binding"]
+            or guard is not entry["guard"]
             or _guard_state(guard) != entry["guard_state"]
             or guard.comment_plan is not entry["plan"]
             or _target_binding(entry["target"]) != entry["binding"]
