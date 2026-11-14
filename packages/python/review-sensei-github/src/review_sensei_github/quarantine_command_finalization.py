@@ -226,6 +226,58 @@ def measure_inline_branches(observation):
             caller._accepted_semantic_capacity = previous
 
 
+def _root_growth_measurement(record, accounting, witness, result_bound=None, grants=()):
+    """Detached all-pending root width; this does not prove result production."""
+    from review_sensei import finding_lifecycle_store, session
+
+    require_module_seal(session)
+    raw = record.to_dict()
+    raw["api_run_accounting"] = accounting
+    raw.update(
+        generation=session.MAX_GENERATION,
+        completed_initial_reviews=session.DIAGNOSTIC_ROUND_CEILING,
+        completed_verification_rounds=session.DIAGNOSTIC_ROUND_CEILING,
+        failed_attempts=session.MAX_FAILED_ATTEMPTS,
+    )
+    for field in ("created_at", "updated_at", "expires_at"):
+        maximum = "9999-12-31T23:59:59.999999Z"
+        if len(raw[field]) < len(maximum):
+            raw[field] = maximum
+    if witness is not None and raw.get("finding_lifecycle") is not None:
+        raw["finding_lifecycle"] = {
+            **raw["finding_lifecycle"],
+            "schema_version": finding_lifecycle_store.HISTORY_REFERENCE_VERSION,
+            "accepted_semantic_history": witness["history"],
+        }
+    ordinary = len(canonical_bytes(raw))
+    terminal = finding_lifecycle_store.prospective_terminal_history_bytes(raw)
+    if result_bound is not None:
+        from review_sensei.bounded_evidence import MAX_MANIFEST_BYTES
+
+        terminal += result_bound - MAX_MANIFEST_BYTES
+    from . import session_ledger
+
+    require_module_seal(session_ledger)
+    framed = session_ledger.render_session_comment(
+        repository_id=record.repository_id,
+        pull_request=record.pull_request,
+        record=record,
+        consumed_grants=grants,
+    )
+    framing = len(framed.encode()) - len(canonical_bytes(record.to_dict()))
+    framing += len(str(session.MAX_GENERATION)) - len(str(record.generation))
+    body_bytes = max(ordinary, terminal) + framing
+    return {
+        "ordinary_root_bytes": ordinary,
+        "comment_body_bytes": body_bytes,
+        "terminal_root_bytes": terminal,
+        "root_fits": (
+            max(ordinary, terminal) <= session.MAX_SESSION_RECORD_BYTES
+            and body_bytes <= session_ledger.MAX_SESSION_COMMENT_BYTES
+        ),
+    }
+
+
 def _measure_inline_branches(observation):
     """Measure all reached prefixes under the original inline/root/history caps.
 
@@ -308,6 +360,54 @@ def _measure_inline_branches(observation):
             "assessment_state_manifest": json.loads(projected.cursor_manifest_bytes),
         }
     prospective = record.evolve(generation=generation, **fields)
+    from .quarantine_command_namespace import project_current
+
+    accounting_upper = project_current(run.caller)
+    witness = getattr(run.caller, "_accepted_semantic_capacity", None)
+    result_bound = None
+    if saved["projection"].creates_event:
+        import hashlib
+
+        from .api_run_history import action_result_binding
+        from .command_result_capacity import command_result_capacity_bound
+
+        selected = json.loads(target.native_review_bytes)
+        source_payload = json.loads(plan.payload)
+        if (
+            source_payload.get("conditional_approval") is not None
+            or source_payload["review_before"]["id"] != selected["id"]
+            or source_payload["head_sha"] != run.head_sha
+            or type(selected.get("id")) is not int
+            or not 0 < selected["id"] <= 2**63 - 1
+            or len(run.head_sha) != 40
+        ):
+            raise ReviewInputError(
+                "historical result native scalar source is unsupported"
+            )
+        base_result = quarantine_action.historical_command_result(
+            target.command,
+            target,
+            record,
+            existing=None,
+            actor=saved["authority"].document["actor"],
+        )
+        result_bound = command_result_capacity_bound(
+            base_result,
+            binding=action_result_binding(
+                run.identity, run.caller.accounting, run.ledger.evidence_producer()
+            ),
+            intent_sha256=hashlib.sha256(canonical_bytes(action["intent"])).hexdigest(),
+            outcome={"kind": "applied", "reason": None},
+            call_limit=run.caller.accounting.configuration.limit,
+            reference_history=True,
+            source_review_id=selected["id"],
+            approval_review_id=None,
+        )
+    grants = tuple(sorted(run.ledger._observed_consumed_grants))
+    growth_roots = [
+        _root_growth_measurement(root, accounting_upper, witness, result_bound, grants)
+        for root in (record, prospective)
+    ]
     branches = []
     for documents, _exact in alternatives:
         current = prospective
@@ -330,8 +430,13 @@ def _measure_inline_branches(observation):
                 raise ReviewInputError(
                     "quarantine complete command requires a non-inline checkpoint"
                 )
+            growth = _root_growth_measurement(
+                candidate, accounting_upper, witness, result_bound, grants
+            )
+            growth_roots.append(growth)
             checkpoints.append(
                 {
+                    "growth": growth,
                     "root_bytes": len(canonical_bytes(candidate.to_dict())),
                     "reference_bytes": len(
                         canonical_bytes(candidate.finding_lifecycle)
@@ -344,9 +449,151 @@ def _measure_inline_branches(observation):
     require_observation(observation)
     return {
         "branches": tuple(branches),
+        "growth_roots": tuple(growth_roots),
+        "result_manifest_bound": result_bound,
+        "all_growth_roots_fit": all(root["root_fits"] for root in growth_roots),
         "max_checkpoints": max(len(branch) for branch in branches),
         "native_requests": requests,
         "prospective_root_bytes": len(canonical_bytes(prospective.to_dict())),
+    }
+
+
+def intermediate_suffix_recipe(observation):
+    """Derive the closed intermediate recipe; data, not an execution lease."""
+    from copy import copy, deepcopy
+
+    from review_sensei.bounded_evidence import partition_evidence
+
+    from . import finding_lifecycle, quarantine_action, quarantine_capacity
+    from .quarantine_creation import _body
+
+    saved = require_observation(observation)
+    plan = _NATIVE_PLANS.get(observation)
+    if plan is None or saved["guard"] is None:
+        raise ReviewInputError("guarded intermediate source plan is unavailable")
+    for module in (finding_lifecycle, quarantine_action, quarantine_capacity):
+        require_module_seal(module)
+    payload = json.loads(plan.payload)
+    review, check = payload.get("review_update"), payload.get("check_request")
+    if (
+        not saved["projection"].creates_event
+        or review is None
+        or review[0] != "PUT"
+        or check is None
+        or "/check-runs" not in check[1]
+        or payload.get("cleanup_requests")
+        or payload.get("conditional_approval") is not None
+    ):
+        raise ReviewInputError(
+            "guarded suffix requires one update and check replay only"
+        )
+    method, path, raw = check
+    keys = {
+        finding_lifecycle._digest({"method": method, "path": path, "request": value})
+        for value in (raw, finding_lifecycle._request_identity(raw))
+    }
+    matches = [
+        effect for effect in plan.journal.effects if effect["request_sha256"] in keys
+    ]
+    if len(matches) != 1 or matches[0]["status"] != "confirmed":
+        raise ReviewInputError("guarded suffix check is not an authenticated replay")
+    measured = measure_inline_branches(observation)
+    if (
+        measured["max_checkpoints"] != 2
+        or any(len(branch) != 2 for branch in measured["branches"])
+        or len(measured["native_requests"]) != 2
+    ):
+        raise ReviewInputError(
+            "guarded suffix has additional native/checkpoint branches"
+        )
+    guard = saved["guard"]
+    original = quarantine_capacity._guard_state(guard)
+    projected = copy(guard)
+    for name in (
+        "stats",
+        "objects",
+        "certificates",
+        "comment_bounds",
+        "review_bounds",
+        "check_bounds",
+        "inline_bounds",
+        "reaction_bounds",
+    ):
+        setattr(projected, name, deepcopy(getattr(guard, name)))
+    prefixes = []
+
+    def capture():
+        certificate = projected.certificates["reviews"]
+        if certificate.get("reader") != "bounded-cold-reviews":
+            raise ReviewInputError("guarded suffix review reader is unsupported")
+        prefixes.append(
+            (
+                projected.comment_plan.worst_read_calls(),
+                certificate["physical_reads_upper_bound"],
+            )
+        )
+
+    capture()
+    run, target = saved["run"], saved["target"]
+    binding = {
+        **quarantine_action._decision_binding(saved["record"], run),
+        "generation": 2_147_483_647,
+    }
+    parts = partition_evidence(
+        json.loads(target.capacity_projection.event_bytes),
+        binding=binding,
+        item_count=1,
+    )
+    if len(parts) != 1:
+        raise ReviewInputError("guarded suffix event allocation changed")
+    event_body = _body(parts[0])
+    projected.before_request(
+        "POST", run.ledger._comments_path(run.identity), {"body": event_body}
+    )
+    capture()
+    projected.after_response("POST", {"id": int("9" * 64), "body": event_body})
+    capture()
+    projected.before_request(*review)
+    capture()
+    if quarantine_capacity._guard_state(guard) != original:
+        raise ReviewInputError("guarded suffix sizing changed installed capacity")
+    C, R = max(value[0] for value in prefixes), max(value[1] for value in prefixes)
+    if C > 4 or R > 3:
+        raise ReviewInputError("guarded suffix complete physical reader exceeds recipe")
+    # Original source branches: coalescence saves only two pre-mutation GETs.
+    # Four post-mutation lost GETs and receipt's one complete fresh reconciliation
+    # remain paid. These quantities alone cannot authorize any dispatch.
+    stages = (
+        ("entry-authority", 2),
+        ("entry-checkpoint", C + 5),
+        ("complete-inventory", C),
+        ("event-authority-and-echo", 6),
+        ("own-cas-authority-and-checkpoint", 4 + C + 5),
+        ("post-cas-authority", 4),
+        ("review-capability", 1),
+        ("initial-reviews", R),
+        ("carried-hold", C + 1),
+        ("pre-update-reviews", R),
+        ("pending-journal", 4 + C + 4),
+        ("review-update", 1),
+        ("post-update-reviews", R),
+        ("check-capability-and-replay", 3),
+        ("final-hold", C + 1),
+        ("finish-journal", 4 + C + 4),
+        ("receipt", 5),
+        ("trust-verifications", 7),
+    )
+    normal = sum(count for _, count in stages)
+    return {
+        "stages": stages,
+        "normal_calls": normal,
+        "combined_loss_calls": normal + 3 + 4,
+        "comment_reads": C,
+        "review_reads": R,
+        "root_measurement": measured,
+        "review": json.loads(canonical_bytes(review)),
+        "check": json.loads(canonical_bytes(check)),
+        "event": event_body,
     }
 
 

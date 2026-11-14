@@ -160,10 +160,6 @@ def _make_issuer():
             or caller.accounting.action.get("phase") != "pending"
             or caller._terminal_block is None
             or caller._terminal_reason is not None
-            or getattr(
-                _publication_transport(ledger.http), "_quarantine_capacity_guard", None
-            )
-            is not None
         ):
             return None
         if (
@@ -172,6 +168,15 @@ def _make_issuer():
             or frame.f_locals.get("plan") is not plan
         ):
             raise ReviewInputError("receipt census entry source changed")
+        if (
+            getattr(
+                _publication_transport(ledger.http), "_quarantine_capacity_guard", None
+            )
+            is not None
+        ):
+            from .quarantine_command_suffix import begin_census
+
+            return begin_census(ledger, identity, plan)
         token = _Lease()
         starts[token] = (
             ledger,
@@ -188,7 +193,10 @@ def _make_issuer():
 
     def observe_receipt_census(token, rows):
         from . import packed_comment_census, quarantine_census
+        from .quarantine_command_suffix import complete_census, owns_census
 
+        if owns_census(token):
+            return complete_census(token, rows)
         if token is None:
             return rows
         saved = starts.pop(token, None) if type(token) is _Lease else None

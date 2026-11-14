@@ -562,6 +562,13 @@ def prepare_quarantine_target(run, authority, command, app, permission):
     from .quarantine_command_namespace import prepare as prepare_namespace
 
     prepare_namespace(run, authority, target)
+    from .quarantine_command_suffix import prepare as prepare_suffix
+
+    suffix = prepare_suffix(run, authority, target)
+    if suffix is not None:
+        from .quarantine_command_suffix import require_execution
+
+        require_execution(suffix, run)
     _require_installed_command_tail(run, authenticated)
     from .quarantine_command_execution import prepare_receipt_phase
 
