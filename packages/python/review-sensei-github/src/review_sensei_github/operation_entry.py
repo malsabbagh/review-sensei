@@ -855,3 +855,9 @@ def call_operation_trigger(
     if admitted.replay_payload is None:
         raise ReviewInputError("operation entry refused: result_missing")
     return decode(admitted.replay_payload)
+
+
+from .materialized_publication_phase import install_analysis as _install_materialized_phase  # noqa: E402
+
+_install_materialized_phase(globals())
+del _install_materialized_phase

@@ -577,3 +577,9 @@ def _view(payload: object) -> OperationComment:
         user_id=user_id,
         user_type=user_type,
     )
+
+
+from .materialized_publication_phase import install_ports as _install_materialized_phase  # noqa: E402
+
+_install_materialized_phase(GitHubIssueCommentOperationPort, ResultPartStore)
+del _install_materialized_phase

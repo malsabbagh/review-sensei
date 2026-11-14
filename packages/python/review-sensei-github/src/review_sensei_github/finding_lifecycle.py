@@ -3992,6 +3992,12 @@ class FindingLifecycleJournal:
                 owner.http = http
 
 
+from .materialized_publication_phase import install_journal as _install_materialized_phase  # noqa: E402
+
+_install_materialized_phase(FindingLifecycleJournal)
+del _install_materialized_phase
+
+
 from .empty_original_admission import install_restore as _install_empty_restore  # noqa: E402
 
 restore_finding_lifecycle = _install_empty_restore(restore_finding_lifecycle)

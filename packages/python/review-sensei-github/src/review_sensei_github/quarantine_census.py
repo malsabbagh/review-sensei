@@ -1114,3 +1114,9 @@ def lifecycle_staging_pricing(ledger, record, *, checkpoint_parts, target, facto
         else "quarantine-inline-staging-v1",
         staging_target=target,
     )
+
+
+from .materialized_publication_phase import install_census as _install_materialized_phase  # noqa: E402
+
+_install_materialized_phase(globals())
+del _install_materialized_phase

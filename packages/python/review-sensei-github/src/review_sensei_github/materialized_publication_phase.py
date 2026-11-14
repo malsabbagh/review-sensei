@@ -1,0 +1,455 @@
+"""Source-owned hot materialization phase; no smaller census price is enabled.
+
+The installed source wrappers record original completed computation/retention.
+Once a qualifying census opens, operation-comment writes are forbidden, including
+identical-payload retries to fresh IDs. Readback and the original journal/root
+writers remain unchanged. No public receipt or observation can enter the phase.
+"""
+
+from __future__ import annotations
+
+import inspect
+import sys
+from contextvars import ContextVar
+from functools import wraps
+from typing import Any
+from weakref import WeakKeyDictionary
+
+from review_sensei.bounded_evidence import canonical_bytes
+from review_sensei.errors import ReviewInputError
+
+
+def _build():
+    accepted: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
+    active: ContextVar[Any] = ContextVar(
+        "source_materialized_publication", default=None
+    )
+    installed = set()
+    source_classes: dict[type, Any] = {}
+
+    def definition(name):
+        frame = inspect.currentframe()
+        frame = frame.f_back if frame else None
+        frame = frame.f_back if frame else None
+        module = sys.modules.get(name)
+        if (
+            frame is None
+            or module is None
+            or name in installed
+            or frame.f_code.co_name != "<module>"
+            or frame.f_globals is not vars(module)
+        ):
+            raise ReviewInputError(
+                "materialization source installer is not defining source"
+            )
+        installed.add(name)
+
+    def transport(http):
+        from .publication_recovery import _publication_transport
+
+        return _publication_transport(http)
+
+    def caller_for(http):
+        from .caller_operation import caller_for_http
+
+        return caller_for_http(http)
+
+    def class_seal(cls):
+        return tuple(
+            (name, value, getattr(value, "__code__", None))
+            for name, value in vars(cls).items()
+            if callable(value) or isinstance(value, property)
+        )
+
+    def class_intact(instance):
+        cls = type(instance)
+        seal = source_classes.get(cls)
+        return (
+            seal is not None
+            and class_seal(cls) == seal
+            and not any(name in vars(instance) for name, _, _ in seal)
+        )
+
+    def install_analysis(namespace):
+        definition("review_sensei_github.operation_entry")
+        original = namespace["run_actions_analysis"]
+        original_code = original.__code__
+        from . import accepted_result
+
+        remember = accepted_result.remember_accepted_result
+        remember_code = remember.__code__
+
+        @wraps(original)
+        def run(**kwargs):
+            http = kwargs["http"]
+            key = transport(http)
+            accepted.pop(key, None)
+            result = original(**kwargs)
+            if (
+                original.__code__ is original_code
+                and namespace["run_actions_analysis"] is run
+                and accepted_result.remember_accepted_result is remember
+                and remember.__code__ is remember_code
+                and getattr(result, "fresh", None) is not None
+                and getattr(result, "operation", None) is not None
+            ):
+                captured = accepted_result._CAPTURED.get(key)
+                caller = caller_for(http)
+                if captured is not None and caller is not None:
+                    accepted[key] = (
+                        caller,
+                        captured,
+                        canonical_bytes(captured.reference),
+                    )
+            return result
+
+        namespace["run_actions_analysis"] = run
+
+    def install_application(cls):
+        definition("review_sensei_github.application")
+        original = cls.publish_review
+        body = original
+        while hasattr(body, "__wrapped__"):
+            body = body.__wrapped__
+        application_code = body.__code__
+
+        @wraps(original)
+        def publish(app, **kwargs):
+            ledger = app.session_ledger
+            caller = getattr(ledger, "caller", None)
+            http = getattr(ledger, "http", None)
+            key = transport(http) if http is not None else None
+            selected = accepted.get(key) if key is not None else None
+            entry = None
+            if (
+                type(app) is cls
+                and selected is not None
+                and selected[0] is caller
+                and getattr(ledger, "_quarantine_required", False)
+                and getattr(key, "_quarantine_capacity_guard", None) is None
+            ):
+                entry = {
+                    "app": app,
+                    "application_code": application_code,
+                    "journal": None,
+                    "ledger": ledger,
+                    "caller": caller,
+                    "transport": key,
+                    "accepted": selected,
+                    "retained": None,
+                    "reads": {},
+                    "bodies": {},
+                    "poisoned": False,
+                    "closed": False,
+                    "censuses": 0,
+                }
+            token = active.set(entry)
+            try:
+                return original(app, **kwargs)
+            finally:
+                active.reset(token)
+                if key is not None:
+                    accepted.pop(key, None)
+
+        cls.publish_review = publish
+
+    def install_journal(cls):
+        definition("review_sensei_github.finding_lifecycle")
+        original = cls.__init__
+
+        @wraps(original)
+        def construct(journal, *args, **kwargs):
+            original(journal, *args, **kwargs)
+            entry = active.get()
+            frame = inspect.currentframe()
+            caller = frame.f_back if frame else None
+            if (
+                entry is not None
+                and caller is not None
+                and caller.f_code is entry["application_code"]
+                and type(journal) is cls
+                and journal.ledger is entry["ledger"]
+                and journal.ledger.caller is entry["caller"]
+            ):
+                if entry["journal"] is not None:
+                    entry["poisoned"] = True
+                else:
+                    entry["journal"] = journal
+
+        cls.__init__ = construct
+
+    def install_ports(port_cls, result_cls):
+        definition("review_sensei_github.operation_comments")
+        original_create, original_update = port_cls.create, port_cls.update
+        original_list = port_cls.list_comments
+        original_request = port_cls._request
+        original_read = result_cls.read_available_with_carriers
+
+        def entry_for(port):
+            entry = active.get()
+            if entry is None or transport(port._http) is not entry["transport"]:
+                return None
+            return entry
+
+        def denied(port):
+            entry = entry_for(port)
+            if entry is not None and entry["closed"]:
+                raise ReviewInputError(
+                    "materialized publication forbids new operation artifacts"
+                )
+            return entry
+
+        @wraps(original_request)
+        def request(port, method, path, **kwargs):
+            if method not in {"GET", "HEAD"}:
+                denied(port)
+            return original_request(port, method, path, **kwargs)
+
+        @wraps(original_create)
+        def create(port, body):
+            entry = denied(port)
+            try:
+                return original_create(port, body)
+            except BaseException:
+                if entry is not None:
+                    entry["poisoned"] = True
+                raise
+
+        @wraps(original_update)
+        def update(port, comment_id, body):
+            entry = denied(port)
+            try:
+                return original_update(port, comment_id, body)
+            except BaseException:
+                if entry is not None:
+                    entry["poisoned"] = True
+                raise
+
+        @wraps(original_list)
+        def listed(port):
+            result = original_list(port)
+            entry = entry_for(port)
+            if entry is not None and class_intact(port):
+                for item in result:
+                    entry["bodies"][item.comment_id] = (
+                        item.body,
+                        item.user_id,
+                        item.user_type,
+                    )
+            return result
+
+        @wraps(original_read)
+        def read(store, *, event_key):
+            result = original_read(store, event_key=event_key)
+            entry = active.get()
+            if entry is not None and result is not None and class_intact(store):
+                digest, payload, ids = result
+                if all(identifier in entry["bodies"] for identifier in ids):
+                    entry["reads"][event_key] = (digest, bytes(payload), tuple(ids))
+            return result
+
+        port_cls.create, port_cls.update, port_cls.list_comments = (
+            create,
+            update,
+            listed,
+        )
+        port_cls._request = request
+        result_cls.read_available_with_carriers = read
+        source_classes[port_cls] = class_seal(port_cls)
+        source_classes[result_cls] = class_seal(result_cls)
+
+    def install_retention(namespace):
+        definition("review_sensei_github.publication_recovery")
+        original = namespace["retain_review_result"]
+
+        @wraps(original)
+        def retain(**kwargs):
+            result = original(**kwargs)
+            entry = active.get()
+            if entry is not None and kwargs["ledger"] is entry["ledger"]:
+                value = kwargs["result"]
+                if value.transaction is not None and not value.comments:
+                    entry["retained"] = (
+                        value.content_digest(),
+                        canonical_bytes(value.transaction.to_dict()),
+                    )
+            return result
+
+        namespace["retain_review_result"] = retain
+
+    def require_closed_source(entry, ledger, identity):
+        import hashlib
+        import json
+
+        from review_sensei.models import ReviewResult, ReviewTransaction
+
+        from .accepted_result import selected_accepted_result
+        from .guarded_pending_publication import _empty_state, _original_methods
+        from .quarantine_origin import require_authenticated_read_owner
+
+        app, caller = entry["app"], entry["caller"]
+        journal = entry["journal"]
+        if journal is None or entry["retained"] is None or entry["poisoned"]:
+            return False
+        for owner in (
+            app,
+            ledger,
+            caller,
+            journal,
+            journal.reviewer,
+            journal.reviewer.checks,
+            journal.reviewer.finalizer,
+        ):
+            _original_methods(owner)
+        record = caller._effect_record
+        if (
+            journal.ledger is not ledger
+            or app.session_ledger is not ledger
+            or record is not journal._record
+            or record is None
+            or caller._root != record.record_sha256
+            or caller._checkpoint is not None
+            or caller.accounting.uncertain
+            or record.transaction is None
+            or record.transaction.phase != "publication_failed"
+        ):
+            return False
+        caller._require_ledger(ledger, identity)
+        source = selected_accepted_result(
+            ledger.http, record.transaction, app_id=ledger.authenticated_app_id
+        )
+        if (
+            source is not entry["accepted"][1]
+            or canonical_bytes(source.reference) != entry["accepted"][2]
+        ):
+            raise ReviewInputError("materialized accepted source changed")
+        reference = source.reference
+        original = ReviewResult.from_dict(json.loads(source.payload))
+        retained_digest, retained_transaction = entry["retained"]
+        if (
+            original.comments
+            or original.content_digest() != record.transaction.result_sha256
+            or retained_digest != record.transaction.result_sha256
+            or not ReviewTransaction.from_dict(
+                json.loads(retained_transaction)
+            ).logical_identity_matches(record.transaction)
+            or reference["run_id"] != str(caller.run.run_id)
+            or reference["run_attempt"] != str(caller.attempt)
+        ):
+            return False
+        _empty_state(journal)
+        reader = ledger._quarantine_origin_reader
+        _original_methods(reader)
+        _original_methods(reader.current_scope)
+        authenticated = ledger._quarantine_authenticated
+        require_authenticated_read_owner(authenticated, ledger, caller, identity)
+        if canonical_bytes(record.quarantine_lineage) != authenticated.lineage_bytes:
+            raise ReviewInputError("materialized origin lineage changed")
+        if authenticated.record_sha256 != record.record_sha256:
+            from .quarantine_checkpoint import confirmed_checkpoint_capacity
+
+            if (
+                confirmed_checkpoint_capacity(caller, ledger, identity).record
+                is not record
+            ):
+                raise ReviewInputError("materialized current root custody changed")
+        if (
+            authenticated.archive["target_isolation"].get("schema_version")
+            != "quarantine-target-isolation-v1"
+        ):
+            return False
+        finalizer = journal.reviewer.finalizer
+        if (
+            any(
+                getattr(finalizer, name) is not None
+                for name in (
+                    "partitioned_reader",
+                    "human_inventory_reader",
+                    "historical_assessment_reader_factory",
+                    "native_union_reader_factory",
+                    "prior_publication_reader_factory",
+                )
+            )
+            or journal.reviewer._pending_thread_cleanup is not None
+        ):
+            return False
+        from .application import GitHubApplication
+
+        factory = finalizer.quarantine_reader_factory
+        if (
+            getattr(factory, "__self__", None) is not app
+            or getattr(factory, "__func__", None)
+            is not GitHubApplication._quarantine_hold_reader
+        ):
+            return False
+        rows = tuple(ledger._cached_comments())
+        by_id = {row["id"]: row for row in rows}
+        ids = (reference["event_comment_id"], *reference["part_ids"])
+        if len(by_id) != len(rows) or any(
+            identifier not in by_id for identifier in ids
+        ):
+            return False
+        event = by_id[reference["event_comment_id"]]
+        if (
+            hashlib.sha256(event["body"].encode()).hexdigest()
+            != reference["event_body_sha256"]
+        ):
+            return False
+        for identifier in ids:
+            ledger._part_owner(by_id[identifier], identity)
+        return True
+
+    def install_census(namespace):
+        definition("review_sensei_github.quarantine_census")
+        original = namespace["lifecycle_capacity_plan"]
+
+        @wraps(original)
+        def census(ledger, identity, *, added_parts):
+            entry = active.get()
+            if entry is not None and entry["caller"] is getattr(ledger, "caller", None):
+                # Still no refined quote. Record source reachability only until
+                # all materialization/source checks and writer coverage qualify.
+                entry["censuses"] += 1
+                qualified = require_closed_source(entry, ledger, identity)
+                if entry["closed"] and not qualified:
+                    raise ReviewInputError("materialized publication phase changed")
+                if qualified:
+                    entry["closed"] = True
+            return original(ledger, identity, added_parts=added_parts)
+
+        namespace["lifecycle_capacity_plan"] = census
+
+    def observation(ledger):
+        entry = active.get()
+        if entry is None or entry["caller"] is not getattr(ledger, "caller", None):
+            return None
+        return {
+            "retained": entry["retained"] is not None,
+            "confirmed_read_events": len(entry["reads"]),
+            "observed_bodies": len(entry["bodies"]),
+            "poisoned": entry["poisoned"],
+            "closed": entry["closed"],
+            "censuses": entry["censuses"],
+        }
+
+    return (
+        install_analysis,
+        install_application,
+        install_ports,
+        install_journal,
+        install_retention,
+        install_census,
+        observation,
+    )
+
+
+(
+    install_analysis,
+    install_application,
+    install_ports,
+    install_journal,
+    install_retention,
+    install_census,
+    phase_observation,
+) = _build()
+del _build
