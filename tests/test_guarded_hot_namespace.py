@@ -44,6 +44,32 @@ class GuardedHotNamespaceTests(unittest.TestCase):
                     )
         self.assertIsInstance(ApiRunAccounting.remaining, property)
 
+    def test_original_same_generation_checkpoint_preserves_every_business_field(self):
+        from datetime import timedelta
+
+        from test_session_ledger import FIXED_NOW, IDENTITY
+
+        from review_sensei.session import SessionRecord
+
+        original = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        same = original.evolve(now=FIXED_NOW + timedelta(seconds=1))
+        self.assertTrue(
+            guarded_hot_namespace._checkpoint_generation_matches(original, same)
+        )
+        self.assertTrue(
+            guarded_hot_namespace._checkpoint_generation_matches(
+                original, original.evolve(generation=original.generation + 1)
+            )
+        )
+        for changed in (
+            same.evolve(operator_paused=True),
+            same.evolve(failed_attempts=1),
+            same.evolve(generation=original.generation + 2),
+        ):
+            self.assertFalse(
+                guarded_hot_namespace._checkpoint_generation_matches(original, changed)
+            )
+
     def caller(self, directory, sent):
         def physical(request, timeout):
             sent.append(request.full_url)

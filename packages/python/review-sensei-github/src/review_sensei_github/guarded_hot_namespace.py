@@ -28,6 +28,30 @@ def _function(function):
     )
 
 
+def _checkpoint_generation_matches(previous, candidate):
+    """Negative lineage check, never an own-CAS or writer capability."""
+    from review_sensei import session
+
+    require_module_seal(session)
+    if (
+        type(previous) is not session.SessionRecord
+        or type(candidate) is not session.SessionRecord
+    ):
+        return False
+    if candidate.generation == previous.generation + 1:
+        return True
+    if candidate.generation != previous.generation:
+        return False
+    # Original idempotent publication completion can return its existing root;
+    # the caller still persists current accounting and updates the timestamp.
+    # That does not permit another same-generation business-state transition.
+    left, right = previous.to_dict(), candidate.to_dict()
+    for field in ("api_run_accounting", "updated_at", "record_sha256"):
+        left.pop(field, None)
+        right.pop(field, None)
+    return canonical_bytes(left) == canonical_bytes(right)
+
+
 def _registry():
     from pathlib import Path
 
@@ -516,7 +540,7 @@ def _registry():
             or frame.f_locals.get("persisted") is not persisted
             or caller._checkpoint is None
             or caller._checkpoint.record_sha256 != cast(Any, record).record_sha256
-            or cast(Any, record).generation != entry["record"].generation + 1
+            or not _checkpoint_generation_matches(entry["record"], record)
         ):
             raise ReviewInputError("hot namespace positive checkpoint changed")
         # The original caller has already checked persisted.require_successor.
