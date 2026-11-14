@@ -30,13 +30,18 @@ def _make_registry():
         current = inspect.currentframe()
         frame = current.f_back if current is not None else None
         module = sys.modules.get("review_sensei_github.quarantine_checkpoint")
+        spec = getattr(module, "__spec__", None)
+        get_code = getattr(getattr(spec, "loader", None), "get_code", None)
         if (
             source is not None
             or module is None
             or frame is None
             or frame.f_globals is not vars(module)
+            or frame.f_locals is not frame.f_globals
             or frame.f_code.co_name != "<module>"
-            or not getattr(getattr(module, "__spec__", None), "_initializing", False)
+            or not getattr(spec, "_initializing", False)
+            or not callable(get_code)
+            or get_code(module.__name__) != frame.f_code
             or cls is not getattr(module, "_CheckpointSnapshot", None)
         ):
             raise ReviewInputError("candidate GET receipt requires defining source")
