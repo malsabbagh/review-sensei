@@ -1,13 +1,14 @@
 """Actual own-decision custody and post-observation native drift controls."""
 
 import copy
+import sys
 import unittest
-from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from review_sensei_github import quarantine_lifecycle_transfer as transfer
 from review_sensei_github import quarantine_pr_observation as observation
 
+from review_sensei.errors import ReviewInputError
 from tests import quarantine_worker_qualification as worker
 
 
@@ -24,18 +25,40 @@ class QuarantineLifecycleTransferTests(unittest.TestCase):
                 super().__init__(directory)
                 created.append(self)
 
-        def copied(token, ledger, identity):
-            reached.append(len(created[0].trace))
-            try:
-                return original(copy.copy(token), ledger, identity)
-            except Exception as error:
-                reached.append(str(error))
-                raise
+        def observe(frame, event, _result):
+            if event != "call" or frame.f_code is not original.__code__:
+                return
+            # Observe the actual issued consumer without replacing a sealed
+            # source. A monkeypatched consumer is rejected before this boundary.
+            self.assertIs(frame.f_globals, vars(transfer))
+            token, ledger, identity = (
+                frame.f_locals[key] for key in ("token", "ledger", "identity")
+            )
+            self.assertIn(token, transfer._ISSUED)
+            self.assertIsNotNone(transfer._ISSUED[token]["confirmed"])
+            boundary = len(created[0].trace)
+            reached.append(boundary)
+            with self.assertRaisesRegex(
+                ReviewInputError, "unissued or reused"
+            ) as error:
+                original(copy.copy(token), ledger, identity)
+            self.assertEqual(len(created[0].trace), boundary)
+            self.assertIn(token, transfer._ISSUED)
+            self.assertNotIn(ledger, transfer._NAMESPACE_RESTORE)
+            reached.append(str(error.exception))
+            # The real copied-token refusal terminates this attempted handoff;
+            # do not let the suspended original-token call finalize instead.
+            raise error.exception
 
-        with patch.object(transfer, "consume", copied):
+        previous_profile = sys.getprofile()
+        try:
+            sys.setprofile(observe)
             with self.assertRaisesRegex(AssertionError, "decision 1"):
                 self.exercise_counts(1, 1, fixture_type=Fixture)
-        self.assertTrue(reached)
+        finally:
+            sys.setprofile(previous_profile)
+        self.assertEqual(len(reached), 2)
+        self.assertIs(transfer.consume, original)
         fixture = created[0]
         self.assertFalse(any(row.get("state") == "APPROVED" for row in fixture.reviews))
         later = fixture.trace[reached[0] :]
