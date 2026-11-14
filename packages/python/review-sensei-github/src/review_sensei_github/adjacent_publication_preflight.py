@@ -9,7 +9,7 @@ import hashlib
 import inspect
 import json
 import sys
-from typing import Any
+from typing import Any, cast
 from weakref import WeakKeyDictionary
 
 from review_sensei.bounded_evidence import canonical_bytes
@@ -270,7 +270,8 @@ def _registry():
         ):
             raise ReviewInputError("adjacent preflight reader factory changed")
         require_instance_source(application, methods=("_quarantine_hold_reader",))
-        caller = host.ledger.caller
+        ledger = cast(ApiRunSessionLedger, host.ledger)
+        caller = ledger.caller
         if (
             type(caller) is not ApiRunRequestTransport
             or caller._checkpoint is not None
@@ -279,8 +280,8 @@ def _registry():
         ):
             raise ReviewInputError("adjacent preflight current owner changed")
         require_instance_source(caller, methods=("open", "_require_ledger"))
-        caller._require_ledger(host.ledger, host.identity)
-        require_instance_source(host.ledger, methods=("load", "replace"))
+        caller._require_ledger(ledger, host.identity)
+        require_instance_source(ledger, methods=("load", "replace"))
         if caller._effect_record.publication_staging is not None:
             raise ReviewInputError(
                 "adjacent preflight requires an empty grouped frontier"
@@ -332,8 +333,8 @@ def _registry():
             canonical_bytes(caller._effect_record.to_dict()),
             canonical_bytes(caller.accounting.to_document()),
             transport_stamp(owner.http, caller, capacity, journal),
-            transport_stamp(host.ledger.http, caller, capacity, journal),
-            id(host.ledger),
+            transport_stamp(ledger.http, caller, capacity, journal),
+            id(ledger),
             id(host.plan),
             id(host.transaction),
             factory,
