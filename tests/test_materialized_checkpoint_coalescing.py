@@ -27,6 +27,7 @@ class CoalescingFixture(JourneyFixture):
         self.writes = {}
         self.copies_rejected = set()
         self.reads_before_write = {}
+        self.final_reads = {}
 
     def external(self, request, timeout):
         snapshot = getattr(
@@ -54,11 +55,13 @@ class CoalescingFixture(JourneyFixture):
         if method == "GET" and not snapshot.operation.write_attempted:
             self.reads_before_write[key] = self.reads_before_write.get(key, 0) + 1
         response = super().external(request, timeout)
+        if method == "GET" and snapshot.operation.write_attempted:
+            self.final_reads[key] = self.final_reads.get(key, 0) + 1
         if (
             method == "GET"
             and snapshot.operation.write_attempted
-            and self.fault == "one-loss-per-root"
-            and key not in self.lost
+            and self.fault in {"one-loss-per-root", "all-final-reads"}
+            and (key not in self.lost or self.fault == "all-final-reads")
         ):
             self.lost.add(key)
             raise TimeoutError("synthetic original final readback response loss")
@@ -101,6 +104,20 @@ class MaterializedCheckpointCoalescingTests(unittest.TestCase):
             self.assertTrue(
                 any(count == 1 for count in fixture.reads_before_write.values())
             )
+            self.assertEqual(fixture.accounted.accounting.configuration.limit, 512)
+
+    def test_two_lost_reads_of_same_root_exhaust_original_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = CoalescingFixture(directory, "all-final-reads")
+            _, registration = fixture.original_origins(
+                failed_count=1, published_count=1
+            )
+            with registered_resource([registration]):
+                self.assertEqual(fixture.invoke(), 1)
+            self.assertEqual(len(fixture.writes), 1)
+            self.assertEqual(tuple(fixture.writes.values()), (1,))
+            self.assertEqual(tuple(fixture.final_reads.values()), (2,))
+            self.assertGreaterEqual(fixture.accounted.accounting.uncertain, 2)
             self.assertEqual(fixture.accounted.accounting.configuration.limit, 512)
 
     def test_intervening_read_invalidates_census_receipt_before_first_write(self):
