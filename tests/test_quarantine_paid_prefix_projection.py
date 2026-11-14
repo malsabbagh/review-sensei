@@ -160,3 +160,85 @@ class PaidPrefixProjectionTests(unittest.TestCase):
         self.assertEqual(len(captured), 2)
         self.assertTrue(overflow)
         self.assertTrue(all(size > 32768 for size in overflow))
+
+    def test_coordinated_original_and_live_accounting_mutation_is_refused(self):
+        baselines, changed, callers = [], [], []
+
+        def observe(frame, event, result):
+            if (
+                event == "return"
+                and frame.f_code is namespace.prepare.__code__
+                and result is not None
+            ):
+                baselines.append(frame.f_locals["state"])
+            if (
+                event == "call"
+                and frame.f_code is namespace.capture_paid_prefix.__code__
+            ):
+                caller = frame.f_locals["caller"]
+                request = baselines[-1].completed[0]
+                self.assertIs(request, caller.accounting.completed[0])
+                changed.append((request, request.deadline_unix_ms))
+                object.__setattr__(
+                    request, "deadline_unix_ms", request.deadline_unix_ms + 1
+                )
+                callers.append(caller)
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
+        ):
+            fixture = PublishedTailJourneyFixture(directory)
+            _, registration = fixture.original_origins(
+                failed_count=1, published_count=1
+            )
+            with registered_resource([registration]):
+                self.assertEqual(fixture.invoke(), 0, fixture.error)
+                origin, inventory = next(
+                    (key, value)
+                    for key, value in fixture.selected.ledger._quarantine_authenticated.inventories.items()
+                    if value["assessments"]
+                )
+                fixture.quarantine_predecessor_comment_id = None
+                fixture.select_command(
+                    "@reviewsensei dismiss "
+                    + inventory["assessments"][0]["instance"]
+                    + ' --reason "quarantine:'
+                    + origin
+                    + ' Exact source disproves this historical concern."',
+                    new_run=True,
+                )
+                previous = sys.getprofile()
+                try:
+                    sys.setprofile(observe)
+                    code = fixture.invoke_command()
+                finally:
+                    sys.setprofile(previous)
+                    for request, deadline in changed:
+                        object.__setattr__(request, "deadline_unix_ms", deadline)
+                self.assertEqual(code, 1, fixture.error)
+                self.assertIn(
+                    "cold namespace original accounting changed", fixture.error
+                )
+                self.assertEqual(len(callers), 1)
+                caller = callers[0]
+                self.assertFalse(caller.accounting.action["execution_started"])
+                self.assertEqual(caller.budget_view.ordinary_remaining(), 105)
+                self.assertEqual(caller.accounting.remaining, 190)
+                self.assertEqual(
+                    next(
+                        b.undispatched
+                        for b in caller.accounting.blocks
+                        if b.block_id == caller._terminal_block
+                    ),
+                    50,
+                )
+                self.assertEqual(caller.accounting.uncertain, 0)
+                self.assertEqual(
+                    len(
+                        fixture.selected.ledger._quarantine_authenticated.state[
+                            "settlements"
+                        ]
+                    ),
+                    0,
+                )

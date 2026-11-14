@@ -554,6 +554,8 @@ def _registry():
         ] is not frame.f_locals.get("target"):
             raise ReviewInputError("cold paid prefix observation changed")
         entry = _require(active.get(caller), caller)
+        if canonical_bytes(entry["state"].to_document()) != entry["state_bytes"]:
+            raise ReviewInputError("cold namespace original accounting changed")
         if "paid_projection" in entry:
             raise ReviewInputError("cold paid prefix was already captured")
         start = frame.f_locals.get("before_preparation")
