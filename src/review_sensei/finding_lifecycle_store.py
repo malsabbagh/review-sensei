@@ -1071,6 +1071,10 @@ def _prepare_lifecycle(
         raise ReviewInputError("finding lifecycle document is invalid")
     if type(reserved_tail_calls) is not int or reserved_tail_calls < 0:
         raise ReviewInputError("finding lifecycle tail is invalid")
+    from .publication_intent_fusion import prospective_transaction
+
+    fused_transaction = prospective_transaction(ledger, record)
+    fusion_fields = {} if fused_transaction is None else {"transaction": fused_transaction}
     previous = normalize_reference(record.finding_lifecycle)
     require_accepted_operation(
         record,
@@ -1121,6 +1125,7 @@ def _prepare_lifecycle(
     # The complete future root is measured before the first part write.
     record.evolve(
         generation=record.generation + 1,
+        **fusion_fields,
         finding_lifecycle={**reference, "manifest": prospective},
     )
     capacity_reference = reference
@@ -1195,6 +1200,7 @@ def _prepare_lifecycle(
     def prepare_candidate(manifest):
         candidate = record.evolve(
             generation=record.generation + 1,
+            **fusion_fields,
             finding_lifecycle={**reference, "manifest": manifest},
         )
         _require_retained_snapshot_capacity(candidate)
@@ -1262,6 +1268,11 @@ def stage_finding_lifecycle(
     or resets accounting. Partial staging is nonauthoritative retained evidence.
     The caller retains ownership of full effect/tail funding and its admission.
     """
+    from .publication_intent_fusion import prospective_transaction, require_stage
+
+    require_stage(ledger, record, document)
+    fused_transaction = prospective_transaction(ledger, record)
+    fusion_fields = {} if fused_transaction is None else {"transaction": fused_transaction}
     reference, envelope, parts, allowance, prospective_record = _prepare_lifecycle(
         ledger,
         record,
@@ -1337,8 +1348,12 @@ def stage_finding_lifecycle(
             item_count=item_count,
             max_manifest_bytes=allowance,
         )
+        actual_transaction = prospective_transaction(ledger, current)
+        if actual_transaction != fused_transaction:
+            raise ReviewInputError("finding lifecycle fused transition changed")
         candidate = current.evolve(
             generation=current.generation + 1,
+            **fusion_fields,
             finding_lifecycle={**reference, "manifest": manifest},
         )
         return candidate
@@ -1572,6 +1587,7 @@ def preflight_finding_lifecycle(
                     )
                 candidate = current.evolve(
                     generation=current.generation + 1,
+                    transaction=candidate.transaction,
                     finding_lifecycle={**reference, "manifest": maximum_manifest},
                 )
                 _require_retained_snapshot_capacity(candidate)

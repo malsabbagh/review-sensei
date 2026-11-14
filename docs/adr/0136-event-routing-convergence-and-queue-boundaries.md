@@ -413,3 +413,52 @@ external-inventory, custom-reader, or cold uncertain recovery paths. A non-appro
 check outcomes have a source-qualified complete tail. All storage, response,
 query, effect and funding limits remain
 unchanged; this source-qualified slice is not full-gap closure.
+
+### Guarded publication pair (implementation candidate)
+
+The closed `finding-lifecycle-journal-v3` adapter document retains ordinary
+individual effect records and adds one permanent `guarded_publication_pair`
+descriptor. It binds the confirmed start-check receipt, the completed-check
+request, and the following main-review request by their exact positions and
+canonical request digests. The outer evidence and reference formats, physical
+request accounting, effect-slot limits, and storage limits do not change.
+Version 1 and version 2 keep their existing single-pending-suffix rule. Unknown
+versions fail closed.
+
+Only this validated pair can contain two pending effects. The descriptor is
+liability and ordering evidence, not permission to dispatch. A source-issued,
+invocation-local capability may dispatch the second member only after exact
+confirmation of the first member and revalidation of the precommitted review
+bytes. Failure, response loss, or changed framing stops the sequence; the
+undispatched review remains a durable liability without acquiring a fictional
+physical request charge. The descriptor is retained after confirmation. Later
+ordinary effects are permitted only after both members are confirmed and remain
+subject to the original single-pending rule.
+
+Cold restoration never recreates the hot capability or sends an absent suffix.
+An unknown or rejected completed check prevents reconciliation of the review as
+a successful batch. Review confirmation still requires the exact numeric
+ledger producer, current head, body and marker, with the original bounded
+readback and comment checks. Missing, foreign, edited, ambiguous or incomplete
+observations preserve uncertainty. This initial implementation may hold an
+interrupted batch; it does not claim automatic completion of every crash case.
+
+A complete source-bound capacity plan must cover the pending start checkpoint,
+the pair checkpoint, all reachable receipt/uncertainty layouts, the final
+checkpoint, and every native, source-read and terminal tail before the first
+native write. For the exact empty-original retained-result producer, the original
+validated pending-to-failed transaction transition may be committed atomically
+with the first pending lifecycle intent in one next-generation root. Its private
+receipt comes only from the actual retention validator and follows only the
+original confirmed empty-blocker progress transition. An unknown joint CAS
+cannot authorize native dispatch. Other producers retain their original writes.
+
+The closed route prices at most three checkpoint attempts, including exception
+finish, and its full native/source-read branch maximum. Completion uses the
+original, unclaimed terminal reservation only after exact source, owner, name,
+accounting and remaining-capacity validation. The generic additional terminal
+tail remains unchanged outside this qualified route. The actual one-plus-one
+512-call producer has a funded positive with this fusion; larger populations,
+crash paths and the full failure matrix remain qualification obligations, not
+implied closure. Historical assessment reads and all current authority fences
+remain required.

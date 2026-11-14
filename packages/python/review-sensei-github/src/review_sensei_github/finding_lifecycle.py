@@ -334,10 +334,13 @@ def _validate(document: object) -> dict[str, Any]:
     if not isinstance(document, dict) or document.get("schema_version") not in {
         VERSION,
         CURRENT_VERSION,
+        "finding-lifecycle-journal-v3",
     }:
         raise ReviewInputError("finding lifecycle journal schema is unsupported")
-    if document["schema_version"] == CURRENT_VERSION:
+    if document["schema_version"] in {CURRENT_VERSION, "finding-lifecycle-journal-v3"}:
         fields.add("accepted_semantic_history")
+    if document["schema_version"] == "finding-lifecycle-journal-v3":
+        fields.add("guarded_publication_pair")
     if set(document) != fields:
         raise ReviewInputError("finding lifecycle journal schema is unsupported")
     history = document.get("accepted_semantic_history")
@@ -359,9 +362,10 @@ def _validate(document: object) -> dict[str, Any]:
     effects = document["effects"]
     if not isinstance(effects, list) or len(effects) > MAX_EFFECTS:
         raise ReviewInputError("finding lifecycle effect capacity exceeded")
+    pair = document.get("guarded_publication_pair")
     seen = set()
     pending = False
-    for effect in effects:
+    for effect_index, effect in enumerate(effects):
         effect_fields = {
             "method",
             "path",
@@ -450,7 +454,9 @@ def _validate(document: object) -> dict[str, Any]:
                     check_bodies(item)
 
         check_bodies(effect["request"])
-        if effect["request_sha256"] in seen or pending:
+        if effect["request_sha256"] in seen or (
+            pending and not (pair is not None and effect_index == 2)
+        ):
             raise ReviewInputError("finding lifecycle effects are contradictory")
         seen.add(effect["request_sha256"])
         if effect["status"] == "pending":
@@ -473,6 +479,10 @@ def _validate(document: object) -> dict[str, Any]:
                 )
         else:
             raise ReviewInputError("finding lifecycle effect status is invalid")
+    if document["schema_version"] == "finding-lifecycle-journal-v3":
+        from .guarded_publication_batch import validate_pair
+
+        validate_pair(effects, pair)
     receipts = document["native_receipts"]
     receipt_fields = {
         "schema_version",
@@ -767,6 +777,9 @@ class FindingLifecycleJournal:
         self._review_token = review_token
         self._check_token = check_token
         self.effects = [] if document is None else list(_validate(document)["effects"])
+        self._guarded_publication_pair = (
+            None if document is None else document.get("guarded_publication_pair")
+        )
         self._issued_review_update_precondition: tuple[object, dict, object] | None = (
             None
         )
@@ -826,12 +839,20 @@ class FindingLifecycleJournal:
     def _document(self, *, lifecycle=None, effects=None, native_receipts=None):
         return _validate(
             {
-                "schema_version": CURRENT_VERSION
+                "schema_version": "finding-lifecycle-journal-v3"
+                if getattr(self, "_guarded_publication_pair", None) is not None
+                else CURRENT_VERSION
                 if self._accepted_semantic_history is not None
                 else VERSION,
                 **(
                     {"accepted_semantic_history": self._accepted_semantic_history}
                     if self._accepted_semantic_history is not None
+                    or getattr(self, "_guarded_publication_pair", None) is not None
+                    else {}
+                ),
+                **(
+                    {"guarded_publication_pair": self._guarded_publication_pair}
+                    if getattr(self, "_guarded_publication_pair", None) is not None
                     else {}
                 ),
                 "lifecycle": self._state() if lifecycle is None else lifecycle,
@@ -2299,6 +2320,13 @@ class FindingLifecycleJournal:
                     "finding dictionary writer dependency fence is unqualified"
                 )
             dependency_scope = guard(self._record, packed)
+        from review_sensei.publication_intent_fusion import (
+            begin_checkpoint,
+            confirm_checkpoint,
+        )
+
+        fusion_before = self._record
+        fused = begin_checkpoint(self, packed)
         with dependency_scope:
             self._record = stage_finding_lifecycle(
                 self.ledger,
@@ -2312,6 +2340,9 @@ class FindingLifecycleJournal:
                 item_count=len(self.effects) + 1,
                 reserved_tail_calls=reserved_tail_calls,
             )
+
+        if fused:
+            confirm_checkpoint(self, fusion_before)
 
         from .accepted_semantic_history import record_checkpoint_semantics
 
@@ -2383,8 +2414,15 @@ class FindingLifecycleJournal:
         ):
             self._planned = None
             self._input_identity = None
-        for effect in self.effects:
+        for effect_index, effect in enumerate(self.effects):
             if effect["status"] == "pending":
+                from .guarded_publication_batch import require_cold_pair_order
+
+                try:
+                    require_cold_pair_order(self, effect_index)
+                except ReviewInputError:
+                    self.checkpoint()
+                    raise
                 http = getattr(self, "_readback_http", None)
                 token = (
                     self._check_token
@@ -2401,9 +2439,12 @@ class FindingLifecycleJournal:
                     raise ReviewInputError(
                         "finding lifecycle native intent remains uncertain; terminal accounting withheld"
                     )
+                from .guarded_publication_batch import validate_review_receipt
+
+                receipt = self._compact_response(response[1], effect=effect)
+                validate_review_receipt(self, effect, receipt)
                 effect["status"], effect["response"] = (
-                    "confirmed",
-                    [response[0], self._compact_response(response[1], effect=effect)],
+                    "confirmed", [response[0], receipt],
                 )
         self.checkpoint()
 
@@ -2443,6 +2484,14 @@ class FindingLifecycleJournal:
         from .reply_finalization_plan import require_reply_native_request
 
         require_reply_native_request(self, method, path, raw_request)
+        from .guarded_publication_batch import intercept_request
+
+        handled, response = intercept_request(
+            self, http, method, path, token=token, body=raw_request,
+            kwargs=kwargs, prepare_only=_prepare_only,
+        )
+        if handled:
+            return response
         ordered = getattr(self, "_ordered_native_batch", None)
         if ordered is not None:
             ordered.before_request(method, path, raw_request)
@@ -2656,6 +2705,9 @@ class FindingLifecycleJournal:
                     "finding lifecycle mutation status is unconfirmed"
                 )
             receipt = self._compact_response(response[1], effect=effect)
+            from .guarded_publication_batch import validate_review_receipt
+
+            validate_review_receipt(self, effect, receipt)
             # Validate before changing pending. A foreign/malformed successful
             # response never becomes a confirmed journal receipt.
             effect["status"], effect["response"] = "confirmed", [response[0], receipt]
@@ -3798,6 +3850,12 @@ class FindingLifecycleJournal:
             finalizer_owner._finding_lifecycle_journal = previous_journal
             for owner, http in previous:
                 owner.http = http
+
+
+from .empty_original_admission import install_restore as _install_empty_restore  # noqa: E402
+
+restore_finding_lifecycle = _install_empty_restore(restore_finding_lifecycle)
+del _install_empty_restore
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

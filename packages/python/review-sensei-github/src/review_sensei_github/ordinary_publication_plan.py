@@ -258,6 +258,7 @@ def current_request_branches(
     complete_inventory,
     preserve_explanations=False,
     window_non_inline_blocking=False,
+    check_published=False,
 ):
     """Pure shared framing from the actual source producers; no admission."""
     from dataclasses import replace
@@ -279,7 +280,7 @@ def current_request_branches(
         eligibility,
         facts=replace(
             eligibility.facts,
-            check_published=False,
+            check_published=check_published,
             has_blocking_findings=(
                 any(
                     entry.blocking and entry.body_placed

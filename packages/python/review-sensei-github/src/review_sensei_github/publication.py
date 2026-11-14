@@ -10232,12 +10232,36 @@ class ReviewPublisher:
                 ),
             )
         )
+        guarded_batch = False
         if not write_preflight.app_authored and not grouped_publication:
+            from .guarded_pending_publication import admit as admit_guarded_pending
             from .guarded_publication_plan import require_durable_floor
 
-            require_durable_floor(
-                lifecycle_journal, checks_enabled=check_token is not None
+            guarded_batch = admit_guarded_pending(
+                self,
+                lifecycle_journal,
+                result=result,
+                assembled=preflight_review,
+                eligibility=prospective_eligibility,
+                marker=marker,
+                outcome=planned_check_outcome,
+                policy=effective_policy,
+                complete_inventory=complete_inventory,
+                checks_enabled=check_token is not None,
+                grouped=grouped_publication,
+                planned_window=planned_window_state,
+                planned_drift=planned_drift_state,
+                continuation=continuation_review,
+                retained_eligibility=retained_eligibility,
+                superseded_threads=()
+                if complete_suppression is None
+                else complete_suppression.superseded_threads,
+                convergence_policy=convergence_policy,
             )
+            if not guarded_batch:
+                require_durable_floor(
+                    lifecycle_journal, checks_enabled=check_token is not None
+                )
         ordinary_observation = getattr(self, "_ordinary_publication_observation", None)
         if ordinary_observation is not None and not write_preflight.app_authored:
             from .ordinary_publication_plan import admit_current
@@ -10290,6 +10314,10 @@ class ReviewPublisher:
         ):
             check_diagnostic = check_capability_failure.code
             self._check_accounting_failure = check_capability_failure
+        if guarded_batch and check_diagnostic is not None:
+            raise GitHubPublicationError(
+                "guarded publication check is unconfirmed; precommitted review retained"
+            )
         eligibility = self._eligibility_with_carried(
             result,
             head_sha=head_sha,
@@ -10713,6 +10741,12 @@ class ReviewPublisher:
                 },
             )
         except GitHubHTTPTransientError as exc:
+            if guarded_batch:
+                # No mixed historical decoder or warning-body fallback. The
+                # separately funded journal readback retains any ambiguity.
+                raise GitHubPublicationTransientError(
+                    "guarded publication native outcome is unconfirmed"
+                ) from exc
             if self._reconcile_marker(
                 token=token,
                 repository=repository,
@@ -10807,6 +10841,10 @@ class ReviewPublisher:
             raise GitHubPublicationTransientError(
                 "review publication failed temporarily (review-create transport failure)"
             ) from exc
+        if guarded_batch and (status != 200 or not isinstance(payload, dict)):
+            raise GitHubPublicationError(
+                "guarded publication review is unconfirmed; no alternative native write"
+            )
         if status == 200 and isinstance(payload, dict):
             review_id = payload.get("id")
             if isinstance(review_id, int):
@@ -12337,6 +12375,12 @@ class ReviewPublisher:
 
 
 # Install only after all actual source classes are defined. No first-caller registration.
+from .guarded_pending_publication import install_source as _install_guarded_pending  # noqa: E402
+
+_install_guarded_pending(ReviewPublisher)
+del _install_guarded_pending
+
+
 from .ordinary_publication_reads import _install_publication_source  # noqa: E402
 
 _install_publication_source(ReviewPublisher)

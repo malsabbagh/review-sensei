@@ -3604,6 +3604,16 @@ from .trust_effects import _install_transport_source  # noqa: E402
 
 _install_transport_source(ApiRunRequestTransport)
 del _install_transport_source
+
+# Capture final installed closures at the defining source boundary, before the
+# module seal. Closed default-only planners reject replaced dynamic exports
+# before invoking them; this does not enable or re-install a trust profile.
+from . import trust_effects as _installed_trust_effects  # noqa: E402
+
+_original_trust_verification_calls = _installed_trust_effects.verification_calls
+_original_trust_verification_profile = _installed_trust_effects.verification_profile
+
+
 from .trust_capabilities import _install_capability_transport  # noqa: E402
 from .trust_effects import after_response as _validate_trust_return  # noqa: E402
 

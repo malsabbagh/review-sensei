@@ -1045,9 +1045,12 @@ def retain_review_result(
         assert validated.transaction is not None
         if already_retained:
             if validated.transaction.phase == "publication_pending":
-                mark_review_publication_unconfirmed(
-                    ledger, identity, validated.transaction
-                )
+                from review_sensei.publication_intent_fusion import defer_current
+
+                if not defer_current():
+                    mark_review_publication_unconfirmed(
+                        ledger, identity, validated.transaction
+                    )
             return
         event_key = _event_key(identity, validated.transaction)
         primed_comments = None
@@ -1155,13 +1158,22 @@ def retain_review_result(
                 loaded=_loaded if primed_comments is not None else None,
             )
             if validated.transaction.phase == "publication_pending":
-                mark_review_publication_unconfirmed(
-                    ledger, identity, validated.transaction
-                )
+                from review_sensei.publication_intent_fusion import defer_current
+
+                if not defer_current():
+                    mark_review_publication_unconfirmed(
+                        ledger, identity, validated.transaction
+                    )
     except (ValueError, ReviewInputError) as exc:
         raise GitHubPublicationError(
             "publication result not retained: " + str(exc)
         ) from exc
+
+
+from review_sensei.publication_intent_fusion import install_retention as _install_fusion  # noqa: E402
+
+_install_fusion(globals())
+del _install_fusion
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

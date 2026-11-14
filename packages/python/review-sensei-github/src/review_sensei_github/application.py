@@ -71,10 +71,8 @@ from review_sensei.session import (
     complete_review_publication,
     complete_session_round,
     convergence_progress_blocker_markers,
-    load_review_transaction_for_publication,
     prepare_session_round,
     read_session_baseline,
-    record_admitted_blocker_progress,
     record_session_failed_attempt,
     review_analysis_checkpoint_eligible,
     session_reservation_id,
@@ -1320,7 +1318,11 @@ class GitHubApplication:
                     "identity-bound review publication context is incomplete"
                 )
             try:
-                return load_review_transaction_for_publication(
+                from .empty_original_admission import (
+                    load_transaction as select_transaction,
+                )
+
+                return select_transaction(
                     source_ledger,
                     identity,
                     result,
@@ -2211,9 +2213,17 @@ class GitHubApplication:
                 transaction_record = load_transaction(ledger)
                 if transaction_record.transaction is not None:
                     result = replace(result, transaction=transaction_record.transaction)
+            from .empty_original_admission import consume as empty_original_admission
+
+            omit_empty_original = (
+                validated_transaction_recovery
+                and result_retained
+                and empty_original_admission(self, ledger, transaction_record, result)
+            )
             admitted_inventory_store = None
             if (
-                retention_context_required
+                not omit_empty_original
+                and retention_context_required
                 and ledger is not None
                 and budget is not None
                 and result.transaction is not None
@@ -2466,7 +2476,9 @@ class GitHubApplication:
                     # empty set is progress, but retaining it in the bounded
                     # window is what lets a later A -> empty -> A regression be
                     # classified as oscillation.
-                    admitted_record = record_admitted_blocker_progress(
+                    from review_sensei.publication_intent_fusion import record_progress
+
+                    admitted_record = record_progress(
                         ledger,
                         identity,
                         durable_transaction,
@@ -2876,8 +2888,13 @@ class GitHubApplication:
                 if result_retained
                 else "publication result not retained"
             )
+            from review_sensei.publication_intent_fusion import (
+                outstanding as fusion_outstanding,
+            )
+
             if (
                 not publisher_started
+                and not fusion_outstanding()
                 and not admission_recovery_held
                 and isinstance(reviewer, ReviewPublisher)
                 and not isinstance(publication_error, (KeyboardInterrupt, SystemExit))
@@ -6157,6 +6174,20 @@ def _publication_round_flags(result: ReviewResult) -> dict[str, bool]:
         "latest_head_reviewed": True,
         "no_progress": False,
     }
+
+
+from .empty_original_admission import install_application as _install_empty_original  # noqa: E402
+
+_install_empty_original(GitHubApplication)
+del _install_empty_original
+
+
+from review_sensei.publication_intent_fusion import (  # noqa: E402
+    install_application as _install_fusion,
+)
+
+_install_fusion(GitHubApplication)
+del _install_fusion
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
