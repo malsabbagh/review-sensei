@@ -21,6 +21,12 @@ class ObservedEntryFixture(CommandEntryFixture):
         self.observed_installation = 99
         self.observed_requests = []
 
+    def select_command(self, *args, **kwargs):
+        super().select_command(*args, **kwargs)
+        # The original authenticated observation below identifies actor 101.
+        # Its native source and event must describe that same account.
+        self.source["user"]["id"] = 101
+
     def external(self, request, timeout):
         if urlsplit(request.full_url).hostname == "broker.github.test" and request.data:
             payload = json.loads(request.data)
