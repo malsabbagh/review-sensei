@@ -234,3 +234,112 @@ class SourceRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ReviewInputError, "source changed"):
                 require_instance_source(instance, methods=())
         require_instance_source(instance, methods=())
+
+    def test_hostile_export_refuses_without_dynamic_attribute_callbacks(self):
+        from review_sensei_github import api_run_requests
+
+        calls = []
+
+        class Hostile:
+            def __getattribute__(self, name):
+                calls.append(name)
+                raise AssertionError("replacement attribute callback")
+
+        with patch.object(api_run_requests, "_AccountedResponse", Hostile()):
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(api_run_requests)
+        self.assertEqual(calls, [])
+        require_module_seal(api_run_requests)
+
+    def test_missing_export_does_not_invoke_module_getattr(self):
+        calls = []
+
+        def hostile(name):
+            calls.append(name)
+            raise AssertionError("module callback")
+
+        original = disposition.apply_session_command
+        try:
+            del disposition.apply_session_command
+            with patch.object(disposition, "__getattr__", hostile, create=True):
+                with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                    require_module_seal(disposition)
+        finally:
+            disposition.apply_session_command = original
+        self.assertEqual(calls, [])
+        require_module_seal(disposition)
+
+    def test_module_subclass_refuses_without_callbacks(self):
+        calls = []
+
+        class HostileModule(types.ModuleType):
+            def __getattribute__(self, name):
+                calls.append(name)
+                raise AssertionError("module subclass callback")
+
+        with self.assertRaisesRegex(ReviewInputError, "unavailable"):
+            require_module_seal(HostileModule("hostile"))
+        self.assertEqual(calls, [])
+
+    def test_original_descriptor_and_bound_method_contracts_remain_valid(self):
+        from review_sensei import session
+        from review_sensei.source_registry import require_instance_source
+
+        ledger = object.__new__(session.LocalSessionLedger)
+        record = object.__new__(session.SessionRecord)
+        self.assertIs(
+            type(vars(session.LocalSessionLedger)["evidence_producer"]), staticmethod
+        )
+        self.assertIs(type(vars(session.SessionRecord)["from_dict"]), classmethod)
+        require_module_seal(session)
+        require_instance_source(ledger, methods=("load", "evidence_producer"))
+        require_instance_source(record, methods=("from_dict",))
+
+    def test_hostile_class_descriptor_refuses_without_callbacks(self):
+        from review_sensei import session
+
+        calls = []
+
+        class Hostile:
+            def __getattribute__(self, name):
+                calls.append(name)
+                raise AssertionError("descriptor attribute callback")
+
+            def __get__(self, instance, owner=None):
+                calls.append("descriptor get")
+                raise AssertionError("descriptor callback")
+
+        with patch.object(session.LocalSessionLedger, "evidence_producer", Hostile()):
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(session)
+        self.assertEqual(calls, [])
+        require_module_seal(session)
+
+    def test_hostile_export_type_equality_is_not_normalization(self):
+        calls = []
+
+        class HostileMeta(type):
+            def __eq__(cls, other):
+                calls.append("type equality")
+                raise AssertionError("metaclass callback")
+
+        class Hostile(metaclass=HostileMeta):
+            pass
+
+        with patch.object(disposition, "apply_session_command", Hostile()):
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(disposition)
+        self.assertEqual(calls, [])
+
+    def test_hostile_module_name_is_not_hashed(self):
+        calls = []
+
+        class Hostile:
+            def __hash__(self):
+                calls.append("hash")
+                raise AssertionError("name hash callback")
+
+        with patch.object(disposition, "__name__", Hostile()):
+            with self.assertRaisesRegex(ReviewInputError, "unavailable"):
+                require_module_seal(disposition)
+        self.assertEqual(calls, [])

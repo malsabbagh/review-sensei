@@ -9,7 +9,7 @@ from __future__ import annotations
 import copyreg
 import inspect
 import sys
-from types import ModuleType
+from types import MethodType, ModuleType
 from typing import Any
 
 from .errors import ReviewInputError
@@ -61,7 +61,15 @@ def _build_registry():
         )
 
     def normalize(value):
-        return getattr(value, "__func__", value)
+        # Never ask an untrusted replacement export to describe itself. These
+        # exact built-in containers have non-overridable function storage.
+        if (
+            type(value) is MethodType
+            or type(value) is staticmethod
+            or type(value) is classmethod
+        ):
+            return value.__func__
+        return value
 
     def remember_function(function):
         # inspect.unwrap follows mutable function metadata. Pin each original
@@ -154,7 +162,7 @@ def _build_registry():
                 executable = set()
                 for attribute in dir(value):
                     member = normalize(inspect.getattr_static(value, attribute))
-                    if isinstance(member, property) or callable(member):
+                    if issubclass(type(member), property) or callable(member):
                         executable.add(attribute)
                         row = (
                             value,
@@ -165,7 +173,7 @@ def _build_registry():
                         members.append(row)
                         if callable(member):
                             original_methods[attribute] = member
-                    if isinstance(member, property):
+                    if issubclass(type(member), property):
                         for accessor in ("fget", "fset", "fdel"):
                             function = getattr(member, accessor)
                             if function is not None:
@@ -205,6 +213,8 @@ def _build_registry():
                 current = normalize(
                     inspect.getattr_static(owner, name, None)
                     if inspect.isclass(owner)
+                    else vars(owner).get(name)
+                    if type(owner) is ModuleType
                     else getattr(owner, name, None)
                 )
             if (
@@ -221,8 +231,10 @@ def _build_registry():
         module, name, namespace, executable, bindings, _methods, slots = original
         slot_values = slots[0]
         if (
-            sys.modules.get(module.__name__) is not module
-            or getattr(module, name, None) is not cls
+            type(module) is not ModuleType
+            or type(vars(module).get("__name__")) is not str
+            or sys.modules.get(vars(module).get("__name__")) is not module
+            or vars(module).get(name) is not cls
             or frozenset(vars(cls)) != namespace
             or vars(cls).get("__slotnames__") is not slots[0]
             or type(slot_values) is not list
@@ -240,7 +252,7 @@ def _build_registry():
             frozenset(
                 name
                 for name, member in members.items()
-                if callable(member) or isinstance(member, property)
+                if callable(member) or issubclass(type(member), property)
             )
             != executable
         ):
@@ -248,10 +260,14 @@ def _build_registry():
         require_bindings(bindings, class_snapshot=(cls, members))
 
     def require_module_seal(module):
-        if not isinstance(module, ModuleType):
+        if type(module) is not ModuleType:
             raise ReviewInputError("original source module seal is unavailable")
         bindings = registered.get(module)
-        if bindings is None or sys.modules.get(module.__name__) is not module:
+        if (
+            bindings is None
+            or type(vars(module).get("__name__")) is not str
+            or sys.modules.get(vars(module).get("__name__")) is not module
+        ):
             raise ReviewInputError("original source module seal is unavailable")
         require_bindings(bindings)
         for cls in module_classes[module]:
