@@ -126,6 +126,13 @@ def _registry():
             require_instance_source(http, methods=("request",))
             if type(http) is _JournalTransport:
                 delegate = command_finalization_plan.registered_journal_delegate(http)
+                # repository_path is delegated, not a method on this adapter.
+                # An instance shadow must not replace the actual path producer.
+                if (
+                    "repository_path" in http.__dict__
+                    or http.repository_path != delegate.repository_path
+                ):
+                    raise ReviewInputError("adjacent preflight path delegation changed")
                 journal = http.journal
                 if journal is not expected_journal:
                     raise ReviewInputError("adjacent preflight journal owner changed")
@@ -161,6 +168,7 @@ def _registry():
                 if (
                     type(budget) is not CallerRunBudget
                     or budget is not caller.budget_view
+                    or budget.caller is not caller
                 ):
                     raise ReviewInputError("adjacent preflight budget caller changed")
                 require_instance_source(
@@ -187,6 +195,7 @@ def _registry():
                         id(http),
                         id(http.transport),
                         id(budget),
+                        id(budget.caller),
                         http.api_url,
                         http.timeout,
                         budget._ordinary_hold,
