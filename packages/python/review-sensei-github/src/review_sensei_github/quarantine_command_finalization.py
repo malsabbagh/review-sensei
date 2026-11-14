@@ -226,55 +226,70 @@ def measure_inline_branches(observation):
             caller._accepted_semantic_capacity = previous
 
 
-def _root_growth_measurement(record, accounting, witness, result_bound=None, grants=()):
-    """Detached all-pending root width; this does not prove result production."""
+def _root_growth_measurement(record, accounting, witness, result_upper=None, grants=()):
+    """Validate and render inert full-width roots with original source machinery.
+
+    The result carrier is deliberately not decodable evidence. These detached
+    records never enter a ledger, a transfer registry or an execution grant.
+    """
     from review_sensei import finding_lifecycle_store, session
+    from review_sensei.api_work import ACTION_NOOP_REASONS
+
+    from . import session_ledger
 
     require_module_seal(session)
+    require_module_seal(session_ledger)
+    if result_upper is None:
+        raise ReviewInputError("cold terminal root lacks its complete result shape")
     raw = record.to_dict()
-    raw["api_run_accounting"] = accounting
+    raw["api_run_accounting"] = json.loads(canonical_bytes(accounting))
     raw.update(
-        generation=session.MAX_GENERATION,
+        generation=session.MAX_GENERATION - 1,
         completed_initial_reviews=session.DIAGNOSTIC_ROUND_CEILING,
         completed_verification_rounds=session.DIAGNOSTIC_ROUND_CEILING,
         failed_attempts=session.MAX_FAILED_ATTEMPTS,
+        updated_at="9999-12-31T23:59:59.999999Z",
     )
-    for field in ("created_at", "updated_at", "expires_at"):
-        maximum = "9999-12-31T23:59:59.999999Z"
-        if len(raw[field]) < len(maximum):
-            raw[field] = maximum
+    # Created/expiry timestamps are immutable on this route, unlike updated_at.
     if witness is not None and raw.get("finding_lifecycle") is not None:
         raw["finding_lifecycle"] = {
             **raw["finding_lifecycle"],
             "schema_version": finding_lifecycle_store.HISTORY_REFERENCE_VERSION,
             "accepted_semantic_history": witness["history"],
         }
-    ordinary = len(canonical_bytes(raw))
-    terminal = finding_lifecycle_store.prospective_terminal_history_bytes(raw)
-    if result_bound is not None:
-        from review_sensei.bounded_evidence import MAX_MANIFEST_BYTES
 
-        terminal += result_bound - MAX_MANIFEST_BYTES
-    from . import session_ledger
+    def render(document):
+        payload = {
+            key: value for key, value in document.items() if key != "record_sha256"
+        }
+        document["record_sha256"] = session._digest_payload(payload)
+        candidate = session.SessionRecord.from_dict(document)
+        body = session_ledger.render_session_comment(
+            repository_id=record.repository_id,
+            pull_request=record.pull_request,
+            record=candidate,
+            consumed_grants=grants,
+        )
+        # Exercise the exact original serialized form, including its marker,
+        # ASCII escaping, history/result carriers and retained grant framing.
+        return len(canonical_bytes(candidate.to_dict())), len(body.encode())
 
-    require_module_seal(session_ledger)
-    framed = session_ledger.render_session_comment(
-        repository_id=record.repository_id,
-        pull_request=record.pull_request,
-        record=record,
-        consumed_grants=grants,
+    ordinary, ordinary_body = render(raw)
+    terminal_raw = json.loads(canonical_bytes(raw))
+    terminal_raw["generation"] = session.MAX_GENERATION
+    terminal_raw["api_run_accounting"]["action"].update(
+        phase="terminal",
+        execution_started=True,
+        result=result_upper,
+        outcome={"kind": "explicit_noop", "reason": max(ACTION_NOOP_REASONS, key=len)},
     )
-    framing = len(framed.encode()) - len(canonical_bytes(record.to_dict()))
-    framing += len(str(session.MAX_GENERATION)) - len(str(record.generation))
-    body_bytes = max(ordinary, terminal) + framing
+    terminal, terminal_body = render(terminal_raw)
     return {
         "ordinary_root_bytes": ordinary,
-        "comment_body_bytes": body_bytes,
+        "comment_body_bytes": max(ordinary_body, terminal_body),
         "terminal_root_bytes": terminal,
-        "root_fits": (
-            max(ordinary, terminal) <= session.MAX_SESSION_RECORD_BYTES
-            and body_bytes <= session_ledger.MAX_SESSION_COMMENT_BYTES
-        ),
+        "root_fits": True,
+        "original_validated_and_rendered": True,
     }
 
 
@@ -364,12 +379,12 @@ def _measure_inline_branches(observation):
 
     accounting_upper = project_current(run.caller)
     witness = getattr(run.caller, "_accepted_semantic_capacity", None)
-    result_bound = None
+    result_upper = None
     if saved["projection"].creates_event:
         import hashlib
 
         from .api_run_history import action_result_binding
-        from .command_result_capacity import command_result_capacity_bound
+        from .command_result_capacity import command_result_capacity_upper
 
         selected = json.loads(target.native_review_bytes)
         source_payload = json.loads(plan.payload)
@@ -391,7 +406,7 @@ def _measure_inline_branches(observation):
             existing=None,
             actor=saved["authority"].document["actor"],
         )
-        result_bound = command_result_capacity_bound(
+        result_upper = command_result_capacity_upper(
             base_result,
             binding=action_result_binding(
                 run.identity, run.caller.accounting, run.ledger.evidence_producer()
@@ -405,7 +420,7 @@ def _measure_inline_branches(observation):
         )
     grants = tuple(sorted(run.ledger._observed_consumed_grants))
     growth_roots = [
-        _root_growth_measurement(root, accounting_upper, witness, result_bound, grants)
+        _root_growth_measurement(root, accounting_upper, witness, result_upper, grants)
         for root in (record, prospective)
     ]
     branches = []
@@ -431,7 +446,7 @@ def _measure_inline_branches(observation):
                     "quarantine complete command requires a non-inline checkpoint"
                 )
             growth = _root_growth_measurement(
-                candidate, accounting_upper, witness, result_bound, grants
+                candidate, accounting_upper, witness, result_upper, grants
             )
             growth_roots.append(growth)
             checkpoints.append(
@@ -450,7 +465,7 @@ def _measure_inline_branches(observation):
     return {
         "branches": tuple(branches),
         "growth_roots": tuple(growth_roots),
-        "result_manifest_bound": result_bound,
+        "result_manifest_bound": len(canonical_bytes(result_upper)),
         "all_growth_roots_fit": all(root["root_fits"] for root in growth_roots),
         "max_checkpoints": max(len(branch) for branch in branches),
         "native_requests": requests,

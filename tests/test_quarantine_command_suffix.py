@@ -6,7 +6,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from review_sensei_github import quarantine_command_finalization as finalization
 from review_sensei_github import quarantine_command_suffix as suffix
+from review_sensei_github.command_result_capacity import raw_result_manifest_upper
 from review_sensei_github.quarantine_capacity import _guard_state, installed_capacity
 from test_quarantine_journey import registered_resource
 from test_quarantine_published_tail_journey import (
@@ -22,6 +24,7 @@ class GuardedSuffixTests(unittest.TestCase):
         captured = []
         recipes = []
         preparation_counts = []
+        rendered_inputs = []
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
@@ -51,6 +54,23 @@ class GuardedSuffixTests(unittest.TestCase):
                 )
 
                 def observe(frame, event, arg):
+                    if (
+                        event == "return"
+                        and frame.f_code
+                        is finalization._root_growth_measurement.__code__
+                        and arg is not None
+                    ):
+                        self.assertTrue(arg["original_validated_and_rendered"])
+                        values = frame.f_locals
+                        rendered_inputs.append(
+                            (
+                                values["record"],
+                                values["accounting"],
+                                values["witness"],
+                                values["result_upper"],
+                                values["grants"],
+                            )
+                        )
                     if (
                         event == "return"
                         and frame.f_code is suffix.prepare.__code__
@@ -156,3 +176,21 @@ class GuardedSuffixTests(unittest.TestCase):
                 self.assertEqual(caller.accounting.action["phase"], "pending")
                 self.assertFalse(caller.accounting.action["execution_started"])
                 self.assertEqual(caller.accounting.remaining, 190)
+
+                self.assertTrue(rendered_inputs)
+                overflow_refusals = 0
+                for record, accounting, witness, upper, grants in rendered_inputs:
+                    larger = raw_result_manifest_upper(
+                        envelope_bytes=4800,
+                        binding=upper["binding"],
+                        reference_history=True,
+                    )
+                    try:
+                        finalization._root_growth_measurement(
+                            record, accounting, witness, larger, grants
+                        )
+                    except ReviewInputError as error:
+                        self.assertIn("size limit", str(error))
+                        overflow_refusals += 1
+                self.assertGreater(overflow_refusals, 0)
+                self.assertEqual(len(caller.observations), count)
