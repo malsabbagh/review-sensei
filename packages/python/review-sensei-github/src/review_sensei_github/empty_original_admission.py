@@ -49,7 +49,10 @@ def _build():
     def install_reader(cls):
         frame = inspect.currentframe()
         defining_source(frame.f_back if frame is not None else None, cls.__module__)
-        from . import accepted_result, publication_recovery
+        from . import accepted_result, publication_recovery, session_ledger
+
+        require_module_seal(session_ledger)
+        hosted_ledger = session_ledger.GitHubIssueCommentSessionLedger
 
         module = sys.modules[cls.__module__]
         decode, source = cls._decode, cls._source
@@ -183,10 +186,16 @@ def _build():
                 or loaded.record.transaction is not owner.transaction
             ):
                 return result
+            # This observer grants only original hosted caller/root custody.
+            # A successful local/custom decode must not depend on unrelated
+            # hosted metadata, even when it exposes lookalike instance fields.
+            if type(ledger) is not hosted_ledger:
+                return result
             try:
                 intact()
                 from review_sensei import models
 
+                require_module_seal(session_ledger)
                 require_module_seal(models)
                 if raw:
                     original_result = models.ReviewResult.from_dict(json.loads(payload))
