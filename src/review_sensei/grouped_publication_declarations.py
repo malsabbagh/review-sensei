@@ -14,14 +14,14 @@ from .bounded_evidence import canonical_bytes
 from .errors import ReviewInputError
 from .publication_staging import MAX_STAGING_BYTES, PublicationReceipt
 
+# This distinct version already identifies the finite-declaration purpose;
+# repeating a constant purpose string would consume protected root capacity.
 VERSION = "publication-staging-v3"
-PURPOSE = "finite-grouped-declarations"
 ROLES = ("part", "manifest", "final")
 PHASES = frozenset({"declared", "final-intent", "finished", "held"})
 FIELDS = frozenset(
     {
         "schema_version",
-        "purpose",
         "transaction_id",
         "result_sha256",
         "plan_sha256",
@@ -127,7 +127,6 @@ class GroupedDeclarations:
     def to_document(self):
         return {
             "schema_version": VERSION,
-            "purpose": PURPOSE,
             "transaction_id": self.transaction_id,
             "result_sha256": self.result_sha256,
             "plan_sha256": self.plan_sha256,
@@ -155,7 +154,6 @@ class GroupedDeclarations:
             not isinstance(value, dict)
             or set(value) != FIELDS
             or value.get("schema_version") != VERSION
-            or value.get("purpose") != PURPOSE
             or type(value.get("part_count")) is not int
             or value["part_count"] != 1
             or not isinstance(value.get("declarations"), list)
