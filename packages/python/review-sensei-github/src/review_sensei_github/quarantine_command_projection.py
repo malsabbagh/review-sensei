@@ -15,6 +15,8 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.quarantine_assessments import require_assessment_successor
 from review_sensei.quarantine_state import assessment_cursor, next_assessment_event
 
+from .quarantine_creation import _body as _event_body
+
 
 @dataclass(frozen=True)
 class DecisionProjection:
@@ -59,6 +61,7 @@ def project_decision(authenticated, record, decision, *, binding):
     Both still require independent full finalization admission. A synthetic
     maximum-width storage ID is a sizing value, never an activated reference.
     """
+    require_projection_source()
     current = record.quarantine_lineage["assessment_state_manifest"]
     scope = authenticated.lineage["scope_sha256"]
     existing = next(
@@ -84,9 +87,7 @@ def project_decision(authenticated, record, decision, *, binding):
     parts = partition_evidence(event, binding=binding, item_count=1)
     if len(parts) != 1:
         raise ReviewInputError("quarantine individual event exceeds one bounded part")
-    from .quarantine_creation import _body
-
-    body_bytes = len(_body(parts[0]).encode())
+    body_bytes = len(_event_body(parts[0]).encode())
     if body_bytes > MAX_PART_BYTES:
         raise ReviewInputError("quarantine individual event body exceeds bound")
     tail = evidence_manifest(
@@ -109,3 +110,41 @@ def project_decision(authenticated, record, decision, *, binding):
         body_bytes,
         True,
     )
+
+
+def require_projection_source():
+    """Validate the pure sizing algorithm, not the supplied observation's truth."""
+    import sys
+
+    from review_sensei import (
+        bounded_evidence,
+        quarantine_assessments,
+        quarantine_lineage,
+        quarantine_state,
+        schemas,
+    )
+    from review_sensei.source_registry import require_module_seal
+
+    from . import quarantine_creation
+
+    for module in (
+        sys.modules[__name__],
+        bounded_evidence,
+        quarantine_assessments,
+        quarantine_lineage,
+        quarantine_state,
+        schemas,
+    ):
+        require_module_seal(module)
+    # The production event framer is a closed concatenation over the shared
+    # canonical encoder. Bind both its definition and sole executable input.
+    if (
+        quarantine_creation._body is not _event_body
+        or quarantine_creation.canonical_bytes is not canonical_bytes
+    ):
+        raise ReviewInputError("quarantine event sizing source changed")
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

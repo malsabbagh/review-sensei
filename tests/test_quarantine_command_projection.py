@@ -4,6 +4,7 @@ import copy
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from review_sensei_github.quarantine_command_projection import project_decision
 from test_quarantine_assessments import origins_value
@@ -111,3 +112,27 @@ class DecisionProjectionTests(unittest.TestCase):
         auth, record, binding, _origins = self.setup_projection()
         with self.assertRaises(ReviewInputError):
             project_decision(auth, record, decision("f" * 64), binding=binding)
+
+    def test_replaced_projection_and_transitive_helpers_never_supply_sizing(self):
+        from review_sensei_github import (
+            quarantine_command_projection,
+            quarantine_creation,
+        )
+
+        from review_sensei import bounded_evidence, quarantine_lineage, quarantine_state
+
+        auth, record, binding, origins = self.setup_projection()
+        selected = decision(origins["origins"][0]["scope_sha256"])
+        for owner, name in (
+            (quarantine_command_projection, "successor_state"),
+            (bounded_evidence, "_integer"),
+            (quarantine_lineage, "validate_assessment_state"),
+            (quarantine_state, "next_assessment_event"),
+            (quarantine_creation, "_body"),
+        ):
+            with (
+                self.subTest(helper=name),
+                patch.object(owner, name, lambda *a, **k: None),
+            ):
+                with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                    project_decision(auth, record, selected, binding=binding)

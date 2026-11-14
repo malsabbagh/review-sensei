@@ -162,3 +162,46 @@ class ColdCommandPreflightTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PassiveBudgetObserverTests(unittest.TestCase):
+    def test_budget_construction_fails_only_inside_scope_without_source_replacement(
+        self,
+    ):
+        from test_action_run import forbid_replacement_phase_budget
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        original = EvidenceReadBudget.__init__
+        before_profile, before_trace = sys.getprofile(), sys.gettrace()
+        EvidenceReadBudget()
+        with self.assertRaisesRegex(AssertionError, "no replacement phase budget"):
+            with forbid_replacement_phase_budget():
+                self.assertIs(EvidenceReadBudget.__init__, original)
+                EvidenceReadBudget()
+        self.assertIs(EvidenceReadBudget.__init__, original)
+        self.assertIs(sys.getprofile(), before_profile)
+        self.assertIs(sys.gettrace(), before_trace)
+        EvidenceReadBudget()
+
+    def test_existing_profile_observations_are_preserved(self):
+        from test_action_run import forbid_replacement_phase_budget
+
+        calls = []
+
+        def target():
+            return 1
+
+        def previous(frame, event, arg):
+            if frame.f_code is target.__code__ and event == "call":
+                calls.append(event)
+
+        original = sys.getprofile()
+        try:
+            sys.setprofile(previous)
+            with forbid_replacement_phase_budget():
+                self.assertEqual(target(), 1)
+            self.assertIs(sys.getprofile(), previous)
+        finally:
+            sys.setprofile(original)
+        self.assertEqual(calls, ["call"])

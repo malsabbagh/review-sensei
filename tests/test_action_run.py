@@ -12,9 +12,10 @@ import hashlib
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -38,6 +39,25 @@ from test_review_run import (
 from review_sensei.api_work import ApiExecutionOwner, ApiRunAccounting
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
+
+
+@contextmanager
+def forbid_replacement_phase_budget():
+    """Observe only this invocation; leave audited constructors intact."""
+    original = EvidenceReadBudget.__init__.__code__
+    previous = sys.getprofile()
+
+    def observe(frame, event, arg):
+        if event == "call" and frame.f_code is original:
+            raise AssertionError("no replacement phase budget")
+        if previous is not None:
+            previous(frame, event, arg)
+
+    try:
+        sys.setprofile(observe)
+        yield
+    finally:
+        sys.setprofile(previous)
 
 
 class CommandEntryFixture(EntryFixture):
@@ -382,11 +402,7 @@ class CommandEntryFixture(EntryFixture):
                     ),
                     patch.object(review_run, "GitHubHttp", side_effect=http_factory),
                     patch.object(action_run, "bootstrap", side_effect=capture_run),
-                    patch.object(
-                        EvidenceReadBudget,
-                        "__init__",
-                        side_effect=AssertionError("no replacement phase budget"),
-                    ),
+                    forbid_replacement_phase_budget(),
                     redirect_stdout(output),
                     redirect_stderr(errors),
                 ):
