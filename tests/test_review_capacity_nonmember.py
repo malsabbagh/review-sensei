@@ -177,12 +177,19 @@ class ReviewCapacityNonmemberTests(unittest.TestCase):
 
         from review_sensei.errors import ReviewInputError
 
-        wrapper = _BudgetedReviewPagination(GitHubHttp(), EvidenceReadBudget())
+        # Retain enough genuine predecessors to reproduce the larger registry
+        # seen in a full-suite worker, even when this test runs alone.
+        wrappers = [
+            _BudgetedReviewPagination(GitHubHttp(), EvidenceReadBudget())
+            for _ in range(256)
+        ]
+        wrapper = wrappers[0]
         find = inspect.getclosurevars(membership.never_installed).nonlocals["find"]
         quick = inspect.getclosurevars(find).nonlocals["quick"]
         state = inspect.getclosurevars(quick).nonlocals["state"]
         retired = inspect.getclosurevars(quick).nonlocals["retired"]
         table = state[0][1]
+        self.assertGreater(len(table), 200)
         key = (1, id(weakref.ref(wrapper)))
         original = table[key]
         calls = []
