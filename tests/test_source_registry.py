@@ -94,9 +94,10 @@ class SourceRegistryTests(unittest.TestCase):
 
         with patch.object(inspect, "getattr_static", observe):
             require_module_seal(review_run)
-        # One fresh static lookup serves membership and binding validation.
-        # It must not repeat lookups or cache success across validations.
-        self.assertEqual(observed, ["load"])
+        # Ordinary classes use one fresh namespace snapshot, not repeated
+        # per-member static lookups. The changed method below must still be
+        # refused on the very next validation; no success is cached.
+        self.assertEqual(observed, [])
         with patch.object(ActionRunLedger, "load", lambda *args, **kwargs: None):
             with self.assertRaisesRegex(ReviewInputError, "source changed"):
                 require_module_seal(review_run)
@@ -418,3 +419,238 @@ class SourceRegistryTests(unittest.TestCase):
             slots[0] = original
         self.assertEqual(calls, [])
         require_module_seal(operation_host)
+
+
+class FreshStaticMemberSnapshotTests(unittest.TestCase):
+    def _snapshot_reader(self):
+        # Exercise the private pure enumeration unit as well as the public seal
+        # regressions below. It is closure-owned, not a replaceable module hook.
+        closure = dict(
+            zip(
+                require_module_seal.__code__.co_freevars,
+                (cell.cell_contents for cell in require_module_seal.__closure__),
+            )
+        )
+        require_class = closure["require_class"]
+        return dict(
+            zip(
+                require_class.__code__.co_freevars,
+                (cell.cell_contents for cell in require_class.__closure__),
+            )
+        )["static_members"]
+
+    def _reference(self, cls):
+        import inspect
+
+        def normalized(member):
+            if (
+                type(member) is types.MethodType
+                or type(member) is staticmethod
+                or type(member) is classmethod
+            ):
+                return member.__func__
+            return member
+
+        return {
+            name: normalized(inspect.getattr_static(cls, name)) for name in dir(cls)
+        }
+
+    def _assert_same_members(self, cls):
+        expected = self._reference(cls)
+        actual = self._snapshot_reader()(cls)
+        self.assertEqual(actual.keys(), expected.keys())
+        for name, value in expected.items():
+            self.assertIs(actual[name], value, name)
+        return actual
+
+    def test_exact_members_match_original_reader_for_current_source_classes(self):
+        import importlib
+        import inspect
+
+        names = (
+            "review_sensei.api_work",
+            "review_sensei.session",
+            "review_sensei.models",
+            "review_sensei_github.http",
+            "review_sensei_github.api_run_requests",
+            "review_sensei_github.publication",
+        )
+        ordinary = unusual = 0
+        for name in names:
+            module = importlib.import_module(name)
+            for value in vars(module).values():
+                if inspect.isclass(value) and value.__module__ == name:
+                    with self.subTest(module=name, cls=value.__name__):
+                        self._assert_same_members(value)
+                    ordinary += type(value) is type
+                    unusual += type(value) is not type
+            require_module_seal(module)
+        self.assertGreater(ordinary, 0)
+        self.assertGreater(unusual, 0)
+
+    def test_inherited_descriptors_are_static_and_never_invoked(self):
+        calls = []
+
+        class Descriptor:
+            def __get__(self, instance, owner=None):
+                calls.append("descriptor")
+                raise AssertionError("descriptor execution")
+
+        class Base:
+            descriptor = Descriptor()
+
+            @staticmethod
+            def static_method():
+                raise AssertionError("static method execution")
+
+            @classmethod
+            def class_method(cls):
+                raise AssertionError("class method execution")
+
+            @property
+            def property_member(self):
+                calls.append("property")
+                raise AssertionError("property execution")
+
+        class Child(Base):
+            __slots__ = ("slot",)
+
+        members = self._assert_same_members(Child)
+        self.assertIs(members["descriptor"], vars(Base)["descriptor"])
+        self.assertIs(members["static_method"], Base.static_method)
+        self.assertIs(members["class_method"], Base.class_method.__func__)
+        self.assertIs(members["property_member"], vars(Base)["property_member"])
+        self.assertIs(members["slot"], vars(Child)["slot"])
+        self.assertEqual(calls, [])
+
+    def test_every_snapshot_observes_namespace_and_mro_changes(self):
+        class Base:
+            def method(self):
+                pass
+
+        class Alternate:
+            def method(self):
+                pass
+
+        class Child(Base):
+            pass
+
+        first = self._assert_same_members(Child)
+        replacement = lambda self: None  # noqa: E731
+        Base.method = replacement
+        second = self._assert_same_members(Child)
+        self.assertIs(second["method"], replacement)
+        self.assertIsNot(second["method"], first["method"])
+        Child.added = replacement
+        self.assertIs(self._assert_same_members(Child)["added"], replacement)
+        del Child.added
+        self.assertNotIn("added", self._assert_same_members(Child))
+        Child.__bases__ = (Alternate,)
+        self.assertIs(self._assert_same_members(Child)["method"], Alternate.method)
+
+    def test_custom_metaclass_keeps_exact_original_reader_and_callback_behavior(self):
+        import inspect
+
+        calls = []
+
+        class Meta(type):
+            def __getattribute__(cls, name):
+                calls.append(("getattribute", name))
+                return type.__getattribute__(cls, name)
+
+            def __eq__(cls, other):
+                calls.append(("equality", type(other)))
+                return type.__eq__(cls, other)
+
+            def __hash__(cls):
+                calls.append(("hash",))
+                return type.__hash__(cls)
+
+        class Custom(metaclass=Meta):
+            def method(self):
+                pass
+
+        expected = self._reference(Custom)
+        original_callbacks = list(calls)
+        calls.clear()
+        looked_up = []
+        original = inspect.getattr_static
+
+        def observe(owner, name, *args, **kwargs):
+            looked_up.append(name)
+            return original(owner, name, *args, **kwargs)
+
+        with patch.object(inspect, "getattr_static", observe):
+            actual = self._snapshot_reader()(Custom)
+        self.assertEqual(calls, original_callbacks)
+        self.assertEqual(looked_up, list(expected))
+        self.assertEqual(actual.keys(), expected.keys())
+        for name, member in expected.items():
+            self.assertIs(actual[name], member)
+
+    def test_non_exact_string_namespace_key_keeps_original_reader(self):
+        import inspect
+
+        class Name(str):
+            pass
+
+        def method(self):
+            pass
+
+        cls = type("UnusualKeys", (), {Name("method"): method})
+        self.assertTrue(any(type(key) is Name for key in vars(cls)))
+        original = inspect.getattr_static
+        looked_up = []
+
+        def observe(owner, name, *args, **kwargs):
+            looked_up.append(name)
+            return original(owner, name, *args, **kwargs)
+
+        with patch.object(inspect, "getattr_static", observe):
+            actual = self._snapshot_reader()(cls)
+        self.assertEqual(looked_up, dir(cls))
+        self.assertIs(actual["method"], method)
+        self._assert_same_members(cls)
+
+    def test_replaced_property_accessor_code_is_still_checked(self):
+        from review_sensei import api_work
+
+        function = api_work.ApiRunAccounting.remaining.fget
+        original = function.__code__
+        require_module_seal(api_work)
+        try:
+            function.__code__ = original.replace(co_name="changed_property")
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(api_work)
+        finally:
+            function.__code__ = original
+        require_module_seal(api_work)
+
+    def test_replaced_descriptor_with_hostile_metaclass_never_gets_callbacks(self):
+        from review_sensei import session
+
+        calls = []
+
+        class Meta(type):
+            def __getattribute__(cls, name):
+                calls.append("metaclass getattribute")
+                raise AssertionError("metaclass attribute execution")
+
+            def __eq__(cls, other):
+                calls.append("metaclass equality")
+                raise AssertionError("metaclass equality execution")
+
+            def __hash__(cls):
+                calls.append("metaclass hash")
+                raise AssertionError("metaclass hash execution")
+
+        class Descriptor(metaclass=Meta):
+            def __get__(self, instance, owner=None):
+                calls.append("descriptor")
+                raise AssertionError("descriptor execution")
+
+        with patch.object(session.SessionRecord, "from_dict", Descriptor()):
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(session)
+        self.assertEqual(calls, [])
+        require_module_seal(session)

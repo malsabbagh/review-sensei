@@ -237,6 +237,31 @@ def _build_registry():
             ):
                 raise ReviewInputError("original module source changed: " + name)
 
+    def static_members(cls):
+        # For ordinary classes, getattr_static repeatedly walks the same MRO
+        # and checks the immutable built-in type's dictionary descriptor for
+        # every attribute. Read those current namespaces once instead. Exact
+        # type/key guards exclude user-controlled lookup/equality/hash hooks;
+        # unusual metaclasses and namespaces retain the original static reader.
+        # This is a fresh view, never a cached successful source validation.
+        if type(cls) is type:
+            namespaces = []
+            for base in type.__getattribute__(cls, "__mro__"):
+                if type(base) is not type:
+                    break
+                namespace = vars(base)
+                if any(type(name) is not str for name in namespace):
+                    break
+                namespaces.append(namespace)
+            else:
+                merged = {}
+                for namespace in reversed(namespaces):
+                    merged.update(namespace)
+                names = dir(cls)
+                if all(name in merged for name in names):
+                    return {name: normalize(merged[name]) for name in names}
+        return {name: normalize(inspect.getattr_static(cls, name)) for name in dir(cls)}
+
     def require_class(cls):
         original = classes.get(cls)
         if original is None:
@@ -261,9 +286,7 @@ def _build_registry():
         # binding checks. It is discarded after this validation; no method or
         # successful source check is cached between requests. Preserve the
         # original early metadata refusals before enumerating any members.
-        members = {
-            name: normalize(inspect.getattr_static(cls, name)) for name in dir(cls)
-        }
+        members = static_members(cls)
         if (
             frozenset(
                 name
