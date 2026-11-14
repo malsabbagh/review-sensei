@@ -431,3 +431,73 @@ for operation in (lambda:m.never_installed(GitHubHttp()), root, root.__wrapped__
         # ID reuse does not force an O(live) rebuild on each construction.
         self.assertLess(len(epochs), 100)
         self.assertTrue(all(membership.never_installed(value) for value in keep))
+
+    def test_concurrent_original_install_survives_compaction_snapshot(self):
+        import inspect
+        import sys
+        import threading
+
+        from review_sensei_github import capacity_transport_membership as membership
+
+        find = inspect.getclosurevars(membership.never_installed).nonlocals["find"]
+        quick = inspect.getclosurevars(find).nonlocals["quick"]
+        compact = inspect.getclosurevars(find).nonlocals["compact"]
+        retired = inspect.getclosurevars(quick).nonlocals["retired"]
+        add = inspect.getclosurevars(membership.register_install).nonlocals["add"]
+        lines, first = inspect.getsourcelines(compact)
+        pause_line = first + next(
+            i for i, line in enumerate(lines) if "cache_call(cache, (-2, 0))" in line
+        )
+        prepared = threading.Event()
+        snapshot = threading.Event()
+        attempted = threading.Event()
+        results = []
+        failures = []
+        ordinary = GitHubHttp()
+
+        def installer_trace(frame, event, arg):
+            if event == "call" and frame.f_code is membership.register_install.__code__:
+                prepared.set()
+                if not snapshot.wait(10):
+                    raise AssertionError("compaction did not reach snapshot")
+            if event == "call" and frame.f_code is add.__code__:
+                if frame.f_locals.get("which") == 0:
+                    attempted.set()
+            return installer_trace
+
+        def install():
+            sys.settrace(installer_trace)
+            try:
+                results.append(self.installed_transport())
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                sys.settrace(None)
+
+        def compactor_trace(frame, event, arg):
+            if frame.f_code is compact.__code__ and event == "line":
+                if frame.f_lineno == pause_line:
+                    snapshot.set()
+                    if not attempted.wait(10):
+                        raise AssertionError(
+                            "original installation did not attempt add"
+                        )
+            return compactor_trace
+
+        worker = threading.Thread(target=install)
+        worker.start()
+        try:
+            self.assertTrue(prepared.wait(10))
+            retired.update((9, i) for i in range(10000))
+            sys.settrace(compactor_trace)
+            self.assertTrue(membership.never_installed(ordinary))
+        finally:
+            sys.settrace(None)
+            snapshot.set()
+            worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, [])
+        ledger, guard = results[0]
+        del ledger.http._quarantine_capacity_guard
+        self.assertTrue(membership.was_installed(ledger.http))
+        self.assertFalse(membership.never_installed(ledger.http))

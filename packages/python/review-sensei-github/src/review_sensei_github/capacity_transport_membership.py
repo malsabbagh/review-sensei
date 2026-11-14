@@ -10,6 +10,7 @@ following the three supported wrapper links. No reset or removal API exists.
 
 import sys
 import weakref
+from _thread import RLock
 from functools import lru_cache
 from types import CellType, FunctionType
 from typing import Any
@@ -23,6 +24,11 @@ def _cache_statistics(hits, misses, maxsize, size):
 
 
 def _registry():
+    lock = RLock()
+    lock_type = type(lock)
+    acquire = lock_type.acquire
+    release = lock_type.release
+    busy = [False]
     reference = weakref.ref
     weakref_module = weakref
     cache_type: Any = type(lru_cache(maxsize=None)(lambda: None))
@@ -34,6 +40,23 @@ def _registry():
     state: list[Any] = [None]
     factory_code = sys._getframe().f_code
     mint_code = None
+
+    def enter():
+        # Authenticate before invoking even the synchronization primitive. The
+        # exact C reentrant lock allows us to reject same-thread reentry rather
+        # than deadlock if a tracing callback attempts a registry operation.
+        _require_sources()
+        if type(lock) is not lock_type or type(busy) is not list or len(busy) != 1:
+            raise ReviewInputError("capacity membership synchronization changed")
+        acquire(lock)
+        if busy[0] is not False:
+            release(lock)
+            raise ReviewInputError("capacity membership transition is reentrant")
+        busy[0] = True
+
+    def leave():
+        busy[0] = False
+        release(lock)
 
     def root_value():
         origin = sys._getframe(1)
@@ -249,56 +272,69 @@ def _registry():
         return replacement
 
     def find(which, value):
-        epoch = quick()
-        if len(retired) >= max(64, len(epoch[1]) // 2):
-            epoch = compact()
+        enter()
         try:
-            canonical = reference(value)
-        except TypeError:
-            return None
-        key = (which, id(canonical))
-        try:
-            row = cache_call(epoch[0], key)
-        except absent:
-            return None
-        if not row_valid(row, key):
-            raise ReviewInputError("capacity membership cached row changed")
-        actual = reference.__call__(row[2])
-        if actual is None:
-            return None
-        if actual is not value:
-            raise ReviewInputError("capacity transport membership identity changed")
-        return row
+            epoch = quick()
+            if len(retired) >= max(64, len(epoch[1]) // 2):
+                epoch = compact()
+            try:
+                canonical = reference(value)
+            except TypeError:
+                return None
+            key = (which, id(canonical))
+            try:
+                row = cache_call(epoch[0], key)
+            except absent:
+                return None
+            if not row_valid(row, key):
+                raise ReviewInputError("capacity membership cached row changed")
+            actual = reference.__call__(row[2])
+            if actual is None:
+                return None
+            if actual is not value:
+                raise ReviewInputError("capacity transport membership identity changed")
+            return row
+        finally:
+            leave()
 
     def add(which, value, details):
-        frame = sys._getframe(1)
-        if (
-            frame.f_code not in (register_install.__code__, register_wrapper.__code__)
-            or frame.f_globals is not globals()
-        ):
-            raise ReviewInputError("capacity membership append lacks original producer")
-        epoch = quick()
-        if len(retired) >= max(64, len(epoch[1]) // 2):
-            epoch = compact()
-        canonical = reference(value)
-        key = (which, id(canonical))
+        enter()
         try:
-            previous = cache_call(epoch[0], key)
-        except absent:
-            previous = None
-        if previous is not None:
-            raise ReviewInputError("capacity transport membership cannot be replaced")
+            frame = sys._getframe(1)
+            if (
+                frame.f_code
+                not in (register_install.__code__, register_wrapper.__code__)
+                or frame.f_globals is not globals()
+            ):
+                raise ReviewInputError(
+                    "capacity membership append lacks original producer"
+                )
+            epoch = quick()
+            if len(retired) >= max(64, len(epoch[1]) // 2):
+                epoch = compact()
+            canonical = reference(value)
+            key = (which, id(canonical))
+            try:
+                previous = cache_call(epoch[0], key)
+            except absent:
+                previous = None
+            if previous is not None:
+                raise ReviewInputError(
+                    "capacity transport membership cannot be replaced"
+                )
 
-        def dead(_reference):
-            # A scheduling hint only. Cleanup separately proves every live row
-            # against the immutable C cache before dropping any dead reference.
-            retired.add(key)
+            def dead(_reference):
+                # A scheduling hint only. Cleanup separately proves every live row
+                # against the immutable C cache before dropping any dead reference.
+                retired.add(key)
 
-        row = (which, id(canonical), canonical, details, reference(value, dead))
-        retained = cache_call(epoch[0], key)
-        if retained is not row:
-            raise ReviewInputError("capacity membership append changed")
-        epoch[1][key] = row
+            row = (which, id(canonical), canonical, details, reference(value, dead))
+            retained = cache_call(epoch[0], key)
+            if retained is not row:
+                raise ReviewInputError("capacity membership append changed")
+            epoch[1][key] = row
+        finally:
+            leave()
 
     def register_install(transport, guard):
         _require_sources()
@@ -420,6 +456,8 @@ def _registry():
     state[0] = new_epoch(())
     cache_call(root)
     functions = (
+        enter,
+        leave,
         root_value,
         key_valid,
         new_epoch,
