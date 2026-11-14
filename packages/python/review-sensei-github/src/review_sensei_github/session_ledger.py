@@ -3315,6 +3315,8 @@ class GitHubIssueCommentSessionLedger:
             app_slug=self.app_slug or "reviewsensei[bot]",
             base_sha=target_tx.base_sha,
             head_sha=target_tx.head_sha,
+            transaction=target_tx,
+            source_app_id=self.authenticated_app_id,
         )
         available = store.read_available(
             event_key=_event_key(effective_identity, target_tx)
