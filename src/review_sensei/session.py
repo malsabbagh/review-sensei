@@ -3618,6 +3618,36 @@ def record_admitted_blocker_progress(
     retryable publication failure.
     """
 
+    mutate = _admitted_blocker_progress_mutation(
+        ledger,
+        identity,
+        transaction,
+        blocker_set_sha256=blocker_set_sha256,
+        blocker_count=blocker_count,
+        suppress_publication=suppress_publication,
+        now=now,
+    )
+    return ledger.replace(identity, mutate, now=now)
+
+
+def _admitted_blocker_progress_mutation(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    transaction: ReviewTransaction,
+    *,
+    blocker_set_sha256: str,
+    blocker_count: int,
+    suppress_publication: bool,
+    now: datetime | None = None,
+) -> Callable[[SessionRecord], SessionRecord]:
+    """Persist one post-admission blocker identity and optionally hand off.
+
+    The only writer is the publication boundary after it has admitted the
+    exact result it will hand to the GitHub publisher. A suppression and its
+    evidence are consequently one compare-and-swap transition, rather than a
+    retryable publication failure.
+    """
+
     if not isinstance(transaction, ReviewTransaction):
         raise ReviewInputError("review transaction is invalid")
     if not isinstance(blocker_set_sha256, str) or not _SHA256.fullmatch(
@@ -3757,7 +3787,7 @@ def record_admitted_blocker_progress(
             convergence_history=updated_history,
         )
 
-    return ledger.replace(identity, mutate, now=now)
+    return mutate
 
 
 def reclaim_abandoned_review_transaction(
