@@ -173,6 +173,52 @@ def _registry():
         nodes = response["data"]["repository"]["pullRequest"]["comments"]["nodes"]
         if any(_wire(node) - _wire({"body": node["body"]}) > 4096 for node in nodes):
             raise ReviewInputError("historical census metadata exceeds its bound")
+        event_id = owner.get("event_id")
+        if entry["phase"] >= 2:
+            from . import quarantine_action
+            from .quarantine_command_execution import _source_frame
+
+            require_module_seal(quarantine_action)
+            permit = getattr(ledger, "_quarantine_decision_permit", None)
+            if (
+                type(permit) is not quarantine_action._DecisionPermit
+                or permit not in quarantine_action._ISSUED_DECISIONS
+                or quarantine_action._DECISION_BINDINGS.get(permit)
+                != quarantine_action._decision_permit_binding(permit)
+                or permit.ledger is not ledger
+                or permit.authority is not entry["authority"]
+                or permit.run_id != caller.run.run_id
+            ):
+                raise ReviewInputError("historical census lacks its exact event permit")
+            if event_id is None:
+                producer = _source_frame(
+                    quarantine_action, quarantine_action.apply_quarantine_target
+                )
+                tail = producer.f_locals.get("tail")
+                if (
+                    producer.f_locals.get("run") is not entry["run"]
+                    or producer.f_locals.get("authority") is not entry["authority"]
+                    or producer.f_locals.get("target") is not entry["target"]
+                    or canonical_bytes(tail) != permit.tail
+                    or not isinstance(tail, dict)
+                    or len(tail.get("parts", ())) != 1
+                ):
+                    raise ReviewInputError("historical census event producer changed")
+                identifier = tail["parts"][0]["storage_id"]
+                if (
+                    not isinstance(identifier, str)
+                    or not identifier.isdecimal()
+                    or not 1 <= len(identifier) <= 64
+                ):
+                    raise ReviewInputError(
+                        "historical census event identity is invalid"
+                    )
+                event_id = int(identifier)
+                if event_id <= 0 or event_id in owner["known"]:
+                    raise ReviewInputError("historical census event identity conflicts")
+                owner["event_id"], owner["event_tail"] = event_id, permit.tail
+            elif permit.tail != owner["event_tail"]:
+                raise ReviewInputError("historical census confirmed event changed")
         known, found, event_rows = owner["known"], set(), []
         for row in rows:
             identifier = row["id"]
@@ -182,6 +228,10 @@ def _registry():
             if identifier not in known:
                 if row["body"] != owner["event"]:
                     raise ReviewInputError("historical census has unpriced membership")
+                if identifier != event_id:
+                    raise ReviewInputError(
+                        "historical census confirmed event identity changed"
+                    )
                 ledger._part_owner(row, identity)
                 event_rows.append(row)
                 continue

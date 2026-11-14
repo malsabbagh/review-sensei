@@ -552,6 +552,7 @@ def fetch_comments(
             ):
                 raise ReviewInputError("quarantine census terminal page is incomplete")
             if historical_reader is not None:
+                require_module_seal(historical_invocation_census)
                 historical_invocation_census.finish(
                     historical_reader, ledger, identity, collected, response
                 )

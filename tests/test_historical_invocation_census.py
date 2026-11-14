@@ -23,12 +23,41 @@ class CensusFixture(GuardedHistoricalFixture):
         super().__init__(directory)
         self.census_fault = fault
         self.census_attempts = 0
+        self.initial_ids = None
+        self.fault_injected = False
+        self.fake_finish_calls = 0
+        self.original_finish = census.finish
 
     def external(self, request, timeout):
         response = super().external(request, timeout)
         payload = json.loads(request.data) if request.data else {}
         if self.closed_started and payload.get("query") == QUERY:
             self.census_attempts += 1
+            if self.census_fault == "export" and self.census_attempts == 1:
+
+                def fake_finish(*args):
+                    self.fake_finish_calls += 1
+                    return args[3]
+
+                census.finish = fake_finish
+                self.fault_injected = True
+                return response
+            if self.census_fault == "event_id":
+                value = json.loads(response.read(512 * 1024))
+                nodes = value["data"]["repository"]["pullRequest"]["comments"]["nodes"]
+                if self.initial_ids is None:
+                    self.initial_ids = {node["fullDatabaseId"] for node in nodes}
+                else:
+                    added = [
+                        node
+                        for node in nodes
+                        if node["fullDatabaseId"] not in self.initial_ids
+                    ]
+                    if added and not self.fault_injected:
+                        assert len(added) == 1
+                        added[0]["fullDatabaseId"] = "999999999"
+                        self.fault_injected = True
+                return json_response(value)
             if self.census_attempts == 1 and self.census_fault:
                 if self.census_fault == "loss":
                     raise TimeoutError("lost original complete census response")
@@ -136,6 +165,7 @@ class HistoricalInvocationCensusTests(unittest.TestCase):
                     code = fixture.invoke_command()
                 finally:
                     sys.setprofile(previous)
+                    census.finish = fixture.original_finish
                 self.assertEqual(len(issued), 1)
                 caller = issued[0].caller
                 self.assertEqual(caller.accounting.configuration.limit, 512)
@@ -158,12 +188,20 @@ class HistoricalInvocationCensusTests(unittest.TestCase):
                     )
                 else:
                     self.assertEqual(code, 1, fixture.error)
-                    self.assertEqual(fixture.census_attempts, 1)
-                    self.assertEqual(completed, [])
+                    if fault == "event_id":
+                        self.assertTrue(fixture.fault_injected)
+                        self.assertGreater(fixture.census_attempts, 1)
+                        self.assertGreaterEqual(len(completed), 1)
+                    else:
+                        self.assertEqual(fixture.census_attempts, 1)
+                        self.assertEqual(completed, [])
+                    self.assertEqual(fixture.fake_finish_calls, 0)
                     self.assertEqual(fixture.native_puts, 0)
-                    self.assertFalse(caller.accounting.action["execution_started"])
+                    if fault != "event_id":
+                        self.assertFalse(caller.accounting.action["execution_started"])
                     self.assertEqual(caller.accounting.action["phase"], "pending")
-                    self.assertEqual(caller.budget_view.ordinary_remaining(), 102)
+                    if fault != "event_id":
+                        self.assertEqual(caller.budget_view.ordinary_remaining(), 102)
                     self.assertEqual(
                         next(
                             b.undispatched
@@ -182,6 +220,8 @@ class HistoricalInvocationCensusTests(unittest.TestCase):
                         0,
                     )
                     expected = {
+                        "export": "source",
+                        "event_id": "confirmed event identity changed",
                         "metadata": "metadata exceeds its bound",
                         "membership": "unpriced membership",
                         "loss": "session ledger discovery failed",
@@ -199,3 +239,9 @@ class HistoricalInvocationCensusTests(unittest.TestCase):
 
     def test_lost_response_preserves_its_physical_unknown_without_retry(self):
         self.exercise("loss")
+
+    def test_response_cannot_replace_completion_export(self):
+        self.exercise("export")
+
+    def test_same_signed_event_body_cannot_alias_confirmed_event_id(self):
+        self.exercise("event_id")
