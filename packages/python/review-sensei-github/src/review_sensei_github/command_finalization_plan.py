@@ -11,6 +11,7 @@ from review_sensei.finding_lifecycle import encode_lifecycle_state
 from .http import GitHubHttp
 
 _ISSUED: WeakSet = WeakSet()
+_NONEXECUTING: WeakKeyDictionary = WeakKeyDictionary()
 _EXECUTED: WeakSet = WeakSet()
 _EXECUTION_JOURNALS: WeakKeyDictionary = WeakKeyDictionary()
 _PREVIEW: WeakKeyDictionary = WeakKeyDictionary()
@@ -40,6 +41,7 @@ class CommandFinalizationPlan:
         if (
             self not in _ISSUED
             or self.journal is not journal
+            or (self in _NONEXECUTING and self.payload != _NONEXECUTING[self])
             or self.record is not journal._record
             or self.root != canonical_bytes(journal._record.to_dict())
             or self.operation_id != journal.operation_id
@@ -260,6 +262,10 @@ def issue_plan(finalizer, *, payload, states, check_token, cleanup_instances=Non
         ),
     )
     _ISSUED.add(plan)
+    if payload.get("read_contract") == "quarantine-sizing-observation-only-v1":
+        # The immutable issuance role survives mutation of the public dataclass.
+        # Pure branch compilation may inspect it; execution may never promote it.
+        _NONEXECUTING[plan] = plan.payload
     if cleanup_instances is not None:
         _bind_cleanup_prefixes(plan, cleanup_instances)
     from hashlib import sha256
@@ -477,11 +483,7 @@ def attach_execution_reads(plan, finalizer, journal, *, dispositions, check_toke
 
     from .publication import ReviewApprovalFinalizer
 
-    if (
-        type(plan) is CommandFinalizationPlan
-        and json.loads(plan.payload).get("read_contract")
-        == "quarantine-sizing-observation-only-v1"
-    ):
+    if type(plan) is CommandFinalizationPlan and plan in _NONEXECUTING:
         raise ReviewInputError(
             "quarantine sizing observation cannot authorize execution"
         )
@@ -507,7 +509,6 @@ def attach_execution_reads(plan, finalizer, journal, *, dispositions, check_toke
         raise ReviewInputError("command capacity execution source changed")
     finalizer._require_closed_capacity_source()
     plan.require(plan.journal, http=plan.http, budget=plan.budget)
-    import json
 
     from review_sensei.terminal_representability import action_intent_sha256
 

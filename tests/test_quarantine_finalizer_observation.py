@@ -242,6 +242,40 @@ class QuarantineFinalizerObservationTests(unittest.TestCase):
                                     private_plan.journal,
                                     dispositions=(),
                                 )
+                            original_private_payload = private_plan.payload
+                            for altered in (
+                                b'{"read_contract":"closed-plain-single-complete-page-v1"}',
+                                b"malformed-json",
+                            ):
+                                try:
+                                    object.__setattr__(private_plan, "payload", altered)
+                                    with self.assertRaisesRegex(
+                                        ReviewInputError, "changed"
+                                    ):
+                                        measure_inline_branches(plan)
+                                    with self.assertRaisesRegex(
+                                        ReviewInputError, "cannot authorize execution"
+                                    ):
+                                        attach_execution_reads(
+                                            private_plan,
+                                            None,
+                                            private_plan.journal,
+                                            dispositions=(),
+                                        )
+                                    with self.assertRaisesRegex(
+                                        ReviewInputError, "observation changed"
+                                    ):
+                                        private_plan.require(
+                                            private_plan.journal,
+                                            http=private_plan.http,
+                                            budget=private_plan.budget,
+                                        )
+                                finally:
+                                    object.__setattr__(
+                                        private_plan,
+                                        "payload",
+                                        original_private_payload,
+                                    )
                             self.assertGreater(measurements["max_checkpoints"], 0)
                             for branch in measurements["branches"]:
                                 for checkpoint in branch:

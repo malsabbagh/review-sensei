@@ -242,6 +242,11 @@ def _measure_inline_branches(observation):
     plan = _NATIVE_PLANS.get(observation)
     if plan is None:
         raise ReviewInputError("quarantine native branch source is unavailable")
+    if (
+        plan.payload != observation.payload
+        or plan.state_bytes != observation.state_bytes
+    ):
+        raise ReviewInputError("quarantine native branch observation changed")
     require_module_seal(finding_lifecycle_store)
     require_module_seal(finding_lifecycle)
     require_module_seal(accepted_semantic_history)
