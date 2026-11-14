@@ -30,7 +30,7 @@ def subprocess_environment():
 
 class OrdinaryNativeRecoveryColdTests(unittest.TestCase):
     CHILD = r"""
-import copy, json, sys
+import copy, inspect, json, sys
 from pathlib import Path
 from unittest.mock import patch
 from test_recovery_context_g17 import OrdinaryEntryHostedAndCliRecoveryG17Tests
@@ -59,16 +59,16 @@ trace_start=len(f.trace)
 assert not recovery._ACTIVE and not recovery._CHECK_RESULTS
 observed=[]
 criteria=[]
-restore=lifecycle.restore_finding_lifecycle
-def observe(*args,**kwargs):
-    result=restore(*args,**kwargs)
+restore_code=inspect.unwrap(lifecycle.restore_finding_lifecycle).__code__
+def observe(frame,event,result):
+    if frame.f_code is not restore_code or event != "return" or not isinstance(result,tuple):
+        return
     if result[1] is not None:
         observed.append([effect["status"] for effect in result[1]["effects"]])
         from review_sensei.finding_lifecycle import decode_lifecycle_state
         state=decode_lifecycle_state(result[1]["lifecycle"]).state
         inventory=getattr(state,"inventory",None) or getattr(state,"authoritative_decision_inventory",None)
         criteria.append([{"id":ob.obligation_id,"criterion":getattr(ob,"criterion",ob).resolution_criterion,"human":getattr(ob,"criterion",ob).needs_human} for ob in inventory.obligations])
-    return result
 def no_provider(): raise AssertionError("cold recovery invoked inference")
 f.before_provider=no_provider
 from review_sensei_github import lifecycle_admission
@@ -80,7 +80,12 @@ def inject(result,state,**kwargs):
         bad=replace(old,criterion=replace(old.criterion,resolution_criterion="f"*64))
         state=replace(state,inventory=replace(state.inventory,obligations=(bad,*state.inventory.obligations[1:])))
     return admission(result,state,**kwargs)
-with patch.object(lifecycle,"restore_finding_lifecycle",observe), patch.object(lifecycle_admission,"restore_original_lifecycle_admission",inject): code=f.invoke()
+previous_profile=sys.getprofile()
+sys.setprofile(observe)
+try:
+    with patch.object(lifecycle_admission,"restore_original_lifecycle_admission",inject): code=f.invoke()
+finally:
+    sys.setprofile(previous_profile)
 assert f.accounted is not None, f.error
 current=parse_session_comment(f.comment["body"],identity=IDENTITY)
 now=ApiRunAccounting.from_document(current.api_run_accounting)
