@@ -92,3 +92,42 @@ class GroupedStagingPreservationTests(unittest.TestCase):
             with self.subTest(delta=delta), self.assertRaises(ReviewInputError):
                 normalize_staging(changed)
         self.assertEqual(normalize_staging(old), old)
+
+    def test_foreign_frontiers_are_refused_before_any_replace(self):
+        from types import SimpleNamespace
+
+        _, record, declaration = self.inputs()
+        ordinary = PublicationStaging.prepare(
+            transaction_id=declaration.transaction_id,
+            result_sha256=declaration.result_sha256,
+            plan_sha256="c" * 64,
+            part_count=1,
+        )
+        for expected, after in (
+            (None, declaration),
+            (declaration, ordinary),
+            (object(), ordinary),
+        ):
+            replacements = []
+            calls = []
+
+            def replace_record(identity, mutate, **kwargs):
+                calls.append(identity)
+                replacements.append(mutate(record))
+                return replacements[-1]
+
+            with self.subTest(
+                expected=type(expected).__name__, after=type(after).__name__
+            ):
+                with self.assertRaises(ReviewInputError):
+                    checkpoint_publication_staging(
+                        SimpleNamespace(replace=replace_record),
+                        IDENTITY,
+                        record.transaction,
+                        expected=expected,
+                        after=after,
+                        now=NOW,
+                    )
+                self.assertEqual(calls, [])
+                self.assertEqual(replacements, [])
+                self.assertIsNone(record.publication_staging)

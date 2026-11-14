@@ -503,6 +503,16 @@ def checkpoint_publication_staging(
     """
     from .session import MAX_GENERATION, SessionRecord
 
+    # Parser support for a future variant must not turn this existing v2
+    # writer into a duck-typed issuer before its final readback rejects it.
+    if type(after) is not PublicationStaging or (
+        expected is not None and type(expected) is not PublicationStaging
+    ):
+        raise ReviewInputError("publication staging writer requires exact v2 frontiers")
+    PublicationStaging.from_document(after.to_document())
+    if expected is not None:
+        PublicationStaging.from_document(expected.to_document())
+
     def mutate(record: SessionRecord) -> SessionRecord:
         current = record.transaction
         if (
