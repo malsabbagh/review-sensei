@@ -144,3 +144,108 @@ class ConfirmationReceiptTests(unittest.TestCase):
         self.assertEqual(len(bound), 5)
         self.assertEqual(confirmed, bound)
         self.assertEqual(len(prepared), 1)
+
+    def test_preparation_rejects_both_replaced_aliases_without_calling_them(self):
+        import sys
+        import tempfile
+        from unittest.mock import patch
+
+        from review_sensei_github import (
+            api_run_requests,
+            quarantine_historical_execution,
+        )
+        from test_quarantine_historical_execution import GuardedHistoricalFixture
+        from test_quarantine_journey import registered_resource
+        from test_quarantine_published_tail_journey import BROKER_QUALIFICATIONS
+
+        for alias in ("_bind_namespace_confirmation", "_namespace_confirm_response"):
+            with (
+                self.subTest(alias=alias),
+                tempfile.TemporaryDirectory() as directory,
+                patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
+            ):
+                fixture = GuardedHistoricalFixture(directory)
+                _, registration = fixture.original_origins(
+                    failed_count=1, published_count=1
+                )
+                with registered_resource([registration]):
+                    self.assertEqual(fixture.invoke(), 0, fixture.error)
+                    origin, inventory = next(
+                        (key, value)
+                        for key, value in fixture.selected.ledger._quarantine_authenticated.inventories.items()
+                        if value["assessments"]
+                    )
+                    fixture.quarantine_predecessor_comment_id = None
+                    fixture.select_command(
+                        "@reviewsensei dismiss "
+                        + inventory["assessments"][0]["instance"]
+                        + ' --reason "quarantine:'
+                        + origin
+                        + ' Exact source disproves this historical concern."',
+                        new_run=True,
+                    )
+                    original = getattr(api_run_requests, alias)
+                    fake_calls, injected, activated, refusals = [], [], [], []
+
+                    def fake(*args):
+                        fake_calls.append(args)
+
+                    def observe(frame, event, result):
+                        if (
+                            event == "return"
+                            and frame.f_code is namespace.prepare.__code__
+                            and result is not None
+                        ):
+                            injected.append(result)
+                            setattr(api_run_requests, alias, fake)
+                        if (
+                            event == "return"
+                            and frame.f_code
+                            is quarantine_historical_execution.activate.__code__
+                            and result is not None
+                        ):
+                            activated.append(result)
+
+                    def trace(frame, event, arg):
+                        if (
+                            frame.f_globals is vars(api_run_requests)
+                            and frame.f_code.co_name == "open"
+                        ):
+                            if (
+                                event == "exception"
+                                and str(arg[1])
+                                == "caller namespace confirmation alias changed"
+                            ):
+                                refusals.append(arg[1])
+                            return trace
+                        return None
+
+                    previous = sys.getprofile()
+                    previous_trace = sys.gettrace()
+                    try:
+                        sys.setprofile(observe)
+                        sys.settrace(trace)
+                        code = fixture.invoke_command()
+                    finally:
+                        sys.settrace(previous_trace)
+                        sys.setprofile(previous)
+                        setattr(api_run_requests, alias, original)
+                    self.assertEqual(len(injected), 1)
+                    self.assertEqual(code, 1, fixture.error)
+                    self.assertEqual(fake_calls, [])
+                    self.assertEqual(activated, [])
+                    self.assertEqual(fixture.native_puts, 0)
+                    self.assertEqual(len(refusals), 1)
+                    self.assertIn("broker.transport_phase=request_open", fixture.error)
+                    self.assertIn(
+                        "broker.transport_failure=invalid_response", fixture.error
+                    )
+                    self.assertFalse(
+                        any(row["state"] == "APPROVED" for row in fixture.reviews)
+                    )
+                    self.assertFalse(
+                        any(
+                            "reviewsensei:command-receipt:v1" in row.get("body", "")
+                            for row in fixture.extra_comments.values()
+                        )
+                    )

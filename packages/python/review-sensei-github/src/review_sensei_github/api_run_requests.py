@@ -1030,6 +1030,20 @@ class ApiRunRequestTransport:
         observed_status = None
         resolution_readback = self._capture_thread_request(request, observation)
 
+        from review_sensei.source_registry import require_module_seal
+
+        from . import quarantine_command_namespace
+
+        # Authenticate the defining exports before taking snapshots.  Otherwise
+        # a substituted alias could declare itself inactive before any lease.
+        require_module_seal(quarantine_command_namespace)
+        if (
+            _bind_namespace_confirmation
+            is not quarantine_command_namespace.bind_response_confirmation
+            or _namespace_confirm_response
+            is not quarantine_command_namespace.confirm_response
+        ):
+            raise ReviewInputError("caller namespace confirmation alias changed")
         namespace_bind_confirmation = _bind_namespace_confirmation
         namespace_confirm_response = _namespace_confirm_response
         # Freeze callable custody before external response code can run.  A
