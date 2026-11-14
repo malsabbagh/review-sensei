@@ -8892,7 +8892,12 @@ class ReviewPublisher:
                         not closed_fresh_route
                         and bool(result.comments)
                         and result.transaction is not None
+                        # Window obligations retain native_target/proof, not
+                        # drift thread bindings. They keep their existing
+                        # window route; they cannot select drift admission.
+                        and type(retained_state) is DriftEvaluationResult
                         and inventory is not None
+                        and type(inventory) is DriftInventory
                         and bool(inventory.obligations)
                         and any(
                             item.thread_binding is not None
