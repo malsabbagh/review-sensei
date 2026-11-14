@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dis
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -113,6 +115,42 @@ def _make_recovery_bundle(index: int = 1) -> OriginalRecoveryContextBundle:
         runtime_only_fields=(),
         authority=False,
     )
+
+
+@contextmanager
+def _observe_original_source(observer):
+    previous = sys.getprofile()
+    try:
+        sys.setprofile(observer)
+        yield
+    finally:
+        sys.setprofile(previous)
+
+
+@contextmanager
+def _capture_checkpoint_documents(documents):
+    import copy
+
+    from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
+
+    checkpoint = FindingLifecycleJournal.checkpoint
+    # A profile return on exception unwind is not a committed checkpoint.
+    returns = {
+        item.offset
+        for item in dis.get_instructions(checkpoint)
+        if item.opname in {"RETURN_VALUE", "RETURN_CONST"}
+    }
+
+    def observe(frame, event, arg):
+        if (
+            frame.f_code is checkpoint.__code__
+            and event == "return"
+            and frame.f_lasti in returns
+        ):
+            documents.append(copy.deepcopy(frame.f_locals["self"]._document()))
+
+    with _observe_original_source(observe):
+        yield
 
 
 class CombinedCapacityG12Tests(unittest.TestCase):
@@ -462,10 +500,7 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                         self.assertFalse(replay.gate_succeeded_after_replay)
 
     def test_actual_body_placement_owned_updates_survive_cold_command_reads(self):
-        import copy
         import hashlib
-
-        from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
 
         with tempfile.TemporaryDirectory() as directory:
             fixture = _G34CommandFixture(directory, limit=512)
@@ -485,14 +520,7 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                 )
             ]
             documents = []
-            checkpoint = FindingLifecycleJournal.checkpoint
-
-            def captured(journal, **kwargs):
-                result = checkpoint(journal, **kwargs)
-                documents.append(copy.deepcopy(journal._document()))
-                return result
-
-            with patch.object(FindingLifecycleJournal, "checkpoint", captured):
+            with _capture_checkpoint_documents(documents):
                 self.assertEqual(fixture.invoke(human=True), 0, fixture.error)
                 initial = documents[-1]
                 index = parse_finding_index(
@@ -588,12 +616,35 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                     (fixture.reviews, fixture.check_runs, fixture.inline)
                 )
                 if fault == "missing-proof":
-                    with patch.object(
-                        FindingLifecycleJournal,
-                        "issue_review_update_precondition",
-                        return_value=None,
-                    ):
+                    issue = FindingLifecycleJournal.issue_review_update_precondition
+                    removed = []
+
+                    def lose_issued_proof(frame, event, arg):
+                        if (
+                            frame.f_code is issue.__code__
+                            and event == "return"
+                            and arg is not None
+                            and not removed
+                        ):
+                            record = parse_session_comment(
+                                fixture.comment["body"], identity=IDENTITY
+                            )
+                            if (
+                                record.api_run_accounting["action"]["phase"]
+                                != "pending"
+                            ):
+                                return
+                            journal = frame.f_locals["self"]
+                            self.assertIs(
+                                journal._issued_review_update_precondition[0], arg
+                            )
+                            removed.append(arg)
+                            journal._issued_review_update_precondition = None
+
+                    with _observe_original_source(lose_issued_proof):
                         self.assertNotEqual(fixture.invoke_command(), 0)
+                    self.assertEqual(len(removed), 1)
+                    self.assertIn("gate re-evaluation failed", fixture.error)
                 else:
                     # A foreign body detected by admission is a known refusal,
                     # not uncertainty after entering the disposition mutation.
@@ -625,8 +676,6 @@ class CombinedCapacityG12Tests(unittest.TestCase):
         import copy
         import hashlib
 
-        from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
-
         for fault in ("stored", "absent"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 fixture = _G34CommandFixture(directory, limit=512)
@@ -642,14 +691,7 @@ class CombinedCapacityG12Tests(unittest.TestCase):
                     }
                 ]
                 documents = []
-                checkpoint = FindingLifecycleJournal.checkpoint
-
-                def captured(journal, **kwargs):
-                    result = checkpoint(journal, **kwargs)
-                    documents.append(copy.deepcopy(journal._document()))
-                    return result
-
-                with patch.object(FindingLifecycleJournal, "checkpoint", captured):
+                with _capture_checkpoint_documents(documents):
                     self.assertEqual(fixture.invoke(human=True), 0, fixture.error)
                     before = documents[-1]["native_receipts"][0]
                     index = parse_finding_index(
