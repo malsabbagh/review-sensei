@@ -550,11 +550,14 @@ class PublishedTailJourneyTests(unittest.TestCase):
                     self.assertEqual(fixture.root_posts, 1)
 
     def test_fresh_recurrence_stays_independent_of_fourteen_historical_decisions(self):
+        from hot_original_entry import invoke_original
+
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             fixture = NativePublishedTailJourneyFixture(directory)
+            fixture.api_url = "https://api.github.com"
             old, registration = fixture.original_origins()
             fixture.provider_comments = [
                 {
@@ -569,7 +572,11 @@ class PublishedTailJourneyTests(unittest.TestCase):
                 }
             ]
             with registered_resource([registration]):
-                self.assertEqual(fixture.invoke(), 0, fixture.error)
+                # A populated current admission authenticates the actual
+                # engine and owner. Keep its definitions intact and fake only
+                # the external wire, not EntryFixture's legacy engine wrapper.
+                result, _ = invoke_original(fixture)
+                self.assertEqual(result, 0, fixture.error)
                 # Inspect the displayed current obligations structurally. The
                 # unaware parser must still refuse v8; runtime commands below
                 # must use the independently authenticated complete union.

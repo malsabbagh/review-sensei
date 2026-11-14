@@ -2357,6 +2357,18 @@ os._exit(92)
                 f.attempt, f.mode = 2, "confirmed"
                 before = parse_session_comment(f.comment["body"], identity=IDENTITY)
                 prior = ApiRunAccounting.from_document(before.api_run_accounting)
+                if stage == "reservation":
+                    # The current atomic reservation has already retained the
+                    # new analysis transaction. Its historical root reference
+                    # is not proof that provider entry never happened.
+                    self.assertIsNotNone(before.reservation_id)
+                    self.assertIsNotNone(before.transaction)
+                    self.assertEqual(before.transaction.phase, "analysis")
+                    self.assertEqual(
+                        prior.previous_record["schema_version"],
+                        "caller-run-reference-v2",
+                    )
+                    self.assertIsNone(prior.terminal_transaction)
                 calls = f.provider_calls
                 self.assertEqual(f.invoke(human=True), 1, f.error)
                 self.assertEqual(f.provider_calls, calls)
@@ -2369,12 +2381,7 @@ os._exit(92)
                     ),
                     prior,
                 )
-                self.assertIn(
-                    "cannot be established"
-                    if stage == "reservation"
-                    else "no proven provider non-entry",
-                    f.error,
-                )
+                self.assertIn("no proven provider non-entry", f.error)
                 if stage == "reservation-request":
                     # The external server may accept that old PATCH after the
                     # refusal. No successor work or ownership has been issued.

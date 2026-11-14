@@ -148,6 +148,7 @@
         "tests/test_api_work_public_review.py",
         "tests/test_current_command_inventory.py",
         "tests/test_review_run.py",
+        "tests/hot_original_entry.py",
         "tests/test_review_run_rescan.py",
         "tests/test_run_authority.py",
         "tests/test_work_continuation.py",
