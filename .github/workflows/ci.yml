@@ -292,6 +292,12 @@ jobs:
           "$wheel_venv/bin/python" -I "$GITHUB_WORKSPACE/scripts/run_installed_test_suites.py" \
             --start-directory "$suite/dist_safe" --workers 4 --pattern 'test*.py' \
             --split-module test_quarantine_contract.py \
+            --reviewed-local-hook test_approval_lifecycle_contract \
+            --reviewed-local-hook test_controlled_restart_contract \
+            --reviewed-local-hook test_default_human_inventory_contract \
+            --reviewed-local-hook test_native_group_contract \
+            --reviewed-local-hook test_provider_common_flow_contract \
+            --reviewed-local-hook test_quarantine_contract \
             --costs "$GITHUB_WORKSPACE/tests/fixtures/installed-unit-log-delta-seconds.json" \
             --report "$RUNNER_TEMP/installed-suite-timings.json"
           "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/downstream" -v
