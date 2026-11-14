@@ -95,7 +95,9 @@ class GroupedDurableFloorTests(unittest.TestCase):
                     sys.setprofile(previous)
             self.assertEqual(result, 1, fixture.error)
             self.assertIn("cannot fund the complete operation", fixture.error)
-            self.assertEqual(quotes, [84 if checks_enabled else 50])
+            # Reservation/transaction fusion frees seven prefix calls, not
+            # these mandatory fresh claim and native-reconciliation reads.
+            self.assertEqual(quotes, [91 if checks_enabled else 57])
             self.assertEqual(native_writes, [])
             self.assertEqual(fixture.reviews, old_reviews)
             self.assertEqual(fixture.check_runs, old_checks)

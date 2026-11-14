@@ -135,7 +135,14 @@ def require_grouped_durable_floor(publisher, journal, host, *, checks_enabled):
     require_instance_source(publisher, methods=("_publish_impl",))
     require_instance_source(journal, methods=("request", "checkpoint", "finish"))
     require_instance_source(
-        host, methods=("_publish_parts", "publish_final", "checkpoint")
+        host,
+        methods=(
+            "_publish_parts",
+            "publish_final",
+            "checkpoint",
+            "require_claim",
+            "reconcile_part",
+        ),
     )
     require_instance_source(host.plan, methods=("part_payload",))
     original = publication.ReviewPublisher._publish_impl
@@ -192,6 +199,15 @@ def require_grouped_durable_floor(publisher, journal, host, *, checks_enabled):
     # Count only their actual branch, never skip the review-only floor.
     # One POST per group and one final union POST are mandatory. Every
     # pending intent needs a checkpoint; finish needs one final checkpoint.
-    # This omits staging CAS, manifest writes, complete reads and trust fences.
+    # The original fresh producer also reads back each own part, manifest and
+    # final claim (groups + 2). Each confirmed part needs an opening census,
+    # complete group read and closing census (3 * groups), and the final union
+    # has its own opening census (1). These are disjoint from the journal's
+    # checkpoint quote and cannot be removed by reservation/transaction fusion.
+    # This still omits staging CAS, manifest writes/confirmation, the rest of
+    # the final union walk and trust fences. Passing it is never admission.
     effects = groups + 1 + (2 if checks_enabled else 0)
-    journal.ledger.caller.budget_view.preflight((effects + 1) * checkpoint + effects)
+    minimum_native_reads = 4 * groups + 3
+    journal.ledger.caller.budget_view.preflight(
+        (effects + 1) * checkpoint + effects + minimum_native_reads
+    )
