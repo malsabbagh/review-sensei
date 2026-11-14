@@ -539,7 +539,29 @@ def prepare_quarantine_target(run, authority, command, app, permission):
     from .quarantine_lifecycle_transfer import bind_target
 
     bind_target(target.lifecycle_transfer, target)
+    _require_installed_command_tail(run)
     return target
+
+
+def _require_installed_command_tail(run):
+    """Reject a known unsupported finalizer before entering a decision effect.
+
+    A cold command's original native envelope is not a full-review promise.
+    Authenticate the installed owner before inspecting its profile; do not
+    manufacture that promise or settle the action as a successful no-op.
+    """
+    from .publication_recovery import _publication_transport
+    from .quarantine_capacity import installed_capacity
+
+    transport = _publication_transport(run.ledger.http)
+    if getattr(transport, "_quarantine_capacity_guard", None) is None:
+        return
+    guard = installed_capacity(run.ledger, run.identity)
+    if not guard.complete_tail:
+        raise ReviewInputError(
+            "quarantine command finalization capacity unavailable before business "
+            "writes: installed command tail has no complete lifecycle proof"
+        )
 
 
 def _stage_decision_event(run, authority, event, binding):
