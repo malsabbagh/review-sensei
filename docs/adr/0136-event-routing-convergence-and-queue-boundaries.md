@@ -534,3 +534,26 @@ activation permit. Unknown physical requests remain reported and charged. A
 future plan must authenticate the materialized slot association and prevent all
 unpriced renderer/recovery growth before using any smaller remaining envelope;
 this diagnostic report does not implement that transition.
+
+A hot source-phase prototype now records the original successful analysis return,
+its confirmed accepted-operation carriers, validated retention, and the journal
+constructed by the original executing publication frame. An exact empty-current-
+result plain-isolation route can close operation-artifact writes for the remainder
+of that invocation. Both the source port and the original caller dispatch reject
+later operation/result writes, including identical-payload retries to new IDs.
+The dispatch boundary rechecks installed writer source; neither a returned report
+nor a consumer-supplied payload can open the phase. Already-installed bodies and
+mutable event envelopes remain independently represented in the complete census.
+This prototype still uses the unchanged full runtime capacity quote.
+
+Removing just the accepted-result maximum would leave seven unknown renderer
+slots totaling 218154 body-JSON bytes, in addition to all 109 event/archive slots.
+The current packed-reader proof still returns 11 even with no retained bodies.
+The remaining slots are startup archive (36864), operation metadata (65536),
+inventory intent and fallback manifest (8192 each), checkpoint projection (11278),
+and two inventory projection carriers (60034 and 28058). A complete solution must
+prove which of these cannot be newly allocated in the closed phase, while retaining
+all installed carriers and original lifetime promises. No startup completion,
+terminal settlement or cold-command authority is inferred from the hot capture.
+Cold commands require their own original entry/no-new-analysis contract and
+independent authentication of the retained source and physical carrier inventory.

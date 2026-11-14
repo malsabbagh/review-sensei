@@ -1,10 +1,14 @@
 """Original source captures only; no smaller price or caller-issued scope."""
 
+import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from urllib.request import Request
 
 from review_sensei_github import materialized_publication_phase as phase
+from review_sensei_github.accepted_result import selected_accepted_result
 from review_sensei_github.operation_comments import GitHubIssueCommentOperationPort
 from review_sensei_github.quarantine_census import lifecycle_capacity_plan
 
@@ -47,6 +51,19 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                             pull_request=frame.f_locals["identity"].pull_request,
                             app_user_id=ledger.authenticated_app_id,
                         )
+                        accepted = selected_accepted_result(
+                            ledger.http,
+                            ledger.caller._effect_record.transaction,
+                            app_id=ledger.authenticated_app_id,
+                        )
+                        accepted_row = ledger._comments_by_id[
+                            accepted.reference["event_comment_id"]
+                        ]
+                        native = Request(
+                            ledger.http.api_url + port._list_path,
+                            data=json.dumps({"body": accepted_row["body"]}).encode(),
+                            method="POST",
+                        )
                         before = ledger.caller.accounting.to_document()
                         for send in (
                             lambda: port.create(row["body"]),
@@ -59,6 +76,43 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                             with self.assertRaisesRegex(ReviewInputError, "forbids"):
                                 send()
                             denied.append(True)
+                        for name in ("create", "update", "_request"):
+
+                            def foreign(*args, **kwargs):
+                                self.fail("substituted writer must not be invoked")
+
+                            with patch.object(
+                                GitHubIssueCommentOperationPort, name, foreign
+                            ):
+                                with self.assertRaisesRegex(
+                                    ReviewInputError, "source changed"
+                                ):
+                                    lifecycle_capacity_plan(
+                                        ledger,
+                                        frame.f_locals["identity"],
+                                        added_parts=0,
+                                    )
+                        with self.assertRaisesRegex(ReviewInputError, "forbids"):
+                            ledger.caller.open(native, timeout=1)
+                        port._request = lambda *args, **kwargs: self.fail(
+                            "foreign instance executed"
+                        )
+                        try:
+                            with self.assertRaisesRegex(
+                                ReviewInputError, "instance changed"
+                            ):
+                                ledger.caller.open(native, timeout=1)
+                        finally:
+                            del port._request
+                        original_body = accepted_row["body"]
+                        accepted_row["body"] += " "
+                        try:
+                            with self.assertRaises(ReviewInputError):
+                                lifecycle_capacity_plan(
+                                    ledger, frame.f_locals["identity"], added_parts=0
+                                )
+                        finally:
+                            accepted_row["body"] = original_body
                         self.assertEqual(port.requests, 0)
                         self.assertEqual(ledger.caller.accounting.to_document(), before)
             return trace if frame.f_code is code else None

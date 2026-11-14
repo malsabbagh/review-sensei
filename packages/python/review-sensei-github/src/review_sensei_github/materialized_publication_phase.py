@@ -13,7 +13,7 @@ import sys
 from contextvars import ContextVar
 from functools import wraps
 from typing import Any
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, WeakSet
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
@@ -24,20 +24,31 @@ def _build():
     active: ContextVar[Any] = ContextVar(
         "source_materialized_publication", default=None
     )
+    analyzing: ContextVar[Any] = ContextVar(
+        "source_accepted_materialization", default=None
+    )
     installed = set()
     source_classes: dict[type, Any] = {}
+    port_instances: WeakSet[Any] = WeakSet()
+    original_functions: list[tuple[Any, Any]] = []
 
     def definition(name):
         frame = inspect.currentframe()
         frame = frame.f_back if frame else None
         frame = frame.f_back if frame else None
         module = sys.modules.get(name)
+        spec = getattr(module, "__spec__", None)
+        loader = getattr(spec, "loader", None)
+        get_code = getattr(loader, "get_code", None)
         if (
             frame is None
             or module is None
             or name in installed
             or frame.f_code.co_name != "<module>"
             or frame.f_globals is not vars(module)
+            or not getattr(spec, "_initializing", False)
+            or not callable(get_code)
+            or get_code(name) != frame.f_code
         ):
             raise ReviewInputError(
                 "materialization source installer is not defining source"
@@ -60,6 +71,19 @@ def _build():
             for name, value in vars(cls).items()
             if callable(value) or isinstance(value, property)
         )
+
+    def ports_intact():
+        if any(function.__code__ is not code for function, code in original_functions):
+            raise ReviewInputError("materialized publication original writer changed")
+        if not source_classes or any(
+            class_seal(cls) != seal for cls, seal in source_classes.items()
+        ):
+            raise ReviewInputError("materialized publication writer source changed")
+        for instance in tuple(port_instances):
+            if not class_intact(instance):
+                raise ReviewInputError(
+                    "materialized publication writer instance changed"
+                )
 
     def class_intact(instance):
         cls = type(instance)
@@ -84,9 +108,21 @@ def _build():
             http = kwargs["http"]
             key = transport(http)
             accepted.pop(key, None)
-            result = original(**kwargs)
+            capture = {
+                "transport": key,
+                "bodies": {},
+                "reads": {},
+                "closed": False,
+                "poisoned": False,
+            }
+            token = analyzing.set(capture)
+            try:
+                result = original(**kwargs)
+            finally:
+                analyzing.reset(token)
             if (
-                original.__code__ is original_code
+                not capture["poisoned"]
+                and original.__code__ is original_code
                 and namespace["run_actions_analysis"] is run
                 and accepted_result.remember_accepted_result is remember
                 and remember.__code__ is remember_code
@@ -100,6 +136,8 @@ def _build():
                         caller,
                         captured,
                         canonical_bytes(captured.reference),
+                        tuple(sorted(capture["bodies"].items())),
+                        tuple(sorted(capture["reads"].items())),
                     )
             return result
 
@@ -180,13 +218,31 @@ def _build():
 
     def install_ports(port_cls, result_cls):
         definition("review_sensei_github.operation_comments")
+        original_init = port_cls.__init__
         original_create, original_update = port_cls.create, port_cls.update
         original_list = port_cls.list_comments
         original_request = port_cls._request
         original_read = result_cls.read_available_with_carriers
+        original_functions.extend(
+            (function, function.__code__)
+            for function in (
+                original_init,
+                original_create,
+                original_update,
+                original_list,
+                original_request,
+                original_read,
+            )
+        )
+
+        @wraps(original_init)
+        def construct(port, *args, **kwargs):
+            original_init(port, *args, **kwargs)
+            if type(port) is port_cls:
+                port_instances.add(port)
 
         def entry_for(port):
-            entry = active.get()
+            entry = active.get() or analyzing.get()
             if entry is None or transport(port._http) is not entry["transport"]:
                 return None
             return entry
@@ -194,6 +250,7 @@ def _build():
         def denied(port):
             entry = entry_for(port)
             if entry is not None and entry["closed"]:
+                ports_intact()
                 raise ReviewInputError(
                     "materialized publication forbids new operation artifacts"
                 )
@@ -209,7 +266,14 @@ def _build():
         def create(port, body):
             entry = denied(port)
             try:
-                return original_create(port, body)
+                result = original_create(port, body)
+                if entry is not None and class_intact(port):
+                    entry["bodies"][result.comment_id] = (
+                        result.body,
+                        result.user_id,
+                        result.user_type,
+                    )
+                return result
             except BaseException:
                 if entry is not None:
                     entry["poisoned"] = True
@@ -219,7 +283,14 @@ def _build():
         def update(port, comment_id, body):
             entry = denied(port)
             try:
-                return original_update(port, comment_id, body)
+                result = original_update(port, comment_id, body)
+                if entry is not None and class_intact(port):
+                    entry["bodies"][result.comment_id] = (
+                        result.body,
+                        result.user_id,
+                        result.user_type,
+                    )
+                return result
             except BaseException:
                 if entry is not None:
                     entry["poisoned"] = True
@@ -241,7 +312,7 @@ def _build():
         @wraps(original_read)
         def read(store, *, event_key):
             result = original_read(store, event_key=event_key)
-            entry = active.get()
+            entry = active.get() or analyzing.get()
             if entry is not None and result is not None and class_intact(store):
                 digest, payload, ids = result
                 if all(identifier in entry["bodies"] for identifier in ids):
@@ -253,6 +324,7 @@ def _build():
             update,
             listed,
         )
+        port_cls.__init__ = construct
         port_cls._request = request
         result_cls.read_available_with_carriers = read
         source_classes[port_cls] = class_seal(port_cls)
@@ -287,6 +359,7 @@ def _build():
         from .guarded_pending_publication import _empty_state, _original_methods
         from .quarantine_origin import require_authenticated_read_owner
 
+        ports_intact()
         app, caller = entry["app"], entry["caller"]
         journal = entry["journal"]
         if journal is None or entry["retained"] is None or entry["poisoned"]:
@@ -395,9 +468,99 @@ def _build():
             != reference["event_body_sha256"]
         ):
             return False
+        captured_bodies = dict(entry["accepted"][3])
         for identifier in ids:
-            ledger._part_owner(by_id[identifier], identity)
+            row = by_id[identifier]
+            ledger._part_owner(row, identity)
+            expected_body = captured_bodies.get(identifier)
+            if expected_body is None or expected_body != (
+                row["body"],
+                row["user"]["id"],
+                row["user"]["type"],
+            ):
+                raise ReviewInputError("materialized accepted carrier changed")
+        if reference["part_ids"]:
+            read = dict(entry["accepted"][4]).get(reference["event_key"])
+            if read != (
+                reference["payload_sha256"],
+                source.payload,
+                tuple(reference["part_ids"]),
+            ):
+                raise ReviewInputError("materialized accepted part receipt changed")
+        from review_sensei.source_registry import require_module_seal
+
+        from . import accepted_result, operation_comments, operation_host
+
+        for module in (accepted_result, operation_host, operation_comments):
+            require_module_seal(module)
+        # This is a consistency calculation over the exact original observations,
+        # not a fresh read or an alternative authority source. The actual census
+        # continues fetching every complete native body independently.
+        snapshot = accepted_result._ReadSnapshot(
+            tuple(operation_comments._view(row) for row in rows)
+        )
+        store = operation_host.GitHubCommentOperationStore(
+            snapshot, app_user_id=reference["producer_id"]
+        )
+        payload = accepted_result.read_accepted_result(
+            reference,
+            record.transaction,
+            store,
+            repository_id=reference["repository_id"],
+            app_id=ledger.authenticated_app_id,
+        )
+        if payload != source.payload:
+            raise ReviewInputError("materialized accepted payload changed")
         return True
+
+    def install_caller(cls):
+        definition("review_sensei_github.api_run_requests")
+        original = cls.open
+        original_functions.append((original, original.__code__))
+
+        @wraps(original)
+        def opened(caller, request, *, timeout):
+            entry = active.get()
+            if entry is not None and entry["closed"] and entry["caller"] is caller:
+                import json
+                from urllib.parse import urlsplit
+                from urllib.request import Request
+
+                from .guarded_pending_publication import _original_methods
+                from .operation_host import (
+                    OPERATION_COMMENT_MARKER,
+                    RESULT_COMMENT_MARKER,
+                )
+
+                _original_methods(caller)
+                ports_intact()
+                if type(request) is not Request:
+                    raise ReviewInputError(
+                        "materialized publication request source changed"
+                    )
+                if request.get_method() not in {"GET", "HEAD"}:
+                    path = urlsplit(request.full_url).path
+                    if "/issues/" in path and "/comments" in path:
+                        data = request.data
+                        if type(data) is not bytes or len(data) > 524288:
+                            raise ReviewInputError(
+                                "materialized publication request body changed"
+                            )
+                        payload = json.loads(data)
+                        body = payload.get("body") if type(payload) is dict else None
+                        if not isinstance(body, str) or any(
+                            marker in body
+                            for marker in (
+                                OPERATION_COMMENT_MARKER,
+                                RESULT_COMMENT_MARKER,
+                            )
+                        ):
+                            raise ReviewInputError(
+                                "materialized publication forbids new operation artifacts"
+                            )
+            return original(caller, request, timeout=timeout)
+
+        cls.open = opened
 
     def install_census(namespace):
         definition("review_sensei_github.quarantine_census")
@@ -438,6 +601,7 @@ def _build():
         install_ports,
         install_journal,
         install_retention,
+        install_caller,
         install_census,
         observation,
     )
@@ -449,6 +613,7 @@ def _build():
     install_ports,
     install_journal,
     install_retention,
+    install_caller,
     install_census,
     phase_observation,
 ) = _build()
