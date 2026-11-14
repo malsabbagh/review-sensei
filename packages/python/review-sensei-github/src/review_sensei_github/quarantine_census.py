@@ -327,9 +327,14 @@ def fetch_comments(
     observe_request=None,
 ):
     """Complete bounded census; every failed adaptive attempt spends a call."""
+    from review_sensei.source_registry import require_module_seal
+
+    from . import historical_invocation_census
     from .publication_recovery import _publication_transport
     from .quarantine_creation_census import selected_plan
 
+    require_module_seal(historical_invocation_census)
+    historical_reader = historical_invocation_census.choose(ledger, identity)
     creation = selected_plan(ledger, identity)
     if creation is not None:
         from .packed_comment_census import fetch_packed_comments
@@ -353,21 +358,26 @@ def fetch_comments(
 
         if type(lifecycle) is not _LifecycleCapacity:
             raise ReviewInputError("quarantine lifecycle census scope is unissued")
-        plan = _LifecycleCapacity.require(lifecycle, ledger, identity)
-        return fetch_packed_comments(
-            ledger,
-            identity,
-            plan=plan,
-            max_requests=max_requests,
-            timeout_seconds=timeout_seconds,
-            before_read=before_read,
-            observe_request=observe_request,
-        )
+        lifetime_plan = _LifecycleCapacity.require(lifecycle, ledger, identity)
+        if historical_reader is None:
+            return fetch_packed_comments(
+                ledger,
+                identity,
+                plan=lifetime_plan,
+                max_requests=max_requests,
+                timeout_seconds=timeout_seconds,
+                before_read=before_read,
+                observe_request=observe_request,
+            )
 
     guard = getattr(
         _publication_transport(ledger.http), "_quarantine_capacity_guard", None
     )
-    if guard is not None and guard.comment_plan is not None:
+    if (
+        historical_reader is None
+        and guard is not None
+        and guard.comment_plan is not None
+    ):
         from .packed_comment_census import fetch_packed_comments
 
         if guard.identity != identity:
@@ -396,13 +406,17 @@ def fetch_comments(
     seen_ids: set[int] = set()
     cursors: set[str] = set()
     after, total = None, None
-    certified = getattr(ledger, "_quarantine_capacity_cursor", False)
+    certified = historical_reader is not None or getattr(
+        ledger, "_quarantine_capacity_cursor", False
+    )
     first = 100 if certified else _page_hint(ledger, seen_ids)
     requests = (
         MAX_PAGINATION_PAGES
         if max_requests is None
         else min(max_requests, MAX_PAGINATION_PAGES)
     )
+    if historical_reader is not None:
+        requests = min(requests, 1)
     if type(requests) is not int or not 1 <= requests <= MAX_PAGINATION_PAGES:
         raise ReviewInputError("quarantine census request bound is invalid")
     deadline = time.monotonic() + (
@@ -537,6 +551,10 @@ def fetch_comments(
                 or (not nodes and cursor is not None)
             ):
                 raise ReviewInputError("quarantine census terminal page is incomplete")
+            if historical_reader is not None:
+                historical_invocation_census.finish(
+                    historical_reader, ledger, identity, collected, response
+                )
             return observe_receipt_census(receipt_census, collected)
         if (
             len(nodes) != first

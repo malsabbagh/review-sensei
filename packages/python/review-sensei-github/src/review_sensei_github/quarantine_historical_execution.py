@@ -196,6 +196,10 @@ def _registry():
         try:
             saved["witness"] = start_guarded(run, entry["target"], lease)
             require(run.caller)
+            from . import historical_invocation_census
+
+            require_module_seal(historical_invocation_census)
+            historical_invocation_census.issue(lease, saved)
         except BaseException:
             active.pop(run.caller, None)
             leases.pop(lease, None)
