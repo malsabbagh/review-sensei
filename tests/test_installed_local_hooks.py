@@ -204,6 +204,31 @@ def load_tests(loader, tests, pattern):
                 self.assertEqual(data["hook_mode"], "original-root")
                 self.assertIsNotNone(data["fallback_reason"])
 
+    def test_slot_backed_configuration_keeps_original_root(self):
+        for declaration in ("('directory',)", "'directory'"):
+            source = (
+                DECLARATION
+                + f"""\
+import os, unittest
+class Slotted:
+    __slots__ = {declaration}
+class Case(Slotted, unittest.TestCase):
+    def test_original(self):
+        self.assertEqual(self.directory, os.getcwd())
+def load_tests(loader, tests, pattern):
+    case=Case('test_original'); case.directory=os.getcwd()
+    return unittest.TestSuite([case])
+"""
+            )
+            with self.subTest(declaration=declaration):
+                result, data, _ = self.execute(
+                    {"test_a.py": source}, reviewed=("test_a",)
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(data["hook_mode"], "original-root")
+                self.assertIn("slot-backed", data["fallback_reason"])
+                self.assertEqual(len(data["workers"]), 1)
+
     def test_worker_configuration_drift_fails_before_execution(self):
         source = (
             DECLARATION

@@ -483,6 +483,13 @@ def local_hook_snapshot(original, children, descriptions, units, requested):
         cls = type(item)
         if type(cls) is not type or cls.__getattribute__ is not object.__getattribute__:
             raise ValueError("hook fixture lookup is not stable")
+        # vars() cannot observe slot-backed configuration. Never compare a
+        # partial instance snapshot, including slots inherited from a mixin.
+        if any(
+            "__slots__" in vars(base) and vars(base)["__slots__"] not in ((), [])
+            for base in cls.__mro__
+        ):
+            raise ValueError("slot-backed hook configuration is unsupported")
         if isinstance(item, unittest.TestSuite):
             if cls is not unittest.TestSuite and cls not in wrappers:
                 raise ValueError("hook contains an unreviewed suite wrapper")
