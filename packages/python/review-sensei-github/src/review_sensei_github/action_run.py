@@ -460,10 +460,8 @@ def _options(run: ReviewRun) -> GitHubWriteOptions:
 def execute_command(run: ReviewRun, args: Any) -> int:
     from review_sensei.source_registry import require_module_seal
 
-    from . import current_quarantine_finalization, historical_terminal_fence
+    from . import historical_terminal_fence
 
-    require_module_seal(current_quarantine_finalization)
-    current_quarantine_finalization.before_terminal(caller, run, proof)
     require_module_seal(historical_terminal_fence)
     with historical_terminal_fence.execution_scope():
         assert run.identity.repository_id is not None
@@ -672,6 +670,11 @@ def execute_command(run: ReviewRun, args: Any) -> int:
             result_document=asdict(result),
         )
         from review_sensei.source_registry import require_module_seal
+
+        from . import current_quarantine_finalization
+
+        require_module_seal(current_quarantine_finalization)
+        current_quarantine_finalization.before_terminal(caller, run, proof)
 
         from . import historical_terminal_fence
 
