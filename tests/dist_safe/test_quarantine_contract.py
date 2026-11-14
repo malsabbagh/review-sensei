@@ -2,6 +2,7 @@
 
 import importlib
 import sys
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,8 +19,35 @@ if not is_disarmed() and not Path(
     raise ImportError("quarantine qualification requires the installed hosted adapter")
 
 
-# Reviewed deterministic process-local construction; runtime wrappers stay intact.
+# Reviewed deterministic process-local construction and module-local guard.
 INSTALLED_SUITE_HOOK_CONTRACT = ("reproducible-module-local-v1", ())
+_guarded_setups = {}
+
+
+def _guard_module(module):
+    current = vars(module).get("setUpModule")
+    if module in _guarded_setups:
+        if current is not _guarded_setups[module]:
+            raise ImportError(
+                "quarantine module setup changed after guard installation"
+            )
+        return
+
+    def set_up_module():
+        # unittest dispatches fixtures by the leaf class's module, not this
+        # collector. Register restoration first so original setup, teardown
+        # and all subsequently registered cleanups remain inside the guard.
+        unittest.enterModuleContext(
+            patch(
+                "socket.socket.connect",
+                side_effect=AssertionError("live network forbidden"),
+            )
+        )
+        if current is not None:
+            current()
+
+    module.setUpModule = set_up_module
+    _guarded_setups[module] = set_up_module
 
 
 def load_tests(loader, tests, pattern):
@@ -34,17 +62,7 @@ def load_tests(loader, tests, pattern):
     for path in sorted(_TESTS.glob("test_quarantine*.py")):
         if path.stem in publication_proofs:
             continue
-        tests.addTests(loader.loadTestsFromModule(importlib.import_module(path.stem)))
+        module = importlib.import_module(path.stem)
+        _guard_module(module)
+        tests.addTests(loader.loadTestsFromModule(module))
     return tests
-
-
-def setUpModule():
-    global _network
-    _network = patch(
-        "socket.socket.connect", side_effect=AssertionError("live network forbidden")
-    )
-    _network.start()
-
-
-def tearDownModule():
-    _network.stop()
