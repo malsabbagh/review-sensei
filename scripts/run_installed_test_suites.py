@@ -486,7 +486,11 @@ def local_hook_snapshot(original, children, descriptions, units, requested):
         # vars() cannot observe slot-backed configuration. Never compare a
         # partial instance snapshot, including slots inherited from a mixin.
         if any(
-            "__slots__" in vars(base) and vars(base)["__slots__"] not in ((), [])
+            "__slots__" in vars(base)
+            and not (
+                type(vars(base)["__slots__"]) in (tuple, list)
+                and len(vars(base)["__slots__"]) == 0
+            )
             for base in cls.__mro__
         ):
             raise ValueError("slot-backed hook configuration is unsupported")

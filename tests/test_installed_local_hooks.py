@@ -229,6 +229,29 @@ def load_tests(loader, tests, pattern):
                 self.assertIn("slot-backed", data["fallback_reason"])
                 self.assertEqual(len(data["workers"]), 1)
 
+    def test_custom_inherited_slot_declaration_never_calls_equality(self):
+        source = (
+            DECLARATION
+            + """\
+import os, unittest
+class Declaration:
+    def __iter__(self): return iter(('directory',))
+    def __eq__(self, other): raise AssertionError('SLOT EQUALITY MUST NOT RUN')
+class Slotted:
+    __slots__ = Declaration()
+class Case(Slotted, unittest.TestCase):
+    def test_original(self): self.assertEqual(self.directory, os.getcwd())
+def load_tests(loader, tests, pattern):
+    case=Case('test_original'); case.directory=os.getcwd()
+    return unittest.TestSuite([case])
+"""
+        )
+        result, data, _ = self.execute({"test_a.py": source}, reviewed=("test_a",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(data["hook_mode"], "original-root")
+        self.assertIn("slot-backed", data["fallback_reason"])
+        self.assertNotIn("SLOT EQUALITY MUST NOT RUN", result.stderr)
+
     def test_worker_configuration_drift_fails_before_execution(self):
         source = (
             DECLARATION
