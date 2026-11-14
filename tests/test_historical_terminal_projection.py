@@ -130,6 +130,7 @@ class HistoricalTerminalProjectionTests(unittest.TestCase):
 
         for invoke in (
             lambda: projection.prepare(Poison(), Poison()),
+            lambda: projection._derive(Poison()),
             lambda: projection.require_activation(Poison(), Poison()),
             lambda: fence.require_projection_shape(Poison()),
             lambda: fence.require_active(Poison(), Poison()),

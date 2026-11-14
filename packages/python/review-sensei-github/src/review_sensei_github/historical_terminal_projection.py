@@ -115,6 +115,16 @@ def _derive(run):
     require_module_seal(sys.modules[__name__])
     require_module_seal(fence)
     require_module_seal(namespace)
+    origin = sys._getframe(1)
+    if (
+        origin.f_globals is not globals()
+        or (
+            origin.f_code is not prepare.__code__
+            and origin.f_code is not require_activation.__code__
+        )
+        or origin.f_locals.get("run") is not run
+    ):
+        raise ReviewInputError("terminal DATA derivation lacks original consumer")
     fence.require_projection_shape(run)
     caller = run.caller
     # This authenticates the genuine paid prefix against complete private
