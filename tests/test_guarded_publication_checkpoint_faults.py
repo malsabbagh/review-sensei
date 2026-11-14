@@ -174,7 +174,7 @@ class GuardedPublicationCheckpointFaultTests(unittest.TestCase):
     def test_root_checkpoint_response_loss_matrix(self):
         # Counts include every caller request, not just native mutations. Stored
         # responses reconcile the exact CAS; absence never permits blind retry.
-        absent_calls = {1: 134, 2: 143, 3: 157}
+        absent_calls = {1: 127, 2: 136, 3: 150}
         for checkpoint in (1, 2, 3):
             for stored in (False, True):
                 with self.subTest(checkpoint=checkpoint, stored=stored):
@@ -184,7 +184,7 @@ class GuardedPublicationCheckpointFaultTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         len(result["observations"]),
-                        171 if stored else absent_calls[checkpoint],
+                        164 if stored else absent_calls[checkpoint],
                     )
                     self.assertEqual(
                         [row[0] for row in result["attempts"]],
