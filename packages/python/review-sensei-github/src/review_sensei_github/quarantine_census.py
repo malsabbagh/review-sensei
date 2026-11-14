@@ -564,6 +564,10 @@ class _LifecycleCapacity:
     plan: Any
     parts: int
     extension: Any = None
+    read_plan: Any = None
+
+    def enumeration_plan(self):
+        return self.plan if self.read_plan is None else self.read_plan
 
     def _require_scope(self, ledger, identity):
         from review_sensei.bounded_evidence import canonical_bytes
@@ -581,6 +585,13 @@ class _LifecycleCapacity:
             or canonical_bytes(_lifecycle_profile(ledger)) != self.profile
         ):
             raise ReviewInputError("quarantine lifecycle census scope changed")
+        if self.read_plan is not None:
+            from review_sensei.source_registry import require_module_seal
+
+            from . import materialized_publication_phase
+
+            require_module_seal(materialized_publication_phase)
+            materialized_publication_phase.require_invocation_read_plan(self)
         return issued
 
     def require(self, ledger, identity):
@@ -602,7 +613,7 @@ class _LifecycleCapacity:
             raise ReviewInputError("quarantine lifecycle census operation changed")
         self.caller._require_ledger(ledger, identity)
         self.caller.budget_view.check()
-        return self.plan
+        return _LifecycleCapacity.enumeration_plan(self)
 
     def _seal(self):
         return (
@@ -620,6 +631,15 @@ class _LifecycleCapacity:
             self.plan.metadata_unknown,
             self.parts,
             id(self.extension),
+            id(self.read_plan),
+            None
+            if self.read_plan is None
+            else (
+                tuple(self.read_plan.known.items()),
+                self.read_plan.unknown,
+                tuple(self.read_plan.metadata_known.items()),
+                self.read_plan.metadata_unknown,
+            ),
         )
 
 
@@ -813,7 +833,16 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
             known,
             (*tail, *((MAX_PART_BYTES + 512,) * (added_parts + promised_parts))),
         )
-    if plan.worst_read_calls() > MAX_PAGINATION_PAGES:
+    from review_sensei.source_registry import require_module_seal
+
+    from . import materialized_publication_phase
+
+    require_module_seal(materialized_publication_phase)
+    read_plan = materialized_publication_phase.invocation_read_plan(
+        ledger, identity, plan=plan, added_parts=added_parts
+    )
+    enumeration = plan if read_plan is None else read_plan
+    if enumeration.worst_read_calls() > MAX_PAGINATION_PAGES:
         raise ReviewInputError(
             "quarantine lifecycle complete census exceeds original request bound"
         )
@@ -828,6 +857,7 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         plan,
         added_parts,
         extension,
+        read_plan,
     )
     _LIFECYCLE_ISSUED[scope] = _LifecycleCapacity._seal(scope)
     return scope
@@ -873,7 +903,11 @@ def lifecycle_checkpoint_operation(ledger, caller, identity):
     if type(scope) is not _LifecycleCapacity or scope.caller is not caller:
         raise ReviewInputError("quarantine lifecycle checkpoint scope is unissued")
     _LifecycleCapacity._require_scope(scope, ledger, identity)
-    return scope.plan.worst_read_calls() + 6 + 2 * scope.parts
+    return (
+        _LifecycleCapacity.enumeration_plan(scope).worst_read_calls()
+        + 6
+        + 2 * scope.parts
+    )
 
 
 def lifecycle_checkpoint_pricing(
@@ -971,7 +1005,12 @@ def lifecycle_checkpoint_pricing(
         current = lifecycle_capacity_plan(
             ledger, record.identity(), added_parts=added_parts
         )
-        return current.plan == scope.plan and current.profile == scope.profile
+        return (
+            current.plan == scope.plan
+            and current.profile == scope.profile
+            and _LifecycleCapacity.enumeration_plan(current)
+            == _LifecycleCapacity.enumeration_plan(scope)
+        )
 
     capacity = ledger.preflight_finding_lifecycle_retention(
         record.identity(),
@@ -979,7 +1018,7 @@ def lifecycle_checkpoint_pricing(
         added_bytes=added_bytes,
         checkpoint_parts=checkpoint_parts,
     )
-    pages = scope.plan.worst_read_calls()
+    pages = _LifecycleCapacity.enumeration_plan(scope).worst_read_calls()
     return factory(
         ledger,
         record,

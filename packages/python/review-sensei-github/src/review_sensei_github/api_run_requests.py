@@ -3376,7 +3376,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 # action guard are funded before any guard/census dispatch.
                 assert self.evidence_budget is not None
                 self.evidence_budget.preflight(
-                    scope.plan.worst_read_calls()
+                    scope.enumeration_plan().worst_read_calls()
                     + 6
                     + 2 * parts
                     + business[0]

@@ -1,4 +1,4 @@
-"""Source-owned hot materialization phase; no smaller census price is enabled.
+"""Source-owned hot materialization and fixed-membership census phase.
 
 The installed source wrappers record original completed computation/retention.
 Once a qualifying census opens, operation-comment writes are forbidden, including
@@ -35,6 +35,7 @@ def _build():
     journal_checkpoint_sources: dict[type, Any] = {}
     publication_sources: dict[type, Any] = {}
     checkpoint_get_source = None
+    census_plan_source = None
     hold_read_source = None
     origin_receipts: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
@@ -188,12 +189,16 @@ def _build():
                     "censuses": 0,
                     "write_frames": [],
                     "projection": None,
+                    "projection_bytes": None,
+                    "request_namespace": None,
                     "projection_error": None,
                     "census_receipt": None,
                     "coalesced": None,
                     "coalesced_reads": 0,
                     "read_losses": [],
                     "source_cache": None,
+                    "fixed_membership": None,
+                    "read_plans": [],
                 }
             token = active.set(entry)
             try:
@@ -203,6 +208,7 @@ def _build():
                 if entry is not None:
                     entry["write_frames"].clear()
                     entry["read_losses"].clear()
+                    entry["read_plans"].clear()
                     entry["census_receipt"] = entry["coalesced"] = None
                 if key is not None:
                     accepted.pop(key, None)
@@ -810,10 +816,46 @@ def _build():
                         "materialized publication request source changed"
                     )
                 require_source_cache(entry)
+                namespace = entry["request_namespace"]
+                if namespace is not None and (
+                    caller._state is None
+                    or canonical_bytes(vars(caller.accounting.owner)) != namespace[0]
+                    or type(caller._sequence) is not int
+                    or not namespace[1] <= caller._sequence < namespace[2]
+                    or caller._block not in namespace[3]
+                    or len(
+                        f"c-{caller.accounting.owner.generation:x}-{caller._sequence + 1:x}"
+                    )
+                    > namespace[4]
+                ):
+                    raise ReviewInputError(
+                        "materialized request namespace exceeded its bound"
+                    )
                 require_adjacent_read(entry, request)
                 if request.get_method() not in {"GET", "HEAD"}:
                     path = urlsplit(request.full_url).path
+                    if entry["fixed_membership"] is not None and path == "/graphql":
+                        from review_sensei.source_registry import require_module_seal
+
+                        from . import quarantine_census
+
+                        require_module_seal(quarantine_census)
+                        if not quarantine_census.is_readonly_census(
+                            request,
+                            entry["ledger"].http.api_url,
+                            identity=entry["journal"].identity,
+                        ):
+                            raise ReviewInputError(
+                                "materialized fixed membership forbids GraphQL mutations"
+                            )
                     if "/issues/" in path and "/comments" in path:
+                        if (
+                            entry["fixed_membership"] is not None
+                            and request.get_method() != "PATCH"
+                        ):
+                            raise ReviewInputError(
+                                "materialized fixed membership forbids comment allocations"
+                            )
                         data = request.data
                         if type(data) is not bytes or len(data) > 524288:
                             raise ReviewInputError(
@@ -863,7 +905,9 @@ def _build():
             ports_intact()
             _original_methods(ledger)
             quarantine_census._LifecycleCapacity._require_scope(scope, ledger, identity)
-            if kwargs.get("plan") is not scope.plan:
+            if kwargs.get(
+                "plan"
+            ) is not quarantine_census._LifecycleCapacity.enumeration_plan(scope):
                 raise ReviewInputError("materialized census allocation source changed")
             frame = inspect.currentframe()
             discovery = False
@@ -1140,18 +1184,23 @@ def _build():
             frame = frame.f_back
         if found is None:
             raise ReviewInputError("materialized projection executing source is absent")
-        entry["projection"] = projection.project(journal, found.f_locals)
+        measured = projection.project(journal, found.f_locals)
+        entry["projection_bytes"] = canonical_bytes(measured)
+        entry["projection"] = measured
 
     def install_census(namespace):
+        nonlocal census_plan_source
         definition("review_sensei_github.quarantine_census")
         original = namespace["lifecycle_capacity_plan"]
+        census_plan_source = original.__code__
+        original_functions.append((original, original.__code__))
 
         @wraps(original)
         def census(ledger, identity, *, added_parts):
             entry = active.get()
             if entry is not None and entry["caller"] is getattr(ledger, "caller", None):
-                # Still no refined quote. Record source reachability only until
-                # all materialization/source checks and writer coverage qualify.
+                # Select the fixed reader only after every source and future
+                # inline branch has been independently qualified.
                 entry["censuses"] += 1
                 qualified = require_closed_source(entry, ledger, identity)
                 if entry["closed"] and not qualified:
@@ -1177,7 +1226,133 @@ def _build():
 
         namespace["lifecycle_capacity_plan"] = census
 
+    def invocation_read_plan(ledger, identity, *, plan, added_parts):
+        """Issue a one-invocation read bound, never a lifetime allocation waiver.
+
+        Every retained body still has the original positive-growth bound. All
+        promised future allocations remain in scope.plan. The separate reader
+        admits exactly the closed invocation's current IDs, refusing any later
+        old/current allocation before returning evidence. No missing body or
+        merely observed successful prefix supplies this certificate.
+        """
+        entry = active.get()
+        if (
+            entry is None
+            or ledger is None
+            or not entry["closed"]
+            or entry["ledger"] is not ledger
+            or entry["caller"] is not getattr(ledger, "caller", None)
+            or added_parts != 0
+        ):
+            return None
+        frame = inspect.currentframe()
+        source = frame.f_back if frame else None
+        if (
+            source is None
+            or source.f_code is not census_plan_source
+            or source.f_locals.get("ledger") is not ledger
+            or source.f_locals.get("identity") != identity
+            or source.f_locals.get("plan") is not plan
+        ):
+            raise ReviewInputError(
+                "materialized read plan requires original census source"
+            )
+        encoded = entry["projection_bytes"]
+        if encoded is None or entry["projection_error"] is not None:
+            return None
+        import json
+
+        projection = json.loads(encoded)
+        branches = projection["branches"]
+        if not branches or any(
+            type(branch["effects"]) is not int
+            or not 1 <= branch["effects"] <= 32
+            or len(branch["pending_and_stop_sequences"]) != branch["effects"]
+            or len(branch["loss_and_stop_sequences"]) != branch["effects"]
+            or len(branch["pending_document_bytes"]) != branch["effects"]
+            or len(branch["stop_document_bytes"]) != branch["effects"]
+            or any(
+                len(sequence) != index + 2
+                for index, sequence in enumerate(branch["pending_and_stop_sequences"])
+            )
+            or any(
+                len(sequence) != 2 * (index + 1) + 1
+                for index, sequence in enumerate(branch["loss_and_stop_sequences"])
+            )
+            for branch in branches
+        ):
+            raise ReviewInputError("materialized projection branch shape is incomplete")
+        if any(
+            not stage["inline"]
+            or stage["future_parts"] != 0
+            or stage["accounting_root_fits"] is not True
+            for branch in branches
+            for sequence in (
+                *branch["pending_and_stop_sequences"],
+                *branch["loss_and_stop_sequences"],
+            )
+            for stage in sequence
+        ):
+            return None
+        from .packed_comment_census import CommentAllocationPlan
+
+        if type(plan) is not CommentAllocationPlan:
+            raise ReviewInputError("materialized read plan allocation type changed")
+        membership = tuple(plan.known)
+        if not membership or len(set(membership)) != len(membership):
+            raise ReviewInputError("materialized read plan membership is incomplete")
+        if entry["fixed_membership"] is None:
+            entry["fixed_membership"] = membership
+        elif entry["fixed_membership"] != membership:
+            raise ReviewInputError("materialized invocation membership changed")
+        namespace = projection["request_namespace"]
+        bound = (
+            canonical_bytes(namespace["owner"]),
+            namespace["first_sequence"],
+            namespace["last_sequence"],
+            tuple(namespace["blocks"]),
+            namespace["request_id_width"],
+        )
+        if entry["request_namespace"] is None:
+            entry["request_namespace"] = bound
+        elif entry["request_namespace"] != bound:
+            raise ReviewInputError("materialized request namespace changed")
+        selected = CommentAllocationPlan(
+            plan.known,
+            (),
+            metadata_known=plan.metadata_known,
+            metadata_unknown=plan.metadata_unknown,
+        )
+        entry["read_plans"].append((selected, plan, entry["caller"]._root))
+        return selected
+
+    def require_invocation_read_plan(scope):
+        entry = active.get()
+        if (
+            entry is None
+            or not entry["closed"]
+            or entry["poisoned"]
+            or entry["ledger"] is not scope.ledger
+            or entry["caller"] is not scope.caller
+            or scope.parts != 0
+            or tuple(scope.read_plan.known) != entry["fixed_membership"]
+            or scope.read_plan.unknown
+            or not any(
+                selected is scope.read_plan
+                and lifetime is scope.plan
+                and root == scope.root
+                for selected, lifetime, root in entry["read_plans"]
+            )
+        ):
+            raise ReviewInputError(
+                "materialized invocation read plan is expired or foreign"
+            )
+        ports_intact()
+        require_source_cache(entry)
+
     def observation(ledger):
+        import json
+
         entry = active.get()
         if entry is None or entry["caller"] is not getattr(ledger, "caller", None):
             return None
@@ -1188,9 +1363,12 @@ def _build():
             "poisoned": entry["poisoned"],
             "closed": entry["closed"],
             "censuses": entry["censuses"],
-            "projection": entry["projection"],
+            "projection": None
+            if entry["projection_bytes"] is None
+            else json.loads(entry["projection_bytes"]),
             "projection_error": entry["projection_error"],
             "coalesced_reads": entry["coalesced_reads"],
+            "fixed_membership": entry["fixed_membership"],
         }
 
     return (
@@ -1206,6 +1384,8 @@ def _build():
         install_checkpoint,
         install_origin_reader,
         install_hold_reader,
+        invocation_read_plan,
+        require_invocation_read_plan,
         observation,
     )
 
@@ -1223,6 +1403,13 @@ def _build():
     install_checkpoint,
     install_origin_reader,
     install_hold_reader,
+    invocation_read_plan,
+    require_invocation_read_plan,
     phase_observation,
 ) = _build()
 del _build
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

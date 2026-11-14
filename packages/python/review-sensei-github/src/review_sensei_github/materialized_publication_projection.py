@@ -50,7 +50,7 @@ def _data(value, *, _seen=None, _depth=0):
         _data(child, _seen=seen, _depth=_depth + 1)
 
 
-def _future_accounting(state, block_ids):
+def _future_accounting(state, block_ids, *, request_id_width=128):
     """Detached maximum-width pending receipts in the two existing tranches.
 
     V2 confirmed receipts are compact pairs; a pending receipt retains both
@@ -89,6 +89,8 @@ def _future_accounting(state, block_ids):
         raise ReviewInputError(
             "materialized accounting projection exceeds original funding"
         )
+    if type(request_id_width) is not int or not 16 <= request_id_width <= 128:
+        raise ReviewInputError("materialized accounting request width changed")
     before = canonical_bytes(state.to_document())
     used = {item.request_id for item in state.completed}
     used.update(item.request_id for block in state.blocks for item in block.pending)
@@ -96,12 +98,16 @@ def _future_accounting(state, block_ids):
     serial = 0
     for key, count in zip(block_ids, counts, strict=True):
         for _ in range(count):
-            # PendingApiRequest's original validated identifier bound is 128
-            # ASCII bytes; its deadline bound is the closed 53-bit integer.
-            # Sizing labels are never returned as requests or capabilities.
+            # The generic model permits 128 ASCII bytes. A smaller width is
+            # inert sizing data only: its caller must enforce the original
+            # transport's complete owner/sequence namespace for the whole
+            # invocation. Every receipt uses the MAXIMUM permitted width, not
+            # the next sequential ID, so assignment/order cannot undercount.
             while True:
-                identifier = f"p{serial:0127d}"
+                identifier = "p" + str(serial).zfill(request_id_width - 1)
                 serial += 1
+                if len(identifier) != request_id_width:
+                    raise ReviewInputError("materialized accounting ID space exhausted")
                 if identifier not in used:
                     break
             used.add(identifier)
@@ -111,6 +117,32 @@ def _future_accounting(state, block_ids):
     if canonical_bytes(state.to_document()) != before:
         raise ReviewInputError("materialized accounting projection changed source")
     return projected.to_document(), counts
+
+
+def _maximum_publication_root(document, accounting_upper):
+    """Detached scalar-width bound, including later completion markers.
+
+    This is never loaded as a record or supplied to a writer. Original unknown
+    receipts/reservations stay in the accounting copy; a maximum close digest
+    is only byte capacity, not evidence that publication or its run completed.
+    """
+    from review_sensei import models, session
+
+    require_module_seal(models)
+    require_module_seal(session)
+    growth = copy.deepcopy(document)
+    growth["api_run_accounting"] = copy.deepcopy(accounting_upper)
+    growth["api_run_accounting"]["terminal_transaction"] = "f" * 64
+    growth["generation"] = session.MAX_GENERATION
+    growth["completed_initial_reviews"] += 1
+    growth["completed_verification_rounds"] += 1
+    growth["updated_at"] = max(
+        growth["updated_at"], "9999-12-31T23:59:59.999999Z", key=len
+    )
+    if growth["transaction"] is not None:
+        growth["transaction"]["generation"] = session.MAX_GENERATION
+        growth["transaction"]["phase"] = max(models.TRANSACTION_PHASES, key=len)
+    return growth
 
 
 def _measure_sequence(journal, documents, item_count, accounting_upper=None):
@@ -237,13 +269,9 @@ def _measure_sequence(journal, documents, item_count, accounting_upper=None):
         accounting_root_bytes = None
         accounting_root_fits = None
         if accounting_upper is not None:
-            from review_sensei.session import MAX_GENERATION, MAX_SESSION_RECORD_BYTES
+            from review_sensei.session import MAX_SESSION_RECORD_BYTES
 
-            growth = candidate.to_dict()
-            growth["api_run_accounting"] = accounting_upper
-            growth["generation"] = MAX_GENERATION
-            growth["completed_initial_reviews"] += 1
-            growth["completed_verification_rounds"] += 1
+            growth = _maximum_publication_root(candidate.to_dict(), accounting_upper)
             witness = getattr(
                 journal.ledger.caller, "_accepted_semantic_capacity", None
             )
@@ -367,8 +395,36 @@ def project(journal, source):
             _data(getattr(owner, name, None))
     terminal = _terminal_reservation(journal)
     caller = journal.ledger.caller
+    # The original transport produces compact owner/sequence IDs. This bound
+    # is usable only with the phase's physical sequence ceiling; the generic
+    # model bound above continues to retain the full 128-byte identifier max.
+    from . import api_run_requests
+
+    require_module_seal(api_run_requests)
+    require_instance_source(caller, methods=("open",))
+    from review_sensei.api_work import MAX_API_REQUEST_LIMIT
+
+    if (
+        type(caller._sequence) is not int
+        or not 0 <= caller._sequence <= MAX_API_REQUEST_LIMIT
+    ):
+        raise ReviewInputError("materialized accounting source sequence changed")
+    blocks = (caller._block, caller._terminal_block)
+    # Failed pre-dispatch attempts also advance the original transport. Never
+    # equate attempts with funded receipts: reserve two complete model ceilings
+    # of sequence headroom, independent of the ordinary/terminal balances. This
+    # bound does not debit, enlarge or release any request allocation.
+    last_sequence = caller._sequence + 2 * MAX_API_REQUEST_LIMIT
+    width = len(f"c-{caller.accounting.owner.generation:x}-{last_sequence:x}")
+    namespace = {
+        "owner": vars(caller.accounting.owner),
+        "first_sequence": caller._sequence,
+        "last_sequence": last_sequence,
+        "blocks": blocks,
+        "request_id_width": width,
+    }
     accounting_upper, accounting_counts = _future_accounting(
-        caller.accounting, (caller._block, caller._terminal_block)
+        caller.accounting, blocks, request_id_width=width
     )
     before = (
         len(caller.observations),
@@ -422,6 +478,9 @@ def project(journal, source):
         shadow.effects = []
         pending_sizes, stop_sizes = [], []
         pending_documents, prefix_measurements = [], []
+        loss_documents: list[Any] = []
+        loss_measurements = []
+        stop_documents: list[Any] = []
         keys = set()
         for method, path, body, precondition in branch:
             request = plan._capacity_request_identity(method, path, body)
@@ -477,6 +536,28 @@ def project(journal, source):
                 )
                 measured_sequences[sequence_key] = measurement
             prefix_measurements.append(measurement)
+            # A stored native response loss can durably checkpoint its receipt
+            # before publication continues. The independent final journal
+            # finish may checkpoint again. Preserve the full physically
+            # reachable chain, not only a normal pending/stop subsequence.
+            loss_documents.extend((cached[3], cached[4]))
+            stop_documents.extend((cached[3], cached[4]))
+            loss_sequence = (
+                *loss_documents,
+                max(stop_documents, key=lambda value: len(canonical_bytes(value))),
+            )
+            loss_key = (
+                source_binding,
+                item_count,
+                tuple(canonical_bytes(value) for value in loss_sequence),
+            )
+            loss_measurement = measured_sequences.get(loss_key)
+            if loss_measurement is None:
+                loss_measurement = _measure_sequence(
+                    journal, loss_sequence, item_count, accounting_upper
+                )
+                measured_sequences[loss_key] = loss_measurement
+            loss_measurements.append(loss_measurement)
         summaries.append(
             {
                 "check_published_frame": check_published,
@@ -485,6 +566,7 @@ def project(journal, source):
                 "stop_document_bytes": tuple(stop_sizes),
                 "maximum_finish_document_bytes": max(stop_sizes),
                 "pending_and_stop_sequences": tuple(prefix_measurements),
+                "loss_and_stop_sequences": tuple(loss_measurements),
             }
         )
     if before != (
@@ -501,6 +583,7 @@ def project(journal, source):
         "ordinary_remaining": before[1],
         "protected_terminal_remaining": terminal.undispatched,
         "accounting_future_requests": accounting_counts,
+        "request_namespace": namespace,
         "accounting_maximum_bytes": len(canonical_bytes(accounting_upper)),
         "invocation_price_issued": False,
         "complete_funding_proof": False,
