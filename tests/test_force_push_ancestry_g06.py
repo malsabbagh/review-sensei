@@ -62,6 +62,7 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.session import read_session_baseline
 from review_sensei.workflow import prepare_diff
+from tests.publication_timing_observers import at_empty_original_publication_fence
 
 
 def _init_git_repo(root: Path) -> dict[str, str]:
@@ -648,27 +649,11 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
         # ZERO fresh model inference!
         with tempfile.TemporaryDirectory() as tmp:
             fixture = LifecycleEntryFixture(Path(tmp))
-            original_preflight = ReviewPublisher._preflight_pr
-            retargeted = False
-
-            def retarget_on_final_preflight(publisher, **kwargs):
-                nonlocal retargeted
-                # Anchor on the post-staging pre-mutation fence (immediately after
-                # `human_inventory_store.stage` records the default human inventory
-                # part comment), rather than a brittle preflight call counter.
-                if not retargeted and any(
-                    "default-human-inventory" in str(item.get("body", ""))
-                    for item in fixture.extra_comments.values()
-                ):
-                    retargeted = True
-                    fixture.base_ref = "release/1.0"
-                return original_preflight(publisher, **kwargs)
-
-            with patch.object(
-                ReviewPublisher, "_preflight_pr", retarget_on_final_preflight
-            ):
+            with at_empty_original_publication_fence(
+                lambda: setattr(fixture, "base_ref", "release/1.0")
+            ) as retargeted:
                 code_mid, out_mid = fixture.run_and_read(human=False)
-            self.assertTrue(retargeted)
+            self.assertEqual(retargeted, [True])
             self.assertEqual(code_mid, 1)
             assert out_mid is not None
             self.assertEqual(out_mid["status"], "skipped_stale_base")

@@ -48,6 +48,7 @@ from review_sensei_github.session_ledger import parse_session_comment
 
 from review_sensei.api_work import ApiRunAccounting
 from review_sensei.models import ReviewResult
+from tests.publication_timing_observers import at_empty_original_publication_fence
 
 
 class StateReplyFixture(FreshnessReplyFixture):
@@ -514,24 +515,11 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
         for kind in ("converted_to_draft", "closed"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
                 fx = LifecycleEntryFixture(Path(tmp))
-                original_preflight = ReviewPublisher._preflight_pr
-                transitioned = False
-
-                def transition_on_final_preflight(publisher, **kwargs):
-                    nonlocal transitioned
-                    if not transitioned and any(
-                        "default-human-inventory" in str(item.get("body", ""))
-                        for item in fx.extra_comments.values()
-                    ):
-                        transitioned = True
-                        _apply_transition(fx, kind)
-                    return original_preflight(publisher, **kwargs)
-
-                with patch.object(
-                    ReviewPublisher, "_preflight_pr", transition_on_final_preflight
-                ):
+                with at_empty_original_publication_fence(
+                    lambda: _apply_transition(fx, kind)
+                ) as transitioned:
                     code_1, out_1 = fx.run_and_read(human=False)
-                self.assertTrue(transitioned)
+                self.assertEqual(transitioned, [True])
                 self.assertEqual(code_1, 1)
                 assert out_1 is not None
                 self.assertEqual(out_1["status"], "skipped_pr_state")
@@ -895,23 +883,11 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
         # never refunds N_1 (`confirmed_2 > confirmed_1`), and settles terminally.
         with tempfile.TemporaryDirectory() as tmp:
             fx = LifecycleEntryFixture(Path(tmp))
-            orig_preflight = ReviewPublisher._preflight_pr
-            transitioned = False
-
-            def draft_on_final_preflight(publisher, **kwargs):
-                nonlocal transitioned
-                if not transitioned and any(
-                    "default-human-inventory" in str(item.get("body", ""))
-                    for item in fx.extra_comments.values()
-                ):
-                    transitioned = True
-                    fx.pr_draft = True
-                return orig_preflight(publisher, **kwargs)
-
-            with patch.object(
-                ReviewPublisher, "_preflight_pr", draft_on_final_preflight
-            ):
+            with at_empty_original_publication_fence(
+                lambda: setattr(fx, "pr_draft", True)
+            ) as transitioned:
                 code_1, out_1 = fx.run_and_read(human=False)
+            self.assertEqual(transitioned, [True])
             self.assertEqual(code_1, 1)
             assert out_1 is not None
             self.assertEqual(out_1["status"], "skipped_pr_state")
