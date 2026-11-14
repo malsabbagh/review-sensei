@@ -87,12 +87,19 @@ def _blocks(caller):
         for block in blocks
     )
     return (
-        ordinary,
-        terminal,
-        caller.accounting.remaining,
-        caller.accounting.prior_nonstartup_liability,
-        fixed,
-    ), selected[0].undispatched
+        (
+            ordinary,
+            terminal,
+            caller.accounting.remaining,
+            caller.accounting.prior_nonstartup_liability,
+            fixed,
+        ),
+        selected[0].undispatched,
+        frozenset(
+            (pending.request_id, pending.deadline_unix_ms)
+            for pending in selected[0].pending
+        ),
+    )
 
 
 def _make_issuer():
@@ -534,10 +541,11 @@ def _make_issuer():
             block_state,
         ) = entry
         run.caller._require_ledger(run.ledger, run.identity)
-        current_blocks, remaining = _blocks(run.caller)
+        current_blocks, remaining, pending = _blocks(run.caller)
         if (
             current_blocks != block_state[0]
             or remaining > block_state[1]
+            or not block_state[2].issubset(pending)
             or getattr(
                 _publication_transport(run.http), "_quarantine_capacity_guard", None
             )
