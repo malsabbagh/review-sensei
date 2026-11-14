@@ -1,6 +1,8 @@
 """Actual guarded source retains a precommitted, undispatched review on stops."""
 
 import copy
+import dis
+import inspect
 import json
 import sys
 import tempfile
@@ -28,7 +30,13 @@ class GuardedPublicationBatchTests(unittest.TestCase):
         from review_sensei_github.finding_lifecycle import _closed_pair_path_bound
 
         path_code = _closed_pair_path_bound.__code__
-        checkpoint_code = FindingLifecycleJournal.checkpoint.__code__
+        checkpoint = inspect.unwrap(FindingLifecycleJournal.checkpoint)
+        checkpoint_code = checkpoint.__code__
+        returns = {
+            item.offset
+            for item in dis.get_instructions(checkpoint)
+            if item.opname in {"RETURN_VALUE", "RETURN_CONST"}
+        }
 
         def observe(frame, event, value):
             if (
@@ -56,7 +64,12 @@ class GuardedPublicationBatchTests(unittest.TestCase):
                 return observe
             if event == "call" and frame.f_code is intercept_request.__code__:
                 entries.append((frame.f_locals["method"], frame.f_locals["path"]))
-            if event == "return" and frame.f_code is checkpoint_code:
+            if (
+                event == "return"
+                and frame.f_code is checkpoint_code
+                and frame.f_globals is checkpoint.__globals__
+                and frame.f_lasti in returns
+            ):
                 journal = frame.f_locals["self"]
                 current = journal._document()
                 documents.append(copy.deepcopy(current))

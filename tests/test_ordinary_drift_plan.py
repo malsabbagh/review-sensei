@@ -1,9 +1,9 @@
 """Detached stop-only envelopes do not admit or mutate a publication route."""
 
 import copy
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 
 from review_sensei_github import ordinary_publication_plan
 from review_sensei_github.ordinary_drift_plan import stopped_prefix_documents
@@ -24,7 +24,14 @@ class OrdinaryDriftPlanTests(unittest.TestCase):
             original = ordinary_publication_plan.admit_current
             observed = []
 
-            def inspect(publisher, observer, journal, **kwargs):
+            def observe(frame, event, value):
+                if (
+                    event != "call"
+                    or frame.f_code is not original.__code__
+                    or frame.f_globals is not original.__globals__
+                ):
+                    return
+                journal = frame.f_locals["journal"]
                 if journal is not None and not observed:
                     original_record = canonical_bytes(journal._record.to_dict())
                     original_effects = copy.deepcopy(journal.effects)
@@ -81,10 +88,13 @@ class OrdinaryDriftPlanTests(unittest.TestCase):
                         original_remaining,
                     )
                     observed.append(first)
-                return original(publisher, observer, journal, **kwargs)
 
-            with patch.object(ordinary_publication_plan, "admit_current", inspect):
+            previous = sys.getprofile()
+            try:
+                sys.setprofile(observe)
                 self.assertEqual(fixture.invoke(), 0, fixture.error)
+            finally:
+                sys.setprofile(previous)
             self.assertEqual(len(observed), 1)
 
 

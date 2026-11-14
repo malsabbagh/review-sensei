@@ -1,6 +1,7 @@
 """Physical root response losses in the actual guarded three-checkpoint route."""
 
 import copy
+import inspect
 import json
 import sys
 import tempfile
@@ -31,7 +32,8 @@ class GuardedPublicationCheckpointFaultTests(unittest.TestCase):
         prior_reference = []
         admitted = []
         business = []
-        code = FindingLifecycleJournal.checkpoint.__code__
+        original_checkpoint = inspect.unwrap(FindingLifecycleJournal.checkpoint)
+        code = original_checkpoint.__code__
 
         def observe(frame, event, value):
             if frame.f_code is admit.__code__:
@@ -45,7 +47,10 @@ class GuardedPublicationCheckpointFaultTests(unittest.TestCase):
                     )
                     admitted.append((len(caller.observations), terminal.undispatched))
                 return observe
-            if frame.f_code is not code:
+            if (
+                frame.f_code is not code
+                or frame.f_globals is not original_checkpoint.__globals__
+            ):
                 return None
             if event == "call":
                 journal = frame.f_locals["self"]
