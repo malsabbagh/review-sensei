@@ -197,8 +197,17 @@ def capacity_review_walk(http, path):
         ledger, guard, transport = resolved
     elif guard is None or type(reader) is not CapacityCommentReader:
         return None
-    expected = transport.repository_path(
-        guard.identity.repository, f"/pulls/{guard.identity.pull_request}/reviews"
+    # Installed readers use the authenticated defining method, never an
+    # instance callback supplied during the preceding external response.
+    from . import http as native_http
+
+    require_module_seal(native_http)
+    if "repository_path" in object.__getattribute__(transport, "__dict__"):
+        raise ReviewInputError("quarantine review repository path was shadowed")
+    expected = native_http.GitHubHttp.repository_path(
+        transport,
+        guard.identity.repository,
+        f"/pulls/{guard.identity.pull_request}/reviews",
     )
     if path != expected:
         return None

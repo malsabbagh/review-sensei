@@ -187,7 +187,10 @@ def _registry():
         caller = saved["entry"]["caller"]
         if object.__getattribute__(ledger, "__dict__").get("caller") is not caller:
             raise ReviewInputError("historical review raw caller changed")
-        if caller._terminal_reason is not None:
+        if (
+            object.__getattribute__(caller, "__dict__").get("_terminal_reason")
+            is not None
+        ):
             return None
         entry = saved["entry"]
         if entry["phase"] >= 7:

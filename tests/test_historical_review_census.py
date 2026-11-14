@@ -154,6 +154,8 @@ class HistoricalReviewCensusTests(unittest.TestCase):
                 original_owner = quarantine_capacity.review_walk_owner
                 original_journal_class = finding_lifecycle.FindingLifecycleJournal
                 restored_fields = []
+                shadowed = []
+                selection_accounting = []
 
                 class FakeLedger:
                     @property
@@ -171,8 +173,35 @@ class HistoricalReviewCensusTests(unittest.TestCase):
                     finding_lifecycle.FindingLifecycleJournal = original_journal_class
                     for owner, field, value in restored_fields:
                         setattr(owner, field, value)
+                    for transport in shadowed:
+                        vars(transport).pop("repository_path", None)
 
                 def observe(frame, event, result):
+                    if (
+                        fault == "path_shadow"
+                        and runs
+                        and frame.f_code is scan.capacity_review_walk.__code__
+                    ):
+                        if event == "call" and not early_injected:
+                            transport = original_resolver(runs[0].http)
+                            original_path = transport.repository_path
+
+                            def fake_path(*args, **kwargs):
+                                fixture.fake_calls += 1
+                                return original_path(*args, **kwargs)
+
+                            shadowed.append(transport)
+                            transport.repository_path = fake_path
+                            selection_accounting.append(
+                                runs[0].caller.accounting.to_document()
+                            )
+                            early_injected.append(True)
+                        elif event == "return":
+                            self.assertEqual(
+                                runs[0].caller.accounting.to_document(),
+                                selection_accounting[0],
+                            )
+                            restore_inner()
                     if (
                         fault in ("inner_class", "inner_ledger")
                         and runs
@@ -261,6 +290,7 @@ class HistoricalReviewCensusTests(unittest.TestCase):
                         "capacity_export",
                         "inner_class",
                         "inner_ledger",
+                        "path_shadow",
                     )
                     else 1,
                 )
@@ -269,6 +299,7 @@ class HistoricalReviewCensusTests(unittest.TestCase):
                     "capacity_export",
                     "inner_class",
                     "inner_ledger",
+                    "path_shadow",
                 ):
                     self.assertEqual(early_injected, [True])
                 self.assertEqual(fixture.fake_calls, 0)
@@ -386,6 +417,9 @@ class HistoricalReviewCensusTests(unittest.TestCase):
 
     def test_preselection_ledger_substitution_executes_no_fake_caller(self):
         self.exercise_fault("inner_ledger")
+
+    def test_preselection_repository_path_shadow_executes_no_callback(self):
+        self.exercise_fault("path_shadow")
 
     def test_preselection_capacity_owner_export_is_authenticated(self):
         self.exercise_fault("capacity_export")
