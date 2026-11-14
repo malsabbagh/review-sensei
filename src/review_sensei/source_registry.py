@@ -191,13 +191,16 @@ def _build_registry():
         registered[module] = tuple(row for row in bindings if row[0] is module)
         module_classes[module] = tuple(defined_classes)
 
-    def require_bindings(bindings):
+    def require_bindings(bindings, *, class_snapshot=None):
         for owner, name, original, code in bindings:
-            current = normalize(
-                inspect.getattr_static(owner, name, None)
-                if inspect.isclass(owner)
-                else getattr(owner, name, None)
-            )
+            if class_snapshot is not None and owner is class_snapshot[0]:
+                current = class_snapshot[1].get(name)
+            else:
+                current = normalize(
+                    inspect.getattr_static(owner, name, None)
+                    if inspect.isclass(owner)
+                    else getattr(owner, name, None)
+                )
             if (
                 current is not original
                 or getattr(current, "__code__", None) is not code
@@ -218,16 +221,25 @@ def _build_registry():
             or vars(cls).get("__slotnames__") is not slots[0]
             or type(slot_values) is not list
             or tuple(slot_values) != slots[1]
-            or frozenset(
+        ):
+            raise ReviewInputError("original class source changed")
+        # One fresh static snapshot serves both executable membership and
+        # binding checks. It is discarded after this validation; no method or
+        # successful source check is cached between requests. Preserve the
+        # original early metadata refusals before enumerating any members.
+        members = {
+            name: normalize(inspect.getattr_static(cls, name)) for name in dir(cls)
+        }
+        if (
+            frozenset(
                 name
-                for name in dir(cls)
-                if callable(normalize(inspect.getattr_static(cls, name)))
-                or isinstance(inspect.getattr_static(cls, name), property)
+                for name, member in members.items()
+                if callable(member) or isinstance(member, property)
             )
             != executable
         ):
             raise ReviewInputError("original class source changed")
-        require_bindings(bindings)
+        require_bindings(bindings, class_snapshot=(cls, members))
 
     def require_module_seal(module):
         if not isinstance(module, ModuleType):

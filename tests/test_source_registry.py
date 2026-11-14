@@ -94,9 +94,9 @@ class SourceRegistryTests(unittest.TestCase):
 
         with patch.object(inspect, "getattr_static", observe):
             require_module_seal(review_run)
-        # One executable-membership lookup and one actual binding validation.
-        # Module validation must not repeat the complete class binding pass.
-        self.assertEqual(observed, ["load", "load"])
+        # One fresh static lookup serves membership and binding validation.
+        # It must not repeat lookups or cache success across validations.
+        self.assertEqual(observed, ["load"])
         with patch.object(ActionRunLedger, "load", lambda *args, **kwargs: None):
             with self.assertRaisesRegex(ReviewInputError, "source changed"):
                 require_module_seal(review_run)
