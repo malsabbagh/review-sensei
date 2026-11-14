@@ -515,3 +515,22 @@ only with an installed quarantine capacity guard. Plain target-isolation without
 that guard uses the raw writers. A prospective plain-profile optimization must
 therefore prove/enforce its actual renderer variants, not assume that the tail
 helper's advertised projection slots alone constrain those raw writes.
+
+Creation already separates phase reachability from lifetime storage promises.
+For exact plain literal-blocker isolation, `prepare_census` validates the full
+lifetime allocation/storage set but bounds the creation read phase with only
+retained bodies, the new root and new creation parts. Its phase guard disallows
+later successor allocations until activation. The later lifecycle census instead
+adds all future decision/archive slots and the generic full review tail. The
+historical lifecycle census refusal therefore does not establish that creation
+itself must fail before the provider can return an exact result.
+
+A separate non-executable materialization observer can inspect the original
+accepted-result capture against the selected transaction, current caller/root,
+run, payload digest and exact event/part IDs. It reports actual renderer widths
+alongside the unchanged generic tail, explicitly releasing zero allocations.
+It performs no HTTP requests and is not a current-body read, capacity witness or
+activation permit. Unknown physical requests remain reported and charged. A
+future plan must authenticate the materialized slot association and prevent all
+unpriced renderer/recovery growth before using any smaller remaining envelope;
+this diagnostic report does not implement that transition.
