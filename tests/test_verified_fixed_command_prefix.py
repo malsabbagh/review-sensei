@@ -1,6 +1,7 @@
 """Cold commands consume genuine terminal reply proofs without inventing authority."""
 
 import copy
+import dis
 import json
 import subprocess
 import sys
@@ -27,34 +28,38 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
         external = reply.external
 
         @contextmanager
-        def capture(extra=None):
-            # Observe genuine successful checkpoints without replacing a sealed
-            # class method. An exception unwinding the frame is not a receipt.
-            failed = set()
+        def capture(extra=None, extra_code=None):
+            # Profiling leaves coverage tracing installed. Only genuine Python
+            # return instructions count; exception unwind is not a receipt.
+            returns = {
+                code: {
+                    item.offset
+                    for item in dis.get_instructions(code)
+                    if item.opname in {"RETURN_VALUE", "RETURN_CONST"}
+                }
+                for code in (checkpoint.__code__, extra_code)
+                if code is not None
+            }
 
             def observe(frame, event, arg):
-                if frame.f_code is checkpoint.__code__:
-                    key = id(frame)
-                    if event == "exception":
-                        failed.add(key)
-                    elif event == "line":
-                        failed.discard(key)
-                    elif event == "return":
-                        if key not in failed:
-                            documents.append(
-                                copy.deepcopy(frame.f_locals["self"]._document())
-                            )
-                        failed.discard(key)
-                if extra is not None:
+                successful_return = event == "return" and frame.f_lasti in returns.get(
+                    frame.f_code, ()
+                )
+                if frame.f_code is checkpoint.__code__ and successful_return:
+                    documents.append(copy.deepcopy(frame.f_locals["self"]._document()))
+                if (
+                    extra is not None
+                    and frame.f_code is extra_code
+                    and (event == "call" or successful_return)
+                ):
                     extra(frame, event, arg)
-                return observe
 
-            previous = sys.gettrace()
+            previous = sys.getprofile()
             try:
-                sys.settrace(observe)
+                sys.setprofile(observe)
                 yield
             finally:
-                sys.settrace(previous)
+                sys.setprofile(previous)
 
         def externally_resolve(request, timeout):
             body = json.loads(request.data) if request.data else {}
@@ -411,7 +416,7 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
                         )
                         authority["body"] += "\nChanged after planning."
 
-                with capture(transfer):
+                with capture(transfer, attach.__code__):
                     code = fixture.invoke_command()
                 if fault is None:
                     self.assertEqual(code, 0, fixture.error)

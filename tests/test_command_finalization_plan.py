@@ -1,6 +1,7 @@
 """Capacity preparation observes source data without issuing business effects."""
 
 import copy
+import dis
 import json
 import sys
 import unittest
@@ -410,13 +411,25 @@ class CommandFinalizationPlanTests(unittest.TestCase):
             self.assertEqual(len(journal.ledger.caller.observations), before)
             exercised.append(plan)
 
+        returns = {
+            code: {
+                item.offset
+                for item in dis.get_instructions(code)
+                if item.opname in {"RETURN_VALUE", "RETURN_CONST"}
+            }
+            for code in (original_bind.__code__, original_attach.__code__)
+        }
+
         def observe(frame, event, arg):
             values = frame.f_locals
+            successful_return = event == "return" and frame.f_lasti in returns.get(
+                frame.f_code, ()
+            )
             if frame.f_code is original_bind.__code__:
                 plan, base = values["self"], values["base"]
                 if event == "call":
                     bind(plan, base)
-                elif event == "return":
+                elif successful_return:
                     before = len(plan.journal.ledger.caller.observations)
                     with self.assertRaises(ReviewInputError):
                         original_bind(plan, base)
@@ -424,7 +437,7 @@ class CommandFinalizationPlanTests(unittest.TestCase):
                         len(plan.journal.ledger.caller.observations), before
                     )
                     bound.append(plan)
-            elif frame.f_code is original_attach.__code__ and event == "return":
+            elif frame.f_code is original_attach.__code__ and successful_return:
                 attach(
                     values["plan"],
                     values["finalizer"],
