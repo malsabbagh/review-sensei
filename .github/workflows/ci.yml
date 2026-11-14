@@ -54,9 +54,10 @@ jobs:
       - name: Run every macOS test in isolated processes
         if: runner.os == 'macOS'
         run: python scripts/run_checkout_tests.py --workers 4 --controller-module test_provider_common_flow --costs tests/fixtures/checkout-class-seconds-macos.json --report "${{ runner.temp }}/checkout-timings.json"
-      - name: Run tests
+      # Reuse the macOS measurements above as scheduling seeds, not Linux timings.
+      - name: Run every Linux test in isolated processes
         if: runner.os == 'Linux'
-        run: python -m unittest discover -s tests -v
+        run: python scripts/run_checkout_tests.py --workers 4 --controller-module test_provider_common_flow --costs tests/fixtures/checkout-class-seconds-macos.json --report "${{ runner.temp }}/checkout-timings.json"
       # The 100 slowest measured classes from complete Windows CI run
       # 41456441033; these hints affect scheduling, not discovery or scope.
       - name: Run every Windows test in isolated processes
