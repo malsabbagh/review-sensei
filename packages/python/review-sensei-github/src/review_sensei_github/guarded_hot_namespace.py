@@ -4,6 +4,7 @@ No accounting projection consumes this witness. The original generic 128-byte
 bound remains unchanged. A later consumer needs separate complete-prefix proof.
 """
 
+import inspect
 import sys
 import threading
 from contextvars import ContextVar
@@ -27,61 +28,158 @@ def _function(function):
     )
 
 
-def _definition(name):
-    frame = sys._getframe(2)
-    module = sys.modules.get(name)
-    spec = getattr(module, "__spec__", None)
-    loader = getattr(spec, "loader", None)
-    if (
-        module is None
-        or frame.f_globals is not vars(module)
-        or frame.f_locals is not frame.f_globals
-        or not getattr(spec, "_initializing", False)
-        or not callable(getattr(loader, "get_code", None))
-        or cast(Any, loader).get_code(name) != frame.f_code
-    ):
-        raise ReviewInputError("hot namespace requires defining loader")
-    return module
-
-
 def _registry():
+    from pathlib import Path
+
+    defining_module = sys.modules[__name__]
+    defining_spec = defining_module.__spec__
+    if defining_spec is None:
+        raise ReviewInputError("hot namespace defining loader is unavailable")
+    defining_loader = defining_spec.loader
+    definition_file = sys._getframe().f_code.co_filename
+    defining_origin = defining_spec.origin
+    defining_file = getattr(defining_module, "__file__", None)
+    defining_state = tuple(vars(defining_loader).items())
+
+    def loader_binding(loader):
+        descriptor = inspect.getattr_static(type(loader), "get_code", None)
+        if (
+            descriptor is None
+            or inspect.getattr_static(loader, "get_code", None) is not descriptor
+        ):
+            raise ReviewInputError("hot namespace loader implementation changed")
+        implementation = getattr(descriptor, "__func__", descriptor)
+        return (
+            type(loader),
+            descriptor,
+            getattr(implementation, "__code__", None),
+            getattr(implementation, "__globals__", None),
+            getattr(implementation, "__defaults__", None),
+            getattr(implementation, "__kwdefaults__", None),
+        )
+
+    loader_source = loader_binding(defining_loader)
+
+    def _definition(name):
+        require_module_seal(defining_module)
+        frame = sys._getframe(2)
+        module = sys.modules.get(name)
+        if type(module) is not type(defining_module):
+            raise ReviewInputError("hot namespace defining module changed")
+        spec = getattr(module, "__spec__", None)
+        if type(spec) is not type(defining_spec):
+            raise ReviewInputError("hot namespace defining spec changed")
+        loader = getattr(spec, "loader", None)
+        stem = name.rsplit(".", 1)[-1]
+        expected = (
+            f"<frozen {name}>"
+            if definition_file == f"<frozen {__name__}>"
+            else str(Path(definition_file).with_name(stem + ".py"))
+        )
+
+        def sibling(value):
+            if value in (None, "frozen"):
+                return value
+            return str(Path(value).with_name(stem + Path(value).suffix))
+
+        replacements = {
+            __name__: name,
+            definition_file: expected,
+            defining_origin: sibling(defining_origin),
+            defining_file: sibling(defining_file),
+        }
+        expected_state = {
+            key: replacements.get(value, value) if type(value) is str else value
+            for key, value in defining_state
+        }
+        # Authenticate loader family/code BEFORE asking it for source code or
+        # touching its supplied state; a forged loader must never run a callback.
+        if (
+            loader_binding(loader) != loader_source
+            or loader_binding(defining_loader) != loader_source
+        ):
+            raise ReviewInputError("hot namespace defining loader changed")
+        actual_state = vars(loader)
+        original_state = vars(defining_loader)
+        state_intact = (
+            set(actual_state) == set(expected_state)
+            and set(original_state) == {key for key, _ in defining_state}
+            and all(original_state[key] is value for key, value in defining_state)
+            and all(
+                (type(actual_state[key]) is type(value) and actual_state[key] == value)
+                if type(value) in (str, int, bool, type(None))
+                else actual_state[key] is value
+                for key, value in expected_state.items()
+            )
+        )
+        if (
+            not state_intact
+            or module is None
+            or frame.f_globals is not vars(module)
+            or frame.f_locals is not frame.f_globals
+            or not getattr(spec, "_initializing", False)
+            or getattr(spec, "origin", None) != sibling(defining_origin)
+            or getattr(module, "__file__", None) != sibling(defining_file)
+            or frame.f_code.co_filename != expected
+        ):
+            raise ReviewInputError("hot namespace requires defining loader")
+        if cast(Any, loader).get_code(name) != frame.f_code:
+            raise ReviewInputError("hot namespace defining code changed")
+        return module
+
     sources: dict[str, Any] = {}
     active: WeakKeyDictionary[Any, dict[str, Any]] = WeakKeyDictionary()
     context: ContextVar[Any] = ContextVar("original_hot_namespace", default=None)
 
     def install_caller(cls):
+        if "caller" in sources:
+            raise ReviewInputError("hot namespace caller already installed")
         module = _definition("review_sensei_github.api_run_requests")
-        if "caller" in sources or cls is not module.ApiRunRequestTransport:
+        if cls is not module.ApiRunRequestTransport:
             raise ReviewInputError("hot namespace caller source changed")
         sources.update(
             caller=cls,
             open=_function(cls.open),
             accept=_function(cls._accept_checkpoint),
+            finish=_function(cls.finish_review_run),
         )
 
     def install_application(cls):
+        if "application" in sources:
+            raise ReviewInputError("hot namespace application already installed")
         module = _definition("review_sensei_github.application")
-        if "application" in sources or cls is not module.GitHubApplication:
+        if cls is not module.GitHubApplication:
             raise ReviewInputError("hot namespace application source changed")
         original = cls.publish_review
         sources["application"] = _function(original)
         sources["application_type"] = cls
 
+    def install_run(cls):
+        if "run" in sources:
+            raise ReviewInputError("hot namespace run already installed")
+        module = _definition("review_sensei_github.review_run")
+        if cls is not module.ReviewRun:
+            raise ReviewInputError("hot namespace run source changed")
+        original = cls.execute
+        sources["run"] = _function(original)
+        sources["run_type"] = cls
+        sources["close_run"] = _function(module.close_review_run)
+
         @wraps(original)
-        def published(app, **kwargs):
-            scope = {"app": app, "thread": threading.get_ident(), "entry": None}
+        def executed(run, *args, **kwargs):
+            scope = {"run": run, "thread": threading.get_ident(), "entry": None}
             token = context.set(scope)
             try:
-                return original(app, **kwargs)
+                return original(run, *args, **kwargs)
             finally:
                 entry = scope["entry"]
                 if entry is not None:
                     active.pop(entry["caller"], None)
                     entry["expired"] = True
-                    entry.pop("application_frame", None)
+                    entry.pop("run_frame", None)
                 context.reset(token)
 
-        cls.publish_review = published
+        cls.execute = executed
 
     def source(kind, frame, caller):
         from . import api_run_requests
@@ -109,6 +207,9 @@ def _registry():
         )
 
         require_module_seal(application)
+        from . import review_run
+
+        require_module_seal(review_run)
         require_module_seal(guarded_pending_publication)
         require_module_seal(quarantine_command_namespace)
         scope = context.get()
@@ -120,7 +221,7 @@ def _registry():
         ):
             raise ReviewInputError("hot namespace copied or expired scope")
         frame: Any = sys._getframe(1)
-        while frame is not None and frame is not entry["application_frame"]:
+        while frame is not None and frame is not entry["run_frame"]:
             frame = frame.f_back
         if frame is None:
             raise ReviewInputError("hot namespace original application extent changed")
@@ -144,6 +245,82 @@ def _registry():
         if canonical_bytes(entry["initial"].to_document()) != entry["initial_bytes"]:
             raise ReviewInputError("hot namespace initial accounting changed")
         entry["initial"].require_successor(state)
+        if (
+            tuple(b.block_id for b in state.blocks) != tuple(entry["tranches"])
+            or state.unallocated != entry["unallocated"]
+            or state.prior_nonstartup_liability != entry["prior"]
+        ):
+            raise ReviewInputError("hot namespace frozen funding changed")
+        for block in state.blocks:
+            before = entry["tranches"][block.block_id]
+            if (
+                block.issued_by != before.issued_by
+                or block.undispatched > before.undispatched
+                or not set(before.pending).issubset(set(block.pending))
+            ):
+                raise ReviewInputError(
+                    "hot namespace old unknown or allocation changed"
+                )
+            if block.block_id not in entry["blocks"] and block != before:
+                raise ReviewInputError("hot namespace borrowed protected funding")
+        terminal = next(b for b in state.blocks if b.block_id == entry["blocks"][1])
+        if caller._terminal_reason is None:
+            if (
+                caller._block != entry["blocks"][0]
+                or terminal != entry["tranches"][terminal.block_id]
+            ):
+                raise ReviewInputError(
+                    "hot namespace terminal funds were used before closure"
+                )
+        elif caller._terminal_reason == "publication-completion":
+            if caller._block != entry["blocks"][1]:
+                raise ReviewInputError("hot namespace terminal block changed")
+            from review_sensei import session
+
+            require_module_seal(session)
+            completion: Any = sys._getframe(1)
+            while completion is not None and not (
+                completion.f_code is session.complete_review_publication.__code__
+                and completion.f_globals is vars(session)
+                and completion.f_locals.get("ledger") is entry["ledger"]
+                and completion.f_locals.get("identity") == entry["record"].identity()
+            ):
+                completion = completion.f_back
+            if completion is not None:
+                transaction = completion.f_locals.get("transaction")
+                if (
+                    not entry["ledger"]._terminal_claimed
+                    or transaction is None
+                    or transaction.transaction_id != entry["transaction"]
+                ):
+                    raise ReviewInputError("hot namespace terminal transaction changed")
+                entry["terminal_entered"] = True
+            else:
+                finish: Any = sys._getframe(1)
+                saved = sources["finish"]
+                while finish is not None and not (
+                    finish.f_code is saved[1]
+                    and finish.f_globals is saved[2]
+                    and finish.f_locals.get("self") is caller
+                    and finish.f_locals.get("ledger") is entry["ledger"]
+                ):
+                    finish = finish.f_back
+                close = None if finish is None else finish.f_back
+                saved_close = sources["close_run"]
+                if (
+                    not entry["terminal_entered"]
+                    or close is None
+                    or close.f_code is not saved_close[1]
+                    or close.f_globals is not saved_close[2]
+                    or _function(saved[0]) != saved
+                    or _function(saved_close[0]) != saved_close
+                    or review_run.close_review_run is not saved_close[0]
+                ):
+                    raise ReviewInputError(
+                        "hot namespace terminal close source changed"
+                    )
+        else:
+            raise ReviewInputError("hot namespace terminal purpose changed")
         return entry
 
     def begin(publisher, journal, host):
@@ -167,40 +344,33 @@ def _registry():
         require_instance_source(publisher, methods=("_publish_impl",))
         while hasattr(method, "__wrapped__"):
             method = method.__wrapped__
-        scope = context.get()
         if (
             frame.f_code is not method.__code__
             or frame.f_globals is not vars(publication)
             or frame.f_locals.get("self") is not publisher
             or frame.f_locals.get("lifecycle_journal") is not journal
             or frame.f_locals.get("native_host") is not host
-            or scope is None
-            or scope["thread"] != threading.get_ident()
-            or scope["entry"] is not None
         ):
             raise ReviewInputError("hot namespace requires original grouped producer")
+        # Classify the authentic source domain before requiring an application
+        # or outer hosted extent. Generic grouped callers retain prior behavior.
+        from .finding_lifecycle import FindingLifecycleJournal
+
+        if type(journal) is not FindingLifecycleJournal or journal.effects:
+            return
+        require_instance_source(journal, methods=("request", "checkpoint", "finish"))
+        ledger, record = journal.ledger, journal._record
         if (
-            journal is None
-            or journal.effects
-            or journal._record.quarantine_lineage is None
+            record is None
+            or record.quarantine_lineage is None
+            or record.api_run_accounting is None
+            or not getattr(ledger, "_quarantine_required", False)
         ):
             return
-        if type(scope["app"]) is not sources["application_type"]:
-            raise ReviewInputError("hot namespace application owner changed")
-        require_instance_source(scope["app"], methods=("publish_review",))
-        application_frame: Any = frame
-        while application_frame is not None and not (
-            application_frame.f_code is sources["application"][1]
-            and application_frame.f_globals is sources["application"][2]
-            and application_frame.f_locals.get("self") is scope["app"]
-        ):
-            application_frame = application_frame.f_back
-        if application_frame is None:
-            raise ReviewInputError("hot namespace original application frame is absent")
-        ledger, record = journal.ledger, journal._record
+        initial = ApiRunAccounting.from_document(record.api_run_accounting)
+        if initial.configuration.limit != 512:
+            return
         caller = ledger.caller
-        if caller in active:
-            raise ReviewInputError("hot namespace cannot nest")
         require_instance_source(
             caller, methods=("open", "_require_ledger", "_accept_checkpoint")
         )
@@ -209,9 +379,48 @@ def _registry():
         guarded_pending_publication._original_accounting_graph(
             caller.accounting, models=True
         )
-        initial = ApiRunAccounting.from_document(record.api_run_accounting)
-        if initial.configuration.limit != 512:
-            return
+        scope = context.get()
+        from . import review_run
+
+        require_module_seal(review_run)
+        if (
+            scope is None
+            or scope["thread"] != threading.get_ident()
+            or scope["entry"] is not None
+            or type(scope["run"]) is not sources.get("run_type")
+            or scope["run"].caller is not caller
+            or scope["run"].ledger is not ledger
+        ):
+            raise ReviewInputError(
+                "hot namespace eligible producer lacks original run extent"
+            )
+        require_instance_source(scope["run"], methods=("execute",))
+        run_frame: Any = frame
+        while run_frame is not None and not (
+            run_frame.f_code is sources["run"][1]
+            and run_frame.f_globals is sources["run"][2]
+            and run_frame.f_locals.get("self") is scope["run"]
+        ):
+            run_frame = run_frame.f_back
+        app_frame: Any = frame
+        while app_frame is not None and not (
+            app_frame.f_code is sources["application"][1]
+            and app_frame.f_globals is sources["application"][2]
+        ):
+            app_frame = app_frame.f_back
+        if run_frame is None or app_frame is None:
+            raise ReviewInputError(
+                "hot namespace original run/application frame is absent"
+            )
+        app = app_frame.f_locals.get("self")
+        if (
+            type(app) is not sources["application_type"]
+            or app.session_ledger is not ledger
+        ):
+            raise ReviewInputError("hot namespace application owner changed")
+        require_instance_source(app, methods=("publish_review",))
+        if caller in active:
+            raise ReviewInputError("hot namespace cannot nest")
         blocks = (caller._block, caller._terminal_block)
         selected = tuple(
             next((b for b in initial.blocks if b.block_id == key), None)
@@ -224,7 +433,6 @@ def _registry():
             or initial.owner != caller.accounting.owner
             or record.record_sha256 != caller._root
             or caller._effect_record is not record
-            or cast(Any, scope["app"]).session_ledger is not ledger
         ):
             raise ReviewInputError("hot namespace initial producer custody changed")
         initial.require_successor(caller.accounting)
@@ -233,7 +441,7 @@ def _registry():
             raise ReviewInputError("hot namespace initial sequence is unavailable")
         entry = dict(
             scope=scope,
-            application_frame=application_frame,
+            run_frame=run_frame,
             caller=caller,
             ledger=ledger,
             root=record.record_sha256,
@@ -245,6 +453,11 @@ def _registry():
             blocks=blocks,
             start=sequence,
             expired=False,
+            terminal_entered=False,
+            transaction=record.transaction.transaction_id,
+            tranches={b.block_id: b for b in caller.accounting.blocks},
+            unallocated=caller.accounting.unallocated,
+            prior=caller.accounting.prior_nonstartup_liability,
         )
         scope["entry"] = entry
         active[caller] = entry
@@ -255,7 +468,9 @@ def _registry():
         scope = context.get()
         if entry is None:
             if scope is not None and scope["entry"] is not None:
-                raise ReviewInputError("hot namespace foreign caller in original extent")
+                raise ReviewInputError(
+                    "hot namespace foreign caller in original extent"
+                )
             return
         frame = sys._getframe(1)
         source("open", frame, caller)
@@ -274,7 +489,9 @@ def _registry():
         scope = context.get()
         if entry is None:
             if scope is not None and scope["entry"] is not None:
-                raise ReviewInputError("hot namespace foreign caller in original extent")
+                raise ReviewInputError(
+                    "hot namespace foreign caller in original extent"
+                )
             return
         frame = sys._getframe(1)
         source("accept", frame, caller)
@@ -298,15 +515,21 @@ def _registry():
     return (
         install_caller,
         install_application,
+        install_run,
         begin,
         before_sequence,
         confirm_checkpoint,
     )
 
 
-install_caller, install_application, begin, before_sequence, confirm_checkpoint = (
-    _registry()
-)
+(
+    install_caller,
+    install_application,
+    install_run,
+    begin,
+    before_sequence,
+    confirm_checkpoint,
+) = _registry()
 del _registry
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

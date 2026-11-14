@@ -1717,6 +1717,12 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
 
 _install_guarded_ledger_replaces(ReviewRunLedger, ActionRunLedger)
 
+from .guarded_hot_namespace import install_run as _install_hot_namespace  # noqa: E402
+
+_install_hot_namespace(ReviewRun)
+del _install_hot_namespace
+
+
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
 
 _seal_original_source()
