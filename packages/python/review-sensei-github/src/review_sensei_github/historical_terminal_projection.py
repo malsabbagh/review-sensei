@@ -126,6 +126,8 @@ def _derive(run):
     ):
         raise ReviewInputError("terminal DATA derivation lacks original consumer")
     fence.require_projection_shape(run)
+    if run is None:
+        raise ReviewInputError("terminal DATA run is absent")
     caller = run.caller
     # This authenticates the genuine paid prefix against complete private
     # namespace history. It neither refunds it nor learns from observations.
