@@ -142,6 +142,35 @@ def _measure_sequence(journal, documents, item_count):
                 finding_lifecycle={**reference, "manifest": manifest},
             )
             finding_lifecycle_store._require_retained_snapshot_capacity(candidate)
+            # The original preparer has authenticated this exact capacity
+            # witness against the journal intent/current owned root. Retain its
+            # prospective-history checks for our larger compressBound manifest,
+            # not merely the selected concrete compression above.
+            witness = getattr(
+                journal.ledger.caller, "_accepted_semantic_capacity", None
+            )
+            if witness is not None:
+                from review_sensei.session import MAX_SESSION_RECORD_BYTES
+
+                prospective_reference = {
+                    **reference,
+                    "schema_version": finding_lifecycle_store.HISTORY_REFERENCE_VERSION,
+                    "accepted_semantic_history": witness["history"],
+                    "manifest": manifest,
+                }
+                finding_lifecycle_store.normalize_reference(prospective_reference)
+                finding_lifecycle_store._require_retained_snapshot_capacity(
+                    candidate, reference=prospective_reference
+                )
+                prospective_record = candidate.to_dict()
+                prospective_record["finding_lifecycle"] = prospective_reference
+                finding_lifecycle_store.require_prospective_terminal_history_capacity(
+                    prospective_record
+                )
+                if len(canonical_bytes(prospective_record)) > MAX_SESSION_RECORD_BYTES:
+                    raise ReviewInputError(
+                        "materialized projection prospective history root capacity exceeded"
+                    )
         measurements.append(
             {
                 "inline": inline,
