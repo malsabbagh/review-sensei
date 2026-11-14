@@ -50,7 +50,70 @@ def _data(value, *, _seen=None, _depth=0):
         _data(child, _seen=seen, _depth=_depth + 1)
 
 
-def _measure_sequence(journal, documents, item_count):
+def _future_accounting(state, block_ids):
+    """Detached maximum-width pending receipts in the two existing tranches.
+
+    V2 confirmed receipts are compact pairs; a pending receipt retains both
+    field names. Thus retaining every future request as pending dominates every
+    completed/pending mixture and every shorter prefix, including the at-most
+    one comma boundary difference and decreasing undispatched digit widths.
+    Existing unknown requests are never removed or reclassified here.
+    """
+    from review_sensei import api_work
+    from review_sensei.api_work import (
+        ACCOUNTING_VERSION,
+        MAX_API_REQUEST_LIMIT,
+        PendingApiRequest,
+    )
+
+    from .guarded_pending_publication import _original_accounting_graph
+
+    require_module_seal(api_work)
+    _original_accounting_graph(state, models=True)
+    if (
+        state.version != ACCOUNTING_VERSION
+        or type(block_ids) is not tuple
+        or len(block_ids) != 2
+        or len(set(block_ids)) != 2
+    ):
+        raise ReviewInputError(
+            "materialized accounting projection scope is unsupported"
+        )
+    selected = tuple(
+        next((b for b in state.blocks if b.block_id == key), None) for key in block_ids
+    )
+    if any(block is None or block.issued_by != state.owner for block in selected):
+        raise ReviewInputError("materialized accounting projection owner changed")
+    counts = tuple(block.undispatched for block in selected if block is not None)
+    if sum(counts) > state.configuration.limit:
+        raise ReviewInputError(
+            "materialized accounting projection exceeds original funding"
+        )
+    before = canonical_bytes(state.to_document())
+    used = {item.request_id for item in state.completed}
+    used.update(item.request_id for block in state.blocks for item in block.pending)
+    projected = state
+    serial = 0
+    for key, count in zip(block_ids, counts, strict=True):
+        for _ in range(count):
+            # PendingApiRequest's original validated identifier bound is 128
+            # ASCII bytes; its deadline bound is the closed 53-bit integer.
+            # Sizing labels are never returned as requests or capabilities.
+            while True:
+                identifier = f"p{serial:0127d}"
+                serial += 1
+                if identifier not in used:
+                    break
+            used.add(identifier)
+            projected = projected.dispatch(
+                key, PendingApiRequest(identifier, MAX_API_REQUEST_LIMIT)
+            )
+    if canonical_bytes(state.to_document()) != before:
+        raise ReviewInputError("materialized accounting projection changed source")
+    return projected.to_document(), counts
+
+
+def _measure_sequence(journal, documents, item_count, accounting_upper=None):
     """Pure original renderer/retention preparation, without ledger preflight."""
     from review_sensei import bounded_evidence, finding_lifecycle_store
     from review_sensei.bounded_evidence import (
@@ -171,6 +234,30 @@ def _measure_sequence(journal, documents, item_count):
                     raise ReviewInputError(
                         "materialized projection prospective history root capacity exceeded"
                     )
+        accounting_root_bytes = None
+        accounting_root_fits = None
+        if accounting_upper is not None:
+            from review_sensei.session import MAX_GENERATION, MAX_SESSION_RECORD_BYTES
+
+            growth = candidate.to_dict()
+            growth["api_run_accounting"] = accounting_upper
+            growth["generation"] = MAX_GENERATION
+            growth["completed_initial_reviews"] += 1
+            growth["completed_verification_rounds"] += 1
+            witness = getattr(
+                journal.ledger.caller, "_accepted_semantic_capacity", None
+            )
+            if witness is not None:
+                growth["finding_lifecycle"] = {
+                    **growth["finding_lifecycle"],
+                    "schema_version": finding_lifecycle_store.HISTORY_REFERENCE_VERSION,
+                    "accepted_semantic_history": witness["history"],
+                }
+            accounting_root_bytes = max(
+                len(canonical_bytes(growth)),
+                finding_lifecycle_store.prospective_terminal_history_bytes(growth),
+            )
+            accounting_root_fits = accounting_root_bytes <= MAX_SESSION_RECORD_BYTES
         measurements.append(
             {
                 "inline": inline,
@@ -180,6 +267,8 @@ def _measure_sequence(journal, documents, item_count):
                 "reference_bytes": len(canonical_bytes(candidate.finding_lifecycle)),
                 "future_parts": parts,
                 "framed_part_bytes": retained,
+                "accounting_root_bytes": accounting_root_bytes,
+                "accounting_root_fits": accounting_root_fits,
             }
         )
         current = candidate
@@ -278,6 +367,9 @@ def project(journal, source):
             _data(getattr(owner, name, None))
     terminal = _terminal_reservation(journal)
     caller = journal.ledger.caller
+    accounting_upper, accounting_counts = _future_accounting(
+        caller.accounting, (caller._block, caller._terminal_block)
+    )
     before = (
         len(caller.observations),
         caller.usable,
@@ -380,7 +472,9 @@ def project(journal, source):
             )
             measurement = measured_sequences.get(sequence_key)
             if measurement is None:
-                measurement = _measure_sequence(journal, documents, item_count)
+                measurement = _measure_sequence(
+                    journal, documents, item_count, accounting_upper
+                )
                 measured_sequences[sequence_key] = measurement
             prefix_measurements.append(measurement)
         summaries.append(
@@ -406,6 +500,8 @@ def project(journal, source):
         "branches": tuple(summaries),
         "ordinary_remaining": before[1],
         "protected_terminal_remaining": terminal.undispatched,
+        "accounting_future_requests": accounting_counts,
+        "accounting_maximum_bytes": len(canonical_bytes(accounting_upper)),
         "invocation_price_issued": False,
         "complete_funding_proof": False,
     }
