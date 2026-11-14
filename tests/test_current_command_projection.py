@@ -66,6 +66,48 @@ class CurrentCommandProjectionTests(unittest.TestCase):
         self.assertEqual(upper.configuration, state.configuration)
         self.assertEqual(canonical_bytes(state.to_document()), before)
 
+    def test_terminal_suffix_keeps_confirmed_runtime_history(self):
+        state = accounting(limit=512).reserve("ordinary", 6).reserve("terminal", 4)
+        initial = state
+        state = state.dispatch("ordinary", PendingApiRequest("c-0-1", 100))
+        state = state.confirm(PendingApiRequest("c-0-1", 100))
+        state = state.dispatch("ordinary", PendingApiRequest("c-0-2", 100))
+        document = pending_accounting(
+            state,
+            sequence=2,
+            ordinary_id="ordinary",
+            terminal_id="terminal",
+            ordinary=0,
+            terminal=3,
+        )
+        projected = ApiRunAccounting.from_document(document)
+        state.require_successor(projected)
+        self.assertEqual(projected.completed, state.completed)
+        self.assertEqual(projected.blocks[0], state.blocks[0])
+        self.assertEqual(projected.blocks[1].undispatched, 1)
+        demoted = ApiRunAccounting.from_document(
+            pending_accounting(
+                initial,
+                sequence=0,
+                ordinary_id="ordinary",
+                terminal_id="terminal",
+                ordinary=3,
+                terminal=3,
+            )
+        )
+        with self.assertRaisesRegex(ReviewInputError, "discard prior charges"):
+            state.require_successor(demoted)
+        requests = projected.blocks[1].pending
+        upper = len(canonical_bytes(projected.to_document()))
+        for mask in range(1 << len(requests)):
+            mixture = projected
+            for index, request in enumerate(requests):
+                if mask & (1 << index):
+                    mixture = mixture.confirm(request)
+            state.require_successor(mixture)
+            self.assertLessEqual(len(canonical_bytes(mixture.to_document())), upper)
+            self.assertEqual(mixture.blocks[0], state.blocks[0])
+
     def test_all_pending_dominates_short_prefixes_and_confirmed_mixtures(self):
         state = accounting(limit=512).reserve("ordinary", 6).reserve("terminal", 4)
         old = PendingApiRequest("retained-unknown", 100)
