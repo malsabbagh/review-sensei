@@ -1,15 +1,17 @@
 """Complete candidate journey; 28 is a measured profile, not a publication cap."""
 
 import copy
+import dis
+import sys
 import tempfile
 import unittest
-from unittest.mock import PropertyMock, patch
+from contextlib import contextmanager
+from unittest.mock import patch
 
 from review_sensei_github.api_run_requests import ApiRunSessionLedger
 from review_sensei_github.approval import ReviewApprovalEligibility
 from review_sensei_github.native_union import native_union_frame_document
 from review_sensei_github.publication import parse_finding_index
-from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
 from test_quarantine_evidence import git
 from test_quarantine_published_tail_journey import (
     BROKER_QUALIFICATIONS,
@@ -75,31 +77,47 @@ class BoundedSnapshotLifecycleTests(unittest.TestCase):
             original_batch = ApiRunSessionLedger.stage_disposition_snapshot_batch
             batches = []
 
-            def stage(ledger, identity, **kwargs):
+            @contextmanager
+            def observe_batches():
+                frames = {}
+                code = original_batch.__code__
+                returns = {
+                    item.offset
+                    for item in dis.get_instructions(code)
+                    if item.opname in {"RETURN_VALUE", "RETURN_CONST"}
+                }
+
                 def count():
                     return sum(
                         "evidence-part:v1" in row["body"]
                         for row in f.extra_comments.values()
                     )
 
-                before = count()
-                manifest = original_batch(ledger, identity, **kwargs)
-                added = count() - before
-                batches.append((len(kwargs["values"]), added))
-                self.assertLessEqual(added, 1)
-                return manifest
+                def observe(frame, event, arg):
+                    if previous is not None:
+                        previous(frame, event, arg)
+                    if frame.f_code is not code:
+                        return
+                    if event == "call":
+                        frames[id(frame)] = count()
+                    elif event == "return":
+                        before = frames.pop(id(frame))
+                        if frame.f_lasti not in returns:
+                            return
+                        added = count() - before
+                        batches.append((len(frame.f_locals["kwargs"]["values"]), added))
+                        self.assertLessEqual(added, 1)
+
+                previous = sys.getprofile()
+                try:
+                    sys.setprofile(observe)
+                    yield
+                finally:
+                    sys.setprofile(previous)
 
             with (
                 registered_resource([registration]),
-                patch.object(
-                    GitHubIssueCommentSessionLedger,
-                    "supports_paged_disposition_snapshot_writes",
-                    new_callable=PropertyMock,
-                    return_value=True,
-                ),
-                patch.object(
-                    ApiRunSessionLedger, "stage_disposition_snapshot_batch", stage
-                ),
+                observe_batches(),
             ):
                 self.assertEqual(f.invoke(), 0, f.error)
                 provider_calls = f.provider_calls
