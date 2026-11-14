@@ -1,6 +1,7 @@
 """Plain original commands qualify cold checkpoint mechanics, not guarded admission."""
 
 import copy
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -173,6 +174,54 @@ class CommandCheckpointTests(unittest.TestCase):
                         all(n == 2 for n in fixture.all_final_reads.values())
                     )
                     self.assertGreaterEqual(fixture.accounted.accounting.uncertain, 5)
+                    from review_sensei_github.api_run_history import read_action_result
+
+                    from review_sensei.disposition import OverrideReceipt
+                    from review_sensei.presentation import render_command_receipt
+
+                    current = fixture.current_record()
+                    action = current.api_run_accounting["action"]
+                    self.assertEqual(action["phase"], "terminal")
+                    self.assertTrue(action["execution_started"])
+                    retained = read_action_result(
+                        fixture.selected.ledger, fixture.selected.identity, current
+                    )
+                    self.assertEqual(
+                        retained["outcome"], {"kind": "applied", "reason": None}
+                    )
+                    result = retained["result"]
+                    self.assertTrue(result["applied"])
+                    self.assertFalse(result["evaluation_failed"])
+                    self.assertEqual(len(result["receipts"]), 1)
+                    self.assertEqual(result["receipts"][0]["outcome"], "recorded")
+                    digest = hashlib.sha256(fixture.command_body.encode()).hexdigest()
+                    marker = (
+                        "<!-- reviewsensei:command-receipt:v1 "
+                        f"source={fixture.source['id']} digest={digest} -->"
+                    )
+                    receipts = [
+                        row
+                        for row in fixture.extra_comments.values()
+                        if row.get("body", "").rstrip().endswith(marker)
+                    ]
+                    self.assertEqual(len(receipts), 1)
+                    self.assertEqual(receipts[0]["user"]["type"], "Bot")
+                    self.assertEqual(
+                        receipts[0]["user"]["id"],
+                        fixture.selected.ledger._evidence_author_id,
+                    )
+                    self.assertEqual(
+                        receipts[0]["body"],
+                        render_command_receipt(
+                            actor=fixture.source["user"]["login"],
+                            source_comment_id=fixture.source["id"],
+                            command_digest=digest,
+                            receipts=tuple(
+                                OverrideReceipt(**row) for row in result["receipts"]
+                            ),
+                            ledger_written=True,
+                        ),
+                    )
                 if fault == "intervening":
                     self.assertEqual(fixture.writes, {})
                 if fault == "two-losses":
@@ -188,6 +237,7 @@ class CommandCheckpointTests(unittest.TestCase):
     def test_intervening_io_expires_real_census_before_any_journal_patch(self):
         injected = []
         rejected = []
+        scopes = []
 
         def trace(frame, event, arg):
             if frame.f_code is not phase.before_get.__code__:
@@ -204,6 +254,12 @@ class CommandCheckpointTests(unittest.TestCase):
                 and not injected
             ):
                 token = frame.f_locals["token"]
+                scope = frame.f_locals["scope"]
+                scopes.append(scope)
+                with self.assertRaisesRegex(ReviewInputError, "census scope changed"):
+                    type(scope)._require_scope(
+                        copy.copy(scope), scope.ledger, scope.identity
+                    )
                 ledger = frame.f_locals["ledger"]
                 before = len(ledger.caller.observations)
                 with self.assertRaisesRegex(ReviewInputError, "source changed"):
@@ -222,6 +278,10 @@ class CommandCheckpointTests(unittest.TestCase):
             rejected, ["cold census first-root receipt is stale or foreign"]
         )
         self.assertEqual(injected, [True])
+        self.assertEqual(len(scopes), 1)
+        for scope in scopes:
+            with self.assertRaisesRegex(ReviewInputError, "census scope changed"):
+                type(scope)._require_scope(scope, scope.ledger, scope.identity)
 
     def test_all_four_command_checkpoint_losses_reconcile_without_repeated_patch(self):
         self.exercise(fixture_type=AllCheckpointLossFixture)
