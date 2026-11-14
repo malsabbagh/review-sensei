@@ -9760,8 +9760,63 @@ class ReviewPublisher:
                 else:
                     from .publication_recovery import _publication_transport
 
+                    capacity_transport = _publication_transport(self.http)
+                    if grouped_publication:
+                        from .finding_lifecycle import _JournalTransport
+
+                        if type(capacity_transport) is _JournalTransport:
+                            from review_sensei.session import SessionIdentity
+                            from review_sensei.source_registry import (
+                                require_module_seal,
+                            )
+
+                            from . import command_finalization_plan
+                            from .quarantine_capacity import installed_capacity
+
+                            # The journal adapter owns native dispatch. Resolve
+                            # only the guard's identity, never replace the HTTP
+                            # used by this producer or its native group host.
+                            require_module_seal(command_finalization_plan)
+                            delegate = (
+                                command_finalization_plan.registered_journal_delegate(
+                                    capacity_transport
+                                )
+                            )
+                            if (
+                                lifecycle_journal is None
+                                or capacity_transport.journal is not lifecycle_journal
+                                or lifecycle_journal.reviewer is not self
+                                or lifecycle_journal.identity
+                                != SessionIdentity(
+                                    repository, pull_request, repository_id
+                                )
+                            ):
+                                raise ReviewInputError(
+                                    "grouped publication journal owner changed"
+                                )
+                            capacity_transport = _publication_transport(delegate)
+                            if capacity_transport is not _publication_transport(
+                                lifecycle_journal.ledger.http
+                            ):
+                                raise ReviewInputError(
+                                    "grouped publication capacity transport changed"
+                                )
+                            installed = installed_capacity(
+                                lifecycle_journal.ledger, lifecycle_journal.identity
+                            )
+                            if (
+                                getattr(
+                                    capacity_transport,
+                                    "_quarantine_capacity_guard",
+                                    None,
+                                )
+                                is not installed
+                            ):
+                                raise ReviewInputError(
+                                    "grouped publication installed capacity changed"
+                                )
                     capacity = getattr(
-                        _publication_transport(self.http),
+                        capacity_transport,
                         "_quarantine_capacity_guard",
                         None,
                     )
