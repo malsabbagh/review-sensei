@@ -43,6 +43,8 @@ class CommandResultWireBoundTests(unittest.TestCase):
             intent_sha256="c" * 64,
             outcome=outcome,
             call_limit=1152,
+            source_review_id=42,
+            approval_review_id=2**63 - 1,
             reference_history=True,
         )
         strings = GitHubApplication._refinalize_command.__code__.co_consts
@@ -124,6 +126,21 @@ class CommandResultWireBoundTests(unittest.TestCase):
                 self.assertLessEqual(len(canonical_bytes(manifest)), size)
         self.assertLess(size, 8192)
 
+    def test_required_native_identity_domain_is_not_inferred_from_source_seals(self):
+        for invalid in (True, 0, -1, 2**63, "42"):
+            for field in ("source_review_id", "approval_review_id"):
+                with self.subTest(field=field, invalid=invalid):
+                    domain = {"source_review_id": 42, "approval_review_id": None}
+                    domain[field] = invalid
+                    with self.assertRaisesRegex(ReviewInputError, "identity domain"):
+                        bound.formatter_growth_bound(call_limit=512, **domain)
+        self.assertEqual(
+            bound.formatter_growth_bound(
+                call_limit=512, source_review_id=2**63 - 1, approval_review_id=2**63 - 1
+            ),
+            2777,
+        )
+
     def test_unpriced_v1_history_is_not_qualified(self):
         with self.assertRaises(ReviewInputError):
             bound.command_result_capacity_bound(
@@ -132,14 +149,26 @@ class CommandResultWireBoundTests(unittest.TestCase):
                 intent_sha256="c" * 64,
                 outcome={"kind": "applied", "reason": None},
                 call_limit=512,
+                source_review_id=42,
+                approval_review_id=None,
                 reference_history=False,
             )
 
     def test_nullable_diagnostics_are_priced_without_numeric_width_slack(self):
         # Null is four bytes, wider than a three-digit HTTP status or 512.
         for limit in (1, 512, 1152):
-            self.assertEqual(bound.formatter_growth_bound(call_limit=limit), 2777)
-        self.assertGreater(bound.formatter_growth_bound(call_limit=10000), 2777)
+            self.assertEqual(
+                bound.formatter_growth_bound(
+                    source_review_id=42, approval_review_id=None, call_limit=limit
+                ),
+                2762,
+            )
+        self.assertGreater(
+            bound.formatter_growth_bound(
+                source_review_id=42, approval_review_id=None, call_limit=10000
+            ),
+            2762,
+        )
 
     def test_raw_wire_overflow_and_unbounded_call_limit_refuse(self):
         with self.assertRaisesRegex(ReviewInputError, "inline bound"):
@@ -148,7 +177,9 @@ class CommandResultWireBoundTests(unittest.TestCase):
             )
         for limit in (True, -1, 2**63):
             with self.assertRaises(ReviewInputError):
-                bound.formatter_growth_bound(call_limit=limit)
+                bound.formatter_growth_bound(
+                    source_review_id=42, approval_review_id=None, call_limit=limit
+                )
 
     def test_formatter_source_mutation_cannot_supply_bound(self):
         original = approval_progress.render_command_progress.__code__
@@ -157,7 +188,14 @@ class CommandResultWireBoundTests(unittest.TestCase):
                 lambda result, publication: result
             ).__code__
             with self.assertRaisesRegex(ReviewInputError, "source.*changed"):
-                bound.formatter_growth_bound(call_limit=1152)
+                bound.formatter_growth_bound(
+                    source_review_id=42, approval_review_id=None, call_limit=1152
+                )
         finally:
             approval_progress.render_command_progress.__code__ = original
-        self.assertEqual(bound.formatter_growth_bound(call_limit=1152), 2777)
+        self.assertEqual(
+            bound.formatter_growth_bound(
+                source_review_id=42, approval_review_id=None, call_limit=1152
+            ),
+            2762,
+        )

@@ -9,11 +9,15 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.source_registry import require_module_seal
 
 
-def formatter_growth_bound(*, call_limit):
+def formatter_growth_bound(*, call_limit, source_review_id, approval_review_id):
     """Canonical result-envelope growth from original finalizer formatting.
 
     Detached capacity data only. A caller must additionally bind the original
     base result, native source, full root/accounting projection and writer.
+    The required IDs are DATA, NOT SOURCE PROOFS. The issuer must authenticate
+    the selected source review and an already-known approval (or prove no new
+    approval is reachable). Original publication source seals alone do not
+    enforce these ID widths. An unknown future approval is unsupported.
     """
     from . import (
         application,
@@ -36,6 +40,13 @@ def formatter_growth_bound(*, call_limit):
         require_module_seal(module)
     if type(call_limit) is not int or not 1 <= call_limit <= 2**63 - 1:
         raise ReviewInputError("current result call limit is unsupported")
+
+    if type(source_review_id) is not int or not 1 <= source_review_id <= 2**63 - 1:
+        raise ReviewInputError("result source review identity domain is unsupported")
+    if approval_review_id is not None and (
+        type(approval_review_id) is not int or not 1 <= approval_review_id <= 2**63 - 1
+    ):
+        raise ReviewInputError("result approval review identity domain is unsupported")
 
     def width(value):
         return len(json.dumps(value, ensure_ascii=True).encode()) - 2
@@ -93,7 +104,7 @@ def formatter_growth_bound(*, call_limit):
         max(approval.QUALIFICATION_STATES, key=width),
         "unconfirmed",
         "observed-existing",
-        maximum,
+        approval_review_id,
         "not-attempted",
         maximum,
         max(checks.COMPLETED_CONCLUSIONS, key=width),
@@ -143,13 +154,24 @@ def formatter_growth_bound(*, call_limit):
 
 
 def command_result_capacity_bound(
-    result, *, binding, intent_sha256, outcome, call_limit, reference_history
+    result,
+    *,
+    binding,
+    intent_sha256,
+    outcome,
+    call_limit,
+    reference_history,
+    source_review_id,
+    approval_review_id,
 ):
     """Data-only bound; separate issuers must prove the exact base result source.
 
     Full retained semantic history must be priced in the lifecycle/root proof;
     the V2 result only carries its fixed-width commitment, outside compression.
-    V1 result/history routes are not qualified by this helper.
+    V1 result/history routes are not qualified by this helper. The consumer
+    must authenticate source_review_id and prove approval_review_id is the
+    exact already-known output (None on a strictly withheld route). No future
+    approval POST is supported. Values and module seals are not that proof.
     """
     from review_sensei.action_result_codec import V1, validate_action_result_envelope
     from review_sensei.disposition import MaintainerCommandResult
@@ -165,7 +187,9 @@ def command_result_capacity_bound(
     }
     validate_action_result_envelope(envelope)
     size = len(canonical_bytes(envelope)) + formatter_growth_bound(
-        call_limit=call_limit
+        call_limit=call_limit,
+        source_review_id=source_review_id,
+        approval_review_id=approval_review_id,
     )
     return raw_result_manifest_bound(
         envelope_bytes=size, binding=binding, reference_history=reference_history
