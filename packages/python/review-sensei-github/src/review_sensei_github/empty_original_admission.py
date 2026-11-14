@@ -232,6 +232,16 @@ def _build():
         entry["receipt"] = None
         if saved is None or result.comments or record is None:
             return False
+        if saved[2].finding_lifecycle is None:
+            # Validate the defining parser and digest producers before the
+            # first authority comparison, not only immediately before parsing.
+            from review_sensei import models
+
+            try:
+                require_module_seal(models)
+                require_instance_source(result, methods=("content_digest", "to_dict"))
+            except ReviewInputError:
+                return False
         selection = entry.get("selected")
         if (
             selection is None

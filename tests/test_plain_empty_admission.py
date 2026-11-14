@@ -99,3 +99,48 @@ class PlainEmptyAdmissionTests(unittest.TestCase):
                 self.assertFalse(
                     any(c.get("conclusion") == "success" for c in fixture.check_runs)
                 )
+
+    def test_substituted_model_producers_are_never_invoked(self):
+        from unittest.mock import patch
+
+        class Observed(BaseException):
+            pass
+
+        for method in ("from_dict", "content_digest"):
+            with (
+                self.subTest(method=method),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture = CurrentLargeEntryFixture.create(directory)
+                values, calls, patches = [], [], []
+
+                def substituted(*args, **kwargs):
+                    calls.append(method)
+                    raise AssertionError("substituted model producer executed")
+
+                def observe(frame, event, value):
+                    if frame.f_code is not consume.__code__:
+                        return None
+                    if event == "call":
+                        replacement = patch.object(ReviewResult, method, substituted)
+                        replacement.start()
+                        patches.append(replacement)
+                    if event == "return":
+                        values.append(value)
+                        while patches:
+                            patches.pop().stop()
+                        raise Observed()
+                    return observe
+
+                previous = sys.gettrace()
+                try:
+                    sys.settrace(observe)
+                    with self.assertRaises(Observed):
+                        fixture.invoke()
+                finally:
+                    sys.settrace(previous)
+                    while patches:
+                        patches.pop().stop()
+                self.assertEqual(values, [False])
+                self.assertEqual(calls, [])
+                self.assertEqual(fixture.reviews, [])
