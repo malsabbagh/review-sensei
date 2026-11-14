@@ -167,7 +167,7 @@ class PublicationProgressMutationTests(unittest.TestCase):
 
         for module, name in (
             (fusion, "_record_grouped_progress"),
-            (publication_staging, "prepare_publication_staging"),
+            (publication_staging, "checkpoint_publication_staging"),
             (quarantine_capacity, "installed_capacity"),
         ):
             with self.subTest(name=name):
