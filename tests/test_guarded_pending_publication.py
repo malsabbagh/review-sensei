@@ -27,7 +27,7 @@ class GuardedPendingPublicationTests(unittest.TestCase):
             fixture = PublishedTailJourneyFixture(directory)
             # Configure the original producer itself, never mutate a live budget.
             fixture.config_bytes = fixture.config_bytes.replace(
-                b"api_request_limit: 512", b"api_request_limit: 504"
+                b"api_request_limit: 512", b"api_request_limit: 490"
             )
             (fixture.root / ".reviewsensei.yml").write_bytes(fixture.config_bytes)
             git(fixture.root, "add", ".reviewsensei.yml")
@@ -82,7 +82,7 @@ class GuardedPendingPublicationTests(unittest.TestCase):
             accounting = ApiRunAccounting.from_document(
                 fixture.current_record().api_run_accounting
             )
-            self.assertEqual(accounting.configuration.limit, 504)
+            self.assertEqual(accounting.configuration.limit, 490)
             self.assertEqual(accounting.startup.liability, 130)
             self.assertEqual(accounting.startup_used, (("hosted", 1),))
             self.assertGreater(accounting.confirmed, 0)

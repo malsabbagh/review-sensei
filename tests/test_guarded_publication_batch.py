@@ -206,7 +206,7 @@ class GuardedPublicationBatchTests(unittest.TestCase):
                     )
 
     def test_original_total_exact_fit_and_one_short_before_business(self):
-        for limit, remaining in ((506, 70), (504, 69)):
+        for limit, remaining in ((492, 70), (490, 69)):
             with self.subTest(limit=limit):
                 result = self.run_source(limit=limit)
                 self.assertIn((70, remaining, limit), result["quotes"])
