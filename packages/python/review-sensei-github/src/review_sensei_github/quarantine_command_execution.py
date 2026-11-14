@@ -369,9 +369,12 @@ def _make_issuer():
             projection=projection,
             authority_bytes=canonical_bytes(authority.document),
         )
-        from .quarantine_command_successor import start
+        from . import quarantine_command_successor
 
-        prepared[run.ledger]["successor_witness"] = start(run, target)
+        require_module_seal(quarantine_command_successor)
+        prepared[run.ledger]["successor_witness"] = quarantine_command_successor.start(
+            run, target
+        )
 
     def require_receipt_phase(run: Any, authority, *, text, marker):
         from . import action_receipt, action_run
@@ -403,6 +406,13 @@ def _make_issuer():
             )
         if result.applied is not True:
             return None
+
+        from . import quarantine_command_successor
+
+        require_module_seal(quarantine_command_successor)
+        quarantine_command_successor.require_current(
+            entry["successor_witness"], run.caller, run.ledger
+        )
 
         from review_sensei.bounded_evidence import partition_evidence
 

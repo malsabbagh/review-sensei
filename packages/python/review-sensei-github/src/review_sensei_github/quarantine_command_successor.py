@@ -7,7 +7,7 @@ funding grant, candidate-GET receipt, or permission to activate a guarded route.
 import inspect
 import sys
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from weakref import WeakKeyDictionary
 
 from review_sensei.bounded_evidence import canonical_bytes
@@ -33,11 +33,13 @@ def _registry():
             quarantine_command_execution,
             quarantine_command_execution.prepare_receipt_phase,
         )
+        values = cast(Any, frame.f_locals)
         if (
-            frame.f_locals.get("run") is not run
-            or frame.f_locals.get("target") is not target
-            or frame.f_locals.get("projection") is None
-            or run.ledger not in frame.f_locals["prepared"]
+            sys._getframe(1) is not frame
+            or values.get("run") is not run
+            or values.get("target") is not target
+            or values.get("projection") is None
+            or run.ledger not in values["prepared"]
         ):
             raise ReviewInputError("historical successor requires original preparation")
         caller = run.caller
@@ -60,6 +62,7 @@ def _registry():
             root=caller._root,
             count=0,
             terminal=False,
+            attempted=None,
         )
         active[caller] = token
         return token
@@ -79,6 +82,47 @@ def _registry():
         ):
             raise ReviewInputError("historical successor witness is copied or stale")
         return entry["record"]
+
+    def before_request(caller):
+        token = active.get(caller)
+        if token is None:
+            return
+        from . import quarantine_command_namespace
+        from .quarantine_command_execution import _source_frame
+        from .quarantine_command_phase import classify_original_mutation
+
+        frame = _source_frame(
+            quarantine_command_namespace, quarantine_command_namespace.before_sequence
+        )
+        values = cast(Any, frame.f_locals)
+        if sys._getframe(1) is not frame or values.get("caller") is not caller:
+            raise ReviewInputError(
+                "historical root attempt requires original namespace source"
+            )
+        entry = issued[token]
+        require_current(token, caller, entry["ledger"])
+        outer = frame.f_back
+        if outer is None:
+            raise ReviewInputError("historical root attempt lacks original request")
+        request = outer.f_locals.get("request")
+        # Other mutation families retain their existing source admission. Only
+        # an actual original checkpoint PATCH participates in this root fence.
+        if (
+            request is None
+            or request.get_method() != "PATCH"
+            or caller._checkpoint is None
+        ):
+            return
+        description = classify_original_mutation(caller)
+        if description is None or description.kind not in {"root", "terminal-root"}:
+            raise ReviewInputError("historical checkpoint mutation family changed")
+        if entry["attempted"] is not None:
+            raise ReviewInputError("historical root cannot repeat an unconfirmed PATCH")
+        entry["attempted"] = (
+            caller._checkpoint,
+            caller._checkpoint.record_sha256,
+            len(caller.observations),
+        )
 
     def confirm_checkpoint(caller, ledger, record, persisted):
         token = active.get(caller)
@@ -111,6 +155,23 @@ def _registry():
             )
         previous = require_current(token, caller, ledger)
         entry = issued[token]
+        attempt = entry["attempted"]
+        if (
+            attempt is None
+            or caller._checkpoint is not attempt[0]
+            or record.record_sha256 != attempt[1]
+            or len(
+                [
+                    row
+                    for row in caller.observations[attempt[2] :]
+                    if row.get("mutation")
+                ]
+            )
+            != 1
+        ):
+            raise ReviewInputError(
+                "historical successor lacks its single physical PATCH"
+            )
         if (
             caller._checkpoint is None
             or record.record_sha256 != caller._checkpoint.record_sha256
@@ -128,16 +189,17 @@ def _registry():
             raw=canonical_bytes(record.to_dict()),
             root=record.record_sha256,
             count=entry["count"] + 1,
+            attempted=None,
             terminal=persisted.action is not None
             and persisted.action["phase"] == "terminal",
         )
         if entry["terminal"]:
             active.pop(caller, None)
 
-    return start, require_current, confirm_checkpoint
+    return start, require_current, before_request, confirm_checkpoint
 
 
-start, require_current, confirm_checkpoint = _registry()
+start, require_current, before_request, confirm_checkpoint = _registry()
 del _registry
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

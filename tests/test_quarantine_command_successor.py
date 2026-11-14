@@ -22,6 +22,8 @@ class CommandSuccessorTests(unittest.TestCase):
                     return
                 run = frame.f_locals["run"]
                 issued.append((arg, run))
+                with self.assertRaisesRegex(ReviewInputError, "original preparation"):
+                    successor.start(run, frame.f_locals["target"])
                 self.assertIs(
                     successor.require_current(arg, run.caller, run.ledger),
                     run.caller._effect_record,
@@ -41,6 +43,10 @@ class CommandSuccessorTests(unittest.TestCase):
                 token, run = issued[0]
                 if frame.f_locals["caller"] is run.caller:
                     successor.require_current(token, run.caller, run.ledger)
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "original namespace source"
+                    ):
+                        successor.before_request(run.caller)
             if (
                 event == "call"
                 and frame.f_code is successor.confirm_checkpoint.__code__

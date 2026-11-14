@@ -491,6 +491,10 @@ def _registry():
             return
         original("open", frame)
         entry = _require(token, caller)
+        from . import quarantine_command_successor
+
+        require_module_seal(quarantine_command_successor)
+        quarantine_command_successor.before_request(caller)
         entry["last"] = _next_sequence(caller._sequence, entry["ceiling"], deadline)
         observed[caller] = entry["last"]
         entry["remaining"] = {
