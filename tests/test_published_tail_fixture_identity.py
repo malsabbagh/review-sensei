@@ -14,3 +14,11 @@ class PublishedTailFixtureIdentityTests(unittest.TestCase):
         first = next(bare._RUNS)
         second = next(package._RUNS)
         self.assertEqual(second, first + 1)
+
+    def test_body_limit_imports_share_one_execution_sequence(self):
+        bare = importlib.import_module("test_quarantine_body_limit")
+        package = importlib.import_module("tests.test_quarantine_body_limit")
+        self.assertIs(bare._RUNS, package._RUNS)
+        first = next(bare._RUNS)
+        second = next(package._RUNS)
+        self.assertEqual(second, first + 1)

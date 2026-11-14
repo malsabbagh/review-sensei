@@ -10,3 +10,5 @@ import itertools
 JOURNEY_RUNS = itertools.count(2900)
 
 PUBLISHED_TAIL_RUNS = itertools.count(3900)
+
+BODY_LIMIT_RUNS = itertools.count(7900)
