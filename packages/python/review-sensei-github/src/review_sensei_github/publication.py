@@ -8149,6 +8149,22 @@ class ReviewPublisher:
         # None still means discover; do not erase a previously pending owner.
         if threads is not None and not threads and self._pending_thread_cleanup is None:
             return
+        # Use the very same source selector as execution. This only suppresses
+        # work that has no obsolete target; it never settles or deletes an
+        # active obligation and never accepts a caller-provided empty proof.
+        if (
+            drift_state is not None
+            and threads is not None
+            and self._pending_thread_cleanup is None
+            and not self._matching_superseded_threads(
+                threads=threads,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                replacements=replacements,
+            )
+        ):
+            return
 
         def cleanup() -> str | None:
             try:
@@ -10277,6 +10293,24 @@ class ReviewPublisher:
                 require_durable_floor(
                     lifecycle_journal, checks_enabled=check_token is not None
                 )
+        # Observation-only source preparation. This is not consumed as a
+        # route permit and does not replace any existing publication preflight.
+        from .ordinary_drift_plan import observe_current
+
+        self._ordinary_drift_sizing_observation = observe_current(
+            self,
+            lifecycle_journal,
+            planned=planned_drift_state,
+            result=result,
+            assembled=preflight_review,
+            eligibility=prospective_eligibility,
+            marker=marker,
+            outcome=planned_check_outcome,
+            policy=effective_policy,
+            complete_inventory=complete_inventory,
+            convergence_policy=convergence_policy,
+            auto_approval=auto_approval,
+        )
         ordinary_observation = getattr(self, "_ordinary_publication_observation", None)
         if ordinary_observation is not None and not write_preflight.app_authored:
             from .ordinary_publication_plan import admit_current
@@ -11220,23 +11254,10 @@ class ReviewPublisher:
             return False
         return all(instance in found.by_instance for instance in instances)
 
-    def _supersede_replaced_threads(
-        self,
-        *,
-        token: str,
-        threads: Sequence[tuple[str, str]],
-        confirmed_review_id: int,
-        repository: str,
-        repository_id: int,
-        pull_request: int,
-        head_sha: str,
-        base_sha: str,
-        app_slug: str,
-        eligibility: ReviewApprovalEligibility,
-        replacements: Sequence[tuple[ReviewComment, str, str, str]],
-    ) -> str | None:
-        from .thread_resolution import FindingThreadResolver
-
+    def _matching_superseded_threads(
+        self, *, threads, repository_id, pull_request, head_sha, replacements
+    ):
+        """Pure existing cleanup selection; retained active roots never retire."""
         replacement_concerns = {item[1] for item in replacements}
         drift_state = self._drift_states.get((repository_id, pull_request))
         if drift_state is not None and drift_state.head_sha == head_sha:
@@ -11282,11 +11303,36 @@ class ReviewPublisher:
                 if slot.state == "active"
                 and not slot.target.startswith(("inline:", "body:"))
             )
-        matching = {
+        return {
             thread: concern
             for thread, concern in threads
             if concern in replacement_concerns and thread not in retained_active_threads
         }
+
+    def _supersede_replaced_threads(
+        self,
+        *,
+        token: str,
+        threads: Sequence[tuple[str, str]],
+        confirmed_review_id: int,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility,
+        replacements: Sequence[tuple[ReviewComment, str, str, str]],
+    ) -> str | None:
+        from .thread_resolution import FindingThreadResolver
+
+        matching = self._matching_superseded_threads(
+            threads=threads,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            replacements=replacements,
+        )
         if (
             not matching
             or type(confirmed_review_id) is not int

@@ -40,6 +40,12 @@ _RUNS = PUBLISHED_TAIL_RUNS
 
 class PublishedTailJourneyFixture(JourneyFixture):
     tail_runs = None
+    # The intended 5+9 origins contain distinct criteria. Prose ordinals and
+    # moved line numbers alone deliberately do not establish finding identity.
+    stable_assessment_identities = True
+    # This origin-count fixture is not a five-thread rewrite scenario. Keep
+    # overlapping criteria unchanged; only four additional criteria are new.
+    unchanged_original_overlap = True
 
     def creator(self):
         return {**super().creator(), "created_at": "2026-10-28T00:01:00Z"}
@@ -137,6 +143,11 @@ class PublishedTailJourneyFixture(JourneyFixture):
                 "severity": "high",
                 "blocking": False,
                 "needs_human": True,
+                **(
+                    {"evidence_id": f"published-tail-assessment-{n}"}
+                    if self.stable_assessment_identities
+                    else {}
+                ),
             }
             for n in range(published_count)
         ]
@@ -146,12 +157,27 @@ class PublishedTailJourneyFixture(JourneyFixture):
         self.provider_comments = [
             {
                 "path": "src/app.py",
-                "line": 3,
+                "line": 2
+                if self.stable_assessment_identities
+                and self.unchanged_original_overlap
+                and n < published_count
+                else 3,
                 "side": "RIGHT",
-                "body": f"Current published assessment {n} requires independent human judgment.",
+                "body": (
+                    f"Earlier published assessment {n} requires independent human judgment."
+                    if self.stable_assessment_identities
+                    and self.unchanged_original_overlap
+                    and n < published_count
+                    else f"Current published assessment {n} requires independent human judgment."
+                ),
                 "severity": "high",
                 "blocking": False,
                 "needs_human": True,
+                **(
+                    {"evidence_id": f"published-tail-assessment-{n}"}
+                    if self.stable_assessment_identities
+                    else {}
+                ),
             }
             for n in range(failed_count)
         ]
@@ -534,6 +560,7 @@ class PublishedTailJourneyTests(unittest.TestCase):
                     "severity": "high",
                     "blocking": False,
                     "needs_human": True,
+                    "evidence_id": "published-tail-assessment-0",
                 }
             ]
             with registered_resource([registration]):
