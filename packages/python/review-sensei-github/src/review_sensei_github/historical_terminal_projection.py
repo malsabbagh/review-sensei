@@ -65,11 +65,12 @@ def terminal_accounting_data(state, *, ordinary, terminal, sequence):
     """Pure original transitions; every old receipt remains, 34 slots unissued."""
     from review_sensei import api_work
 
-    from .guarded_pending_publication import _original_accounting_graph
+    from . import guarded_pending_publication
 
     require_module_seal(api_work)
+    require_module_seal(guarded_pending_publication)
     _plain_accounting(state)
-    _original_accounting_graph(state, models=True)
+    guarded_pending_publication._original_accounting_graph(state, models=True)
     if (
         type(ordinary) is not str
         or type(terminal) is not str

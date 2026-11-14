@@ -149,3 +149,46 @@ class HistoricalTerminalProjectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ReviewInputError, "trust source changed"):
                 fence._zero_fences(object())
         self.assertEqual(calls, [])
+
+    def test_replaced_accounting_graph_refuses_without_callback(self):
+        from review_sensei_github import guarded_pending_publication
+
+        calls = []
+        original = state()
+
+        def changed(*args, **kwargs):
+            calls.append((args, kwargs))
+
+        with patch.object(
+            guarded_pending_publication, "_original_accounting_graph", changed
+        ):
+            with self.assertRaises(ReviewInputError):
+                project(original)
+        self.assertEqual(calls, [])
+
+    def test_representative_ordinary_prefixes_and_completion_patterns(self):
+        original = state()
+        upper_bytes = len(canonical_bytes(project(original).to_document()))
+        for prefix in (0, 1, 9, 10, 99, 104, 105):
+            for pattern in ("none", "all", "mixed"):
+                candidate = original
+                for index in range(prefix):
+                    request = PendingApiRequest(
+                        f"c-0-{81 + index:x}", MAX_API_REQUEST_LIMIT
+                    )
+                    candidate = candidate.dispatch("ordinary", request)
+                    if pattern == "all" or (pattern == "mixed" and index % 2):
+                        candidate = candidate.confirm(request)
+                for index in range(16):
+                    request = PendingApiRequest(
+                        f"c-0-{81 + prefix + index:x}", MAX_API_REQUEST_LIMIT
+                    )
+                    candidate = candidate.dispatch("terminal", request)
+                    if pattern == "all" or (pattern == "mixed" and index % 2):
+                        candidate = candidate.confirm(request)
+                self.assertLessEqual(
+                    len(canonical_bytes(candidate.to_document())), upper_bytes
+                )
+                self.assertEqual(candidate.blocks[0], original.blocks[0])
+                self.assertEqual(candidate.blocks[-1], original.blocks[-1])
+                self.assertEqual(candidate.remaining, original.remaining)
