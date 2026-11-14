@@ -414,13 +414,15 @@ def _measure_inline_branches(observation):
         import hashlib
 
         from .api_run_history import action_result_binding
-        from .command_result_capacity import command_result_capacity_upper
+        from .command_result_capacity import (
+            command_result_capacity_upper,
+            future_journal_approval_result_capacity_upper,
+        )
 
         selected = json.loads(target.native_review_bytes)
         source_payload = json.loads(plan.payload)
         if (
-            source_payload.get("conditional_approval") is not None
-            or source_payload["review_before"]["id"] != selected["id"]
+            source_payload["review_before"]["id"] != selected["id"]
             or source_payload["head_sha"] != run.head_sha
             or type(selected.get("id")) is not int
             or not 0 < selected["id"] <= 2**63 - 1
@@ -436,7 +438,33 @@ def _measure_inline_branches(observation):
             existing=None,
             actor=saved["authority"].document["actor"],
         )
-        result_upper = command_result_capacity_upper(
+        approval = source_payload.get("conditional_approval")
+        if approval is not None and (
+            type(approval) is not list
+            or len(approval) != 3
+            or approval[:2]
+            != [
+                "POST",
+                plan.http.repository_path(
+                    run.identity.repository,
+                    f"/pulls/{run.identity.pull_request}/reviews",
+                ),
+            ]
+            or type(approval[2]) is not dict
+            or approval[2].get("event") != "APPROVE"
+            or approval[2].get("commit_id") != run.head_sha
+        ):
+            raise ReviewInputError("historical future approval source is unsupported")
+        # Detached conditional sizing only. The intermediate execution issuer
+        # still rejects this branch; an eventual lease must prove all approval
+        # outputs pass the original journal's signed-63 receipt validator.
+        upper_factory = (
+            command_result_capacity_upper
+            if approval is None
+            else future_journal_approval_result_capacity_upper
+        )
+        approval_fields = {"approval_review_id": None} if approval is None else {}
+        result_upper = upper_factory(
             base_result,
             binding=action_result_binding(
                 run.identity, run.caller.accounting, run.ledger.evidence_producer()
@@ -446,7 +474,7 @@ def _measure_inline_branches(observation):
             call_limit=run.caller.accounting.configuration.limit,
             reference_history=True,
             source_review_id=selected["id"],
-            approval_review_id=None,
+            **approval_fields,
         )
     grants = tuple(sorted(run.ledger._observed_consumed_grants))
     growth_roots = [
@@ -496,6 +524,10 @@ def _measure_inline_branches(observation):
         "branches": tuple(branches),
         "growth_roots": tuple(growth_roots),
         "result_manifest_bound": len(canonical_bytes(result_upper)),
+        "future_approval_domain_requires_execution_proof": json.loads(plan.payload).get(
+            "conditional_approval"
+        )
+        is not None,
         "all_growth_roots_fit": all(root["root_fits"] for root in growth_roots),
         "max_checkpoints": max(len(branch) for branch in branches),
         "native_requests": requests,
