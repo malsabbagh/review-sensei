@@ -6916,7 +6916,10 @@ class ReviewPublisher:
         identifiers = dict(evidence.thread_ids)
         metadata = {root.comment_id: root for root in evidence.roots}
         nodes = []
-        existing = context.setdefault("existing_bindings", {})
+        # Native census permits wider opaque IDs than the existing lifecycle
+        # codec. Prepare the entire adoption off to the side so refusal cannot
+        # leave even an earlier valid binding installed.
+        existing = dict(context.get("existing_bindings", {}))
         for root in evidence.root_bodies:
             identifier = int(root["n"])
             native = metadata[identifier]
@@ -6979,12 +6982,25 @@ class ReviewPublisher:
                     item.instance,
                     hashlib.sha256(evidence.main_body.encode()).hexdigest(),
                 )
-        context["receipts"] = (evidence.main_review_id, confirmed)
-        scoped = self._native_finding_receipt_records.setdefault(
-            (receipt.repository_id, receipt.pull_request), {}
-        )
+        scope = (receipt.repository_id, receipt.pull_request)
+        scoped = dict(self._native_finding_receipt_records.get(scope, {}))
         for instance, native_receipt in confirmed.items():
             scoped[instance] = native_receipt.to_dict()
+
+        from review_sensei.source_registry import require_module_seal
+
+        from . import finding_lifecycle
+
+        require_module_seal(finding_lifecycle)
+        # Use the unchanged original representation: <=256 UTF-8 bytes per
+        # native atom, signed-63 numeric IDs and the existing aggregate caps.
+        # This is not a journal checkpoint or a whole-tail funding grant.
+        finding_lifecycle._pack_journal(
+            {"existing_bindings": existing, "native_receipts": list(scoped.values())}
+        )
+        context["existing_bindings"] = existing
+        context["receipts"] = (evidence.main_review_id, confirmed)
+        self._native_finding_receipt_records[scope] = scoped
 
     @staticmethod
     def _ordinary_review_event(
