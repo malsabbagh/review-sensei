@@ -9056,6 +9056,9 @@ class ReviewPublisher:
                 else self._finish_thread_cleanup(publication)
             )
         finally:
+            from . import adjacent_publication_preflight
+
+            adjacent_publication_preflight.discard(self)
             self._native_finding_context = previous_native_context
             self._carried_context = previous_carried_context
             self.finalizer._observed_trust_context = prev_observed_trust
@@ -10000,6 +10003,12 @@ class ReviewPublisher:
                     break
             if complete_inventory:
                 complete_review = preflight_review
+        from review_sensei.source_registry import require_module_seal
+
+        from . import adjacent_publication_preflight
+
+        require_module_seal(adjacent_publication_preflight)
+        adjacent_preflight = adjacent_publication_preflight.begin(self, native_host)
         preflight = self._preflight_pr(
             token=token,
             repository=repository,
@@ -10009,6 +10018,7 @@ class ReviewPublisher:
             base_branch=base_branch,
             base_sha=base_sha,
             app_slug=app_slug,
+            _adjacent_observation=adjacent_preflight,
         )
         if preflight.result is not None:
             return preflight.result
@@ -10300,6 +10310,7 @@ class ReviewPublisher:
             base_branch=base_branch,
             base_sha=base_sha,
             app_slug=app_slug,
+            _adjacent_observation=adjacent_preflight,
         )
         if write_preflight.result is not None:
             return write_preflight.result
@@ -12086,9 +12097,22 @@ class ReviewPublisher:
         base_branch: str,
         base_sha: str,
         app_slug: str,
+        _adjacent_observation=None,
     ) -> _PreflightDecision:
         path = self.http.repository_path(repository, f"/pulls/{pull_request}")
-        status, payload = self.http.request("GET", path, token=token)
+        from review_sensei.source_registry import require_module_seal
+
+        from . import adjacent_publication_preflight
+
+        require_module_seal(adjacent_publication_preflight)
+        selected = adjacent_publication_preflight.consume(_adjacent_observation, self)
+        if selected is None:
+            status, payload = self.http.request("GET", path, token=token)
+            adjacent_publication_preflight.observe(
+                _adjacent_observation, self, status, payload
+            )
+        else:
+            status, payload = selected
         if status == 404:
             raise GitHubPublicationError("review target was not found")
         if status < 200 or status >= 300:
@@ -12298,6 +12322,14 @@ class ReviewPublisher:
                 persisted_index is not None
                 and any(entry.blocking for entry in persisted_index.entries)
             )
+        from review_sensei.source_registry import require_module_seal
+
+        from . import adjacent_publication_preflight
+
+        require_module_seal(adjacent_publication_preflight)
+        adjacent_publication_preflight.index(
+            self, native_host, identity_states, result_states, eligibility
+        )
         return frozenset(identity_states), frozenset(result_states), eligibility
 
     def _verify_complete_review(
@@ -12711,6 +12743,14 @@ _capture_quarantine_pr, _consume_quarantine_pr = _install_pr_finalizer(
     ReviewApprovalFinalizer
 )
 del _install_pr_finalizer
+
+
+from .adjacent_publication_preflight import (  # noqa: E402
+    install_source as _install_adjacent_preflight,
+)
+
+_install_adjacent_preflight(ReviewPublisher)
+del _install_adjacent_preflight
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

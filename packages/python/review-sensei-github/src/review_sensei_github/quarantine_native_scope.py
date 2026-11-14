@@ -159,3 +159,8 @@ def native_scope(http, *, repository=None, head_sha=None):
 def filter_reviews(http, reviews, *, repository, head_sha=None):
     scope = native_scope(http, repository=repository, head_sha=head_sha)
     return reviews if scope is None else scope.filter_reviews(reviews)
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()
