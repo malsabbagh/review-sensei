@@ -159,6 +159,18 @@ class HistoricalExecutionTests(unittest.TestCase):
                         closed.require_closed(copy.copy(result), run)
                     with self.assertRaisesRegex(ReviewInputError, "ledger changed"):
                         closed.available(run.caller, copy.copy(run.ledger))
+                    from review_sensei_github import trust_effects
+
+                    original_profile = trust_effects.verification_profile
+                    try:
+                        trust_effects.verification_profile = lambda caller: None
+                        with self.assertRaisesRegex(
+                            ReviewInputError, "profile source changed"
+                        ):
+                            closed.require_closed(result, run)
+                    finally:
+                        trust_effects.verification_profile = original_profile
+                    closed.require_closed(result, run)
                     original_root = run.caller._root
                     try:
                         run.caller._root = "0" * 64

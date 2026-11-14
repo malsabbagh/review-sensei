@@ -26,6 +26,18 @@ class LifecycleContext:
     pass
 
 
+def _require_default_profile(caller):
+    """Use the original installed profile reader, never a dynamic substitute."""
+    from . import api_run_requests, trust_effects
+
+    require_module_seal(api_run_requests)
+    original = api_run_requests._original_trust_verification_profile
+    if trust_effects.verification_profile is not original:
+        raise ReviewInputError("historical trust profile source changed")
+    if original(caller) is not None:
+        raise ReviewInputError("historical closed trust profile is unsupported")
+
+
 def _registry():
     active: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
     leases: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
@@ -37,6 +49,7 @@ def _registry():
         if lease is None:
             return None
         entry = leases.get(lease)
+        _require_default_profile(caller)
         from .quarantine_capacity import installed_capacity
         from .quarantine_command_execution import _configuration, _execution_owner
         from .quarantine_command_successor import require_current
@@ -97,7 +110,6 @@ def _registry():
         from . import quarantine_command_suffix
         from .quarantine_command_execution import _configuration, _execution_owner
         from .quarantine_command_successor import start_guarded
-        from .trust_effects import verification_profile
 
         require_module_seal(quarantine_command_suffix)
         frame = sys._getframe(1)
@@ -112,11 +124,11 @@ def _registry():
             raise ReviewInputError(
                 "historical lease requires original closed preparation"
             )
+        _require_default_profile(run.caller)
         recipe = json.loads(entry["recipe"])
         measured = recipe["root_measurement"]
         if (
-            verification_profile(run.caller) is not None
-            or not measured["all_growth_roots_fit"]
+            not measured["all_growth_roots_fit"]
             or not all(
                 row["original_validated_and_rendered"]
                 for row in measured["growth_roots"]
