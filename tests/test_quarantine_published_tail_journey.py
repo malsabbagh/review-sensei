@@ -3,7 +3,6 @@
 import base64
 import copy
 import hashlib
-import itertools
 import json
 import random
 import re
@@ -16,6 +15,7 @@ from urllib.parse import urlsplit
 
 import test_quarantine_journey as journey_contract
 from fake_github_http import json_response
+from quarantine_fixture_identity import PUBLISHED_TAIL_RUNS
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
 from review_sensei_github.publication import (
     approval_eligibility_from_body,
@@ -35,7 +35,7 @@ from test_quarantine_published_tail_isolation import contract_fixture
 
 from review_sensei.bounded_evidence import canonical_bytes
 
-_RUNS = itertools.count(3900)
+_RUNS = PUBLISHED_TAIL_RUNS
 
 
 class PublishedTailJourneyFixture(JourneyFixture):

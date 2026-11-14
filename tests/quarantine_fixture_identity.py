@@ -8,3 +8,5 @@ from the same sequence; the production single-use registry remains untouched.
 import itertools
 
 JOURNEY_RUNS = itertools.count(2900)
+
+PUBLISHED_TAIL_RUNS = itertools.count(3900)
