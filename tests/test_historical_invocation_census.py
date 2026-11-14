@@ -49,7 +49,7 @@ class CensusFixture(GuardedHistoricalFixture):
 
 
 class HistoricalInvocationCensusTests(unittest.TestCase):
-    def exercise(self, fault=None):
+    def exercise(self, fault=None, extra_observer=None):
         issued, completed, starts = [], [], {}
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -127,6 +127,8 @@ class HistoricalInvocationCensusTests(unittest.TestCase):
                                     values["response"],
                                 )
                         completed.append(token)
+                    if extra_observer is not None:
+                        extra_observer(frame, event, result)
 
                 previous = sys.getprofile()
                 try:

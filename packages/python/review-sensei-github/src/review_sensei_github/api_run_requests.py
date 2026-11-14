@@ -1030,6 +1030,32 @@ class ApiRunRequestTransport:
         observed_status = None
         resolution_readback = self._capture_thread_request(request, observation)
 
+        namespace_bind_confirmation = _bind_namespace_confirmation
+        namespace_confirm_response = _namespace_confirm_response
+        # Freeze callable custody before external response code can run.  A
+        # captured object alone does not protect its mutable function metadata.
+        namespace_hook_sources = tuple(
+            (
+                hook.__code__,
+                hook.__globals__,
+                hook.__defaults__,
+                hook.__kwdefaults__,
+                tuple((cell, cell.cell_contents) for cell in hook.__closure__ or ()),
+            )
+            for hook in (namespace_bind_confirmation, namespace_confirm_response)
+        )
+        namespace_confirmation_context = (
+            self._sequence,
+            self._block,
+            request_id,
+            deadline,
+            is_mutation,
+            request.get_method() == "POST"
+            and request.full_url in self._authentication_endpoints,
+            request.get_method(),
+            request.full_url,
+        )
+
         def confirmed() -> None:
             if observation["outcome"] == "expired":
                 raise EvidenceBudgetExhausted(
@@ -1054,6 +1080,25 @@ class ApiRunRequestTransport:
                 raise EvidenceBudgetExhausted(
                     "caller response exceeded its original request deadline"
                 )
+            hook_source = namespace_hook_sources[1]
+            if (
+                namespace_confirm_response.__code__ is not hook_source[0]
+                or namespace_confirm_response.__globals__ is not hook_source[1]
+                or namespace_confirm_response.__defaults__ is not hook_source[2]
+                or namespace_confirm_response.__kwdefaults__ is not hook_source[3]
+                or len(namespace_confirm_response.__closure__ or ())
+                != len(hook_source[4])
+                or any(
+                    cell is not saved_cell or cell.cell_contents is not contents
+                    for cell, (saved_cell, contents) in zip(
+                        namespace_confirm_response.__closure__ or (),
+                        hook_source[4],
+                        strict=True,
+                    )
+                )
+            ):
+                raise ReviewInputError("caller namespace confirmation source changed")
+            namespace_confirm_response(self, confirmed, pending, observation)
             try:
                 from .check_accounting import _response
 
@@ -1104,7 +1149,7 @@ class ApiRunRequestTransport:
             finally:
                 validate_trust_return(self)
             raise
-        return _AccountedResponse(
+        accounted_response = _AccountedResponse(
             response,
             confirmed,
             None
@@ -1114,6 +1159,32 @@ class ApiRunRequestTransport:
             ),
             validate_return=lambda: validate_trust_return(self),
         )
+        hook_source = namespace_hook_sources[0]
+        if (
+            namespace_bind_confirmation.__code__ is not hook_source[0]
+            or namespace_bind_confirmation.__globals__ is not hook_source[1]
+            or namespace_bind_confirmation.__defaults__ is not hook_source[2]
+            or namespace_bind_confirmation.__kwdefaults__ is not hook_source[3]
+            or len(namespace_bind_confirmation.__closure__ or ()) != len(hook_source[4])
+            or any(
+                cell is not saved_cell or cell.cell_contents is not contents
+                for cell, (saved_cell, contents) in zip(
+                    namespace_bind_confirmation.__closure__ or (),
+                    hook_source[4],
+                    strict=True,
+                )
+            )
+        ):
+            raise ReviewInputError("caller namespace confirmation source changed")
+        namespace_bind_confirmation(
+            self,
+            confirmed,
+            pending,
+            observation,
+            response,
+            namespace_confirmation_context,
+        )
+        return accounted_response
 
     def _require_ledger(
         self, ledger: GitHubIssueCommentSessionLedger, identity: SessionIdentity
@@ -3611,7 +3682,15 @@ _install_checkpoint_pricer(
 )
 
 
-from .quarantine_command_namespace import install as _install_cold_namespace  # noqa: E402
+from .quarantine_command_namespace import (  # noqa: E402
+    bind_response_confirmation as _bind_namespace_confirmation,
+)
+from .quarantine_command_namespace import (  # noqa: E402
+    confirm_response as _namespace_confirm_response,
+)
+from .quarantine_command_namespace import (  # noqa: E402
+    install as _install_cold_namespace,
+)
 
 _install_cold_namespace(ApiRunRequestTransport)
 del _install_cold_namespace

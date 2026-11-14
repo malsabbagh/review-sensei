@@ -70,6 +70,7 @@ def _registry():
     active: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
     observed: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
     current: dict[str, Any] = {}
+    confirmations: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
     definition_file = cast(Any, inspect.currentframe()).f_code.co_filename
     defining_module = sys.modules[__name__]
     defining_spec = defining_module.__spec__
@@ -120,6 +121,13 @@ def _registry():
             open=_function(caller_type.open),
             close=_function(caller_type.close_action),
             ledger=_function(caller_type._require_ledger),
+            response_type=module._AccountedResponse,
+            response_read=_function(module._AccountedResponse.read),
+            confirmed_code=next(
+                item
+                for item in caller_type.open.__code__.co_consts
+                if inspect.iscode(item) and item.co_name == "confirmed"
+            ),
         )
 
     def install_current_validator(function):
@@ -424,6 +432,11 @@ def _registry():
             raise ReviewInputError(
                 "cold namespace sequence ceiling exceeds representation"
             )
+        from .publication_recovery import _publication_transport
+
+        guard = getattr(
+            _publication_transport(run.http), "_quarantine_capacity_guard", None
+        )
         token = _Namespace()
         issued[token] = dict(
             caller=caller,
@@ -452,6 +465,8 @@ def _registry():
             counts=counts,
             state=state,
             state_bytes=canonical_bytes(state.to_document()),
+            confirmed_receipts={},
+            recording_confirmations=guard is not None and guard.complete_tail is False,
         )
         active[caller] = token
         _require(token, caller)
@@ -529,6 +544,157 @@ def _registry():
     def require(token, caller):
         _require(token, caller)
 
+    def bind_response_confirmation(
+        caller, function, pending, observation, response, context
+    ):
+        token = active.get(caller)
+        if token is None or not issued.get(token, {}).get("recording_confirmations"):
+            return
+        frame = sys._getframe(1)
+        original("open", frame)
+        entry = _require(token, caller)
+        values = cast(Any, frame.f_locals)
+        wrapper = values.get("accounted_response")
+        if (
+            values.get("self") is not caller
+            or values.get("namespace_confirmation_context") is not context
+            or values.get("confirmed") is not function
+            or values.get("pending") is not pending
+            or values.get("observation") is not observation
+            or values.get("response") is not response
+            or type(wrapper) is not source["response_type"]
+            or wrapper._confirmed is not function
+            or wrapper._response is not response
+            or function.__code__ is not source["confirmed_code"]
+            or function.__globals__ is not source["open"][2]
+            or function.__defaults__ is not None
+            or function.__kwdefaults__ is not None
+            or pending is None
+            or caller.observations[-1] is not observation
+            or observation.get("outcome") != "unknown"
+            or not any(
+                p is pending for b in caller.accounting.blocks for p in b.pending
+            )
+            or context
+            != (
+                caller._sequence,
+                caller._block,
+                pending.request_id,
+                pending.deadline_unix_ms,
+                observation.get("mutation"),
+                context[5]
+                if isinstance(context, tuple) and len(context) == 8
+                else None,
+                values["request"].get_method(),
+                values["request"].full_url,
+            )
+            or type(context[5]) is not bool
+            or function in confirmations
+        ):
+            raise ReviewInputError(
+                "cold response binding lacks original object custody"
+            )
+        require_instance_source(wrapper, methods=("read",))
+        closure = tuple(
+            (cell, cell.cell_contents) for cell in function.__closure__ or ()
+        )
+        confirmations[function] = dict(
+            entry=entry,
+            caller=caller,
+            function=_function(function),
+            closure=closure,
+            wrapper=wrapper,
+            response=response,
+            pending=pending,
+            pending_bytes=canonical_bytes(
+                {"id": pending.request_id, "deadline": pending.deadline_unix_ms}
+            ),
+            observation=observation,
+            before=canonical_bytes(observation),
+            status=values.get("observed_status"),
+            context=context,
+        )
+
+    def confirm_response(caller, function, pending, observation):
+        token = active.get(caller)
+        if token is None or not issued.get(token, {}).get("recording_confirmations"):
+            return
+        frame = sys._getframe(1)
+        entry = _require(token, caller)
+        values = cast(Any, frame.f_locals)
+        if (
+            frame.f_code is not source["confirmed_code"]
+            or frame.f_globals is not source["open"][2]
+            or values.get("self") is not caller
+            or values.get("confirmed") is not function
+            or values.get("pending") is not pending
+            or values.get("observation") is not observation
+        ):
+            raise ReviewInputError("cold confirmation lacks original nested source")
+        saved = confirmations.get(function)
+        previous = frame.f_back
+        if saved is None:
+            # Original HTTPError confirmation retains its ordinary accounting
+            # semantics, but is never a successful preparation receipt.
+            if (
+                previous is not None
+                and previous.f_code is source["open"][1]
+                and previous.f_globals is source["open"][2]
+                and previous.f_locals.get("confirmed") is function
+            ):
+                return
+            raise ReviewInputError("cold confirmation callable is unissued or replayed")
+        if (
+            saved["entry"] is not entry
+            or saved["caller"] is not caller
+            or _function(function) != saved["function"]
+            or any(cell.cell_contents is not value for cell, value in saved["closure"])
+            or previous is None
+            or previous.f_code is not source["response_read"][1]
+            or previous.f_globals is not source["response_read"][2]
+            or id(previous.f_locals.get("self")) != id(saved["wrapper"])
+            or previous.f_locals.get("confirmed") is not function
+            or saved["wrapper"]._confirmed is not function
+            or saved["wrapper"]._response is not saved["response"]
+            or pending is not saved["pending"]
+            or observation is not saved["observation"]
+            or canonical_bytes(
+                {"id": pending.request_id, "deadline": pending.deadline_unix_ms}
+            )
+            != saved["pending_bytes"]
+            or values.get("observed_status") != saved["status"]
+        ):
+            raise ReviewInputError("cold confirmation object or closure changed")
+        require_instance_source(saved["wrapper"], methods=("read",))
+        import json
+
+        expected = json.loads(saved["before"])
+        expected.update(
+            outcome="response",
+            uncertain_effect=bool(expected.get("mutation"))
+            and (
+                saved["status"] in {202, 409, 422, 429}
+                or isinstance(saved["status"], int)
+                and saved["status"] >= 500
+            ),
+        )
+        if canonical_bytes(observation) != canonical_bytes(expected):
+            raise ReviewInputError("cold confirmation observation changed")
+        if pending not in caller.accounting.completed or any(
+            p == pending for b in caller.accounting.blocks for p in b.pending
+        ):
+            raise ReviewInputError("cold confirmation accounting is unavailable")
+        if pending.request_id in entry["confirmed_receipts"]:
+            raise ReviewInputError("cold confirmation receipt was replayed")
+        confirmations.pop(function)
+        entry["confirmed_receipts"][pending.request_id] = (
+            observation,
+            canonical_bytes(observation),
+            pending.deadline_unix_ms,
+            saved["status"],
+            saved["context"][5],
+        )
+
     def capture_paid_prefix(caller):
         """Reconstruct a genuine completed preparation; no execution authority."""
         from . import quarantine_command_suffix
@@ -576,14 +742,17 @@ def _registry():
             identifier = (
                 f"c-{reconstructed.owner.generation:x}-{entry['start'] + offset:x}"
             )
+            receipt = entry["confirmed_receipts"].get(identifier)
             if (
-                item.get("request_id") != identifier
+                receipt is None
+                or receipt[0] is not item
+                or receipt[1] != canonical_bytes(item)
+                or receipt[2] != item.get("deadline_unix_ms")
+                or type(receipt[3]) is not int
+                or not 200 <= receipt[3] < 300
+                or item.get("request_id") != identifier
                 or item.get("outcome") != "response"
-                or (
-                    item.get("mutation") is not False
-                    and caller._confirmed_control_writes.get(identifier)
-                    != ("broker_authentication", str(caller.run.run_id))
-                )
+                or (item.get("mutation") is not False and receipt[4] is not True)
                 or item.get("uncertain_effect")
                 or type(item.get("deadline_unix_ms")) is not int
             ):
@@ -617,6 +786,7 @@ def _registry():
             (item, canonical_bytes(item)) for item in prefix
         )
         entry["paid_projection"] = canonical_bytes(projected.to_document())
+        entry["recording_confirmations"] = False
 
     def project_prepared_prefix(caller):
         """Conditional detached data; original baseline projection is unchanged."""
@@ -645,6 +815,8 @@ def _registry():
         before_sequence,
         project,
         project_current,
+        bind_response_confirmation,
+        confirm_response,
         capture_paid_prefix,
         project_prepared_prefix,
         require,
@@ -659,6 +831,8 @@ def _registry():
     before_sequence,
     project,
     project_current,
+    bind_response_confirmation,
+    confirm_response,
     capture_paid_prefix,
     project_prepared_prefix,
     require,
