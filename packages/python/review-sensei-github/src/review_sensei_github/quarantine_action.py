@@ -539,11 +539,11 @@ def prepare_quarantine_target(run, authority, command, app, permission):
     from .quarantine_lifecycle_transfer import bind_target
 
     bind_target(target.lifecycle_transfer, target)
-    _require_installed_command_tail(run)
+    _require_installed_command_tail(run, authenticated)
     return target
 
 
-def _require_installed_command_tail(run):
+def _require_installed_command_tail(run, authenticated):
     """Reject a known unsupported finalizer before entering a decision effect.
 
     A cold command's original native envelope is not a full-review promise.
@@ -551,10 +551,15 @@ def _require_installed_command_tail(run):
     manufacture that promise or settle the action as a successful no-op.
     """
     from .publication_recovery import _publication_transport
-    from .quarantine_capacity import installed_capacity
+    from .quarantine_capacity import installed_capacity, native_reserve
+    from .quarantine_origin import require_authenticated_read_owner
 
+    require_authenticated_read_owner(
+        authenticated, run.ledger, run.caller, run.identity
+    )
+    required = native_reserve(authenticated.archive["target_isolation"]) is not None
     transport = _publication_transport(run.ledger.http)
-    if getattr(transport, "_quarantine_capacity_guard", None) is None:
+    if not required and getattr(transport, "_quarantine_capacity_guard", None) is None:
         return
     guard = installed_capacity(run.ledger, run.identity)
     if not guard.complete_tail:
