@@ -453,6 +453,20 @@ class GitHubHttp:
                 before_read=before_read,
                 expected_items=expected_items,
             )
+        from review_sensei.source_registry import require_module_seal
+
+        from . import quarantine_scan_capacity
+
+        require_module_seal(quarantine_scan_capacity)
+        review_walk = quarantine_scan_capacity.capacity_review_walk(self, path)
+        if review_walk is not None:
+            # No adaptive probes/retries: the installed lifetime frontier pays
+            # for this exact safe width, including the final empty/short page.
+            page_sizes = (review_walk.width,)
+            max_requests = min(
+                max_requests if max_requests is not None else MAX_PAGINATION_PAGES,
+                review_walk.requests,
+            )
         requests = 0
         collected: list[Any] = []
         separator = "&" if "?" in path else "?"
@@ -535,6 +549,30 @@ class GitHubHttp:
                 raise GitHubHTTPPaginationLimitError(
                     "GitHub pagination exceeded its expected inventory"
                 )
+            if review_walk is not None:
+                if (
+                    len(
+                        json.dumps(
+                            body, ensure_ascii=True, separators=(",", ":")
+                        ).encode()
+                    )
+                    > MAX_GITHUB_RESPONSE_BYTES
+                ):
+                    raise GitHubHTTPResponseTooLargeError(
+                        "quarantine review page exceeds response bound"
+                    )
+                from review_sensei.source_registry import (
+                    require_instance_source,
+                    require_module_seal,
+                )
+
+                from . import historical_review_census, quarantine_scan_capacity
+
+                # Response code must not replace the selected completion seam.
+                require_module_seal(quarantine_scan_capacity)
+                require_module_seal(historical_review_census)
+                require_instance_source(review_walk, methods=("validate",))
+                review_walk.validate([*collected, *body])
             collected.extend(body)
             if len(body) < page_size:
                 if expected_items is not None and len(collected) != expected_items:
@@ -711,3 +749,8 @@ class GitHubHttp:
             ) from exc
         remaining()
         return bundle
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

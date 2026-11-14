@@ -870,6 +870,8 @@ class SessionRecord:
     historical_assessments: Mapping[str, object] | None = None
     quarantine_lineage: Mapping[str, object] | None = None
     publication_staging: Mapping[str, object] | None = None
+    finding_lifecycle: Mapping[str, object] | None = None
+    trust_enrollment: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
     _digest_shape_input: InitVar[str] = "current"
@@ -1126,11 +1128,22 @@ class SessionRecord:
         if staging is not None:
             from .publication_staging import PublicationStaging
 
-            frontier = PublicationStaging.from_document(staging)
-            if not frontier.complete and (
+            if staging.get("schema_version") == "publication-staging-v3":
+                from .grouped_publication_declarations import GroupedDeclarations
+
+                declared = GroupedDeclarations.from_document(staging)
+                staging_complete = declared.phase == "finished"
+                staging_transaction = declared.transaction_id
+                staging_result = declared.result_sha256
+            else:
+                frontier = PublicationStaging.from_document(staging)
+                staging_complete = frontier.complete
+                staging_transaction = frontier.transaction_id
+                staging_result = frontier.result_sha256
+            if not staging_complete and (
                 self.transaction is None
-                or self.transaction.transaction_id != frontier.transaction_id
-                or self.transaction.result_sha256 != frontier.result_sha256
+                or self.transaction.transaction_id != staging_transaction
+                or self.transaction.result_sha256 != staging_result
                 or self.transaction.phase
                 not in {"publication_pending", "publication_failed"}
             ):
@@ -1151,6 +1164,38 @@ class SessionRecord:
                 raise ReviewInputError(
                     "historical assessment session identity conflicts"
                 )
+        from .finding_lifecycle_store import normalize_reference
+
+        lifecycle = normalize_reference(self.finding_lifecycle)
+        object.__setattr__(self, "finding_lifecycle", lifecycle)
+        if lifecycle is not None:
+            binding = lifecycle["manifest"]["binding"]
+            if (
+                binding["repository"] != self.repository
+                or binding["repository_id"] != self.repository_id
+                or binding["pull_request"] != self.pull_request
+                or binding["generation"] > self.generation
+            ):
+                raise ReviewInputError("finding lifecycle session scope conflicts")
+        from .trust_enrollment import normalize_reference as normalize_trust
+
+        trust = normalize_trust(self.trust_enrollment)
+        object.__setattr__(self, "trust_enrollment", trust)
+        if trust is not None:
+            if self._digest_shape != "current":
+                raise ReviewInputError(
+                    "trust enrollment requires current integrity shape"
+                )
+            original = trust["document"]
+            authority = original["authority"]
+            if (
+                authority["repository"],
+                authority["repository_id"],
+                authority["pull_request"],
+            ) != (self.repository, self.repository_id, self.pull_request) or original[
+                "generation"
+            ] > self.generation:
+                raise ReviewInputError("trust enrollment session scope conflicts")
         expected_payload = {
             "current": self._payload,
             "operator-paused": self._payload_without_dispositions,
@@ -1200,6 +1245,14 @@ class SessionRecord:
         if self.quarantine_lineage is not None:
             payload["quarantine_lineage"] = json.loads(
                 canonical_bytes(self.quarantine_lineage)
+            )
+        if self.trust_enrollment is not None:
+            payload["trust_enrollment"] = json.loads(
+                canonical_bytes(self.trust_enrollment)
+            )
+        if self.finding_lifecycle is not None:
+            payload["finding_lifecycle"] = json.loads(
+                canonical_bytes(self.finding_lifecycle)
             )
         if self.publication_staging is not None:
             payload["publication_staging"] = json.loads(
@@ -1263,6 +1316,8 @@ class SessionRecord:
         historical_assessments: Mapping[str, object] | None = None,
         quarantine_lineage: Mapping[str, object] | None = None,
         publication_staging: Mapping[str, object] | None = None,
+        finding_lifecycle: Mapping[str, object] | None = None,
+        trust_enrollment: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
         normalized_grants = _stored_continuation_grants(continuation_grants)
@@ -1313,8 +1368,16 @@ class SessionRecord:
         from .quarantine_lineage import normalize_lineage
 
         normalized_lineage = normalize_lineage(quarantine_lineage)
+        from .finding_lifecycle_store import normalize_reference
         from .publication_staging import normalize_staging
+        from .trust_enrollment import normalize_reference as normalize_trust
 
+        normalized_trust = normalize_trust(trust_enrollment)
+        if normalized_trust is not None:
+            payload["trust_enrollment"] = normalized_trust
+        normalized_lifecycle = normalize_reference(finding_lifecycle)
+        if normalized_lifecycle is not None:
+            payload["finding_lifecycle"] = normalized_lifecycle
         normalized_staging = normalize_staging(publication_staging)
         if normalized_staging is not None:
             payload["publication_staging"] = normalized_staging
@@ -1362,6 +1425,8 @@ class SessionRecord:
             historical_assessments=normalized_hold,
             quarantine_lineage=normalized_lineage,
             publication_staging=normalized_staging,
+            finding_lifecycle=normalized_lifecycle,
+            trust_enrollment=normalized_trust,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -1443,6 +1508,10 @@ class SessionRecord:
             raise ReviewInputError(
                 "historical assessments cannot be a null absence marker"
             )
+        if "trust_enrollment" in value and value["trust_enrollment"] is None:
+            raise ReviewInputError("trust enrollment cannot be a null absence marker")
+        if "finding_lifecycle" in value and value["finding_lifecycle"] is None:
+            raise ReviewInputError("finding lifecycle cannot be a null absence marker")
         if "publication_staging" in value and value["publication_staging"] is None:
             raise ReviewInputError(
                 "publication staging cannot be a null absence marker"
@@ -1476,6 +1545,8 @@ class SessionRecord:
             or "historical_assessments" in value
             or "quarantine_lineage" in value
             or "publication_staging" in value
+            or "trust_enrollment" in value
+            or "finding_lifecycle" in value
             or "rescan_state" in value
             else "operator-paused"
             if has_operator_paused
@@ -1568,9 +1639,15 @@ class SessionRecord:
             publication_staging=cast(
                 Mapping[str, object] | None, value.get("publication_staging")
             ),
+            finding_lifecycle=cast(
+                Mapping[str, object] | None, value.get("finding_lifecycle")
+            ),
+            trust_enrollment=cast(
+                Mapping[str, object] | None, value.get("trust_enrollment")
+            ),
             _digest_shape_input=digest_shape,
         )
-        validate_public_document(record.to_dict(), "session-record")
+        validate_public_document(dict(value), "session-record")
         return record
 
     @classmethod
@@ -1601,6 +1678,8 @@ class SessionRecord:
         historical_assessments: Mapping[str, object] | None = None,
         quarantine_lineage: Mapping[str, object] | None = None,
         publication_staging: Mapping[str, object] | None = None,
+        finding_lifecycle: Mapping[str, object] | None = None,
+        trust_enrollment: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         created = _aware_now(now)
         if isinstance(expires_at, str):
@@ -1644,6 +1723,8 @@ class SessionRecord:
             historical_assessments=historical_assessments,
             quarantine_lineage=quarantine_lineage,
             publication_staging=publication_staging,
+            finding_lifecycle=finding_lifecycle,
+            trust_enrollment=trust_enrollment,
         )
 
     def rollover_api_accounting(
@@ -1848,7 +1929,15 @@ class SessionRecord:
         historical_assessments: Mapping[str, object] | None | object = ...,
         quarantine_lineage: Mapping[str, object] | None | object = ...,
         publication_staging: Mapping[str, object] | None | object = ...,
+        finding_lifecycle: Mapping[str, object] | None | object = ...,
+        trust_enrollment: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
+        from .trust_enrollment import require_successor as require_trust_successor
+
+        next_trust = (
+            self.trust_enrollment if trust_enrollment is ... else trust_enrollment
+        )
+        require_trust_successor(self.trust_enrollment, next_trust)
         from .quarantine_lineage import require_lineage_successor
 
         next_lineage = (
@@ -1863,6 +1952,12 @@ class SessionRecord:
             else publication_staging
         )
         require_staging_successor(self.publication_staging, next_staging)
+        from .finding_lifecycle_store import require_reference_successor
+
+        next_lifecycle = (
+            self.finding_lifecycle if finding_lifecycle is ... else finding_lifecycle
+        )
+        require_reference_successor(self.finding_lifecycle, next_lifecycle)
         updated = _format_datetime(_aware_now(now))
         from .historical_assessments import require_hold_successor
 
@@ -1969,6 +2064,8 @@ class SessionRecord:
             ),
             quarantine_lineage=cast(Mapping[str, object] | None, next_lineage),
             publication_staging=cast(Mapping[str, object] | None, next_staging),
+            finding_lifecycle=cast(Mapping[str, object] | None, next_lifecycle),
+            trust_enrollment=cast(Mapping[str, object] | None, next_trust),
             convergence_history=(
                 self.convergence_history
                 if convergence_history is ...
@@ -1980,6 +2077,10 @@ class SessionRecord:
 def _reserve_publication_staging(
     shell: dict[str, object], record: SessionRecord
 ) -> None:
+    if record.finding_lifecycle is not None:
+        from .finding_lifecycle_store import MAX_REFERENCE_BYTES
+
+        shell["finding_lifecycle"] = "f" * MAX_REFERENCE_BYTES
     if record.api_run_accounting is not None or record.publication_staging is not None:
         from .publication_staging import MAX_STAGING_BYTES
 
@@ -2638,10 +2739,23 @@ def prepare_review_transaction(
         raise ReviewInputError("review transaction configuration digest is invalid")
     if not re.fullmatch(r"[a-f0-9]{64}", evidence_digest):
         raise ReviewInputError("review transaction evidence digest is invalid")
-    prepared = prepare_session_round(
+    if not isinstance(policy, ReviewConvergencePolicy):
+        raise ReviewInputError("review convergence policy is invalid")
+    from . import reservation_transaction_fusion
+    from .source_registry import require_module_seal
+
+    require_module_seal(reservation_transaction_fusion)
+    prepared, fused = reservation_transaction_fusion.reserve_transaction(
         ledger,
         identity,
         policy,
+        binding={
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "policy_digest": policy.digest(),
+            "configuration_digest": configuration_digest,
+            "evidence_digest": evidence_digest,
+        },
         reservation_id=reservation_id,
         now=now,
         head_sha=head_sha,
@@ -2661,6 +2775,16 @@ def prepare_review_transaction(
         reservation_id=prepared.reservation_id,
         generation=prepared.record.generation,
     )
+
+    if fused:
+        if prepared.record.transaction != transaction:
+            raise ReviewInputError("atomic reservation transaction changed")
+        return PreparedSessionRound(
+            record=prepared.record,
+            decision=prepared.decision,
+            reservation_id=prepared.reservation_id,
+            transaction=transaction,
+        )
 
     def attach(record: SessionRecord) -> SessionRecord:
         if record.generation != prepared.record.generation:
@@ -3505,6 +3629,36 @@ def record_admitted_blocker_progress(
     retryable publication failure.
     """
 
+    mutate = _admitted_blocker_progress_mutation(
+        ledger,
+        identity,
+        transaction,
+        blocker_set_sha256=blocker_set_sha256,
+        blocker_count=blocker_count,
+        suppress_publication=suppress_publication,
+        now=now,
+    )
+    return ledger.replace(identity, mutate, now=now)
+
+
+def _admitted_blocker_progress_mutation(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    transaction: ReviewTransaction,
+    *,
+    blocker_set_sha256: str,
+    blocker_count: int,
+    suppress_publication: bool,
+    now: datetime | None = None,
+) -> Callable[[SessionRecord], SessionRecord]:
+    """Persist one post-admission blocker identity and optionally hand off.
+
+    The only writer is the publication boundary after it has admitted the
+    exact result it will hand to the GitHub publisher. A suppression and its
+    evidence are consequently one compare-and-swap transition, rather than a
+    retryable publication failure.
+    """
+
     if not isinstance(transaction, ReviewTransaction):
         raise ReviewInputError("review transaction is invalid")
     if not isinstance(blocker_set_sha256, str) or not _SHA256.fullmatch(
@@ -3644,7 +3798,7 @@ def record_admitted_blocker_progress(
             convergence_history=updated_history,
         )
 
-    return ledger.replace(identity, mutate, now=now)
+    return mutate
 
 
 def reclaim_abandoned_review_transaction(
@@ -4277,12 +4431,31 @@ def disposition_snapshot_capacity(record: SessionRecord) -> int:
     )
     if record.assessment_queue is not None:
         shell["assessment_queue"] = "q" * MAX_ASSESSMENT_QUEUE_ROOT_BYTES
+    action = (
+        record.api_run_accounting.get("action")
+        if isinstance(record.api_run_accounting, Mapping)
+        else None
+    )
+    shell_bytes = len(canonical_bytes(shell))
+    if (
+        record.finding_lifecycle is not None
+        and isinstance(action, Mapping)
+        and action.get("phase") == "pending"
+    ):
+        from .finding_lifecycle_store import prospective_terminal_history_bytes
+
+        # Lifecycle checkpoints reprice every prospective reference (including
+        # maximal future manifests and semantic metadata) before native effects.
+        # Keep full staging and terminal domains; this exact reference is not
+        # permission for later unpriced growth. CAS repeats this same guard.
+        shell["finding_lifecycle"] = record.finding_lifecycle
+        shell_bytes = prospective_terminal_history_bytes(shell)
     return max(
         0,
         min(
             MAX_DISPOSITION_SNAPSHOT_ROOT_BYTES,
             MAX_SESSION_RECORD_BYTES
-            - len(canonical_bytes(shell))
+            - shell_bytes
             - len(',"disposition_snapshot":')
             - MAX_HISTORY_ENVELOPE_RESERVE_BYTES,
         ),
@@ -4571,6 +4744,46 @@ def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> No
     from .publication_staging import require_staging_successor
 
     require_staging_successor(before.publication_staging, after.publication_staging)
+    from .finding_lifecycle_store import (
+        is_history_metadata_amendment,
+        require_reference_successor,
+        require_terminal_history_amendment,
+    )
+
+    metadata_amendment = (
+        before.finding_lifecycle != after.finding_lifecycle
+        and is_history_metadata_amendment(
+            before.finding_lifecycle, after.finding_lifecycle
+        )
+    )
+    require_reference_successor(before.finding_lifecycle, after.finding_lifecycle)
+    if metadata_amendment:
+        require_terminal_history_amendment(before, after)
+    if (
+        before.finding_lifecycle != after.finding_lifecycle
+        and after.finding_lifecycle is not None
+        and not metadata_amendment
+    ):
+        if (
+            after.finding_lifecycle["previous_root_sha256"] != before.record_sha256
+            or cast(Mapping[str, Any], after.finding_lifecycle)["manifest"]["binding"][
+                "generation"
+            ]
+            != after.generation
+        ):
+            raise ReviewInputError("finding lifecycle root predecessor conflicts")
+        lifecycle_reference = cast(Mapping[str, Any], after.finding_lifecycle)
+        binding = lifecycle_reference["manifest"]["binding"]
+        from .finding_lifecycle_store import require_accepted_operation
+
+        require_accepted_operation(
+            before,
+            lifecycle_reference["operation_id"],
+            base_sha=binding["base_sha"],
+            head_sha=binding["head_sha"],
+            policy_digest=binding["policy_digest"],
+            configuration_digest=binding["configuration_digest"],
+        )
     if before.api_run_accounting is not None:
         if after.api_run_accounting is None:
             raise ReviewInputError("API accounting cannot be silently discarded")
@@ -4592,7 +4805,16 @@ def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> No
                 else before.rollover_api_accounting(after.api_run_accounting)
             )
             if expected.record_sha256 != after.record_sha256:
-                raise ReviewInputError("caller run rollover discarded session state")
+                expected_document, actual_document = expected.to_dict(), after.to_dict()
+                actual_document["finding_lifecycle"] = expected_document.get(
+                    "finding_lifecycle"
+                )
+                expected_document.pop("record_sha256", None)
+                actual_document.pop("record_sha256", None)
+                if not metadata_amendment or actual_document != expected_document:
+                    raise ReviewInputError(
+                        "caller run rollover discarded session state"
+                    )
         else:
             previous.require_successor(current)
     if before.disposition_snapshot is not None and after.disposition_snapshot is None:
@@ -4903,6 +5125,7 @@ class LocalSessionLedger:
         enable_partition_writes: bool = False,
         enable_history_graph: bool = False,
         enable_disposition_snapshot_writes: bool = False,
+        enable_finding_lifecycle_writes: bool = False,
     ) -> None:
         if not isinstance(root, Path):
             raise ReviewInputError("session ledger root is invalid")
@@ -4914,6 +5137,7 @@ class LocalSessionLedger:
         self.enable_partition_writes = enable_partition_writes
         self.enable_history_graph = enable_history_graph
         self.enable_disposition_snapshot_writes = enable_disposition_snapshot_writes
+        self.enable_finding_lifecycle_writes = enable_finding_lifecycle_writes
         self._history_documents: dict[str, bytes] = {}
         self._history_associations: dict[object, Any] = {}
         self._shared_control_budget = evidence_budget is not None
@@ -4931,6 +5155,7 @@ class LocalSessionLedger:
             self._shared_control_budget
             or self.enable_partition_writes
             or self.enable_disposition_snapshot_writes
+            or self.enable_finding_lifecycle_writes
         )
 
     def _dispatch_evidence(self, label: str, *, fence: bool = False) -> None:
@@ -4949,7 +5174,8 @@ class LocalSessionLedger:
         history = document.get("convergence_history")
         baseline = history.get("baseline") if isinstance(history, Mapping) else None
         if (
-            "assessment_queue" in document
+            "finding_lifecycle" in document
+            or "assessment_queue" in document
             or "disposition_snapshot" in document
             or (
                 isinstance(baseline, Mapping)
@@ -5459,9 +5685,16 @@ class LocalSessionLedger:
         item_count: int,
         max_manifest_bytes: int,
     ) -> dict[str, object]:
-        if not self.enable_partition_writes and not (
-            self.enable_disposition_snapshot_writes
-            and binding.get("purpose") == "dispositions"
+        if (
+            not self.enable_partition_writes
+            and not (
+                self.enable_disposition_snapshot_writes
+                and binding.get("purpose") == "dispositions"
+            )
+            and not (
+                self.enable_finding_lifecycle_writes
+                and binding.get("purpose") == "finding-lifecycle"
+            )
         ):
             raise ReviewInputError(
                 "partition writers require explicit reader-first enablement"
@@ -5473,6 +5706,15 @@ class LocalSessionLedger:
             or binding.get("producer") != self.evidence_producer()
         ):
             raise ReviewInputError("local partition binding does not match")
+        if binding.get("purpose") == "finding-lifecycle":
+            from .bounded_evidence import inline_manifest
+
+            inlined = inline_manifest(document, binding=binding, item_count=item_count)
+            if (
+                inlined is not None
+                and len(canonical_bytes(inlined)) <= max_manifest_bytes
+            ):
+                return inlined
         directory, sizes = self._retained_evidence_parts(identity)
         prospective_parts = partition_evidence(
             document, binding=binding, item_count=item_count
@@ -6108,6 +6350,75 @@ class LocalSessionLedger:
             )
         return updated
 
+    def replace_finding_lifecycle_inline(
+        self,
+        identity: SessionIdentity,
+        mutate: Callable[[SessionRecord], SessionRecord],
+        *,
+        record: SessionRecord,
+    ) -> SessionRecord:
+        """Commit a selected inline lifecycle with one fresh prewrite fence.
+
+        The supplied record is only a prospective mutation input, not authority.
+        Its exact digest/generation must match a freshly parsed on-disk root
+        immediately before activation. This omits the redundant initial load,
+        not the CAS fence, durable write, or final readback. The adapter retains
+        its documented single-writer requirement and claims no distributed lock.
+        """
+        from .finding_lifecycle_store import _inline_local_commit_calls
+
+        if (
+            type(self) is not LocalSessionLedger
+            or not self.enable_finding_lifecycle_writes
+            or type(record) is not SessionRecord
+            or record.identity() != identity
+            or _inline_local_commit_calls(self, record) is None
+        ):
+            raise ReviewInputError("local inline lifecycle commit is unsupported")
+        updated = mutate(record)
+        if type(updated) is not SessionRecord or updated.finding_lifecycle is None:
+            raise ReviewInputError("local inline lifecycle mutation is invalid")
+        manifest = updated.finding_lifecycle.get("manifest")
+        if (
+            not isinstance(manifest, Mapping)
+            or manifest.get("encoding") != INLINE_ENCODING
+        ):
+            raise ReviewInputError(
+                "local inline lifecycle mutation requires inline evidence"
+            )
+        before, after = record.to_dict(), updated.to_dict()
+        for name in ("generation", "record_sha256", "updated_at", "finding_lifecycle"):
+            before.pop(name, None)
+            after.pop(name, None)
+        if before != after or updated.generation != record.generation + 1:
+            raise ReviewInputError(
+                "local inline lifecycle mutation changed unrelated authority"
+            )
+        _history_legacy_write_guard(self, record)
+        _validate_queue_retention(record, updated)
+        _history_legacy_write_guard(self, updated)
+        current_document = self._read_document(self._path(identity), fence=True)
+        if current_document is None:
+            raise ReviewInputError("session generation conflict before activation")
+        current = SessionRecord.from_dict(current_document)
+        if current.expired():
+            raise ReviewInputError("session record is expired")
+        if (
+            current.generation != record.generation
+            or current.record_sha256 != record.record_sha256
+        ):
+            raise ReviewInputError("session generation conflict before activation")
+        self._write(identity, updated)
+        persisted = self._read_document(self._path(identity), fence=True)
+        if (
+            persisted is None
+            or SessionRecord.from_dict(persisted).record_sha256 != updated.record_sha256
+        ):
+            raise ReviewInputError(
+                "session activation readback is ambiguous or conflicting"
+            )
+        return updated
+
     # Kept as a compatibility shim for older in-process callers. New code
     # must use the public CAS seam above.
     def _replace(
@@ -6508,3 +6819,14 @@ def resolve_local_session_ledger(
     except (OSError, TypeError, ValueError) as exc:
         raise ReviewInputError("session ledger path is invalid") from exc
     return LocalSessionLedger(root)
+
+
+from .reservation_transaction_fusion import install as _install_reservation_fusion  # noqa: E402
+
+_install_reservation_fusion(globals())
+del _install_reservation_fusion
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

@@ -1,8 +1,10 @@
 """Issued exact-root startup tail: real stored/absent archive acknowledgments."""
 
 import copy
+import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
@@ -17,6 +19,17 @@ from test_quarantine_activation import registered_resource
 from test_quarantine_published_tail_journey import PublishedTailJourneyFixture
 
 from review_sensei.errors import ReviewInputError
+
+
+@contextmanager
+def observe_original_calls(observer):
+    """Keep the original source methods installed while inspecting their calls."""
+    previous = sys.getprofile()
+    try:
+        sys.setprofile(observer)
+        yield
+    finally:
+        sys.setprofile(previous)
 
 
 class ArchiveFaultFixture(PublishedTailJourneyFixture):
@@ -113,9 +126,13 @@ class QuarantineRolloverTests(unittest.TestCase):
                     self.assertIsNone(read_startup_part(ledger, identity, "999999999"))
                     self.assertEqual(len(f.trace), start)
                     captured.append((ledger, identity, identifier, snapshot))
-                    return original(ledger, identity, previous, *args, **kwargs)
 
-                with patch.object(api_run_history, "retain_previous_run", retain):
+                def observe(frame, event, arg):
+                    if frame.f_code is original.__code__ and event == "call":
+                        values = frame.f_locals
+                        retain(values["ledger"], values["identity"], values["previous"])
+
+                with observe_original_calls(observe):
                     self.assertEqual(f.invoke_command(), 0, f.error)
                 self.assertEqual(len(captured), 1)
                 ledger, identity, identifier, snapshot = captured[0]
@@ -159,22 +176,21 @@ class QuarantineRolloverTests(unittest.TestCase):
                     original_preflight = CallerRunBudget.preflight
                     original_accept = ApiRunRequestTransport._accept_activation
 
-                    def preflight(budget, calls):
-                        if budget.caller._state is None and calls == 17:
-                            bounded.append({"start": len(f.trace), "calls": calls})
-                        return original_preflight(budget, calls)
+                    def observe(frame, event, arg):
+                        if event != "call":
+                            return
+                        if frame.f_code is original_preflight.__code__:
+                            budget, calls = (
+                                frame.f_locals["self"],
+                                frame.f_locals["calls"],
+                            )
+                            if budget.caller._state is None and calls == 17:
+                                bounded.append({"start": len(f.trace), "calls": calls})
+                        elif frame.f_code is original_accept.__code__:
+                            if bounded and "end" not in bounded[-1]:
+                                bounded[-1]["end"] = len(f.trace)
 
-                    def accept(caller, ledger, record):
-                        if bounded and "end" not in bounded[-1]:
-                            bounded[-1]["end"] = len(f.trace)
-                        return original_accept(caller, ledger, record)
-
-                    with (
-                        patch.object(CallerRunBudget, "preflight", preflight),
-                        patch.object(
-                            ApiRunRequestTransport, "_accept_activation", accept
-                        ),
-                    ):
+                    with observe_original_calls(observe):
                         result = f.invoke_command()
                     self.assertEqual(
                         result,

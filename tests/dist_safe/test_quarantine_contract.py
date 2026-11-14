@@ -18,6 +18,10 @@ if not is_disarmed() and not Path(
     raise ImportError("quarantine qualification requires the installed hosted adapter")
 
 
+# Reviewed deterministic process-local construction; runtime wrappers stay intact.
+INSTALLED_SUITE_HOOK_CONTRACT = ("reproducible-module-local-v1", ())
+
+
 def load_tests(loader, tests, pattern):
     # Publication proofs require the optional pinned Sigstore/PyPI verifiers.
     # CI runs these modules after installing those tools; keep this consumer

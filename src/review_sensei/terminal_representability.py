@@ -32,12 +32,10 @@ from .bounded_evidence import (
     INLINE_ENCODING,
     MAX_MANIFEST_BYTES,
     MAX_PART_READS,
-    MAX_PARTITION_DECODED_BYTES,
     PARTITION_ENCODING,
     AuthenticatedPart,
     EvidenceReadBudget,
     canonical_bytes,
-    encode_evidence,
     evidence_manifest,
     inline_manifest,
     partition_evidence,
@@ -640,13 +638,17 @@ def evaluate_terminal_action_representability(
         "outcome": _json_clone(dict(outcome)),
         "result": _json_clone(dict(result_document)),
     }
-    envelope_bytes = len(canonical_bytes(envelope))
-    payload = encode_evidence(envelope, max_decoded_bytes=MAX_PARTITION_DECODED_BYTES)
+    from .action_result_codec import encode_action_result_carrier
+
+    carrier = encode_action_result_carrier(
+        envelope,
+        reference_history=(
+            record_obj is not None and record_obj.finding_lifecycle is not None
+        ),
+    )
+    payload = carrier["payload"]
+    envelope_bytes = payload["decoded_bytes"]
     payload_bytes = len(canonical_bytes(payload))
-    carrier = {
-        "schema_version": ACTION_RESULT_ENVELOPE_VERSION,
-        "payload": payload,
-    }
     carrier_bytes = len(canonical_bytes(carrier))
     normalized_binding = dict(binding)
     manifest = inline_manifest(carrier, binding=normalized_binding, item_count=1)
@@ -1326,9 +1328,11 @@ def preview_session_command_representability(
     accounting_version: str = ACCOUNTING_VERSION,
     pricing: ActionSettlementPricing | None = None,
     future_reserve_bytes: int = 0,
+    result_metadata: Mapping[str, object] | None = None,
     consumed_grants: Sequence[str] = (),
     allow_v3_writer: bool = False,
     now: datetime | None = None,
+    capacity_details: dict[str, object] | None = None,
 ) -> tuple[
     MaintainerCommandResult | None, SessionRecord | None, TerminalRepresentabilityReport
 ]:
@@ -1340,6 +1344,8 @@ def preview_session_command_representability(
     ``evidence_budget`` physical calls.
     """
 
+    if capacity_details is not None:
+        capacity_details.clear()
     effective_pricing = pricing or ActionSettlementPricing()
     reserve = _non_negative_int(future_reserve_bytes, field="future_reserve_bytes")
     v3_enabled = _exact_bool(allow_v3_writer, field="allow_v3_writer")
@@ -1617,11 +1623,24 @@ def preview_session_command_representability(
             "reason": "status" if command.action == "status" else "no_change",
         }
     )
+    prospective_result = asdict(preview_result)
+    if result_metadata is not None:
+        # Data-only capacity projection; never a command output or authority.
+        metadata = _json_clone(dict(result_metadata))
+        if len(canonical_bytes(metadata)) > MAX_MANIFEST_BYTES:
+            raise ReviewInputError(
+                "prospective result metadata exceeds bounded envelope"
+            )
+        if set(metadata).intersection(prospective_result):
+            raise ReviewInputError(
+                "prospective result metadata conflicts with command result"
+            )
+        prospective_result.update(metadata)
     report = evaluate_terminal_action_representability(
         identity=identity,
         intent_sha256=intent_sha256,
         outcome=outcome,
-        result_document=asdict(preview_result),
+        result_document=prospective_result,
         binding=binding,
         current_record=preview_record,
         accounting_version=accounting_version,
@@ -1635,6 +1654,57 @@ def preview_session_command_representability(
         resolved_dispositions=resolved_dispositions,
         intermediate_record=current_record,
     )
+    if (
+        result_metadata is not None
+        and report.representable
+        and (preview_record is None or preview_record.finding_lifecycle is None)
+    ):
+        # Future semantic digests can change entropy without changing width.
+        # Do not price repeated preview hashes as guaranteed compression savings.
+        size = report.envelope_bytes
+        packed_bound = size + (size >> 12) + (size >> 14) + (size >> 25) + 13
+        payload_bound = {
+            "encoding": "zlib-json-v1",
+            "decoded_bytes": size,
+            "sha256": "f" * 64,
+            "data": "A" * (4 * ((packed_bound + 2) // 3)),
+        }
+        carrier_bound = {
+            "schema_version": ACTION_RESULT_ENVELOPE_VERSION,
+            "payload": payload_bound,
+        }
+        if inline_manifest(carrier_bound, binding=dict(binding), item_count=1) is None:
+            report = replace(
+                report,
+                representable=False,
+                refusal_code="carrier_inline_bound_exceeded",
+                reason="prospective semantic result cannot guarantee the original inline carrier bound",
+                recovery=_prescribe_terminal_recovery(
+                    "carrier_inline_bound_exceeded", action_name=command.action
+                ),
+            )
+    if capacity_details is not None and report.representable:
+        # Detached sizing data only. Synthetic part identifiers must never be
+        # read from a real ledger or treated as committed evidence.
+        capacity_details.update(
+            dispositions=(
+                None
+                if resolved_dispositions is None
+                else canonical_bytes(list(resolved_dispositions))
+            ),
+            staged_parts=tuple(
+                canonical_bytes(document)
+                for document, _producer in sandbox_ledger._parts.values()
+            ),
+            pricing=asdict(effective_pricing),
+            original_root=(
+                None if current_record is None else current_record.record_sha256
+            ),
+            preview_root=(
+                None if preview_record is None else preview_record.record_sha256
+            ),
+            intent_sha256=intent_sha256,
+        )
     return preview_result, preview_record, report
 
 
@@ -1705,3 +1775,8 @@ __all__ = [
     "require_terminal_action_representable",
     "with_terminal_action_manifest",
 ]
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

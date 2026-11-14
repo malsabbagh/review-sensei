@@ -3,6 +3,10 @@
 Host callbacks own original operation authorization, serialized generation
 mutation and durable reconciliation. A plan is independent expected context,
 not a grant. Unknown activation must retain the original attempt as unknown.
+
+This auxiliary v4 prose projection is not the native finding producer: it cannot
+advance a durable finding session, reduce hidden obligations, or mint native
+thread receipts. Grouped native publication uses the ordinary publisher instead.
 """
 
 from __future__ import annotations
@@ -219,6 +223,36 @@ def publish_partitioned(
     repository = cast(str, binding["repository"])
     repository_id = cast(int, binding["repository_id"])
     pull_request = cast(int, binding["pull_request"])
+    key = (repository_id, pull_request)
+    journal = getattr(publisher, "_finding_lifecycle_journal", None)
+    journal_identity = getattr(journal, "identity", None)
+    native_context = getattr(publisher, "_native_finding_context", None)
+    if (
+        key in getattr(publisher, "_active_window_states", {})
+        or key in getattr(publisher, "_drift_states", {})
+        or key in getattr(publisher, "_unknown_effect_holds", set())
+        or (
+            journal_identity is not None
+            and (journal_identity.repository_id, journal_identity.pull_request) == key
+        )
+        or (
+            isinstance(native_context, Mapping)
+            and (
+                native_context.get("repository_id"),
+                native_context.get("pull_request"),
+            )
+            == key
+        )
+    ):
+        # The host's human-inventory manifest is not session authority. Its fixed
+        # activation generation cannot absorb finding checkpoints, and its prose
+        # reviews do not supply inline thread receipts. Refuse before host fences,
+        # reads, staging, checks or native effects rather than replace a complete
+        # finding root with a human-only projection of this round's visible rows.
+        raise ReviewInputError(
+            "partitioned prose cannot advance an enrolled finding lifecycle; "
+            "use ordinary authenticated native finding publication"
+        )
     base_sha = cast(str, binding["base_sha"])
     head_sha = cast(str, binding["head_sha"])
     if binding["policy_digest"] != convergence_policy.digest() or binding[

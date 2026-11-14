@@ -140,3 +140,22 @@ def remove_hold_notice(text):
         text,
         flags=re.DOTALL,
     )
+
+
+from .materialized_publication_phase import (  # noqa: E402
+    install_hold_reader as _install_materialized_reader,
+)
+
+_install_materialized_reader(QuarantineHoldReader)
+del _install_materialized_reader
+
+
+from .quarantine_pr_observation import install_hold_reader as _install_pr_hold  # noqa: E402
+
+_install_pr_hold(QuarantineHoldReader)
+del _install_pr_hold
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

@@ -607,3 +607,8 @@ def full_inline_envelope() -> dict[str, int]:
         + PART_RESPONSE_FRAMING_BYTES
         + MIDDLE_METADATA_BYTES,
     }
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

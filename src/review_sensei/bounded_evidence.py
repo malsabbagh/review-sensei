@@ -249,6 +249,7 @@ def validate_binding(value: object) -> dict[str, object]:
         "evidence",
         "queue",
         "dispositions",
+        "finding-lifecycle",
     }:
         raise ReviewInputError("partition purpose is invalid")
     if value["schema_version"] != "1.0":
@@ -890,3 +891,8 @@ def decode_evidence(
         RecursionError,
     ) as exc:
         raise ReviewInputError("encoded evidence is invalid") from exc
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

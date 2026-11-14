@@ -1,10 +1,10 @@
 """Original public computation → exact owned event/parts source validation."""
 
 import copy
+import hashlib
 import json
 import tempfile
 import unittest
-from contextlib import nullcontext
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -103,19 +103,26 @@ class AcceptedResultTests(unittest.TestCase):
                         "blocking": False,
                     }
                 ]
+                if overflow:
+                    # Forty distinct, valid 256-character symbols exceed the
+                    # original 11,264-byte compressed baseline allowance.
+                    # Keep every finding and the real source/capacity writer.
+                    f.provider_comments = [
+                        {
+                            **f.provider_comments[0],
+                            "body": f"Preserve independent original explanation {i}.",
+                            "symbol": "".join(
+                                hashlib.sha256(f"identity-{i}-{j}".encode()).hexdigest()
+                                for j in range(4)
+                            ),
+                        }
+                        for i in range(40)
+                    ]
                 for run in range(2 if not overflow else 1):
-                    capacity = (
-                        patch(
-                            "review_sensei.session.checkpoint_baseline_capacity",
-                            return_value=128,
-                        )
-                        if overflow
-                        else nullcontext()
-                    )
-                    with capacity:
-                        self.assertEqual(f.invoke(), 1 if overflow else 0, f.error)
+                    self.assertEqual(f.invoke(), 1 if overflow else 0, f.error)
                     if overflow:
                         self.assertIn("baseline_capacity_exceeded", f.error)
+                        self.assertIn('"reasons": ["encoded-bytes"]', f.error)
                     tx = parse_session_comment(
                         f.comment["body"], identity=f.selected.identity
                     ).transaction

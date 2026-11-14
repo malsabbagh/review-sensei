@@ -640,7 +640,7 @@ def load_tests(loader,tests,pattern): return tests
             for line in step.get("run", "").splitlines()
             if "scripts/run_checkout_tests.py" in line
         ]
-        self.assertEqual(len(commands), 3)
+        self.assertEqual(len(commands), 4)
         for text in commands:
             command = shlex.split(text)
             self.assertEqual(

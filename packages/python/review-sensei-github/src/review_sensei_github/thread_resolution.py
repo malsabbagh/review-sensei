@@ -335,31 +335,25 @@ class FindingThreadResolver:
         except (GitHubHTTPError, AttributeError, TypeError):
             return False
 
-    def resolve(
+    def _discover_candidates(
         self,
         *,
-        token: str,
-        repository: str,
-        repository_id: int,
-        pull_request: int,
-        head_sha: str,
-        base_sha: str,
-        app_slug: str,
-        instances: frozenset[str],
-        fence: Callable[[], bool],
-        records: Sequence[Mapping[str, Any]] = (),
-        supersede: Mapping[str, str] | None = None,
-        skip_resolved: bool = False,
-        cleanup_budget: EvidenceReadBudget | None = None,
-        observer: OperationObserver | None = None,
-        cleanup_token_provider: Callable[[], str] | None = None,
-        root_reader: Callable[[], Sequence[Mapping[str, Any]] | None] | None = None,
-    ) -> ThreadResolutionResult:
+        token,
+        repository,
+        repository_id,
+        pull_request,
+        head_sha,
+        base_sha,
+        app_slug,
+        instances,
+        supersede=None,
+        root_reader=None,
+    ):
+        """Read-only complete discovery shared by planning and execution.
 
-        if not instances and not supersede:
-            return ThreadResolutionResult()
-        if observer is not None:
-            observer.at("cleanup.discovery")
+        Returned candidates convey no mutation authority. Execution always
+        repeats its existing per-target source and live authority fences.
+        """
         owner, name = repository.split("/", 1)
         after = None
         candidates = []
@@ -443,7 +437,112 @@ class FindingThreadResolver:
                 raise GitHubPublicationError(
                     "thread resolution pagination exceeded configured limit"
                 )
-        resolved, unconfirmed = [], []
+        return candidates
+
+    def plan_capacity(
+        self,
+        *,
+        token,
+        repository,
+        repository_id,
+        pull_request,
+        head_sha,
+        base_sha,
+        app_slug,
+        instances,
+        batch_fence_calls,
+        records=(),
+        skip_resolved=True,
+        cleanup_capability_required=True,
+        root_reader=None,
+    ):
+        """Discover exact cleanup work without acquiring or using write authority."""
+        if type(batch_fence_calls) is not int or batch_fence_calls < 0:
+            raise ReviewInputError("thread cleanup planning read tail is unqualified")
+        candidates = self._discover_candidates(
+            token=token,
+            repository=repository,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            app_slug=app_slug,
+            instances=instances,
+            root_reader=root_reader,
+        )
+        found = {instance for _, _, instance, old in candidates if not old}
+        if instances - found:
+            raise ReviewInputError("thread cleanup planning evidence is incomplete")
+        mutations = [item for item in candidates if not item[0]["isResolved"]]
+        visits = [
+            item for item in candidates if not (skip_resolved and item[0]["isResolved"])
+        ]
+
+        def authentication_calls(item):
+            return (
+                1
+                + batch_fence_calls
+                + sum(record["instance"] == item[2] for record in records)
+            )
+
+        native_calls = sum(authentication_calls(item) for item in visits)
+        native_calls += 2 * len(mutations)
+        if mutations and cleanup_capability_required:
+            native_calls += 1 + authentication_calls(mutations[0])
+        requests = tuple(
+            (
+                "POST",
+                "/graphql",
+                {
+                    "operationName": "ResolveReviewThread",
+                    "query": _MUTATION,
+                    "variables": {"input": {"threadId": item[0]["id"]}},
+                },
+            )
+            for item in mutations
+        )
+        return requests, native_calls
+
+    def resolve(
+        self,
+        *,
+        token: str,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        app_slug: str,
+        instances: frozenset[str],
+        fence: Callable[[], bool],
+        records: Sequence[Mapping[str, Any]] = (),
+        supersede: Mapping[str, str] | None = None,
+        skip_resolved: bool = False,
+        cleanup_budget: EvidenceReadBudget | None = None,
+        observer: OperationObserver | None = None,
+        cleanup_token_provider: Callable[[], str] | None = None,
+        root_reader: Callable[[], Sequence[Mapping[str, Any]] | None] | None = None,
+        batch_fence_calls: int | None = None,
+    ) -> ThreadResolutionResult:
+
+        if not instances and not supersede:
+            return ThreadResolutionResult()
+        if observer is not None:
+            observer.at("cleanup.discovery")
+        candidates = self._discover_candidates(
+            token=token,
+            repository=repository,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            app_slug=app_slug,
+            instances=instances,
+            supersede=supersede,
+            root_reader=root_reader,
+        )
+        resolved: list[str] = []
+        unconfirmed: list[str] = []
         found = {instance for _, _, instance, old in candidates if not old}
         if observer is not None and instances - found:
             observer.missing_evidence()
@@ -454,143 +553,255 @@ class FindingThreadResolver:
                 - {node["id"] for node, _, _, old in candidates if old}
             )
         )
-        cleanup_token: str | None = None
-        for position, (node, root, instance, old) in enumerate(candidates):
-            identity = node["id"] if old else instance
-            assert isinstance(identity, str)
-            if skip_resolved and node["isResolved"]:
-                # Complete discovery above authenticated this root's App and
-                # exact scope. No write is needed. The opted-in caller still
-                # owns fresh final approval fences; this observation grants
-                # no new decision and never resolves an unvisited thread.
-                resolved.append(identity)
-                continue
+        # Discovery is complete. Capacity data cannot authorize any target:
+        # every source/root/fence below is still repeated before dispatch.
+        mutation_candidates = [item for item in candidates if not item[0]["isResolved"]]
+        ordered_batch = None
+        batch_preflight = getattr(self.http, "preflight_native_batch", None)
+        if len(mutation_candidates) > 1 and callable(batch_preflight):
             try:
-                if observer is not None:
-                    observer.at("cleanup.root-readback")
-                if cleanup_budget is not None:
-                    # Root + replacement scan + eligibility + PR, then mutation
-                    # and its one possible readback. Paginated fences may need
-                    # more read-only work; no mutation is admitted until they end.
-                    cleanup_budget.preflight(6)
-
-                # Re-read the root, decision, and PR immediately before each
-                # mutation, and again after capability acquisition. Discovery
-                # and authority reads always retain the ordinary credential.
-                def authenticate_candidate() -> None:
-                    if observer is not None:
-                        observer.at("cleanup.root-readback")
-                    status, live_root = self.http.request(
-                        "GET",
-                        self.http.repository_path(
-                            repository, f"/pulls/comments/{root['databaseId']}"
-                        ),
-                        token=token,
+                if type(batch_fence_calls) is not int or batch_fence_calls < 0:
+                    raise ReviewInputError(
+                        "thread cleanup batch read tail is unqualified"
                     )
-                    if (
-                        status != 200
-                        or not isinstance(live_root, dict)
-                        or live_root.get("body") != root.get("body")
-                        or live_root.get("pull_request_url")
-                        != self.http.api_url
-                        + self.http.repository_path(
-                            repository, f"/pulls/{pull_request}"
-                        )
-                        or str(live_root.get("user", {}).get("login", "")).casefold()
-                        != app_slug.casefold()
-                        or live_root.get("user", {}).get("type") != "Bot"
-                    ):
-                        raise GitHubPublicationError("thread root changed")
-                    for record in records:
-                        if record["instance"] == instance and (
-                            record["root"] != root["databaseId"]
-                            or not self.source_valid(
-                                token=token,
-                                repository=repository,
-                                record=record,
-                                app_slug=app_slug,
-                            )
-                        ):
-                            raise GitHubPublicationError("resolution source changed")
-                    if observer is not None:
-                        observer.at("cleanup.authority-fence")
-                    if not fence():
-                        raise GitHubPublicationError(
-                            "thread resolution authority changed"
-                        )
+                visits = [
+                    item
+                    for item in candidates
+                    if not (skip_resolved and item[0]["isResolved"])
+                ]
 
-                authenticate_candidate()
-                if (
-                    not node["isResolved"]
-                    and cleanup_token_provider is not None
-                    and cleanup_token is None
-                ):
-                    if observer is not None:
-                        observer.at("cleanup.capability")
-                    try:
-                        cleanup_token = cleanup_token_provider()
-                    except (
-                        GitHubBrokerClientError,
-                        GitHubHTTPError,
-                        ReviewInputError,
-                        OSError,
-                    ) as exc:
-                        raise _CleanupCapabilityUnavailable(
-                            "thread cleanup capability unavailable"
-                        ) from exc
-                    if not isinstance(cleanup_token, str) or not cleanup_token.strip():
-                        raise _CleanupCapabilityUnavailable(
-                            "thread cleanup capability unavailable"
-                        )
-                    # Issuance consumed time and the original request budget;
-                    # pre-issuance observations cannot authorize the mutation.
-                    authenticate_candidate()
-                if cleanup_budget is not None:
-                    cleanup_budget.preflight(2)
-                if observer is not None:
-                    observer.at("cleanup.resolve-request")
-                mutation_token = token
-                if cleanup_token_provider is not None and not node["isResolved"]:
-                    assert isinstance(cleanup_token, str)
-                    mutation_token = cleanup_token
-                if not node["isResolved"] and not self._resolve_confirmed(
-                    token=mutation_token,
-                    thread_id=node["id"],
-                    observer=observer,
-                ):
-                    raise GitHubPublicationError(
-                        "thread resolution mutation is unconfirmed"
+                def authentication_calls(item):
+                    return (
+                        1
+                        + batch_fence_calls
+                        + sum(record["instance"] == item[2] for record in records)
                     )
-                resolved.append(identity)
-            except (_ResolutionPermissionDenied, _CleanupCapabilityUnavailable) as exc:
-                if observer is not None:
-                    observer.exception(exc)
-                for n, _, item, previous in candidates[position:]:
-                    pending = n["id"] if previous else item
-                    assert isinstance(pending, str)
-                    if skip_resolved and n["isResolved"]:
-                        resolved.append(pending)
-                    else:
-                        unconfirmed.append(pending)
-                break
+
+                # Exact root/source reads + source-bounded callback, one native
+                # mutation and possible readback each. Lazy capability issuance
+                # repeats the full first-target authentication after one POST.
+                native_calls = sum(authentication_calls(item) for item in visits)
+                native_calls += 2 * len(mutation_candidates)
+                if cleanup_token_provider is not None:
+                    native_calls += 1 + authentication_calls(mutation_candidates[0])
+                requests = tuple(
+                    (
+                        "POST",
+                        "/graphql",
+                        {
+                            "operationName": "ResolveReviewThread",
+                            "query": _MUTATION,
+                            "variables": {"input": {"threadId": item[0]["id"]}},
+                        },
+                    )
+                    for item in mutation_candidates
+                )
+                from .ordered_native_batch import bind_ordered_batch
+
+                admitted_batch = batch_preflight(requests, native_calls=native_calls)
+                ordered_batch = bind_ordered_batch(admitted_batch, requests)
+                if ordered_batch is not None and unconfirmed:
+                    # A missing expected target is already an unconfirmed
+                    # prefix boundary. Never dispatch the remaining batch.
+                    ordered_batch.stop()
+                    for node, _, instance, old in candidates:
+                        identity = node["id"] if old else instance
+                        (
+                            resolved
+                            if skip_resolved and node["isResolved"]
+                            else unconfirmed
+                        ).append(identity)
+                    return ThreadResolutionResult(tuple(resolved), tuple(unconfirmed))
             except ReviewInputError as exc:
                 if observer is not None:
+                    observer.at("cleanup.resolve-request")
                     observer.exception(exc)
-                if cleanup_budget is None:
-                    unconfirmed.append(identity)
+                for node, _, instance, old in candidates:
+                    identity = node["id"] if old else instance
+                    (
+                        resolved
+                        if skip_resolved and node["isResolved"]
+                        else unconfirmed
+                    ).append(identity)
+                return ThreadResolutionResult(tuple(resolved), tuple(unconfirmed))
+        cleanup_token: str | None = None
+        try:
+            for position, (node, root, instance, old) in enumerate(candidates):
+                identity = node["id"] if old else instance
+                assert isinstance(identity, str)
+                if skip_resolved and node["isResolved"]:
+                    # Complete discovery above authenticated this root's App and
+                    # exact scope. No write is needed. The opted-in caller still
+                    # owns fresh final approval fences; this observation grants
+                    # no new decision and never resolves an unvisited thread.
+                    resolved.append(identity)
                     continue
-                for n, _, item, previous in candidates[position:]:
-                    pending = n["id"] if previous else item
-                    assert isinstance(pending, str)
-                    unconfirmed.append(pending)
-                break
-            except (
-                GitHubHTTPError,
-                GitHubPublicationError,
-                AttributeError,
-                TypeError,
-            ) as exc:
-                if observer is not None:
-                    observer.exception(exc)
-                unconfirmed.append(identity)
+                try:
+                    if observer is not None:
+                        observer.at("cleanup.root-readback")
+                    if cleanup_budget is not None:
+                        # Root + replacement scan + eligibility + PR, then mutation
+                        # and its one possible readback. Paginated fences may need
+                        # more read-only work; no mutation is admitted until they end.
+                        cleanup_budget.preflight(6)
+
+                    # Re-read the root, decision, and PR immediately before each
+                    # mutation, and again after capability acquisition. Discovery
+                    # and authority reads always retain the ordinary credential.
+                    def authenticate_candidate() -> None:
+                        if observer is not None:
+                            observer.at("cleanup.root-readback")
+                        status, live_root = self.http.request(
+                            "GET",
+                            self.http.repository_path(
+                                repository, f"/pulls/comments/{root['databaseId']}"
+                            ),
+                            token=token,
+                        )
+                        if (
+                            status != 200
+                            or not isinstance(live_root, dict)
+                            or live_root.get("body") != root.get("body")
+                            or live_root.get("pull_request_url")
+                            != self.http.api_url
+                            + self.http.repository_path(
+                                repository, f"/pulls/{pull_request}"
+                            )
+                            or str(
+                                live_root.get("user", {}).get("login", "")
+                            ).casefold()
+                            != app_slug.casefold()
+                            or live_root.get("user", {}).get("type") != "Bot"
+                        ):
+                            raise GitHubPublicationError("thread root changed")
+                        for record in records:
+                            if record["instance"] == instance and (
+                                record["root"] != root["databaseId"]
+                                or not self.source_valid(
+                                    token=token,
+                                    repository=repository,
+                                    record=record,
+                                    app_slug=app_slug,
+                                )
+                            ):
+                                raise GitHubPublicationError(
+                                    "resolution source changed"
+                                )
+                        if observer is not None:
+                            observer.at("cleanup.authority-fence")
+                        if not fence():
+                            raise GitHubPublicationError(
+                                "thread resolution authority changed"
+                            )
+
+                    authenticate_candidate()
+                    if (
+                        not node["isResolved"]
+                        and cleanup_token_provider is not None
+                        and cleanup_token is None
+                    ):
+                        if observer is not None:
+                            observer.at("cleanup.capability")
+                        try:
+                            cleanup_token = cleanup_token_provider()
+                        except (
+                            GitHubBrokerClientError,
+                            GitHubHTTPError,
+                            ReviewInputError,
+                            OSError,
+                        ) as exc:
+                            raise _CleanupCapabilityUnavailable(
+                                "thread cleanup capability unavailable"
+                            ) from exc
+                        if (
+                            not isinstance(cleanup_token, str)
+                            or not cleanup_token.strip()
+                        ):
+                            raise _CleanupCapabilityUnavailable(
+                                "thread cleanup capability unavailable"
+                            )
+                        # Issuance consumed time and the original request budget;
+                        # pre-issuance observations cannot authorize the mutation.
+                        authenticate_candidate()
+                    if cleanup_budget is not None:
+                        cleanup_budget.preflight(2)
+                    if observer is not None:
+                        observer.at("cleanup.resolve-request")
+                    mutation_token = token
+                    if cleanup_token_provider is not None and not node["isResolved"]:
+                        assert isinstance(cleanup_token, str)
+                        mutation_token = cleanup_token
+                    if not node["isResolved"] and not self._resolve_confirmed(
+                        token=mutation_token,
+                        thread_id=node["id"],
+                        observer=observer,
+                    ):
+                        raise GitHubPublicationError(
+                            "thread resolution mutation is unconfirmed"
+                        )
+                    if ordered_batch is not None and not node["isResolved"]:
+                        ordered_batch.confirm_current()
+                    resolved.append(identity)
+                except (
+                    _ResolutionPermissionDenied,
+                    _CleanupCapabilityUnavailable,
+                ) as exc:
+                    if observer is not None:
+                        observer.exception(exc)
+                    for n, _, item, previous in candidates[position:]:
+                        pending = n["id"] if previous else item
+                        assert isinstance(pending, str)
+                        if skip_resolved and n["isResolved"]:
+                            resolved.append(pending)
+                        else:
+                            unconfirmed.append(pending)
+                    break
+                except ReviewInputError as exc:
+                    if observer is not None:
+                        observer.exception(exc)
+                    if ordered_batch is not None:
+                        ordered_batch.stop()
+                        for n, _, item, previous in candidates[position:]:
+                            pending = n["id"] if previous else item
+                            (
+                                resolved
+                                if skip_resolved and n["isResolved"]
+                                else unconfirmed
+                            ).append(pending)
+                        break
+                    if cleanup_budget is None:
+                        unconfirmed.append(identity)
+                        continue
+                    for n, _, item, previous in candidates[position:]:
+                        pending = n["id"] if previous else item
+                        assert isinstance(pending, str)
+                        unconfirmed.append(pending)
+                    break
+                except (
+                    GitHubHTTPError,
+                    GitHubPublicationError,
+                    AttributeError,
+                    TypeError,
+                ) as exc:
+                    if observer is not None:
+                        observer.exception(exc)
+                    unconfirmed.append(identity)
+                    if ordered_batch is not None:
+                        ordered_batch.stop()
+                        for n, _, item, previous in candidates[position + 1 :]:
+                            pending = n["id"] if previous else item
+                            (
+                                resolved
+                                if skip_resolved and n["isResolved"]
+                                else unconfirmed
+                            ).append(pending)
+                        break
+        finally:
+            if ordered_batch is not None:
+                ordered_batch.close()
         return ThreadResolutionResult(tuple(resolved), tuple(unconfirmed))
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

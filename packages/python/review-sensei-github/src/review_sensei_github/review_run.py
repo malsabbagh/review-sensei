@@ -65,6 +65,7 @@ from .errors import GitHubPublicationTransientError
 from .http import GitHubHttp
 from .learning_pr import LearningPRPublisher
 from .publication import PublicationResult, ReviewPublisher
+from .quarantine_capacity import _install_guarded_ledger_replaces
 from .review_finalization_diagnostics import close_not_entered, close_review_run
 from .run_authority import request_authority
 from .session_ledger import GitHubIssueCommentSessionLedger
@@ -131,6 +132,12 @@ class StartupRunLedger(GitHubIssueCommentSessionLedger):
         if since is not None:
             path += "?since=" + quote(since, safe="")
         return self.http.paginate(path=path, token=self.token)
+
+
+from .trust_enrollment import _install_native_source  # noqa: E402
+
+_install_native_source(StartupRunLedger)
+del _install_native_source
 
 
 @dataclass(frozen=True)
@@ -221,6 +228,13 @@ class ReviewRunHooks(ApiRunReviewHooks):
 class ReviewRunLedger(ApiRunSessionLedger):
     """One funded exact readback on an uncertain write, never a replay."""
 
+    def __init__(self, native, caller, identity):
+        super().__init__(native, caller, identity)
+        # Reader-first source integration: the current admitted review always
+        # retains its complete finding lifecycle using the existing owner,
+        # evidence destination and original physical caller meter.
+        self.enable_finding_lifecycle_writes = True
+
     def replace(self, identity, mutate, *, now=None):
         try:
             confirmed = super().replace(identity, mutate, now=now)
@@ -252,6 +266,7 @@ class ActionRunLedger(ApiRunSessionLedger):
         # ledger. Snapshot staging uses its existing conditional mutation and
         # physical caller budget, just as a newly constructed action ledger.
         self.enable_disposition_snapshot_writes = True
+        self.enable_finding_lifecycle_writes = True
 
     def replace(self, identity, mutate, *, now=None):
         if self.business_guard is not None:
@@ -434,9 +449,39 @@ class ReviewRun:
             tuple(analyze_diff(diff, allow_incomplete=True).changed_paths),
         )
 
+    def finding_inventory_migration_required(self) -> bool:
+        # Reuse the exact authenticated enrollment root, not a new census or
+        # diagnostic file. Missing retained inventory is not an empty inventory.
+        record = self.caller._effect_record
+        if record is None or record.record_sha256 != self.caller._root:
+            raise ReviewInputError(
+                "authenticated finding inventory admission is unavailable"
+            )
+        return record.finding_lifecycle is None and (
+            record.completed_initial_reviews > 0
+            or record.completed_verification_rounds > 0
+            or record.convergence_history is not None
+            or record.transaction is not None
+            or record.publication_staging is not None
+        )
+
     def execute(self, argv: list[str], *, publication_output: Path) -> int:
         lifecycle_diagnostics.phase("analysis")
         retained = self.retained_analysis(argv)
+        if retained is None and self.finding_inventory_migration_required():
+            migration_outcome = {
+                "status": "handoff",
+                "publication_status": "handoff",
+                "accounting_terminal": False,
+                "terminal_reason": "finding_inventory_migration_required",
+                "review_id": None,
+                "diagnostic": "durable_finding_inventory_recovery_required",
+            }
+            lifecycle_diagnostics.publication(migration_outcome)
+            publication_output.write_text(
+                json.dumps(migration_outcome, indent=2) + "\n"
+            )
+            return 1
         if retained is None and self.plan.runner_kind == "local":
             # Provider discovery is caller API work; inference remains governed
             # by the independent provider budget. Never send a GitHub credential.
@@ -600,34 +645,66 @@ class ReviewRun:
                 )
             )
         lifecycle_diagnostics.phase("publication")
-        publication: PublicationResult = hooks.publish_review(
-            application,
-            options=GitHubWriteOptions(
-                github_writes=True,
-                auto_review=True,
-                auto_approve=(
-                    self.restart_id is None
-                    and self.plan.policy.reviews == "auto-approve"
+        try:
+            publication: PublicationResult = hooks.publish_review(
+                application,
+                options=GitHubWriteOptions(
+                    github_writes=True,
+                    auto_review=True,
+                    auto_approve=(
+                        self.restart_id is None
+                        and self.plan.policy.reviews == "auto-approve"
+                    ),
+                    complete_inventory=True,
+                    max_active_findings=analysis.result.limits.max_comments,
+                    enable_drift_tracking=True,
                 ),
-                complete_inventory=True,
-            ),
-            oidc_token=self.oidc,
-            repository=self.identity.repository,
-            repository_id=self.identity.repository_id,
-            pull_request=self.identity.pull_request,
-            head_sha=self.head_sha,
-            base_sha=self.base_sha,
-            base_branch=self.base_branch,
-            result=analysis.result,
-            diff=analysis.diff,
-            app_slug="reviewsensei[bot]",
-            convergence_policy=analysis.policy,
-            configuration_context=analysis.configuration_context,
-            evidence_context=analysis.evidence_context,
-            baseline=analysis.baseline,
-            current_key=analysis.current_key,
-            changed_paths=analysis.changed_paths,
-        )
+                oidc_token=self.oidc,
+                repository=self.identity.repository,
+                repository_id=self.identity.repository_id,
+                pull_request=self.identity.pull_request,
+                head_sha=self.head_sha,
+                base_sha=self.base_sha,
+                base_branch=self.base_branch,
+                result=analysis.result,
+                diff=analysis.diff,
+                app_slug="reviewsensei[bot]",
+                convergence_policy=analysis.policy,
+                configuration_context=analysis.configuration_context,
+                evidence_context=analysis.evidence_context,
+                baseline=analysis.baseline,
+                current_key=analysis.current_key,
+                changed_paths=analysis.changed_paths,
+            )
+        except ReviewSenseiError:
+            # A durable native intent may stop a later effect before the
+            # publisher returns. Preserve an outcome without promoting the
+            # attempted publication or its journal into a confirmed receipt.
+            observed = getattr(application, "_last_publication_result", None)
+            confirmed_review = (
+                observed.review_id
+                if isinstance(observed, PublicationResult)
+                and observed.status
+                in {"published", "already_published", "auto_approval_disabled"}
+                and type(observed.review_id) is int
+                and observed.review_id > 0
+                else None
+            )
+            outcome = {
+                "status": "published_terminal_pending"
+                if confirmed_review is not None
+                else "publication_incomplete",
+                "publication_status": "published"
+                if confirmed_review is not None
+                else "unknown",
+                "accounting_terminal": False,
+                "terminal_reason": "publication_interrupted",
+                "review_id": confirmed_review,
+                "diagnostic": "publication_outcome_incomplete",
+            }
+            lifecycle_diagnostics.publication(outcome)
+            publication_output.write_text(json.dumps(outcome, indent=2) + "\n")
+            raise
         lifecycle_diagnostics.publication(
             {
                 "status": publication.status,
@@ -646,6 +723,7 @@ class ReviewRun:
             else "publication_finalization_incomplete"
         )
         accounting_terminal = False
+        from .action_completion import finalization_confirmed
         from .check_accounting import denied_accounting_details
 
         check_rejection = denied_accounting_details(
@@ -656,10 +734,14 @@ class ReviewRun:
             in {"published", "already_published", "auto_approval_disabled"}
             and (
                 check_rejection is not None
+                or (
+                    publication.diagnostic
+                    in {"required_fixes_open", "human_adjudication_open"}
+                    and finalization_confirmed(publication)
+                )
                 or publication.diagnostic
                 in {
                     None,
-                    "human_adjudication_open",
                     "approval_withheld",
                     "review_incomplete",
                 }
@@ -783,6 +865,67 @@ def _configuration(
     ), branch
 
 
+def _prepare_review_input(
+    args: argparse.Namespace,
+    *,
+    directory: Path,
+    configuration_path: Path | None,
+    head_repository: str,
+) -> None:
+    """Reject locally invalid input before any durable caller enrollment.
+
+    This is input validation, not an analysis/abort authority. The engine still
+    validates its input independently. Existing complete-diff preparation keeps
+    its default bounds; supplied large-change inputs keep their engine modes.
+    """
+    if args.diff is None:
+        args.diff = directory / "review.patch"
+        prepare_diff(
+            repository=Path.cwd(),
+            base_ref=args.base_sha,
+            head_ref=args.head_sha,
+            head_repository=head_repository
+            if head_repository != args.repository
+            else None,
+            output=args.diff,
+        )
+        return
+
+    from review_sensei.diff import analyze_diff
+    from review_sensei.planning import DEFAULT_TOTAL_WORK_BUDGET, plan_change
+    from review_sensei.validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
+
+    work = load_configuration(configuration_path).advanced.review_work
+    orchestrate = bool(getattr(args, "orchestrate_large_changes", False))
+    if work.mode == "unified" or orchestrate:
+        budget = DEFAULT_TOTAL_WORK_BUDGET
+        diff = read_bounded_utf8(
+            args.diff, maximum=budget.max_total_diff_bytes, label="diff"
+        )
+        if work.mode == "unified":
+            analyze_diff(
+                diff,
+                limits=DEFAULT_REVIEW_LIMITS,
+                allow_incomplete=True,
+                max_bytes=budget.max_total_diff_bytes,
+                max_lines=budget.max_total_diff_lines,
+                max_files=budget.max_total_files,
+                max_hunks=budget.max_total_hunks,
+            )
+        else:
+            plan_change(
+                diff,
+                limits=DEFAULT_REVIEW_LIMITS,
+                orchestrate=True,
+                work_budget=budget,
+            )
+    else:
+        diff = read_bounded_utf8(
+            args.diff, maximum=DEFAULT_REVIEW_LIMITS.max_diff_bytes, label="diff"
+        )
+        analyze_diff(diff, limits=DEFAULT_REVIEW_LIMITS)
+
+
 def bootstrap(
     args: argparse.Namespace,
     *,
@@ -796,8 +939,19 @@ def bootstrap(
     recovery_context_key_file: Path | None = None,
     recovery_context_ttl_seconds: int = DEFAULT_RECOVERY_TTL_SECONDS,
     rollover_service: RolloverService | None = None,
+    enable_current_trust_enrollment: bool = False,
+    observe_original_actor_role: bool = False,
+    input_directory: Path | None = None,
 ) -> ReviewRun:
     """Authenticate one new/recovery owner; no caller document activates capacity."""
+    if purpose == "review" and args.diff is None and input_directory is None:
+        raise ReviewInputError("review requires an owned generated input workspace")
+    if type(observe_original_actor_role) is not bool or (
+        observe_original_actor_role and not enable_current_trust_enrollment
+    ):
+        raise ReviewInputError(
+            "original actor-role observation requires opted v4 enrollment"
+        )
     lifecycle_diagnostics.phase("bootstrap")
     lifecycle_diagnostics.step("policy_checkout")
     lifecycle_diagnostics.requested(args, policy_commit)
@@ -1038,11 +1192,23 @@ def bootstrap(
         or head["repo"].get("fork") is not False
     ):
         raise ReviewInputError("live reviewed base or head conflicts")
+    if purpose in {"command", "reply"}:
+        setattr(
+            caller, "_accepted_semantic_target", (purpose, args.base_sha, args.head_sha)
+        )
     title = pull.get("title", "")
     if not isinstance(title, str) or len(title.encode("utf-8")) > 256:
         raise ReviewInputError("live pull request title exceeds its 256-byte bound")
     if getattr(args, "title", None) not in {None, "", title}:
         raise ReviewInputError("review title differs from the live pull request")
+    if purpose == "review":
+        lifecycle_diagnostics.step("review_input")
+        _prepare_review_input(
+            args,
+            directory=run_directory if input_directory is None else input_directory,
+            configuration_path=configuration_path,
+            head_repository=head["repo"]["full_name"],
+        )
     # Read-only authority/owner checks precede enrollment's durable witness.
     lifecycle_diagnostics.step("run_authority")
     authority = request_authority(
@@ -1083,12 +1249,22 @@ def bootstrap(
         control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
         authority=authority,
     )
+    session_broker = (
+        BrokerClient(
+            opener=caller.open,
+            control=BrokerDispatchAccounting(budget, operation_id, 60, 60),
+            authority={**authority, "version": 4},
+        )
+        if enable_current_trust_enrollment
+        else broker
+    )
     lifecycle_diagnostics.step("broker_session")
-    session = broker.open_session(
+    session = session_broker.open_session(
         oidc,
         repository_id=args.repository_id,
         pull_request=args.pull_request,
         head_sha=args.head_sha,
+        **({"observe_actor_role": True} if observe_original_actor_role else {}),
     )
     if session.reservation_owner != {"run_id": run_id, "head_sha": args.head_sha}:
         raise ReviewInputError("broker review owner scope conflicts")
@@ -1170,7 +1346,23 @@ def bootstrap(
         )
         install_admission(native, proof)
     lifecycle_diagnostics.step("ledger_discovery")
-    loaded = native.load(identity)
+    from .trust_enrollment import compare_restored_observation, load_original_enrollment
+
+    if enable_current_trust_enrollment:
+        loaded, original_trust = load_original_enrollment(native, identity)
+    else:
+        loaded, original_trust = native.load(identity), None
+    if loaded.status == "ok" and loaded.record is not None:
+        if loaded.record.trust_enrollment is not None:
+            if not enable_current_trust_enrollment:
+                raise ReviewInputError(
+                    "trust enrolled current observation unavailable; v4 opt-in required"
+                )
+            compare_restored_observation(session_broker, session, original_trust)
+        elif enable_current_trust_enrollment:
+            raise ReviewInputError(
+                "trust original enrollment unavailable; legacy migration required"
+            )
     if int(attempt) == 1:
         try:
             if quarantine_predecessor_comment_id is not None:
@@ -1193,7 +1385,15 @@ def bootstrap(
                 create_quarantine(prepared, actions_token=actions_token)
             elif loaded.status == "missing":
                 lifecycle_diagnostics.step("initial_enrollment")
-                caller.initialize_and_activate(native, identity, frozen, owner)
+                caller.initialize_and_activate(
+                    native,
+                    identity,
+                    frozen,
+                    owner,
+                    trust_source=(session_broker, session)
+                    if enable_current_trust_enrollment
+                    else None,
+                )
             elif loaded.status == "ok" and loaded.record is not None:
                 previous_root = loaded.record
                 previous = ApiRunAccounting.from_document(
@@ -1422,6 +1622,11 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
     parser.add_argument("--run-directory", type=Path, required=True)
     parser.add_argument("--publication-outcome", type=Path, required=True)
     parser.add_argument("--quarantine-predecessor-comment-id", type=int)
+    parser.add_argument(
+        "--enable-current-trust-enrollment",
+        action="store_true",
+        help="Opt in to original observed trust enrollment with a compatible v4 broker; not continuous trust history or effect authorization.",
+    )
     parser.add_argument("--recovery-context-dir", type=Path, default=None)
     parser.add_argument("--recovery-context-key-file", type=Path, default=None)
     parser.add_argument(
@@ -1451,33 +1656,18 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
         raise ReviewInputError(
             "controlled restart requires a freshly prepared current full diff"
         )
-    selected = bootstrap(
-        args,
-        run_directory=options.run_directory,
-        policy_commit=options.policy_commit,
-        quarantine_predecessor_comment_id=options.quarantine_predecessor_comment_id,
-        restart_id=getattr(options, "restart_id", None),
-        recovery_context_dir=options.recovery_context_dir,
-        recovery_context_key_file=options.recovery_context_key_file,
-        recovery_context_ttl_seconds=options.recovery_context_ttl_seconds,
-    )
-    core = [*core]
-    if not _has_option(core, "--base-sha"):
-        core.extend(["--base-sha", selected.base_sha])
-    if not _has_option(core, "--head-sha"):
-        core.extend(["--head-sha", selected.head_sha])
-    if not _has_option(core, "--title") and selected.title:
-        core.append("--title=" + selected.title)
-    if args.config is None and selected.configuration_path is not None:
-        core.extend(["--config", str(selected.configuration_path)])
-    # The durable directory owns only the restart archive/claim. Fresh source
-    # bytes stay in a private temporary directory, including on failed or
-    # cancelled execution. Abrupt process death leaves only ephemeral storage.
+    # Keep generated inputs separate from existing runner files, including when
+    # later predecessor admission refuses. Retain every original startup claim
+    # and restart archive. Supplied inputs remain caller-owned and untouched.
+    # Abrupt process death leaves only ephemeral generated source storage.
     workspace = (
         TemporaryDirectory(
-            prefix="review-sensei-restart-", dir=os.environ.get("RUNNER_TEMP") or None
+            prefix="review-sensei-restart-"
+            if controlled_restart
+            else "review-sensei-input-",
+            dir=os.environ.get("RUNNER_TEMP") or None,
         )
-        if controlled_restart
+        if args.diff is None
         else nullcontext(str(options.run_directory))
     )
     with workspace as working_directory:
@@ -1487,18 +1677,29 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
             raise ReviewInputError(
                 "controlled restart diff cannot use retained history storage"
             )
-        if args.diff is None:
-            diff = Path(working_directory) / "review.patch"
-            prepare_diff(
-                repository=Path.cwd(),
-                base_ref=selected.base_sha,
-                head_ref=selected.head_sha,
-                head_repository=selected.head_repository
-                if selected.head_repository != selected.identity.repository
-                else None,
-                output=diff,
-            )
-            core.extend(["--diff", str(diff)])
+        selected = bootstrap(
+            args,
+            run_directory=options.run_directory,
+            policy_commit=options.policy_commit,
+            quarantine_predecessor_comment_id=options.quarantine_predecessor_comment_id,
+            restart_id=getattr(options, "restart_id", None),
+            recovery_context_dir=options.recovery_context_dir,
+            recovery_context_key_file=options.recovery_context_key_file,
+            recovery_context_ttl_seconds=options.recovery_context_ttl_seconds,
+            enable_current_trust_enrollment=options.enable_current_trust_enrollment,
+            input_directory=Path(working_directory),
+        )
+        core = [*core]
+        if not _has_option(core, "--base-sha"):
+            core.extend(["--base-sha", selected.base_sha])
+        if not _has_option(core, "--head-sha"):
+            core.extend(["--head-sha", selected.head_sha])
+        if not _has_option(core, "--title") and selected.title:
+            core.append("--title=" + selected.title)
+        if args.config is None and selected.configuration_path is not None:
+            core.extend(["--config", str(selected.configuration_path)])
+        if not _has_option(core, "--diff"):
+            core.extend(["--diff", str(args.diff)])
         if not args.transaction:
             core.append("--transaction")
         if not args.github_session_ledger:
@@ -1510,3 +1711,18 @@ def run_review(argv: Sequence[str], *, controlled_restart: bool = False) -> int:
         if not _has_option(core, "--exit-semantics"):
             core.extend(["--exit-semantics", "operational"])
         return selected.execute(core, publication_output=options.publication_outcome)
+
+
+# Pin genuine subclass writers once at source module initialization.
+
+_install_guarded_ledger_replaces(ReviewRunLedger, ActionRunLedger)
+
+from .guarded_hot_namespace import install_run as _install_hot_namespace  # noqa: E402
+
+_install_hot_namespace(ReviewRun)
+del _install_hot_namespace
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const broker = vi.hoisted(() => ({ exchange: vi.fn(), verifySessionGrant: vi.fn() }));
+const broker = vi.hoisted(() => ({ exchange: vi.fn(), verifySessionGrant: vi.fn(), refreshSessionObservation: vi.fn() }));
 
 vi.mock("../src/token-broker", () => ({
   TokenBroker: class {
     exchange = broker.exchange;
     verifySessionGrant = broker.verifySessionGrant;
+    refreshSessionObservation = broker.refreshSessionObservation;
   },
 }));
 
@@ -54,6 +55,7 @@ function grantRequest(
 beforeEach(() => {
   broker.exchange.mockReset();
   broker.verifySessionGrant.mockReset();
+  broker.refreshSessionObservation.mockReset();
   broker.exchange.mockResolvedValue({ token: "ghs_scoped_token", capability: "review_publish" });
   broker.verifySessionGrant.mockResolvedValue({ repository_id: 987654321, pull_request: 7 });
 });
@@ -69,6 +71,18 @@ describe("session-grant verification route", () => {
     expect(broker.verifySessionGrant).toHaveBeenCalledWith(
       "a".repeat(43), { version: 1 }, undefined, undefined,
     );
+  });
+
+  it("keeps explicitly requested current observation separate from original verification", async () => {
+    const binding = "e".repeat(64);
+    const refreshed = { session_attestation: { version: 4 }, current_observation: { schema_version: "current-observation-v2" }, observation_binding: { effect_sha256: binding } };
+    broker.refreshSessionObservation.mockResolvedValue(refreshed);
+    const result = await worker.fetch(grantRequest({ session_grant: "a".repeat(43), session_attestation: { version: 4 }, refresh_effect_sha256: binding } as any), env);
+    expect(result.status).toBe(200);
+    expect(result.headers.get("cache-control")).toBe("no-store");
+    expect(await result.json()).toEqual(refreshed);
+    expect(broker.verifySessionGrant).not.toHaveBeenCalled();
+    expect(broker.refreshSessionObservation).toHaveBeenCalledWith("a".repeat(43), { version: 4 }, binding, undefined, undefined);
   });
 
   it("rejects expired or invalid grants without exposing their values", async () => {

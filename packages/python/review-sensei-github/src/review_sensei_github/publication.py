@@ -156,12 +156,12 @@ from .operation_diagnostics import OperationDiagnostics, OperationObserver
 from .qualification import TrustedOpenRouterQualification
 from .thread_resolution import graphql_app_author
 from .trust_transitions import (
-    PERMISSION_RANKS,
     AuthenticatedTrustMigration,
     AuthenticatedTrustSnapshot,
     TrustMigrationReceipt,
     TrustTransitionDecision,
     evaluate_trust_boundary,
+    missing_trust_observation,
     verify_and_migrate_trust_boundary,
 )
 
@@ -216,10 +216,13 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
           isResolved
           comments(first: 1) {
             nodes {
+              databaseId
               body
               path
               line
-              author { login __typename }
+              commit { oid }
+              pullRequestReview { databaseId }
+              author { login __typename ... on Bot { databaseId } }
             }
           }
         }
@@ -1042,6 +1045,33 @@ def _disposition_frame_reserve(
     return growth + len(provenance.encode("utf-8")) + 2
 
 
+def _command_review_confirmation(caller, *, key, native_union):
+    """Fund one original prewrite verification without shrinking native readback.
+
+    This local allocation is not trust-route or whole-command admission.
+    Unsupported trust profiles still fail at the original effect gate.
+    """
+    from .api_run_plan import (
+        COMMAND_UPDATE_CONFIRMATION_REQUESTS,
+        NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS,
+    )
+    from .trust_effects import verification_calls
+
+    tail = 1 + (
+        NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS
+        if native_union
+        else COMMAND_UPDATE_CONFIRMATION_REQUESTS
+    )
+    verification = verification_calls(caller)
+    caller.budget_view.preflight(tail + verification)
+    return caller._operation(
+        key,
+        tail + verification,
+        write_tail=tail,
+        prewrite_reads=verification,
+    )
+
+
 def _published_summary_byte_limit(result: ReviewResult) -> int:
     """Account for finding prose separately from the validated input summary.
 
@@ -1229,6 +1259,141 @@ def finding_publication_scope(
 
 
 @dataclass(frozen=True)
+class NativeFindingReceipt:
+    """Exact owned readback, distinct from a locally allocated effect intent."""
+
+    repository_id: int
+    pull_request: int
+    head_sha: str
+    base_sha: str
+    producer_id: int
+    review_id: int
+    instance: str
+    body_sha256: str
+    thread_id: str | None = None
+    comment_id: int | None = None
+    native_head_sha: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {"schema_version": "native-finding-receipt-v1", **self.__dict__}
+
+    @property
+    def target(self) -> str:
+        return self.thread_id or f"body:{self.review_id}:{self.instance}"
+
+    @property
+    def proof_sha256(self) -> str:
+        return hashlib.sha256(
+            canonical_bytes(
+                {
+                    "purpose": "native-finding-readback-v1",
+                    **self.__dict__,
+                }
+            )
+        ).hexdigest()
+
+
+def _native_finding_receipts_from_nodes(
+    nodes: Sequence[Mapping[str, Any]],
+    *,
+    repository_id: int,
+    pull_request: int,
+    head_sha: str,
+    base_sha: str,
+    producer_id: int,
+    review_id: int,
+    app_slug: str,
+    expected: Mapping[str, str],
+    existing_bindings: Mapping[str, Mapping[str, Any]] | None = None,
+    expected_anchors: Mapping[str, tuple[str | None, int | None]] | None = None,
+) -> dict[str, NativeFindingReceipt]:
+    """Accept exact unique native roots; marker membership alone is not proof."""
+    receipts: dict[str, NativeFindingReceipt] = {}
+    ambiguous: set[str] = set()
+    for node in nodes:
+        comments = node.get("comments")
+        roots = comments.get("nodes") if isinstance(comments, dict) else None
+        if not isinstance(roots, list) or not roots or not isinstance(roots[0], dict):
+            continue
+        root = roots[0]
+        body = root.get("body")
+        instance = finding_instance_from_body(body)
+        if instance not in expected:
+            continue
+        assert isinstance(instance, str)
+        scope = finding_publication_scope(body)
+        existing = (existing_bindings or {}).get(instance)
+        selected_existing = existing is not None and (
+            node.get("id") == existing["thread_id"]
+            and root.get("databaseId") == existing["comment_id"]
+        )
+        if (
+            scope is not None
+            and scope[:2] == (repository_id, pull_request)
+            and scope[2:4] != (head_sha, base_sha)
+            and not selected_existing
+        ):
+            # Discovery includes historical roots for the same concern. They
+            # cannot compete with a current-snapshot receipt unless the exact
+            # retained binding selects them. Selected/reused roots still pass
+            # every body, scope, producer and native-identity check below.
+            continue
+        if instance in receipts or instance in ambiguous:
+            receipts.pop(instance, None)
+            ambiguous.add(instance)
+            continue
+        author = root.get("author")
+        native_review = review_id if existing is None else existing["review_id"]
+        native_head = head_sha if existing is None else existing["native_head_sha"]
+        if (
+            body != expected[instance]
+            or scope is None
+            or scope[:4] != (repository_id, pull_request, head_sha, base_sha)
+            or not isinstance(author, dict)
+            or not graphql_app_author(author, app_slug)
+            or type(author.get("databaseId")) is not int
+            or author["databaseId"] != producer_id
+            or root.get("edited_by_human") is True
+            or (
+                existing is None
+                and expected_anchors is not None
+                and (root.get("path"), root.get("line"))
+                != expected_anchors.get(instance)
+            )
+            or root.get("commit") != {"oid": native_head}
+            or root.get("pullRequestReview") != {"databaseId": native_review}
+            or (
+                existing is not None
+                and (
+                    node.get("id") != existing["thread_id"]
+                    or root.get("databaseId") != existing["comment_id"]
+                )
+            )
+            or type(root.get("databaseId")) is not int
+            or root["databaseId"] <= 0
+            or not isinstance(node.get("id"), str)
+            or not node["id"]
+            or node.get("isResolved") is not False
+        ):
+            ambiguous.add(instance)
+            continue
+        receipts[instance] = NativeFindingReceipt(
+            repository_id,
+            pull_request,
+            head_sha,
+            base_sha,
+            producer_id,
+            native_review,
+            instance,
+            hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            node["id"],
+            root["databaseId"],
+            native_head,
+        )
+    return receipts
+
+
+@dataclass(frozen=True)
 class PublishedInstance:
     """One open or historical App thread bound to a publication scope."""
 
@@ -1290,6 +1455,26 @@ def approval_marker(
     return (
         f"{APPROVAL_MARKER_PREFIX} repo={repository_id} pr={pull_request} "
         f"head={head_sha} base={base_sha} -->"
+    )
+
+
+def _approval_body(marker, eligibility, decision):
+    """Pure exact body shared by conditional sizing and actual publication."""
+    if decision.outcome != "maintainer-coverage-exception":
+        return marker
+    gates = ",".join(decision.satisfied_gates)
+    exception_marker = (
+        "<!-- reviewsensei:approval-exception:v1 "
+        "outcome=maintainer-coverage-exception "
+        f"result={eligibility.result_digest} "
+        f"gates={gates} -->"
+    )
+    return (
+        "Approved with maintainer coverage exception "
+        f"(`outcome=maintainer-coverage-exception`, "
+        f"`result={eligibility.result_digest}`, "
+        f"`satisfied_gates={gates}`).\n\n"
+        f"{marker}\n{exception_marker}"
     )
 
 
@@ -1565,6 +1750,13 @@ class _BudgetedReviewPagination(GitHubHttp):
         self.transport = http
         self.budget = budget
         self.last_page_size = 100
+
+        from review_sensei.source_registry import require_module_seal
+
+        from . import capacity_transport_membership
+
+        require_module_seal(capacity_transport_membership)
+        capacity_transport_membership.register_wrapper(self)
 
     def request(
         self,
@@ -2019,6 +2211,12 @@ class ReviewApprovalFinalizer:
         self.qualification_authority = qualification_authority
         self._operation_budget: EvidenceReadBudget | None = None
         self._last_review_scan: tuple[int, int, int] | None = None
+        self._plain_review_frontier: tuple[Any, ...] | None = None
+        self._command_capacity_requested = False
+        self._quarantine_capacity_preparation: Any = None
+        self._current_quarantine_preparation: Any = None
+        self._closed_command_reads = False
+        self._execution_capacity_plan: Any = None
         self._human_inventory_scope: tuple[str, int, str, str, str] | None = None
         self._operation_observer: OperationObserver | None = None
         self._scoped_human_inventory_reader: _ScopedHumanInventoryReader | None = None
@@ -2067,75 +2265,50 @@ class ReviewApprovalFinalizer:
         if enrolled is None:
             return None
 
-        live_repo_id: int | None = repository_id
-        live_slug: str | None = repository
-        live_fork: bool | None = None
-        live_owner_id: int | None = None
-        live_owner_login: str | None = None
-        if isinstance(payload, dict):
-            base = payload.get("base")
-            repo_obj = base.get("repo") if isinstance(base, dict) else None
-            if isinstance(repo_obj, dict):
-                raw_id = repo_obj.get("id")
-                if type(raw_id) is int and raw_id > 0:
-                    live_repo_id = raw_id
-                raw_full = repo_obj.get("full_name")
-                if isinstance(raw_full, str) and raw_full:
-                    live_slug = raw_full
-                raw_fork = repo_obj.get("fork")
-                if type(raw_fork) is bool:
-                    live_fork = raw_fork
-                owner_obj = repo_obj.get("owner")
-                if isinstance(owner_obj, dict):
-                    raw_oid = owner_obj.get("id")
-                    if type(raw_oid) is int and raw_oid > 0:
-                        live_owner_id = raw_oid
-                    raw_ologin = owner_obj.get("login")
-                    if isinstance(raw_ologin, str) and raw_ologin:
-                        live_owner_login = raw_ologin
-
-        base_obs = observed_override or enrolled
-        eff_repo_id = (
-            live_repo_id
-            if type(live_repo_id) is int and live_repo_id > 0
-            else base_obs.repository_id
+        # A repository read does not observe installation/permission/actor
+        # authority. Never promote the enrollment into a fresh observation.
+        repo_obj = (
+            payload.get("base", {}).get("repo")
+            if isinstance(payload, dict) and isinstance(payload.get("base"), dict)
+            else None
         )
-        eff_slug = (
-            live_slug
-            if isinstance(live_slug, str) and live_slug
-            else base_obs.repository_slug
+        owner = repo_obj.get("owner") if isinstance(repo_obj, dict) else None
+        complete = (
+            observed_override is not None
+            and isinstance(repo_obj, dict)
+            and type(repo_obj.get("id")) is int
+            and repo_obj["id"] > 0
+            and isinstance(repo_obj.get("full_name"), str)
+            and bool(repo_obj["full_name"])
+            and type(repo_obj.get("fork")) is bool
+            and isinstance(owner, dict)
+            and type(owner.get("id")) is int
+            and owner["id"] > 0
+            and isinstance(owner.get("login"), str)
+            and bool(owner["login"])
+            and isinstance(head_sha, str)
+            and GIT_SHA_HEX.fullmatch(head_sha) is not None
         )
-        slug_owner, _sep, slug_repo = eff_slug.partition("/")
-        eff_owner_login = (
-            live_owner_login
-            if isinstance(live_owner_login, str) and live_owner_login
-            else (
-                slug_owner
-                if slug_owner and slug_owner.lower() != base_obs.owner_login.lower()
-                else base_obs.owner_login
+        if not complete:
+            decision = missing_trust_observation(
+                phase="before_native_effect",
+                has_unknown_effect=(enrolled.repository_id, enrolled.pull_request)
+                in self._unknown_effect_holds,
             )
-        )
-        if slug_owner.lower() != eff_owner_login.lower():
-            eff_slug = f"{eff_owner_login}/{slug_repo or 'repo'}"
-        eff_owner_id = (
-            live_owner_id
-            if type(live_owner_id) is int and live_owner_id > 0
-            else base_obs.owner_id
-        )
-        eff_fork = live_fork if type(live_fork) is bool else base_obs.is_fork
-        eff_head = (
-            head_sha
-            if isinstance(head_sha, str) and GIT_SHA_HEX.fullmatch(head_sha)
-            else base_obs.head_sha
-        )
+            self._trust_decisions.setdefault(
+                (enrolled.repository_id, enrolled.pull_request), []
+            ).append(decision)
+            return decision
+        assert observed_override is not None
+        assert isinstance(repo_obj, dict) and isinstance(owner, dict)
         observed = replace(
-            base_obs,
-            repository_id=eff_repo_id,
-            owner_id=eff_owner_id,
-            owner_login=eff_owner_login,
-            repository_slug=eff_slug,
-            is_fork=eff_fork,
-            head_sha=eff_head,
+            observed_override,
+            repository_id=repo_obj["id"],
+            owner_id=owner["id"],
+            owner_login=owner["login"],
+            repository_slug=repo_obj["full_name"],
+            is_fork=repo_obj["fork"],
+            head_sha=head_sha,
         )
         key = (enrolled.repository_id, enrolled.pull_request)
         decision = evaluate_trust_boundary(
@@ -2187,6 +2360,9 @@ class ReviewApprovalFinalizer:
         )
         if type(reader) is not QuarantineHoldReader:
             raise ReviewInputError("quarantine assessment reader is unsupported")
+        from .quarantine_pr_observation import validate_hold_reader
+
+        validate_hold_reader(reader)
         return reader
 
     def attach_quarantine(
@@ -2204,7 +2380,14 @@ class ReviewApprovalFinalizer:
                     "quarantine assessment source reader is unavailable"
                 )
             return eligibility
-        return reader.attach(eligibility, head_sha=head_sha)
+        actual = reader.attach(eligibility, head_sha=head_sha)
+        if self._quarantine_capacity_preparation is not None:
+            from .quarantine_command_finalization import projected_eligibility
+
+            return projected_eligibility(
+                self._quarantine_capacity_preparation, self, actual
+            )
+        return actual
 
     def historical_reader(self, *, token, repository, pull_request, head_sha):
         factory = self.historical_assessment_reader_factory
@@ -2267,6 +2450,11 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         app_slug: str,
     ) -> Callable[[HumanInventoryReference], PendingHumanReview] | None:
+        if self._command_capacity_requested or self._closed_command_reads:
+            # The issued closed-plain contract admits no external references.
+            # Decode without a reader so any changed native/part frame refuses;
+            # do not invoke even the default factory for an inline document.
+            return None
         if self.human_inventory_reader is not None:
             return self.human_inventory_reader
         factory = self.human_inventory_reader_factory
@@ -2345,8 +2533,8 @@ class ReviewApprovalFinalizer:
                 repository, f"/pulls/{pull_request}/reviews"
             ),
             token=token,
-            page_sizes=HISTORY_PAGE_SIZES,
-            max_requests=64,
+            page_sizes=(100,) if self._closed_command_reads else HISTORY_PAGE_SIZES,
+            max_requests=1 if self._closed_command_reads else 64,
             timeout_seconds=60,
         )
         self._last_review_scan = (
@@ -2443,8 +2631,13 @@ class ReviewApprovalFinalizer:
                         diagnostic="quarantine_assessment_unverified",
                     )
                 )
-            if quarantine_reader is not None:
-                eligibility = quarantine_reader.require(eligibility, head_sha=head_sha)
+            with _capture_quarantine_pr(
+                self, quarantine_reader, token=token
+            ) as quarantine_pr:
+                if quarantine_reader is not None:
+                    eligibility = quarantine_reader.require(
+                        eligibility, head_sha=head_sha
+                    )
             # Body-placed blockers stay in the persisted flag. Inline blockers are
             # not settled by that flag: a caller that just published them says they
             # are unresolved, and a later finalizer requires a resolved thread.
@@ -2526,13 +2719,27 @@ class ReviewApprovalFinalizer:
                         status="approval_withheld", diagnostic="approval_withheld"
                     )
             self._observe_stage("approval.preflight")
-            preflight = self._preflight(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
+            preflight = (
+                None
+                if _before_approval is not None
+                else _consume_quarantine_pr(
+                    quarantine_pr,
+                    self,
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
             )
+            if preflight is None:
+                preflight = self._preflight(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
             if preflight.result is not None:
                 return preflight.result
             if preflight.app_authored:
@@ -2605,8 +2812,15 @@ class ReviewApprovalFinalizer:
                     or bool(drift_state.inventory.blocking_obligations)
                 ):
                     has_drift_blockers = (
-                        bool(drift_state.inventory.blocking_obligations)
+                        any(
+                            ob.effective_blocking_now
+                            for ob in drift_state.inventory.obligations
+                        )
                         or has_uncertain_drift_slot
+                    )
+                    has_drift_human = any(
+                        ob.unresolved and ob.criterion.needs_human
+                        for ob in drift_state.inventory.obligations
                     )
                     return known(
                         PublicationResult(
@@ -2614,6 +2828,8 @@ class ReviewApprovalFinalizer:
                             diagnostic=(
                                 "required_fixes_open"
                                 if has_drift_blockers
+                                else "human_adjudication_open"
+                                if has_drift_human
                                 else "approval_withheld"
                             ),
                         )
@@ -2771,22 +2987,7 @@ class ReviewApprovalFinalizer:
                 head_sha=head_sha,
                 base_sha=preflight.base_sha,
             )
-            approval_body = marker
-            if decision.outcome == "maintainer-coverage-exception":
-                gates = ",".join(decision.satisfied_gates)
-                exception_marker = (
-                    "<!-- reviewsensei:approval-exception:v1 "
-                    "outcome=maintainer-coverage-exception "
-                    f"result={eligibility.result_digest} "
-                    f"gates={gates} -->"
-                )
-                approval_body = (
-                    "Approved with maintainer coverage exception "
-                    f"(`outcome=maintainer-coverage-exception`, "
-                    f"`result={eligibility.result_digest}`, "
-                    f"`satisfied_gates={gates}`).\n\n"
-                    f"{marker}\n{exception_marker}"
-                )
+            approval_body = _approval_body(marker, eligibility, decision)
             if self._reviews_have_app_head_state(
                 reviews,
                 head_sha=head_sha,
@@ -3001,6 +3202,157 @@ class ReviewApprovalFinalizer:
             and chosen.get("pull_request_url") == pull_request_url
         )
 
+    def _require_closed_capacity_source(self):
+        from .application import GitHubApplication
+        from .finding_lifecycle import FindingLifecycleJournal
+
+        journal = getattr(self, "_finding_lifecycle_journal", None)
+        quarantine = self._quarantine_capacity_preparation
+        current = getattr(self, "_current_quarantine_preparation", None)
+        if current is not None:
+            from .current_quarantine_finalization import require as require_current
+
+            require_current(current, self)
+        if quarantine is not None:
+            from .quarantine_command_finalization import require
+
+            saved = require(quarantine)
+            factory = self.quarantine_reader_factory
+            if (
+                getattr(factory, "__func__", None)
+                is not GitHubApplication._quarantine_hold_reader
+                or getattr(factory, "__self__", None) is not saved["app"]
+                or journal is None
+                or journal.ledger is not saved["run"].ledger
+                or journal._record is not saved["record"]
+            ):
+                raise ReviewInputError("quarantine capacity finalizer factory changed")
+        if (
+            type(self) is not ReviewApprovalFinalizer
+            or type(journal) is not FindingLifecycleJournal
+            or (
+                self.human_inventory_reader_factory is not None
+                and (
+                    getattr(self.human_inventory_reader_factory, "__func__", None)
+                    is not GitHubApplication._human_inventory_reader
+                    or type(
+                        getattr(self.human_inventory_reader_factory, "__self__", None)
+                    )
+                    is not GitHubApplication
+                    or getattr(self.human_inventory_reader_factory, "__self__").reviewer
+                    is not journal.reviewer
+                )
+            )
+            or any(
+                getattr(self, name) is not None
+                and not (
+                    name == "quarantine_reader_factory"
+                    and (quarantine is not None or current is not None)
+                )
+                for name in (
+                    "human_inventory_reader",
+                    "prior_publication_reader_factory",
+                    "native_union_reader_factory",
+                    "quarantine_reader_factory",
+                    "historical_assessment_reader_factory",
+                    "partitioned_reader",
+                )
+            )
+            or any(
+                getattr(getattr(self, name), "__func__", getattr(self, name))
+                is not getattr(ReviewApprovalFinalizer, name)
+                for name in (
+                    "prepare_quarantine_command_capacity",
+                    "prepare_command_capacity",
+                    "_refinalize_with_dispositions_impl",
+                    "_load_head_reviews",
+                    "_review_pages",
+                    "_eligibility_from_reviews",
+                    "finding_index_from_reviews",
+                    "_preflight",
+                    "_evaluate_live_pr_trust_boundary",
+                    "attach_carried",
+                    "attach_historical",
+                    "attach_quarantine",
+                    "quarantine_reader",
+                    "historical_reader",
+                    "load_eligibility",
+                    "_command_root_unchanged",
+                    "_observe_stage",
+                    "_read_operation",
+                    "_human_reader_for_scope",
+                    "_decided_cleanup_inputs",
+                    "_plain_cleanup_frontier",
+                    "_native_thread_nodes",
+                )
+            )
+        ):
+            raise ReviewInputError("command finalizer capacity source is unsupported")
+
+    def prepare_quarantine_command_capacity(self, preparation, **arguments):
+        """Observe hypothetical native work, without issuing physical admission."""
+        from copy import copy
+
+        from .quarantine_command_finalization import (
+            require,
+            require_finalizer_copy_source,
+        )
+
+        require_finalizer_copy_source(self)
+        require(preparation)
+        operation = copy(self)
+        operation._quarantine_capacity_preparation = preparation
+        from .quarantine_command_finalization import hydrate_sizing_states
+
+        hydrate_sizing_states(preparation, operation)
+        return operation.prepare_command_capacity(**arguments)
+
+    def prepare_current_command_capacity(self, preparation, **arguments):
+        from copy import copy
+
+        from .current_quarantine_finalization import require
+        from .quarantine_command_finalization import require_finalizer_copy_source
+
+        require_finalizer_copy_source(self)
+        require(preparation)
+        operation = copy(self)
+        operation._current_quarantine_preparation = preparation
+        return operation.prepare_command_capacity(**arguments)
+
+    def prepare_command_capacity(self, **arguments):
+        """Prepare only closed source-owned readers; never grant write authority."""
+        from copy import copy, deepcopy
+
+        from .command_finalization_plan import CapacityPrepared
+
+        ReviewApprovalFinalizer._require_closed_capacity_source(self)
+        from .command_finalization_plan import _underlying_http
+
+        _underlying_http(
+            self.http, budget=self.evidence_budget or self._operation_budget
+        )
+        operation = copy(self)
+        for name in (
+            "_active_window_states",
+            "_drift_states",
+            "_artifact_decisions",
+            "_response_loss_holds",
+            "_trust_snapshots",
+            "_trust_decisions",
+            "_unknown_effect_holds",
+        ):
+            setattr(operation, name, deepcopy(getattr(self, name)))
+        operation._operation_observer = None
+        operation._plain_review_frontier = None
+        operation._command_capacity_requested = True
+        try:
+            result = operation._refinalize_with_dispositions_impl(**arguments)
+        except CapacityPrepared as prepared:
+            return prepared.plan
+        raise ReviewInputError(
+            "command finalization capacity preparation refused: " + result.status
+        )
+
     def _refinalize_with_dispositions_impl(
         self,
         *,
@@ -3020,6 +3372,7 @@ class ReviewApprovalFinalizer:
         check_token_provider: Callable[[], str] | None = None,
         command_finalization_reserve: int | None = None,
     ) -> PublicationResult:
+        self._plain_review_frontier = None
         from .checks import ReviewCheckPublisher, review_check_outcome
 
         reviews = self._load_head_reviews(
@@ -3052,6 +3405,20 @@ class ReviewApprovalFinalizer:
             )
         body = chosen["body"]
         assert isinstance(body, str)
+        execution_plan = self._execution_capacity_plan
+        if execution_plan is not None:
+            expected_preparation = json.loads(execution_plan.payload)
+            if canonical_bytes(chosen) != canonical_bytes(
+                expected_preparation["review_before"]
+            ):
+                raise ReviewInputError("command capacity native preparation changed")
+        update_journal = getattr(self, "_finding_lifecycle_journal", None)
+        update_precondition = (
+            update_journal.issue_review_update_precondition(chosen)
+            if update_journal is not None
+            and not getattr(self, "_command_capacity_requested", False)
+            else None
+        )
         eligibility = self._eligibility_from_reviews(
             reviews,
             head_sha=head_sha,
@@ -3224,14 +3591,8 @@ class ReviewApprovalFinalizer:
                 slot_released=True,
                 coverage_uncertainty_accepted=coverage_accepted,
             )
-            displayed_drift_ids = {
-                entry.obligation_id for entry in preview_drift.active_entries
-            }
             if any(s.state == "uncertain" for s in preview_drift.slots) or any(
-                ob.obligation_id not in displayed_drift_ids
-                or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-multi-target"}
-                or ob.blocks_approval_now
-                for ob in preview_drift.inventory.blocking_obligations
+                ob.effective_blocking_now for ob in preview_drift.inventory.obligations
             ):
                 has_blocking = True
             if preview_drift.changed_file_coverage.coverage_uncertainty_accepted:
@@ -3241,13 +3602,14 @@ class ReviewApprovalFinalizer:
             adjusted,
             facts=replace(adjusted.facts, has_blocking_findings=has_blocking),
         )
-        adjusted = self.attach_carried(
-            adjusted,
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-        )
+        with _capture_quarantine_pr(self, token=token) as quarantine_pr:
+            adjusted = self.attach_carried(
+                adjusted,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )
         has_human = adjusted.facts.has_human_adjudication_findings
         if window_state is not None and window_state.head_sha == head_sha:
             if any(
@@ -3309,6 +3671,10 @@ class ReviewApprovalFinalizer:
             len(new_body.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES
             or compact_rows
         ):
+            if self._closed_command_reads:
+                raise ReviewInputError(
+                    "command capacity compacted execution is unqualified"
+                )
             from .command_capacity import compact_command_references
             from .publication_recovery import publication_http
 
@@ -3379,13 +3745,27 @@ class ReviewApprovalFinalizer:
                     status="gate_reevaluation_failed",
                     diagnostic="command_body_capacity_unverifiable",
                 )
-        live = self._preflight(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            app_slug=app_slug,
+        live = (
+            None
+            if compacted
+            else _consume_quarantine_pr(
+                quarantine_pr,
+                self,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
         )
+        if live is None:
+            live = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
         if live.result is not None:
             return live.result
         if live.base_sha != index.base_sha or live.repository_id != repository_id:
@@ -3518,30 +3898,317 @@ class ReviewApprovalFinalizer:
                 status="gate_reevaluation_failed",
                 diagnostic="command_body_capacity_exceeded",
             )
-        from .api_run_plan import (
-            COMMAND_UPDATE_CONFIRMATION_REQUESTS,
-            NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS,
-        )
         from .caller_operation import caller_for_http
 
         caller = caller_for_http(self.http)
         confirmation = nullcontext()
         if caller is not None and new_body != body:
-            capacity = 1 + (
-                NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS
-                if eligibility.native_union is not None
-                else COMMAND_UPDATE_CONFIRMATION_REQUESTS
-            )
-            caller.budget_view.preflight(capacity)
-            confirmation = caller._operation(
-                "command-review-update:"
+            confirmation = _command_review_confirmation(
+                caller,
+                key="command-review-update:"
                 + str(chosen["id"])
                 + ":"
                 + hashlib.sha256(new_body.encode()).hexdigest(),
-                capacity,
-                write_tail=capacity,
+                native_union=eligibility.native_union is not None,
             )
-        with confirmation as allocation:
+        journal = getattr(self, "_finding_lifecycle_journal", None)
+        update_capacity_states: list[
+            ActiveWindowRoundState | DriftEvaluationResult
+        ] = []
+        if window_state is not None and window_state.head_sha == head_sha:
+            for released in (False, True):
+                update_capacity_states.append(
+                    apply_dispositions_to_window_state(
+                        window_state,
+                        honored_fingerprints=active,
+                        honored_instances=honored_instances,
+                        actor=actor,
+                        head_sha=head_sha,
+                        slot_released=released,
+                        coverage_uncertainty_accepted=coverage_accepted,
+                    )
+                )
+        if drift_state is not None and drift_state.head_sha == head_sha:
+            for released in (False, True):
+                update_capacity_states.append(
+                    apply_dispositions_to_drift_state(
+                        drift_state,
+                        honored_fingerprints=active,
+                        honored_instances=honored_instances,
+                        actor=actor,
+                        head_sha=head_sha,
+                        slot_released=released,
+                        coverage_uncertainty_accepted=coverage_accepted,
+                    )
+                )
+        if getattr(self, "_command_capacity_requested", False):
+            from .command_finalization_plan import CapacityPrepared, issue_plan
+            from .thread_resolution import FindingThreadResolver
+
+            if compacted:
+                raise ReviewInputError(
+                    "command capacity compacted source tail is unqualified"
+                )
+            if journal is None:
+                raise ReviewInputError(
+                    "command finalization capacity journal is absent"
+                )
+            records, cleanup_instances = self._decided_cleanup_inputs(
+                eligibility=adjusted,
+                index=index,
+                reviews=reviews,
+                app_slug=app_slug,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                honored_instances=honored_instances,
+            )
+            if self._quarantine_capacity_preparation is not None:
+                from .quarantine_command_finalization import original_frontier
+
+                plain = original_frontier(
+                    self._quarantine_capacity_preparation,
+                    self,
+                    eligibility=eligibility,
+                    index=index,
+                    reviews=reviews,
+                )
+                if cleanup_instances:
+                    raise ReviewInputError(
+                        "quarantine finalizer cleanup sizing remains unqualified"
+                    )
+            elif getattr(self, "_current_quarantine_preparation", None) is not None:
+                from .current_quarantine_finalization import frontier
+
+                plain = frontier(
+                    self, eligibility=eligibility, index=index, reviews=reviews
+                )
+            else:
+                plain = self._plain_cleanup_frontier(
+                    eligibility=eligibility,
+                    index=index,
+                    reviews=reviews,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
+            if plain is None:
+                raise ReviewInputError(
+                    "command finalization planning source tail is unqualified"
+                )
+            from .command_finalization_plan import checked_cleanup_discovery
+
+            resolver = FindingThreadResolver(self.http)
+            roots = ()
+            if cleanup_instances:
+                roots = checked_cleanup_discovery(
+                    journal,
+                    resolver._discover_candidates(
+                        token=token,
+                        repository=repository,
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=index.base_sha,
+                        app_slug=app_slug,
+                        instances=cleanup_instances,
+                    ),
+                    cleanup_instances,
+                )
+            requests, cleanup_calls = (
+                resolver.plan_capacity(
+                    token=token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=index.base_sha,
+                    app_slug=app_slug,
+                    instances=cleanup_instances,
+                    records=records,
+                    batch_fence_calls=2,
+                    cleanup_capability_required=True,
+                    root_reader=lambda: roots,
+                )
+                if cleanup_instances
+                else ((), 0)
+            )
+            planned_check = review_check_outcome(
+                policy=reviews_policy,
+                review_status=adjusted.facts.review_status,
+                required_fixes=has_blocking,
+                required_decisions=has_human,
+                coverage_uncertainty_accepted=coverage_accepted,
+                review_verdict=adjusted.facts.review_verdict,
+            )
+            if not isinstance(check_token, str) or not check_token:
+                raise ReviewInputError(
+                    "command capacity check read credential is unavailable"
+                )
+            check_request = ReviewCheckPublisher(http=self.http).plan_completion(
+                token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                outcome=planned_check,
+            )
+            possible_approval = adjusted.evaluate(
+                app_authored=False,
+                has_open_review_threads=False,
+                coverage_uncertainty_accepted=coverage_accepted,
+            )
+            approval_request = (
+                [
+                    "POST",
+                    self.http.repository_path(
+                        repository, f"/pulls/{pull_request}/reviews"
+                    ),
+                    {
+                        "commit_id": head_sha,
+                        "event": "APPROVE",
+                        "body": _approval_body(
+                            approval_marker(
+                                repository_id=repository_id,
+                                pull_request=pull_request,
+                                head_sha=head_sha,
+                                base_sha=index.base_sha,
+                            ),
+                            adjusted,
+                            possible_approval,
+                        ),
+                    },
+                ]
+                if possible_approval.approved
+                else None
+            )
+            plan_factory = issue_plan
+            if getattr(self, "_current_quarantine_preparation", None) is not None:
+                from .current_quarantine_finalization import issue_plan as current_issue
+
+                plan_factory = current_issue
+            if self._quarantine_capacity_preparation is not None:
+                from .quarantine_command_finalization import observe_plan
+
+                plan_factory = observe_plan
+            raise CapacityPrepared(
+                plan_factory(
+                    self,
+                    payload={
+                        "repository": repository,
+                        "repository_id": repository_id,
+                        "pull_request": pull_request,
+                        "head_sha": head_sha,
+                        "base_sha": index.base_sha,
+                        "app_slug": app_slug,
+                        "review_update": (
+                            [
+                                "PUT",
+                                self.http.repository_path(
+                                    repository,
+                                    f"/pulls/{pull_request}/reviews/{chosen['id']}",
+                                ),
+                                {"body": new_body},
+                            ]
+                            if new_body != body
+                            else None
+                        ),
+                        "review_before": chosen,
+                        "cleanup_requests": requests,
+                        "cleanup_native_calls": cleanup_calls,
+                        "check_request": check_request,
+                        "conditional_approval": approval_request,
+                        "frontier": json.loads(plain),
+                        "execution_read_tail": None
+                        if self._quarantine_capacity_preparation is not None
+                        else {
+                            "preparation": 3,
+                            "post_review_update": 1 if new_body != body else 0,
+                            "cleanup_discovery": 1 if cleanup_instances else 0,
+                            "check_lookup": 1,
+                            "approval_and_response_loss": 5
+                            if approval_request is not None
+                            else 0,
+                        },
+                        "execution_capability_tail": None
+                        if self._quarantine_capacity_preparation is not None
+                        else {"review_publish": 1, "check": 0},
+                        "read_contract": (
+                            "quarantine-sizing-observation-only-v1"
+                            if self._quarantine_capacity_preparation is not None
+                            else "closed-plain-single-complete-page-v1"
+                        ),
+                    },
+                    states=update_capacity_states,
+                    check_token=check_token,
+                    cleanup_instances=cleanup_instances,
+                )
+            )
+
+        if execution_plan is not None:
+            from review_sensei.finding_lifecycle import encode_lifecycle_state
+
+            actual_update = (
+                [
+                    "PUT",
+                    self.http.repository_path(
+                        repository, f"/pulls/{pull_request}/reviews/{chosen['id']}"
+                    ),
+                    {"body": new_body},
+                ]
+                if new_body != body
+                else None
+            )
+            if (
+                actual_update != expected_preparation["review_update"]
+                or canonical_bytes(
+                    [encode_lifecycle_state(state) for state in update_capacity_states]
+                )
+                != execution_plan.state_bytes
+            ):
+                raise ReviewInputError(
+                    "command capacity projected native preparation changed"
+                )
+        if journal is not None:
+            # Sizing only: do not install overrides or release slots before the
+            # complete native cleanup result supplies its own authority.
+            _, cleanup_instances = self._decided_cleanup_inputs(
+                eligibility=adjusted,
+                index=index,
+                reviews=reviews,
+                app_slug=app_slug,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                honored_instances=honored_instances,
+            )
+            try:
+                journal.prepare_finalizer_capacity_states(
+                    tuple(update_capacity_states), cleanup_instances=cleanup_instances
+                )
+            except ReviewInputError as error:
+                if (
+                    str(error)
+                    != "finding_lifecycle_verified_fixed_subset_capacity_unqualified"
+                ):
+                    raise
+                return PublicationResult(
+                    status="gate_reevaluation_failed", diagnostic=str(error)
+                )
+        preparation = (
+            journal.prepare_review_update(
+                self.http.repository_path(
+                    repository, f"/pulls/{pull_request}/reviews/{chosen['id']}"
+                ),
+                token=token,
+                body={"body": new_body},
+                precondition=update_precondition,
+                capacity_states=tuple(update_capacity_states),
+            )
+            if journal is not None and new_body != body
+            else nullcontext()
+        )
+        with preparation, confirmation as allocation:
             if new_body != body:
                 try:
                     status, _payload = self.http.request(
@@ -3662,8 +4329,15 @@ class ReviewApprovalFinalizer:
             if deferred_command
             else None
         )
-        check_failed = False
-        if deferred_command:
+        command_cleanup_stopped = False
+        if resolution is not None and resolution.unconfirmed:
+            from .command_finalization_plan import stop_command_cleanup
+
+            command_cleanup_stopped = stop_command_cleanup(
+                getattr(self, "_finding_lifecycle_journal", None)
+            )
+        check_failed = command_cleanup_stopped
+        if deferred_command and not command_cleanup_stopped:
             assert check_token_provider is not None
             self._observe_stage("check.capability")
             try:
@@ -3693,7 +4367,7 @@ class ReviewApprovalFinalizer:
             if check_token or check_token_provider is not None
             else None
         )
-        if check_token:
+        if check_token and not command_cleanup_stopped:
             assert check_outcome is not None
             self._observe_stage("check.publication")
             try:
@@ -3715,6 +4389,13 @@ class ReviewApprovalFinalizer:
                 check_failed = True
         if resolution is None:
             resolution = reconcile_cleanup()
+            if resolution.unconfirmed:
+                from .command_finalization_plan import stop_command_cleanup
+
+                command_cleanup_stopped = stop_command_cleanup(
+                    getattr(self, "_finding_lifecycle_journal", None)
+                )
+                check_failed = check_failed or command_cleanup_stopped
         if window_state is not None and window_state.head_sha == head_sha:
             self._active_window_states[(repository_id, pull_request)] = (
                 apply_dispositions_to_window_state(
@@ -3739,6 +4420,12 @@ class ReviewApprovalFinalizer:
                     coverage_uncertainty_accepted=coverage_accepted,
                 )
             )
+        from .command_finalization_plan import apply_command_confirmed_release
+
+        apply_command_confirmed_release(
+            getattr(self, "_finding_lifecycle_journal", None),
+            set(resolution.resolved) - set(resolution.unconfirmed),
+        )
         check_confirmed = (
             check_result is not None
             and check_result.status in {"created", "updated"}
@@ -3752,7 +4439,13 @@ class ReviewApprovalFinalizer:
             check_failed = True
         finalization_observed = True
         try:
-            if check_token_provider is not None and check_failed:
+            if command_cleanup_stopped:
+                finalized = PublicationResult(
+                    status="gate_reevaluation_failed",
+                    diagnostic="command_cleanup_incomplete",
+                )
+                finalization_observed = False
+            elif check_token_provider is not None and check_failed:
                 # Deferred commands retain progress without using an unfunded
                 # check phase to justify a fresh approval. An actual exact-head
                 # approval already seen in the authenticated read remains an
@@ -3830,7 +4523,11 @@ class ReviewApprovalFinalizer:
         if check_failed:
             return PublicationResult(
                 status="gate_reevaluation_failed",
-                diagnostic="check_reconciliation_failed",
+                diagnostic=(
+                    "command_cleanup_incomplete"
+                    if command_cleanup_stopped
+                    else "check_reconciliation_failed"
+                ),
                 review_id=finalized.review_id,
                 thread_resolution=thread_res,
                 approval_progress=progress,
@@ -3898,14 +4595,53 @@ class ReviewApprovalFinalizer:
         repository: str,
         pull_request: int,
     ) -> list[Any]:
+        self._plain_review_frontier = None
+        if (
+            self._command_capacity_requested
+            and self._quarantine_capacity_preparation is not None
+        ):
+            from .quarantine_command_finalization import sizing_reviews
+
+            return sizing_reviews(self._quarantine_capacity_preparation, self)
         try:
-            from .controlled_restart import owns_target
+            from .controlled_restart import effect_guard, owns_target
+            from .finding_lifecycle import FindingLifecycleJournal
 
             items = self._review_pages(
                 token=token, repository=repository, pull_request=pull_request
             )
-            from .quarantine_native_scope import filter_reviews
+            from .quarantine_native_scope import filter_reviews, native_scope
 
+            # Retain immutable source observations, never a caller-supplied or
+            # mutable filtered list. A consumer still authenticates the closed
+            # inline root and reacquires the complete frontier before mutation.
+            journal = getattr(self, "_finding_lifecycle_journal", None)
+            if (
+                type(journal) is FindingLifecycleJournal
+                and journal._record is not None
+                and journal.identity.repository == repository
+                and journal.identity.pull_request == pull_request
+                and effect_guard(self.http) is None
+                and native_scope(self.http, repository=repository) is None
+                and 0 < len(items) < 100
+                and all(isinstance(item, dict) for item in items)
+                and all(
+                    getattr(getattr(self, name), "__func__", None)
+                    is getattr(ReviewApprovalFinalizer, name)
+                    for name in ("_load_head_reviews", "_review_pages")
+                )
+            ):
+                self._plain_review_frontier = (
+                    self.http,
+                    self.evidence_budget,
+                    journal,
+                    journal.operation_id,
+                    journal.identity,
+                    journal.head_sha,
+                    journal._record,
+                    canonical_bytes(journal._record.to_dict()),
+                    canonical_bytes(items),
+                )
             items = filter_reviews(self.http, items, repository=repository)
             return [
                 item
@@ -3945,6 +4681,17 @@ class ReviewApprovalFinalizer:
             raise GitHubPublicationError("review target was not found")
         if status < 200 or status >= 300:
             raise GitHubPublicationError("approval finalization preflight failed")
+        return self._preflight_payload(
+            payload,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+        )
+
+    def _preflight_payload(
+        self, payload, *, repository, pull_request, head_sha, app_slug
+    ):
         trust_dec = self._evaluate_live_pr_trust_boundary(
             payload,
             repository=repository,
@@ -4040,50 +4787,23 @@ class ReviewApprovalFinalizer:
             )
         return matching[0]
 
-    def reconcile_decided_threads(
-        self,
+    @staticmethod
+    def _decided_cleanup_inputs(
         *,
-        token: str,
-        repository: str,
-        repository_id: int,
-        pull_request: int,
-        head_sha: str,
-        app_slug: str,
-        eligibility: ReviewApprovalEligibility,
-        index: FindingIndex | None,
-        reviews: Sequence[Any],
-        honored_instances: frozenset[str] = frozenset(),
-        _skip_resolved: bool = True,
-        reserve: int = 0,
+        eligibility,
+        index,
+        reviews,
+        app_slug,
+        repository_id,
+        pull_request,
+        head_sha,
+        honored_instances,
     ):
-        """Retry durable decisions, observing resolved threads without new writes.
-
-        Complete discovery still authenticates each root's App and exact scope.
-        Resolved observations need no mutation fence; fresh authority fences
-        remain mandatory for unresolved mutations and final approval. Repeating
-        those reads for the resolved prefix can starve every later retry.
-        ``reserve`` holds ordinary dispatches for work that follows cleanup in
-        the same request; it is never spent by this phase.
-        """
-        from .thread_resolution import (
-            FindingThreadResolver,
-            ThreadResolutionResult,
-            resolution_records,
-        )
+        from .thread_resolution import resolution_records
 
         if index is None:
-            return ThreadResolutionResult()
-        try:
-            durable_records = resolution_records(reviews, app_slug)
-        except GitHubPublicationError as exc:
-            self._observe_stage("cleanup.authority-fence")
-            if self._operation_observer is not None:
-                self._operation_observer.exception(exc)
-            return ThreadResolutionResult(
-                unconfirmed=tuple(
-                    entry.instance for entry in index.entries if not entry.body_placed
-                )
-            )
+            return (), frozenset()
+        durable_records = resolution_records(reviews, app_slug)
         records = tuple(
             record
             for record in durable_records
@@ -4118,6 +4838,275 @@ class ReviewApprovalFinalizer:
                 or (entry.needs_human and entry.instance in assessed)
             )
         )
+        return records, instances
+
+    def _plain_cleanup_frontier(
+        self,
+        *,
+        eligibility,
+        index,
+        reviews,
+        repository_id,
+        pull_request,
+        head_sha,
+        app_slug,
+    ):
+        """Closed inline source proof for a single-page, two-read fence."""
+        from .controlled_restart import effect_guard
+        from .finding_lifecycle import FindingLifecycleJournal
+        from .quarantine_native_scope import native_scope
+        from .session_ledger import GitHubIssueCommentSessionLedger
+
+        journal = getattr(self, "_finding_lifecycle_journal", None)
+        observed = self._plain_review_frontier
+        self._plain_review_frontier = None
+        if observed is not None:
+            if (
+                journal is None
+                or observed[0] is not self.http
+                or observed[1] is not self.evidence_budget
+                or observed[2] is not journal
+                or observed[3:6]
+                != (journal.operation_id, journal.identity, journal.head_sha)
+                or observed[6] is not journal._record
+                or observed[7] != canonical_bytes(journal._record.to_dict())
+            ):
+                return None
+            reviews = json.loads(observed[8])
+        if (
+            type(self) is not ReviewApprovalFinalizer
+            or type(journal) is not FindingLifecycleJournal
+            or any(
+                getattr(getattr(self, name), "__func__", None)
+                is not getattr(ReviewApprovalFinalizer, name)
+                for name in (
+                    "_preflight",
+                    "_evaluate_live_pr_trust_boundary",
+                    "_observe_stage",
+                )
+            )
+            or (
+                self._operation_observer is not None
+                and (
+                    type(self._operation_observer) is not OperationObserver
+                    or getattr(self._operation_observer.at, "__func__", None)
+                    is not OperationObserver.at
+                )
+            )
+            or self.quarantine_reader_factory is not None
+            or getattr(journal.ledger, "_quarantine_required", False)
+            or getattr(journal.ledger, "_activation_ticket", None) is not None
+            or getattr(journal.ledger, "_quarantine_checkpoint_snapshot", None)
+            is not None
+            or journal._record is None
+            or journal._record.quarantine_lineage is not None
+            or journal.identity.repository_id != repository_id
+            or journal.identity.pull_request != pull_request
+            or journal.head_sha != head_sha
+            or journal._record.identity() != journal.identity
+            or effect_guard(self.http) is not None
+            or native_scope(self.http, repository=journal.identity.repository)
+            is not None
+            or eligibility.native_union is not None
+            or eligibility.human_inventory_reference is not None
+            or not isinstance(reviews, (list, tuple))
+            or not 0 < len(reviews) < 100
+            or any(not isinstance(review, dict) for review in reviews)
+            or getattr(journal.ledger.evidence_producer, "__func__", None)
+            is not GitHubIssueCommentSessionLedger.evidence_producer
+        ):
+            return None
+        producer = journal.ledger.evidence_producer()
+        if not producer.startswith("github-bot:"):
+            return None
+        reference = journal._record.finding_lifecycle
+        if not isinstance(reference, dict):
+            return None
+        binding = reference.get("manifest", {}).get("binding", {})
+        if (
+            binding.get("producer") != producer
+            or binding.get("repository") != journal.identity.repository
+            or binding.get("repository_id") != repository_id
+            or binding.get("pull_request") != pull_request
+        ):
+            return None
+        # A multi-contingent release cannot use a newer approval to hide an
+        # edited original authority frame. This strict source envelope is only
+        # needed for the newly qualified fixed-prefix path; older unrelated
+        # histories retain their existing conservative behavior.
+        key = (repository_id, pull_request)
+        state = (
+            journal._planned
+            or self._drift_states.get(key)
+            or self._active_window_states.get(key)
+        )
+        inventory = getattr(state, "inventory", None) or getattr(
+            state, "authoritative_decision_inventory", None
+        )
+        fixed = []
+        for obligation in getattr(inventory, "obligations", ()):
+            target_state = getattr(obligation, "target_state", None)
+            binding = getattr(obligation, "thread_binding", None)
+            if binding is not None:
+                target_state = binding.slot_state
+            if (
+                obligation.lifecycle_state == "verified-fixed"
+                and obligation.resolution_proof_sha256 is not None
+                and target_state == "contingent"
+            ):
+                fixed.append(obligation)
+        from .command_finalization_plan import retained_review_frontier
+
+        source_frames = None
+        if len(fixed) > 1:
+            source_frames = retained_review_frontier(
+                journal, reviews, producer=producer, app_slug=app_slug
+            )
+            if source_frames is None:
+                return None
+        matches = []
+        for review in reviews:
+            user = review.get("user")
+            if (
+                type(review.get("id")) is int
+                and review["id"] > 0
+                and review.get("commit_id") == head_sha
+                and review.get("state") in PUBLISHED_REVIEW_STATES
+                and review.get("edited_by_human") is not True
+                and isinstance(user, dict)
+                and type(user.get("id")) is int
+                and producer == f"github-bot:{user['id']}"
+                and user.get("type") == "Bot"
+                and isinstance(user.get("login"), str)
+                and user["login"].casefold() == app_slug.casefold()
+                # No reader callbacks means referenced/partial evidence cannot
+                # masquerade as a bounded plain-root decoder.
+                and approval_eligibility_from_body(review.get("body")) == eligibility
+                and parse_finding_index(
+                    review.get("body"),
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                )
+                == index
+            ):
+                matches.append(review)
+        if not matches:
+            # Genuine assessment frames need not duplicate the original index.
+            # Both whole bodies must match independently retained native writes.
+            owned = (
+                source_frames
+                if source_frames is not None
+                else retained_review_frontier(
+                    journal, reviews, producer=producer, app_slug=app_slug
+                )
+            )
+            if owned is None:
+                return None
+            frames = [
+                r for r in owned if APPROVAL_ELIGIBILITY_MARKER_PREFIX in r["body"]
+            ]
+            indexes = [
+                r
+                for r in reviews
+                if r.get("commit_id") == head_sha
+                and FINDING_INDEX_MARKER_PREFIX in str(r.get("body", ""))
+                and parse_finding_index(
+                    r.get("body"),
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                )
+                == index
+            ]
+            if (
+                not frames
+                or len(indexes) != 1
+                or not any(indexes[0] is r for r in owned)
+                or len({r["id"] for r in owned}) != len(owned)
+                or len({r["body"] for r in owned}) != len(owned)
+            ):
+                return None
+            original = approval_eligibility_from_body(indexes[0]["body"])
+            if (
+                approval_eligibility_from_body(frames[-1]["body"]) != eligibility
+                or original is None
+                or original.head_sha != eligibility.head_sha
+                or original.human_review is None
+                or eligibility.human_review is None
+                or original.human_review.base_sha != index.base_sha
+                or eligibility.human_review.base_sha != index.base_sha
+                or original.result_digest != eligibility.result_digest
+                or original.partitioned_root is not None
+                or original.human_inventory_reference is not None
+                or original.native_union is not None
+                or parse_finding_index(
+                    indexes[0]["body"],
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                )
+                != index
+            ):
+                return None
+            matches = indexes
+        if len(matches) != 1:
+            return None
+        return canonical_bytes(list(reviews))
+
+    def reconcile_decided_threads(
+        self,
+        *,
+        token: str,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility,
+        index: FindingIndex | None,
+        reviews: Sequence[Any],
+        honored_instances: frozenset[str] = frozenset(),
+        _skip_resolved: bool = True,
+        reserve: int = 0,
+    ):
+        """Retry durable decisions, observing resolved threads without new writes.
+
+        Complete discovery still authenticates each root's App and exact scope.
+        Resolved observations need no mutation fence; fresh authority fences
+        remain mandatory for unresolved mutations and final approval. Repeating
+        those reads for the resolved prefix can starve every later retry.
+        ``reserve`` holds ordinary dispatches for work that follows cleanup in
+        the same request; it is never spent by this phase.
+        """
+        from .thread_resolution import (
+            FindingThreadResolver,
+            ThreadResolutionResult,
+            resolution_records,
+        )
+
+        if index is None:
+            return ThreadResolutionResult()
+        try:
+            records, instances = self._decided_cleanup_inputs(
+                eligibility=eligibility,
+                index=index,
+                reviews=reviews,
+                app_slug=app_slug,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                honored_instances=honored_instances,
+            )
+        except GitHubPublicationError as exc:
+            self._observe_stage("cleanup.authority-fence")
+            if self._operation_observer is not None:
+                self._operation_observer.exception(exc)
+            return ThreadResolutionResult(
+                unconfirmed=tuple(
+                    entry.instance for entry in index.entries if not entry.body_placed
+                )
+            )
         if not instances:
             return ThreadResolutionResult()
 
@@ -4133,6 +5122,20 @@ class ReviewApprovalFinalizer:
             snapshot = getattr(reader, "confirmed_native_root", None)
             if callable(snapshot):
                 native_root = snapshot(eligibility)
+
+        plain_frontier = (
+            self._plain_cleanup_frontier(
+                eligibility=eligibility,
+                index=index,
+                reviews=reviews,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if native_root is None
+            else None
+        )
 
         def fence() -> bool:
             self._observe_stage("cleanup.authority-fence")
@@ -4190,6 +5193,34 @@ class ReviewApprovalFinalizer:
                     and live.base_sha == index.base_sha
                     and not live.app_authored
                 )
+            if plain_frontier is not None:
+                status, live_reviews = self.http.request(
+                    "GET",
+                    self.http.repository_path(
+                        repository, f"/pulls/{pull_request}/reviews?per_page=100&page=1"
+                    ),
+                    token=token,
+                )
+                if (
+                    status != 200
+                    or not isinstance(live_reviews, list)
+                    or len(live_reviews) >= 100
+                    or canonical_bytes(live_reviews) != plain_frontier
+                ):
+                    return False
+                live = self._preflight(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
+                return (
+                    live.result is None
+                    and live.repository_id == repository_id
+                    and live.base_sha == index.base_sha
+                    and not live.app_authored
+                )
             live_reviews = self._load_head_reviews(
                 token=token, repository=repository, pull_request=pull_request
             )
@@ -4229,6 +5260,41 @@ class ReviewApprovalFinalizer:
                 and live.base_sha == index.base_sha
                 and not live.app_authored
             )
+
+        from .reply_finalization_plan import executing_plan
+
+        reply_journal = getattr(self, "_finding_lifecycle_journal", None)
+        reply_plan = (
+            executing_plan(reply_journal) if reply_journal is not None else None
+        )
+        batch_fence_calls = 2 if plain_frontier is not None else None
+        if reply_plan is not None:
+            # Exact source-qualified inline readers are one complete page;
+            # pure decoders plus the existing live PR fence cost two reads.
+            batch_fence_calls = 2
+        if native_root is not None:
+            from .api_run_plan import READ_OPERATION_REQUESTS
+            from .api_run_requests import ApiRunSessionLedger
+            from .application import GitHubApplication
+
+            # Only the ordinary source-owned factory has this known no-I/O
+            # construction plus one bounded native ledger load in require().
+            if (
+                getattr(self.quarantine_reader_factory, "__func__", None)
+                is GitHubApplication._quarantine_hold_reader
+            ):
+                holds = self.quarantine_reader(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                )
+                if (
+                    holds is not None
+                    and type(holds.ledger).load is ApiRunSessionLedger.load
+                    and holds.ledger.caller._active_operation is None
+                ):
+                    batch_fence_calls = 2 + READ_OPERATION_REQUESTS
 
         budget = (
             self.evidence_budget
@@ -4278,7 +5344,10 @@ class ReviewApprovalFinalizer:
                 return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
         try:
             try:
-                return FindingThreadResolver(self.http).resolve(
+                from .command_finalization_plan import execution_cleanup_roots
+
+                resolver = FindingThreadResolver(self.http)
+                resolution = resolver.resolve(
                     token=token,
                     repository=repository,
                     repository_id=repository_id,
@@ -4289,17 +5358,64 @@ class ReviewApprovalFinalizer:
                     instances=instances,
                     records=records,
                     fence=fence,
+                    batch_fence_calls=batch_fence_calls,
                     skip_resolved=_skip_resolved,
-                    root_reader=lambda: self._native_thread_nodes(
+                    root_reader=lambda: execution_cleanup_roots(
+                        getattr(self, "_finding_lifecycle_journal", None),
+                        resolver,
                         token=token,
                         repository=repository,
+                        repository_id=repository_id,
                         pull_request=pull_request,
                         head_sha=head_sha,
+                        base_sha=index.base_sha,
                         app_slug=app_slug,
+                        instances=instances,
+                        root_reader=lambda: self._native_thread_nodes(
+                            token=token,
+                            repository=repository,
+                            pull_request=pull_request,
+                            head_sha=head_sha,
+                            app_slug=app_slug,
+                        ),
                     ),
                     observer=self._operation_observer,
                     cleanup_token_provider=self._thread_cleanup_token_provider,
                 )
+                consumer = getattr(self, "_finding_lifecycle_consumer", None)
+                resolved_instances = set(resolution.resolved) - set(
+                    resolution.unconfirmed
+                )
+                if reply_plan is not None:
+                    from .reply_finalization_plan import (
+                        restrict_reply_release,
+                        stop_reply_cleanup,
+                    )
+
+                    resolved_instances = restrict_reply_release(
+                        reply_journal, resolved_instances
+                    )
+                    if resolution.unconfirmed:
+                        stop_reply_cleanup(reply_journal)
+                from .command_finalization_plan import (
+                    apply_command_confirmed_release,
+                    restrict_command_release,
+                )
+
+                resolved_instances = restrict_command_release(
+                    getattr(self, "_finding_lifecycle_journal", None),
+                    resolved_instances,
+                )
+                apply_command_confirmed_release(
+                    getattr(self, "_finding_lifecycle_journal", None),
+                    resolved_instances,
+                )
+                if consumer is not None:
+                    consumer.release_confirmed_slots(
+                        head_sha=head_sha,
+                        instances=resolved_instances,
+                    )
+                return resolution
             except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
                 if self._operation_observer is not None:
                     self._operation_observer.exception(exc)
@@ -4384,6 +5500,25 @@ class ReviewApprovalFinalizer:
                     return PublicationResult(
                         status="approval_withheld", diagnostic="approval_withheld"
                     )
+                consumer = getattr(self, "_finding_lifecycle_consumer", None)
+                if (
+                    consumer is not None
+                    and consumer.enrolled
+                    and eligibility.partitioned_root is None
+                    and eligibility.human_review is not None
+                ):
+                    from .conversation import apply_authenticated_finding_resolution
+
+                    apply_authenticated_finding_resolution(
+                        self,
+                        repository_id=live.repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        instances=eligibility.human_review.resolved,
+                        evidence_sha256=hashlib.sha256(
+                            canonical_bytes(eligibility.human_review.to_dict())
+                        ).hexdigest(),
+                    )
                 index = self.finding_index_from_reviews(
                     reviews,
                     repository_id=live.repository_id,
@@ -4403,6 +5538,16 @@ class ReviewApprovalFinalizer:
                     index=index,
                     reviews=reviews,
                 )
+                reply_journal = getattr(self, "_finding_lifecycle_journal", None)
+                if reply_journal is not None and resolution.unconfirmed:
+                    from .reply_finalization_plan import stop_reply_cleanup
+
+                    if stop_reply_cleanup(reply_journal):
+                        return PublicationResult(
+                            status="gate_reevaluation_failed",
+                            diagnostic="reply_cleanup_incomplete",
+                            thread_resolution="unconfirmed",
+                        )
                 if (
                     check_token
                     and not auto_approve_enabled
@@ -5204,6 +6349,9 @@ class ReviewPublisher:
         self._check_observation_hold = False
         self._check_observation: _ConfirmedCheckObservation | None = None
         self._persisted_index_has_blocking: bool = False
+        self._native_finding_receipt_records: dict[
+            tuple[int, int], dict[str, dict[str, object]]
+        ] = {}
         self._active_window_states: dict[tuple[int, int], ActiveWindowRoundState] = {}
         self._active_window_inputs: dict[tuple[int, int], tuple[str, str, str]] = {}
         self.finalizer._active_window_states = self._active_window_states
@@ -5217,6 +6365,7 @@ class ReviewPublisher:
         self._trust_decisions = self.finalizer._trust_decisions
         self._unknown_effect_holds = self.finalizer._unknown_effect_holds
         self._last_review_payload: list[Any] = []
+        self._finding_lifecycle_journal: Any | None = None
 
     def enroll_trust_snapshot(
         self, *, snapshot: AuthenticatedTrustSnapshot
@@ -5318,88 +6467,13 @@ class ReviewPublisher:
             return None
         key = (enrolled.repository_id, enrolled.pull_request)
         if observed is None:
-            eff_slug = (
-                repository_slug
-                if isinstance(repository_slug, str) and repository_slug
-                else enrolled.repository_slug
+            # Individual caller hints cannot fill a complete current trust
+            # observation; in particular a login cannot manufacture an actor ID.
+            decision = missing_trust_observation(
+                phase=phase, has_unknown_effect=key in self._unknown_effect_holds
             )
-            slug_owner, _sep, slug_repo = eff_slug.partition("/")
-            eff_owner_login = (
-                owner_login
-                if isinstance(owner_login, str) and owner_login
-                else (
-                    slug_owner
-                    if slug_owner and slug_owner.lower() != enrolled.owner_login.lower()
-                    else enrolled.owner_login
-                )
-            )
-            if slug_owner.lower() != eff_owner_login.lower():
-                eff_slug = f"{eff_owner_login}/{slug_repo or 'repo'}"
-            eff_owner_id = (
-                owner_id
-                if type(owner_id) is int and owner_id > 0
-                else enrolled.owner_id
-            )
-            eff_fork = is_fork if type(is_fork) is bool else enrolled.is_fork
-            eff_head = (
-                head_sha
-                if isinstance(head_sha, str) and GIT_SHA_HEX.fullmatch(head_sha)
-                else enrolled.head_sha
-            )
-            eff_actor_login = (
-                actor_login
-                if isinstance(actor_login, str) and actor_login
-                else enrolled.actor_login
-            )
-            if type(actor_id) is int and actor_id > 0:
-                eff_actor_id = actor_id
-            elif eff_actor_login.lower() != enrolled.actor_login.lower():
-                derived = (
-                    int(
-                        hashlib.sha256(
-                            eff_actor_login.lower().encode("utf-8")
-                        ).hexdigest()[:8],
-                        16,
-                    )
-                    % 1_000_000_000
-                ) + 1
-                eff_actor_id = derived + 1 if derived == enrolled.actor_id else derived
-            else:
-                eff_actor_id = enrolled.actor_id
-            eff_assoc = (
-                actor_association.upper()
-                if isinstance(actor_association, str)
-                and actor_association.upper()
-                in {
-                    "OWNER",
-                    "MEMBER",
-                    "COLLABORATOR",
-                    "CONTRIBUTOR",
-                    "FIRST_TIMER",
-                    "FIRST_TIME_CONTRIBUTOR",
-                    "NONE",
-                }
-                else enrolled.actor_association
-            )
-            eff_perm = (
-                actor_permission
-                if isinstance(actor_permission, str)
-                and actor_permission in PERMISSION_RANKS
-                else enrolled.actor_permission
-            )
-            observed = replace(
-                enrolled,
-                repository_id=repository_id,
-                owner_id=eff_owner_id,
-                owner_login=eff_owner_login,
-                repository_slug=eff_slug,
-                is_fork=eff_fork,
-                head_sha=eff_head,
-                actor_id=eff_actor_id,
-                actor_login=eff_actor_login,
-                actor_association=eff_assoc,
-                actor_permission=eff_perm,
-            )
+            self._trust_decisions.setdefault(key, []).append(decision)
+            return decision
         prior_charges = bool(
             has_prior_charges
             or key in self._active_window_states
@@ -5869,6 +6943,325 @@ class ReviewPublisher:
         )
         return planned, input_key
 
+    def native_finding_receipts(self, *, repository_id: int, pull_request: int):
+        """Private authenticated receipt records for the lifecycle journal."""
+        retained = getattr(self, "_native_finding_receipt_records", {})
+        return tuple(retained.get((repository_id, pull_request), {}).values())
+
+    def _adopt_native_union_finding_receipts(self, evidence, receipt) -> None:
+        """Project the already authenticated complete native union, no new census."""
+        context = getattr(self, "_native_finding_context", None)
+        if context is None:
+            return
+        receipt.require_evidence(evidence)
+        if (
+            receipt.repository_id,
+            receipt.pull_request,
+            receipt.head_sha,
+            receipt.base_sha,
+            receipt.producer_id,
+        ) != (
+            context["repository_id"],
+            context["pull_request"],
+            context["head_sha"],
+            context["base_sha"],
+            context["producer_id"],
+        ):
+            raise GitHubPublicationError("native union finding scope conflicts")
+        identifiers = dict(evidence.thread_ids)
+        metadata = {root.comment_id: root for root in evidence.roots}
+        nodes = []
+        # Native census permits wider opaque IDs than the existing lifecycle
+        # codec. Prepare the entire adoption off to the side so refusal cannot
+        # leave even an earlier valid binding installed.
+        existing = dict(context.get("existing_bindings", {}))
+        for root in evidence.root_bodies:
+            identifier = int(root["n"])
+            native = metadata[identifier]
+            instance = finding_instance_from_body(root["b"])
+            if instance is None:
+                continue
+            existing[instance] = {
+                "review_id": native.review_id,
+                "native_head_sha": native.head_sha,
+                "thread_id": identifiers[identifier],
+                "comment_id": identifier,
+            }
+            nodes.append(
+                {
+                    "id": identifiers[identifier],
+                    "isResolved": native.resolved,
+                    "comments": {
+                        "nodes": [
+                            {
+                                "databaseId": identifier,
+                                "body": root["b"],
+                                "commit": {"oid": native.head_sha},
+                                "pullRequestReview": {"databaseId": native.review_id},
+                                "author": {
+                                    "login": context["app_slug"],
+                                    "__typename": "Bot",
+                                    "databaseId": native.producer_id,
+                                },
+                            }
+                        ]
+                    },
+                }
+            )
+        assembled = context["assembled"]
+        expected = {
+            finding_instance_fingerprint(comment): body
+            for comment, _, body, _ in assembled.inline_comments
+        }
+        confirmed = _native_finding_receipts_from_nodes(
+            nodes,
+            repository_id=receipt.repository_id,
+            pull_request=receipt.pull_request,
+            head_sha=receipt.head_sha,
+            base_sha=receipt.base_sha,
+            producer_id=receipt.producer_id,
+            review_id=evidence.main_review_id,
+            app_slug=context["app_slug"],
+            expected=expected,
+            existing_bindings=existing,
+        )
+        for item in assembled.body_explanations:
+            if render_finding(item.view) in evidence.main_body:
+                confirmed[item.instance] = NativeFindingReceipt(
+                    receipt.repository_id,
+                    receipt.pull_request,
+                    receipt.head_sha,
+                    receipt.base_sha,
+                    receipt.producer_id,
+                    evidence.main_review_id,
+                    item.instance,
+                    hashlib.sha256(evidence.main_body.encode()).hexdigest(),
+                )
+        scope = (receipt.repository_id, receipt.pull_request)
+        scoped = dict(self._native_finding_receipt_records.get(scope, {}))
+        for instance, native_receipt in confirmed.items():
+            scoped[instance] = native_receipt.to_dict()
+
+        from review_sensei.source_registry import require_module_seal
+
+        from . import finding_lifecycle
+
+        require_module_seal(finding_lifecycle)
+        # Use the unchanged original representation: <=256 UTF-8 bytes per
+        # native atom, signed-63 numeric IDs and the existing aggregate caps.
+        # This is not a journal checkpoint or a whole-tail funding grant.
+        finding_lifecycle._pack_journal(
+            {"existing_bindings": existing, "native_receipts": list(scoped.values())}
+        )
+        context["existing_bindings"] = existing
+        context["receipts"] = (evidence.main_review_id, confirmed)
+        self._native_finding_receipt_records[scope] = scoped
+
+    @staticmethod
+    def _ordinary_review_event(
+        *, approval_enabled, requests_changes, retained_blocking, app_authored
+    ):
+        if (
+            approval_enabled
+            and (requests_changes or retained_blocking)
+            and not app_authored
+        ):
+            return "REQUEST_CHANGES", "CHANGES_REQUESTED"
+        return "COMMENT", "COMMENTED"
+
+    @staticmethod
+    def _inline_comment_payload(comment, comment_body, anchor) -> dict[str, object]:
+        """Pure native body producer shared with ordinary capacity planning."""
+        return {
+            "path": comment.path,
+            "body": comment_body,
+            "line": comment.line,
+            "side": "LEFT" if anchor == "left" else "RIGHT",
+        }
+
+    def _prepare_native_finding_readback(self, assembled: AssembledReview) -> None:
+        context = getattr(self, "_native_finding_context", None)
+        if context is None:
+            return
+        if context["producer_id"] is None:
+            from .publication_recovery import publication_http
+
+            budget = self.finalizer.evidence_budget or self.finalizer._operation_budget
+            if budget is None:
+                raise GitHubPublicationError(
+                    "native finding readback budget is missing"
+                )
+            http = publication_http(self.http, budget)
+            status, producer = http.request(
+                "GET",
+                "/users/" + quote(context["app_slug"], safe=""),
+                token=context["token"],
+            )
+            if (
+                status != 200
+                or not isinstance(producer, dict)
+                or type(producer.get("id")) is not int
+                or producer["id"] <= 0
+                or producer.get("type") != "Bot"
+                or not isinstance(producer.get("login"), str)
+                or producer["login"].casefold() != context["app_slug"].casefold()
+            ):
+                raise GitHubPublicationError("native finding producer is unconfirmed")
+            context["producer_id"] = producer["id"]
+        context["assembled"] = assembled
+        context["receipts"] = None
+        existing = context.setdefault("existing_bindings", {})
+        for receipt in self.native_finding_receipts(
+            repository_id=context["repository_id"], pull_request=context["pull_request"]
+        ):
+            if (
+                receipt["head_sha"] == context["head_sha"]
+                and receipt["base_sha"] == context["base_sha"]
+                and receipt["thread_id"] is not None
+            ):
+                existing[receipt["instance"]] = receipt
+
+    def _confirmed_native_finding_receipts(
+        self,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        review_id: int | None,
+    ) -> Mapping[str, NativeFindingReceipt]:
+        context = getattr(self, "_native_finding_context", None)
+        if (
+            context is None
+            or type(review_id) is not int
+            or review_id <= 0
+            or context["producer_id"] is None
+            or context["assembled"] is None
+            or (
+                context["repository_id"],
+                context["pull_request"],
+                context["head_sha"],
+                context["base_sha"],
+            )
+            != (repository_id, pull_request, head_sha, base_sha)
+        ):
+            return {}
+        cached = context["receipts"]
+        if cached is not None and cached[0] == review_id:
+            return cached[1]
+        receipts: dict[str, NativeFindingReceipt] = {}
+        # An unsuccessful opening is cached as a hold, never retried to obtain a
+        # convenient clean result in the same operation.
+        context["receipts"] = (review_id, receipts)
+        retained = getattr(self, "_native_finding_receipt_records", None)
+        if retained is None:
+            retained = self._native_finding_receipt_records = {}
+        scoped = retained.setdefault((repository_id, pull_request), {})
+        assembled = context["assembled"]
+        expected = {
+            finding_instance_fingerprint(comment): body
+            for comment, _, body, _ in assembled.inline_comments
+        }
+        try:
+            if expected:
+                self._published_finding_suppression(
+                    token=context["token"],
+                    repository=context["repository"],
+                    pull_request=pull_request,
+                    app_slug=context["app_slug"],
+                    repository_id=repository_id,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                )
+                receipts.update(
+                    _native_finding_receipts_from_nodes(
+                        getattr(self, "_native_binding_nodes", ()),
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
+                        producer_id=context["producer_id"],
+                        review_id=review_id,
+                        app_slug=context["app_slug"],
+                        expected=expected,
+                        existing_bindings=context.get("existing_bindings"),
+                        expected_anchors={
+                            finding_instance_fingerprint(comment): (
+                                comment.path,
+                                comment.line,
+                            )
+                            for comment, _, _, _ in assembled.inline_comments
+                        },
+                    )
+                )
+            if assembled.body_explanations:
+                from .publication_recovery import publication_http
+
+                budget = (
+                    self.finalizer.evidence_budget or self.finalizer._operation_budget
+                )
+                if budget is None:
+                    return receipts
+                http = publication_http(self.http, budget)
+                status, review = http.request(
+                    "GET",
+                    http.repository_path(
+                        context["repository"],
+                        f"/pulls/{pull_request}/reviews/{review_id}",
+                    ),
+                    token=context["token"],
+                )
+                user = review.get("user") if isinstance(review, dict) else None
+                if (
+                    status != 200
+                    or not isinstance(review, dict)
+                    or review.get("id") != review_id
+                    or review.get("commit_id") != head_sha
+                    or not isinstance(user, dict)
+                    or user.get("type") != "Bot"
+                    or user.get("id") != context["producer_id"]
+                    or not isinstance(review.get("body"), str)
+                ):
+                    return receipts
+                body = review["body"]
+                if getattr(self, "_ordinary_publication_observation", None) is not None:
+                    # Fresh ordinary body custody comes from the exact producer,
+                    # not finding substrings in possibly amended native prose.
+                    produced = context.get("ordinary_body_source")
+                    if not isinstance(produced, tuple) or produced != (review_id, body):
+                        return receipts
+                index = parse_finding_index(
+                    body,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                )
+                if index is None or index.base_sha != base_sha:
+                    return receipts
+                indexed = {
+                    entry.instance for entry in index.entries if entry.body_placed
+                }
+                for item in assembled.body_explanations:
+                    if item.instance in indexed and render_finding(item.view) in body:
+                        receipts[item.instance] = NativeFindingReceipt(
+                            repository_id,
+                            pull_request,
+                            head_sha,
+                            base_sha,
+                            context["producer_id"],
+                            review_id,
+                            item.instance,
+                            hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                        )
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+            # Known native success remains known; only the absent binding proof
+            # is uncertain. Do not repeat the business effect.
+            pass
+        finally:
+            for instance, receipt in receipts.items():
+                scoped[instance] = receipt.to_dict()
+        return receipts
+
     def _commit_active_window_success(
         self,
         *,
@@ -5883,46 +7276,74 @@ class ReviewPublisher:
         if planned_state is None or input_key is None:
             return None
         current = planned_state
-        displayed_targets = {
-            entry.native_target
-            for entry in current.display_active_findings.entries
-            if entry.native_target is not None
+        receipts = self._confirmed_native_finding_receipts(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            review_id=review_id,
+        )
+        obligations = {
+            ob.obligation_id: ob
+            for ob in current.authoritative_decision_inventory.obligations
         }
-        for slot in current.display_active_findings.slots:
-            if slot.state == "uncertain" and slot.target in displayed_targets:
-                proof = hashlib.sha256(
-                    canonical_bytes(
-                        {
-                            "kind": "reconciled-native-readback",
-                            "target": slot.target,
-                            "head_sha": head_sha,
-                            "review_id": review_id,
-                        }
-                    )
-                ).hexdigest()
-                current = reconcile_uncertain_slot(
-                    current,
-                    target=slot.target,
-                    resolved_state="active",
-                    proof_sha256=proof,
+        created_targets: dict[str, str] = {}
+        uncertain_targets: dict[str, str] = {}
+        for entry in planned_state.display_active_findings.entries:
+            ob = obligations[entry.obligation_id]
+            comment = ob.comment
+            receipt = None
+            if comment is not None:
+                projected = replace(
+                    comment,
+                    path=ob.path or comment.path,
+                    line=ob.line if ob.line is not None else comment.line,
+                    side=ob.side,
+                    symbol=ob.symbol or comment.symbol,
+                    needs_human=ob.needs_human,
+                    effective_blocking=(
+                        ob.blocking
+                        or ob.lifecycle_state
+                        in {"omitted-uncertain", "ambiguous-identity"}
+                    ),
                 )
-        prefix = (
-            f"review:{review_id}"
-            if isinstance(review_id, int) and review_id > 0
-            else f"head:{head_sha[:12]}"
-        )
-        created_targets = {
-            entry.obligation_id: f"{prefix}:{entry.obligation_id[:16]}"
-            for entry in current.display_active_findings.entries
-            if entry.target_action == "create"
-        }
-        has_reopen = any(
-            entry.target_action == "reopen"
-            for entry in current.display_active_findings.entries
-        )
-        if created_targets or has_reopen:
+                receipt = receipts.get(finding_instance_fingerprint(projected))
+            if ob.target_state == "uncertain" and ob.native_target is not None:
+                if receipt is not None and (
+                    ob.native_target.startswith("intent:")
+                    or ob.native_target == receipt.target
+                ):
+                    current = reconcile_uncertain_slot(
+                        current,
+                        target=ob.native_target,
+                        resolved_state="active",
+                        proof_sha256=receipt.proof_sha256,
+                        confirmed_target=receipt.target,
+                    )
+            elif entry.target_action == "create":
+                if receipt is not None:
+                    created_targets[entry.obligation_id] = receipt.target
+                else:
+                    uncertain_targets[entry.obligation_id] = (
+                        f"intent:{input_key}:{entry.obligation_id}:{len(planned_state.display_active_findings.slots)}"
+                    )
+            elif entry.target_action == "reopen" and (
+                receipt is None or receipt.target != entry.native_target
+            ):
+                assert entry.native_target is not None
+                uncertain_targets[entry.obligation_id] = entry.native_target
+        if (
+            created_targets
+            or uncertain_targets
+            or any(
+                entry.target_action == "reopen"
+                for entry in current.display_active_findings.entries
+            )
+        ):
             current = commit_window_publication(
-                current, created_targets=created_targets
+                current,
+                created_targets=created_targets,
+                uncertain_targets=uncertain_targets,
             )
         self._active_window_states[(repository_id, pull_request)] = current
         self._active_window_inputs[(repository_id, pull_request)] = (
@@ -5947,7 +7368,7 @@ class ReviewPublisher:
         uncertain_targets = {
             entry.obligation_id: (
                 entry.native_target
-                or f"uncertain:{head_sha[:12]}:{entry.obligation_id[:16]}"
+                or f"intent:{input_key}:{entry.obligation_id}:{len(planned_state.display_active_findings.slots)}"
             )
             for entry in planned_state.display_active_findings.entries
             if entry.target_action in {"create", "reopen"}
@@ -5980,8 +7401,16 @@ class ReviewPublisher:
             or not convergence_policy.automatic_github_review_events
         ):
             return assembled
+        # Human decisions withhold approval, but are not required code fixes.
         has_blocking = (
-            bool(planned_state.authoritative_decision_inventory.blocking_obligations)
+            any(
+                ob.unresolved
+                and (
+                    ob.blocking
+                    or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
+                )
+                for ob in planned_state.authoritative_decision_inventory.obligations
+            )
             or planned_state.display_active_findings.has_uncertain_slots
         )
         window_approved = (
@@ -6204,6 +7633,251 @@ class ReviewPublisher:
         )
         return planned, input_key
 
+    def _prepare_existing_drift_updates(
+        self,
+        *,
+        planned: DriftEvaluationResult | None,
+        prepared: Sequence[tuple[ReviewComment, str, str, str]],
+    ) -> list[tuple[Any, ...]]:
+        """Describe exact retained-root updates without reads or mutation.
+
+        GitHub retains a comment's original review and commit when its body is
+        edited. The receipt records that native association separately from the
+        current lifecycle head. An absent, edited or ambiguous root is a hold.
+        """
+        context = getattr(self, "_native_finding_context", None)
+        if planned is None or context is None:
+            return []
+        retained = self.native_finding_receipts(
+            repository_id=context["repository_id"], pull_request=context["pull_request"]
+        )
+        by_thread = {r["thread_id"]: r for r in retained if r["thread_id"] is not None}
+        nodes = getattr(self, "_native_binding_nodes", ())
+        by_instance = {
+            finding_instance_fingerprint(comment): (comment, text)
+            for comment, _, text, _ in prepared
+        }
+        entries = {e.obligation_id: e for e in planned.active_entries}
+        updates = []
+        for obligation in planned.inventory.obligations:
+            entry = entries.get(obligation.obligation_id)
+            binding = obligation.thread_binding
+            if (
+                entry is None
+                or binding is None
+                or binding.thread_id.startswith("intent:")
+            ):
+                continue
+            # Ambiguity never authorizes rewriting one guessed destination.
+            if obligation.lifecycle_state == "ambiguous-multi-target":
+                continue
+            instance = finding_instance_fingerprint(
+                obligation.synthetic_comment_for_placement()
+            )
+            if instance not in by_instance:
+                continue
+            previous = by_thread.get(binding.thread_id)
+            matches = [n for n in nodes if n.get("id") == binding.thread_id]
+            if previous is None or len(matches) != 1:
+                raise GitHubPublicationError(
+                    "retained drift native binding is unavailable"
+                )
+            node = matches[0]
+            roots = node.get("comments", {}).get("nodes", [])
+            root = roots[0] if len(roots) == 1 else None
+            if not isinstance(root, dict):
+                raise GitHubPublicationError("retained drift root is incomplete")
+            author = root.get("author", {})
+            text = root.get("body")
+            desired = by_instance[instance][1]
+            update_path = self.http.repository_path(
+                context["repository"], f"/pulls/comments/{binding.comment_id}"
+            )
+            journal = getattr(self, "_finding_lifecycle_journal", None)
+            from .finding_lifecycle import _request_identity
+
+            expected_update = {"body": desired}
+            committed_update = _request_identity(expected_update)
+            carried_intent = journal is not None and any(
+                effect["method"] == "PATCH"
+                and effect["path"] == update_path
+                and effect["status"] != "rejected"
+                and effect["request"] in (expected_update, committed_update)
+                for effect in journal.effects
+            )
+            if (
+                not isinstance(text, str)
+                or (
+                    hashlib.sha256(text.encode("utf-8")).hexdigest()
+                    != previous["body_sha256"]
+                    and not (carried_intent and text == desired)
+                )
+                or root.get("databaseId") != binding.comment_id
+                or root.get("pullRequestReview")
+                != {"databaseId": previous["review_id"]}
+                or root.get("commit") != {"oid": previous["native_head_sha"]}
+                or author.get("databaseId") != context["producer_id"]
+                or not graphql_app_author(author, context["app_slug"])
+                or root.get("edited_by_human") is True
+            ):
+                raise GitHubPublicationError(
+                    "retained drift root changed outside its receipt"
+                )
+            desired = by_instance[instance][1]
+            updates.append(
+                (instance, desired, previous, node["isResolved"], text, carried_intent)
+            )
+        return updates
+
+    def _update_existing_drift_threads(
+        self,
+        *,
+        planned: DriftEvaluationResult | None,
+        prepared: Sequence[tuple[ReviewComment, str, str, str]],
+        base_branch: str,
+        following_native_calls: int,
+    ) -> frozenset[str]:
+        """Update only the exact native roots authenticated by the source plan."""
+        updates = self._prepare_existing_drift_updates(
+            planned=planned, prepared=prepared
+        )
+        context = getattr(self, "_native_finding_context", None)
+        if not updates:
+            return frozenset()
+        if context is None:
+            raise GitHubPublicationError("drift native preparation context changed")
+        # One complete bounded opening above preflights every update before any
+        # dispatch. The lifecycle transport stages each exact intent durably.
+        journal = getattr(self, "_finding_lifecycle_journal", None)
+        if journal is not None:
+            edit_count = sum(
+                old != desired or carried for _, desired, _, _, old, carried in updates
+            )
+            reopen_count = sum(bool(resolved) for _, _, _, resolved, _, _ in updates)
+            batch: list[tuple[str, str, dict[str, Any]]] = []
+            for _, desired, previous, resolved, old, carried in updates:
+                if old != desired or carried:
+                    batch.append(
+                        (
+                            "PATCH",
+                            self.http.repository_path(
+                                context["repository"],
+                                f"/pulls/comments/{previous['comment_id']}",
+                            ),
+                            {"body": desired},
+                        )
+                    )
+                if resolved:
+                    batch.append(
+                        (
+                            "POST",
+                            "/graphql",
+                            {
+                                "operationName": "ReopenFindingThread",
+                                "query": "mutation ReopenFindingThread($threadId:ID!){"
+                                "unresolveReviewThread(input:{threadId:$threadId}){"
+                                "thread{id isResolved}}}",
+                                "variables": {"threadId": previous["thread_id"]},
+                            },
+                        )
+                    )
+            native_calls = (
+                1
+                + edit_count
+                + reopen_count
+                + MAX_REVIEW_THREAD_PAGES
+                + following_native_calls
+            )
+            from .ordinary_drift_execution import suffix_native_calls
+
+            selected_calls = suffix_native_calls(
+                getattr(self, "_ordinary_publication_observation", None),
+                planned=planned,
+                prepared=prepared,
+                requests=tuple(batch),
+            )
+            if selected_calls is not None:
+                native_calls = selected_calls
+            journal.preflight_native_batch(tuple(batch), native_calls=native_calls)
+            journal.preflight_native_tail(calls=native_calls)
+        live = self._preflight_pr(
+            token=context["token"],
+            repository=context["repository"],
+            repository_id=context["repository_id"],
+            pull_request=context["pull_request"],
+            head_sha=context["head_sha"],
+            base_branch=base_branch,
+            base_sha=context["base_sha"],
+            app_slug=context["app_slug"],
+        )
+        if live.result is not None:
+            raise GitHubPublicationError("drift native target changed before update")
+        for instance, desired, previous, resolved, old_text, carried_intent in updates:
+            context.setdefault("existing_bindings", {})[instance] = previous
+            if old_text != desired or carried_intent:
+                status, _ = self.http.request(
+                    "PATCH",
+                    self.http.repository_path(
+                        context["repository"],
+                        f"/pulls/comments/{previous['comment_id']}",
+                    ),
+                    token=context["token"],
+                    body={"body": desired},
+                )
+                if not 200 <= status < 300:
+                    raise GitHubPublicationError("drift native update is unconfirmed")
+            if resolved:
+                status, payload = self.http.request(
+                    "POST",
+                    "/graphql",
+                    token=context["token"],
+                    body={
+                        "operationName": "ReopenFindingThread",
+                        "query": "mutation ReopenFindingThread($threadId:ID!){"
+                        "unresolveReviewThread(input:{threadId:$threadId}){"
+                        "thread{id isResolved}}}",
+                        "variables": {"threadId": previous["thread_id"]},
+                    },
+                )
+                if (
+                    status != 200
+                    or not isinstance(payload, dict)
+                    or payload.get("errors")
+                ):
+                    raise GitHubPublicationError("drift native reopen is unconfirmed")
+        # Confirm exact bodies, producer and immutable native associations in
+        # one fresh bounded read. Response loss never triggers a second PATCH.
+        self._published_finding_suppression(
+            token=context["token"],
+            repository=context["repository"],
+            repository_id=context["repository_id"],
+            pull_request=context["pull_request"],
+            head_sha=context["head_sha"],
+            base_sha=context["base_sha"],
+            app_slug=context["app_slug"],
+        )
+        confirmed = _native_finding_receipts_from_nodes(
+            getattr(self, "_native_binding_nodes", ()),
+            repository_id=context["repository_id"],
+            pull_request=context["pull_request"],
+            head_sha=context["head_sha"],
+            base_sha=context["base_sha"],
+            producer_id=context["producer_id"],
+            review_id=1,
+            app_slug=context["app_slug"],
+            expected={instance: text for instance, text, _, _, _, _ in updates},
+            existing_bindings=context["existing_bindings"],
+        )
+        if set(confirmed) != {item[0] for item in updates}:
+            raise GitHubPublicationError("drift native readback is incomplete")
+        retained_records = self._native_finding_receipt_records.setdefault(
+            (context["repository_id"], context["pull_request"]), {}
+        )
+        for instance, receipt in confirmed.items():
+            retained_records[instance] = receipt.to_dict()
+        context["receipts"] = None
+        return frozenset(confirmed)
+
     def _commit_drift_success(
         self,
         *,
@@ -6217,21 +7891,61 @@ class ReviewPublisher:
     ) -> DriftEvaluationResult | None:
         if planned_drift is None or input_key is None:
             return None
-        rid = (
-            review_id
-            if isinstance(review_id, int) and review_id > 0
-            else int(head_sha[:6], 16) + 1
+        receipts = self._confirmed_native_finding_receipts(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            review_id=review_id,
         )
         created_threads: dict[str, tuple[str, int]] = {}
-        for idx, entry in enumerate(planned_drift.active_entries):
-            if entry.placement == INLINE_PLACEMENT and (
-                entry.thread_action in {"create", "reopen"} or entry.thread_id is None
+        uncertain_threads: dict[str, tuple[str, int | None, str]] = {}
+        obligations = {
+            ob.obligation_id: ob for ob in planned_drift.inventory.obligations
+        }
+        for entry in planned_drift.active_entries:
+            if entry.placement != INLINE_PLACEMENT:
+                continue
+            ob = obligations[entry.obligation_id]
+            comment = ob.synthetic_comment_for_placement()
+            receipt = receipts.get(finding_instance_fingerprint(comment))
+            binding = ob.thread_binding
+            if (
+                receipt is not None
+                and receipt.thread_id is not None
+                and (
+                    binding is None
+                    or binding.thread_id.startswith("intent:")
+                    or binding.thread_id == receipt.thread_id
+                )
             ):
-                tid = entry.thread_id or f"PRRT_{rid}_{idx}"
-                cid = rid * 100 + idx
-                created_threads[entry.obligation_id] = (tid, cid)
+                assert receipt.comment_id is not None
+                created_threads[entry.obligation_id] = (
+                    receipt.thread_id,
+                    receipt.comment_id,
+                )
+            else:
+                target = (
+                    binding.thread_id
+                    if binding is not None
+                    else (f"intent:{input_key}:{entry.obligation_id}")
+                )
+                comment_id = binding.comment_id if binding is not None else None
+                proof = hashlib.sha256(
+                    canonical_bytes(
+                        {
+                            "purpose": "unconfirmed-native-finding-v1",
+                            "intent": input_key,
+                            "obligation_id": entry.obligation_id,
+                            "head_sha": head_sha,
+                        }
+                    )
+                ).hexdigest()
+                uncertain_threads[entry.obligation_id] = (target, comment_id, proof)
         committed = commit_drift_publication(
-            planned_drift, created_threads=created_threads
+            planned_drift,
+            created_threads=created_threads,
+            uncertain_threads=uncertain_threads,
         )
         for ob in committed.inventory.obligations:
             key = (repository_id, pull_request, ob.obligation_id)
@@ -6265,16 +7979,14 @@ class ReviewPublisher:
     ) -> DriftEvaluationResult | None:
         if planned_drift is None or input_key is None:
             return None
-        uncertain_threads: dict[str, tuple[str, int, str]] = {}
+        uncertain_threads: dict[str, tuple[str, int | None, str]] = {}
         for idx, entry in enumerate(planned_drift.active_entries):
             if entry.placement == INLINE_PLACEMENT and entry.thread_action in {
                 "create",
                 "reopen",
+                "update",
             }:
-                tid = (
-                    entry.thread_id
-                    or f"uncertain-drift:{head_sha[:12]}:{entry.obligation_id[:16]}"
-                )
+                tid = entry.thread_id or f"intent:{input_key}:{entry.obligation_id}"
                 proof = hashlib.sha256(
                     canonical_bytes(
                         {
@@ -6285,7 +7997,19 @@ class ReviewPublisher:
                         }
                     )
                 ).hexdigest()
-                uncertain_threads[entry.obligation_id] = (tid, idx + 1, proof)
+                binding = next(
+                    (
+                        ob.thread_binding
+                        for ob in planned_drift.inventory.obligations
+                        if ob.obligation_id == entry.obligation_id
+                    ),
+                    None,
+                )
+                uncertain_threads[entry.obligation_id] = (
+                    tid,
+                    None if binding is None else binding.comment_id,
+                    proof,
+                )
         committed = (
             commit_drift_publication(planned_drift, uncertain_threads=uncertain_threads)
             if uncertain_threads
@@ -6314,7 +8038,8 @@ class ReviewPublisher:
             return assembled
         has_uncertain = any(s.state == "uncertain" for s in planned_drift.slots)
         has_blocking = (
-            bool(planned_drift.inventory.blocking_obligations) or has_uncertain
+            any(ob.effective_blocking_now for ob in planned_drift.inventory.obligations)
+            or has_uncertain
         )
         if has_blocking and not assembled.requests_changes:
             return replace(
@@ -6360,6 +8085,66 @@ class ReviewPublisher:
             raise ReviewInputError(
                 "grouped publication original admission scope changed"
             )
+        from .native_union import (
+            NativeUnionPart,
+            NativeUnionReceipt,
+            NativeUnionReusedRoot,
+        )
+
+        reused_roots = []
+        native_context = getattr(self, "_native_finding_context", None)
+        planned_drift = (
+            None if native_context is None else native_context.get("planned_drift")
+        )
+        retained = self.native_finding_receipts(
+            repository_id=context.repository_id, pull_request=context.pull_request
+        )
+        by_thread = {
+            item["thread_id"]: item
+            for item in retained
+            if item["thread_id"] is not None
+        }
+        desired = {
+            finding_instance_fingerprint(comment): body
+            for comment, _, body, _ in assembled.inline_comments
+        }
+        if planned_drift is not None:
+            for obligation in planned_drift.inventory.obligations:
+                binding = obligation.thread_binding
+                if (
+                    not obligation.unresolved
+                    or binding is None
+                    or binding.comment_id is None
+                ):
+                    continue
+                instance = finding_instance_fingerprint(
+                    obligation.synthetic_comment_for_placement()
+                )
+                if instance not in desired:
+                    continue
+                previous = by_thread.get(binding.thread_id)
+                if previous is None or (
+                    previous["comment_id"] != binding.comment_id
+                    or previous["repository_id"] != context.repository_id
+                    or previous["pull_request"] != context.pull_request
+                    or previous["producer_id"] != context.producer_id
+                ):
+                    raise ReviewInputError(
+                        "grouped lifecycle reused root lacks authenticated receipt"
+                    )
+                reused_roots.append(
+                    NativeUnionReusedRoot(
+                        instance=instance,
+                        thread_id=binding.thread_id,
+                        comment_id=binding.comment_id,
+                        review_id=previous["review_id"],
+                        native_head_sha=previous["native_head_sha"],
+                        body_sha256=hashlib.sha256(
+                            desired[instance].encode("utf-8")
+                        ).hexdigest(),
+                    )
+                )
+        reused_instances = {item.instance for item in reused_roots}
         source_comments = None
         from .api_run_requests import ApiRunSessionLedger
         from .quarantine_holds import QuarantineHoldReader
@@ -6394,12 +8179,31 @@ class ReviewPublisher:
             items=tuple(
                 NativeInline.from_prepared(comment, body, anchor=anchor)
                 for comment, _, body, anchor in assembled.inline_comments
+                if finding_instance_fingerprint(comment) not in reused_instances
             ),
         )
+        # Use the largest supported native receipt IDs to preflight the complete
+        # vNext frame before parts, comment edits, checks or manifest effects.
+        union_context: dict[str, Any] = dict(plan.context(context.producer_id))
+        union_context["inline_count"] = len(plan.items) + len(reused_roots)
+        NativeUnionReceipt(
+            **union_context,
+            parts=tuple(
+                NativeUnionPart(str(9223372036854775807 - index), "f" * 64, len(group))
+                for index, group in enumerate(plan.groups)
+            ),
+            reused_roots=tuple(reused_roots),
+        ).to_document()
         old_targets = getattr(capacity, "native_old_root_nodes", None)
         if not isinstance(old_targets, dict):
             raise ReviewInputError(
                 "grouped publication historical target admission is unavailable"
+            )
+        if any(
+            old_targets.get(item.comment_id) != item.thread_id for item in reused_roots
+        ):
+            raise ReviewInputError(
+                "grouped lifecycle reused root is outside retained native frontier"
             )
         self.finalizer.native_union_reader_factory = lambda review: (
             NativePublicationReader.for_review(
@@ -6426,6 +8230,7 @@ class ReviewPublisher:
             plan=plan,
             token=store.token,
             producer_id=context.producer_id,
+            reused_roots=tuple(reused_roots),
             admission=lambda prepared: admit(plan=prepared),
             authority_fence=authority_fence,
             manifest_store=NativeManifestStore(
@@ -6442,6 +8247,9 @@ class ReviewPublisher:
         self, publication: PublicationResult
     ) -> PublicationResult:
         """Run optional work only after the caller's mandatory completion."""
+        from .ordinary_drift_execution import require_cleanup
+
+        require_cleanup(self)
         from .check_accounting import confirm_cleanup
 
         self._accounting_cleanup_result = None
@@ -6488,6 +8296,17 @@ class ReviewPublisher:
         review_id: int,
         threads: Sequence[tuple[str, str]] | None = None,
     ) -> None:
+        from .ordinary_drift_execution import empty_cleanup
+
+        if empty_cleanup(
+            getattr(self, "_ordinary_publication_observation", None),
+            threads=threads,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            replacements=replacements,
+        ):
+            return
         drift_state = self._drift_states.get((repository_id, pull_request))
         drift_has_resolved = (
             drift_state is not None
@@ -6498,6 +8317,11 @@ class ReviewPublisher:
             )
         )
         if not replacements and not drift_has_resolved:
+            return
+        # A supplied complete empty candidate set already makes the cleanup
+        # closure a no-op before capability issuance, fences, or native I/O.
+        # None still means discover; do not erase a previously pending owner.
+        if threads is not None and not threads and self._pending_thread_cleanup is None:
             return
 
         def cleanup() -> str | None:
@@ -7027,6 +8851,28 @@ class ReviewPublisher:
             raise ReviewInputError(
                 "publication selection is inactive; native revision protocol required"
             )
+        previous_native_context = getattr(self, "_native_finding_context", None)
+        self._native_finding_context = None
+        if (
+            max_active_findings is not None
+            or enable_drift_tracking
+            or (
+                (repository_id, pull_request) in self._active_window_states
+                or (repository_id, pull_request) in self._drift_states
+            )
+        ):
+            self._native_finding_context = {
+                "token": token,
+                "repository": repository,
+                "repository_id": repository_id,
+                "pull_request": pull_request,
+                "head_sha": head_sha,
+                "base_sha": base_sha,
+                "app_slug": app_slug,
+                "producer_id": None,
+                "assembled": None,
+                "receipts": None,
+            }
         previous_carried_context = getattr(self, "_carried_context", None)
         self._carried_context = dict(
             token=token,
@@ -7053,7 +8899,113 @@ class ReviewPublisher:
         if owns_operation_budget:
             self.finalizer._operation_budget = EvidenceReadBudget()
         try:
-            publication = self._publish_impl(
+            lifecycle_journal = getattr(self, "_finding_lifecycle_journal", None)
+            publish_impl = self._publish_impl
+            if lifecycle_journal is not None:
+
+                def publish_impl(**arguments):
+                    from .ordinary_publication_reads import (
+                        select_publication_observation,
+                        unbound_population,
+                    )
+
+                    key = (repository_id, pull_request)
+                    retained_state = self._drift_states.get(
+                        key
+                    ) or self._active_window_states.get(key)
+                    inventory = getattr(retained_state, "inventory", None) or getattr(
+                        retained_state, "authoritative_decision_inventory", None
+                    )
+                    # Extend admission only for the qualified fresh small
+                    # active-window family. Larger/grouped/drift routes retain
+                    # their existing path until their own full tail is priced.
+                    from .checkpoint_result_store import uses_grouped_publication
+
+                    supported_population = (
+                        0 < len(result.comments) <= 2
+                        and max_active_findings == 1
+                        and not uses_grouped_publication(self.http, result)
+                    )
+                    closed_fresh_route = (
+                        (not result.comments or supported_population)
+                        and result.transaction is not None
+                        and getattr(lifecycle_journal.ledger, "caller", None)
+                        is not None
+                        and lifecycle_journal._record.quarantine_lineage is None
+                        and lifecycle_journal._record.historical_assessments is None
+                        and (
+                            inventory is None
+                            or not inventory.obligations
+                            or supported_population
+                            and unbound_population(
+                                lifecycle_journal, result, retained_state
+                            )
+                        )
+                        and retained_eligibility is None
+                    )
+                    closed_drift_route = (
+                        not closed_fresh_route
+                        and bool(result.comments)
+                        and result.transaction is not None
+                        # Window obligations retain native_target/proof, not
+                        # drift thread bindings. They keep their existing
+                        # window route; they cannot select drift admission.
+                        and type(retained_state) is DriftEvaluationResult
+                        and inventory is not None
+                        and type(inventory) is DriftInventory
+                        and bool(inventory.obligations)
+                        and any(
+                            item.thread_binding is not None
+                            for item in inventory.obligations
+                        )
+                        and getattr(lifecycle_journal.ledger, "caller", None)
+                        is not None
+                        and lifecycle_journal._record.quarantine_lineage is None
+                        and lifecycle_journal._record.historical_assessments is None
+                        and retained_eligibility is None
+                        and not uses_grouped_publication(self.http, result)
+                    )
+                    from .ordinary_drift_execution import finishing, stop
+
+                    with (
+                        lifecycle_journal.transports(),
+                        (
+                            select_publication_observation(
+                                self,
+                                lifecycle_journal,
+                                result=result,
+                                family="drift" if closed_drift_route else "fresh",
+                            )
+                            if closed_fresh_route or closed_drift_route
+                            else nullcontext(None)
+                        ) as observation,
+                    ):
+                        previous_observation = getattr(
+                            self, "_ordinary_publication_observation", None
+                        )
+                        self._ordinary_publication_observation = observation
+                        try:
+                            outcome = self._publish_impl(**arguments)
+                        except BaseException as exc:
+                            stop(observation, exc)
+                            try:
+                                with finishing(observation):
+                                    lifecycle_journal.finish()
+                            except BaseException as checkpoint_error:
+                                exc.add_note(
+                                    "finding lifecycle checkpoint retained pending intent: "
+                                    + type(checkpoint_error).__name__
+                                )
+                            raise
+                        finally:
+                            self._ordinary_publication_observation = (
+                                previous_observation
+                            )
+                        with finishing(observation):
+                            lifecycle_journal.finish()
+                        return outcome
+
+            publication = publish_impl(
                 token=token,
                 repository=repository,
                 repository_id=repository_id,
@@ -7111,6 +9063,10 @@ class ReviewPublisher:
                 else self._finish_thread_cleanup(publication)
             )
         finally:
+            from . import adjacent_publication_preflight
+
+            adjacent_publication_preflight.discard(self)
+            self._native_finding_context = previous_native_context
             self._carried_context = previous_carried_context
             self.finalizer._observed_trust_context = prev_observed_trust
             if owns_operation_budget:
@@ -7433,6 +9389,19 @@ class ReviewPublisher:
                 authorized_rescan=authorized_rescan,
             )
         )
+        native_context = getattr(self, "_native_finding_context", None)
+        if native_context is not None:
+            native_context["planned_drift"] = planned_drift_state
+        lifecycle_journal = getattr(self, "_finding_lifecycle_journal", None)
+        if lifecycle_journal is not None:
+            lifecycle_journal.plan(
+                planned_drift_state
+                if planned_drift_state is not None
+                else planned_window_state,
+                drift_input_key
+                if planned_drift_state is not None
+                else window_input_key,
+            )
         if planned_drift_state is not None:
             result = project_drift_review_result(admitted_result, planned_drift_state)
         elif planned_window_state is not None:
@@ -7441,6 +9410,15 @@ class ReviewPublisher:
             )
         else:
             result = admitted_result
+        from .check_accounting import _confirm_publication_projection
+
+        _confirm_publication_projection(
+            original_result,
+            result,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+        )
         window_has_blocking = False
         window_non_inline_blocking = False
         window_has_human = False
@@ -7453,15 +9431,19 @@ class ReviewPublisher:
             has_uncertain_drift = any(
                 s.state == "uncertain" for s in planned_drift_state.slots
             )
+            blocking_drift_obligations = tuple(
+                ob
+                for ob in planned_drift_state.inventory.obligations
+                if ob.effective_blocking_now
+            )
             window_has_blocking = (
-                bool(planned_drift_state.inventory.blocking_obligations)
-                or has_uncertain_drift
+                bool(blocking_drift_obligations) or has_uncertain_drift
             )
             window_non_inline_blocking = has_uncertain_drift or any(
                 ob.obligation_id not in displayed_drift_ids
                 or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-multi-target"}
                 or not ob.present_anchor.inline_anchorable
-                for ob in planned_drift_state.inventory.blocking_obligations
+                for ob in blocking_drift_obligations
             )
             window_has_human = any(
                 ob.unresolved
@@ -7491,10 +9473,17 @@ class ReviewPublisher:
                 entry.obligation_id
                 for entry in planned_window_state.display_active_findings.entries
             }
-            window_has_blocking = (
-                bool(
-                    planned_window_state.authoritative_decision_inventory.blocking_obligations
+            blocking_window_obligations = tuple(
+                ob
+                for ob in planned_window_state.authoritative_decision_inventory.obligations
+                if ob.unresolved
+                and (
+                    ob.blocking
+                    or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
                 )
+            )
+            window_has_blocking = (
+                bool(blocking_window_obligations)
                 or planned_window_state.display_active_findings.has_uncertain_slots
             )
             window_non_inline_blocking = (
@@ -7503,7 +9492,7 @@ class ReviewPublisher:
                     ob.obligation_id not in displayed_ob_ids
                     or ob.obligation_id in prev_displayed_ids_for_block
                     or ob.lifecycle_state in {"omitted-uncertain", "ambiguous-identity"}
-                    for ob in planned_window_state.authoritative_decision_inventory.blocking_obligations
+                    for ob in blocking_window_obligations
                 )
             )
             window_has_human = any(
@@ -7666,7 +9655,12 @@ class ReviewPublisher:
         )
         complete_review: AssembledReview | None = None
         preflight_review: AssembledReview | None = None
-        if complete_inventory or human_inventory is not None:
+        if (
+            complete_inventory
+            or human_inventory is not None
+            or planned_window_state is not None
+            or planned_drift_state is not None
+        ):
             # Qualify the complete framed representation before reconciliation
             # can update a check or finalize an already published result. False
             # reserves the longer check/author boolean spelling; body placement
@@ -7689,6 +9683,7 @@ class ReviewPublisher:
                 convergence_policy=convergence_policy,
                 auto_approval=auto_approval,
             )
+            self._prepare_native_finding_readback(preflight_review)
             if needs_human_inventory:
                 preflight_review = replace(preflight_review, compact_references=True)
             body_blocking = (
@@ -7844,8 +9839,63 @@ class ReviewPublisher:
                 else:
                     from .publication_recovery import _publication_transport
 
+                    capacity_transport = _publication_transport(self.http)
+                    if grouped_publication:
+                        from .finding_lifecycle import _JournalTransport
+
+                        if type(capacity_transport) is _JournalTransport:
+                            from review_sensei.session import SessionIdentity
+                            from review_sensei.source_registry import (
+                                require_module_seal,
+                            )
+
+                            from . import command_finalization_plan
+                            from .quarantine_capacity import installed_capacity
+
+                            # The journal adapter owns native dispatch. Resolve
+                            # only the guard's identity, never replace the HTTP
+                            # used by this producer or its native group host.
+                            require_module_seal(command_finalization_plan)
+                            delegate = (
+                                command_finalization_plan.registered_journal_delegate(
+                                    capacity_transport
+                                )
+                            )
+                            if (
+                                lifecycle_journal is None
+                                or capacity_transport.journal is not lifecycle_journal
+                                or lifecycle_journal.reviewer is not self
+                                or lifecycle_journal.identity
+                                != SessionIdentity(
+                                    repository, pull_request, repository_id
+                                )
+                            ):
+                                raise ReviewInputError(
+                                    "grouped publication journal owner changed"
+                                )
+                            capacity_transport = _publication_transport(delegate)
+                            if capacity_transport is not _publication_transport(
+                                lifecycle_journal.ledger.http
+                            ):
+                                raise ReviewInputError(
+                                    "grouped publication capacity transport changed"
+                                )
+                            installed = installed_capacity(
+                                lifecycle_journal.ledger, lifecycle_journal.identity
+                            )
+                            if (
+                                getattr(
+                                    capacity_transport,
+                                    "_quarantine_capacity_guard",
+                                    None,
+                                )
+                                is not installed
+                            ):
+                                raise ReviewInputError(
+                                    "grouped publication installed capacity changed"
+                                )
                     capacity = getattr(
-                        _publication_transport(self.http),
+                        capacity_transport,
                         "_quarantine_capacity_guard",
                         None,
                     )
@@ -7897,6 +9947,19 @@ class ReviewPublisher:
                                 store=human_inventory_store,
                                 capacity=capacity,
                             )
+                            new_instances = {
+                                item.instance for item in native_host.plan.items
+                            }
+                            inline_wires = [
+                                bound
+                                for prepared, bound in zip(
+                                    preflight_review.inline_comments,
+                                    inline_wires,
+                                    strict=True,
+                                )
+                                if finding_instance_fingerprint(prepared[0])
+                                in new_instances
+                            ]
                         admission(
                             **(
                                 {"plan": native_host.plan}
@@ -7917,9 +9980,42 @@ class ReviewPublisher:
                             + 8192,
                             inline_wires=inline_wires,
                         )
+                        if planned_drift_state is not None:
+                            by_instance = {
+                                finding_instance_fingerprint(comment): text
+                                for comment, _, text, _ in preflight_review.inline_comments
+                            }
+                            edits = []
+                            for obligation in planned_drift_state.inventory.obligations:
+                                binding = obligation.thread_binding
+                                instance = finding_instance_fingerprint(
+                                    obligation.synthetic_comment_for_placement()
+                                )
+                                if (
+                                    binding is not None
+                                    and binding.comment_id is not None
+                                    and instance in by_instance
+                                ):
+                                    edits.append(
+                                        (
+                                            "PATCH",
+                                            self.http.repository_path(
+                                                repository,
+                                                f"/pulls/comments/{binding.comment_id}",
+                                            ),
+                                            {"body": by_instance[instance]},
+                                        )
+                                    )
+                            capacity.preflight_native_edits(edits)
                     break
             if complete_inventory:
                 complete_review = preflight_review
+        from review_sensei.source_registry import require_module_seal
+
+        from . import adjacent_publication_preflight
+
+        require_module_seal(adjacent_publication_preflight)
+        adjacent_preflight = adjacent_publication_preflight.begin(self, native_host)
         preflight = self._preflight_pr(
             token=token,
             repository=repository,
@@ -7929,6 +10025,7 @@ class ReviewPublisher:
             base_branch=base_branch,
             base_sha=base_sha,
             app_slug=app_slug,
+            _adjacent_observation=adjacent_preflight,
         )
         if preflight.result is not None:
             return preflight.result
@@ -8220,6 +10317,7 @@ class ReviewPublisher:
             base_branch=base_branch,
             base_sha=base_sha,
             app_slug=app_slug,
+            _adjacent_observation=adjacent_preflight,
         )
         if write_preflight.result is not None:
             return write_preflight.result
@@ -8385,6 +10483,129 @@ class ReviewPublisher:
             head_sha,
             review_result_digest(result),
         )
+        planned_check_outcome = (
+            review_check_outcome(
+                policy=effective_policy,
+                review_status=prospective_eligibility.facts.review_status,
+                required_fixes=(
+                    prospective_eligibility.facts.has_blocking_findings
+                    or has_blocking_findings(result)
+                    or window_has_blocking
+                ),
+                required_decisions=(
+                    prospective_eligibility.facts.has_human_adjudication_findings
+                    or has_human_adjudication_findings(result)
+                    or window_has_human
+                ),
+                coverage_uncertainty_accepted=True,
+                review_verdict=result.review_verdict,
+            )
+            if window_coverage_accepted
+            else check_outcome_for_result(
+                replace(
+                    result,
+                    review_status=prospective_eligibility.facts.review_status,
+                ),
+                policy=effective_policy,
+                required_fixes=(
+                    prospective_eligibility.facts.has_blocking_findings
+                    or window_has_blocking
+                ),
+                required_decisions=(
+                    prospective_eligibility.facts.has_human_adjudication_findings
+                    or window_has_human
+                ),
+            )
+        )
+        guarded_batch = False
+        if not write_preflight.app_authored and grouped_publication:
+            from review_sensei.source_registry import require_module_seal
+
+            from . import guarded_hot_namespace
+            from .guarded_publication_plan import require_grouped_durable_floor
+
+            require_module_seal(guarded_hot_namespace)
+            if _hot_namespace_begin is not guarded_hot_namespace.begin:
+                raise ReviewInputError("hot namespace producer alias changed")
+            _hot_namespace_begin(self, lifecycle_journal, native_host)
+            require_grouped_durable_floor(
+                self,
+                lifecycle_journal,
+                native_host,
+                checks_enabled=check_token is not None,
+            )
+        if not write_preflight.app_authored and not grouped_publication:
+            from .guarded_pending_publication import admit as admit_guarded_pending
+            from .guarded_publication_plan import require_durable_floor
+
+            guarded_batch = admit_guarded_pending(
+                self,
+                lifecycle_journal,
+                result=result,
+                assembled=preflight_review,
+                eligibility=prospective_eligibility,
+                marker=marker,
+                outcome=planned_check_outcome,
+                policy=effective_policy,
+                complete_inventory=complete_inventory,
+                checks_enabled=check_token is not None,
+                grouped=grouped_publication,
+                planned_window=planned_window_state,
+                planned_drift=planned_drift_state,
+                continuation=continuation_review,
+                retained_eligibility=retained_eligibility,
+                superseded_threads=()
+                if complete_suppression is None
+                else complete_suppression.superseded_threads,
+                convergence_policy=convergence_policy,
+            )
+            if not guarded_batch:
+                require_durable_floor(
+                    lifecycle_journal, checks_enabled=check_token is not None
+                )
+        # Observation-only source preparation. This is not consumed as a
+        # route permit and does not replace any existing publication preflight.
+        from .ordinary_drift_plan import observe_current
+
+        self._ordinary_drift_sizing_observation = observe_current(
+            self,
+            lifecycle_journal,
+            planned=planned_drift_state,
+            result=result,
+            assembled=preflight_review,
+            eligibility=prospective_eligibility,
+            marker=marker,
+            outcome=planned_check_outcome,
+            policy=effective_policy,
+            complete_inventory=complete_inventory,
+            convergence_policy=convergence_policy,
+            auto_approval=auto_approval,
+        )
+        ordinary_observation = getattr(self, "_ordinary_publication_observation", None)
+        if ordinary_observation is not None and not write_preflight.app_authored:
+            from .ordinary_publication_plan import admit_current
+
+            admit_current(
+                self,
+                ordinary_observation,
+                lifecycle_journal,
+                original_result=original_result,
+                result=result,
+                assembled=preflight_review,
+                eligibility=prospective_eligibility,
+                marker=marker,
+                outcome=planned_check_outcome,
+                policy=effective_policy,
+                complete_inventory=complete_inventory,
+                checks_enabled=check_token is not None,
+                grouped=grouped_publication,
+                planned_window=planned_window_state,
+                planned_drift=planned_drift_state,
+                convergence_policy=convergence_policy,
+                auto_approval=auto_approval,
+                preserve_explanations=human_inventory is not None,
+                window_non_inline_blocking=window_non_inline_blocking,
+            )
         if write_preflight.app_authored:
             check_diagnostic: str | None = "app_authored"
         else:
@@ -8397,40 +10618,6 @@ class ReviewPublisher:
                 observation_context=check_observation_context,
             )
             if check_diagnostic is None:
-                planned_check_outcome = (
-                    review_check_outcome(
-                        policy=effective_policy,
-                        review_status=prospective_eligibility.facts.review_status,
-                        required_fixes=(
-                            prospective_eligibility.facts.has_blocking_findings
-                            or has_blocking_findings(result)
-                            or window_has_blocking
-                        ),
-                        required_decisions=(
-                            prospective_eligibility.facts.has_human_adjudication_findings
-                            or has_human_adjudication_findings(result)
-                            or window_has_human
-                        ),
-                        coverage_uncertainty_accepted=True,
-                        review_verdict=result.review_verdict,
-                    )
-                    if window_coverage_accepted
-                    else check_outcome_for_result(
-                        replace(
-                            result,
-                            review_status=prospective_eligibility.facts.review_status,
-                        ),
-                        policy=effective_policy,
-                        required_fixes=(
-                            prospective_eligibility.facts.has_blocking_findings
-                            or window_has_blocking
-                        ),
-                        required_decisions=(
-                            prospective_eligibility.facts.has_human_adjudication_findings
-                            or window_has_human
-                        ),
-                    )
-                )
                 check_diagnostic = self._check_state_or_diagnostic(
                     check_token=check_token,
                     repository=repository,
@@ -8446,6 +10633,10 @@ class ReviewPublisher:
         ):
             check_diagnostic = check_capability_failure.code
             self._check_accounting_failure = check_capability_failure
+        if guarded_batch and check_diagnostic is not None:
+            raise GitHubPublicationError(
+                "guarded publication check is unconfirmed; precommitted review retained"
+            )
         eligibility = self._eligibility_with_carried(
             result,
             head_sha=head_sha,
@@ -8558,6 +10749,7 @@ class ReviewPublisher:
                 raise GitHubPublicationError(
                     "public review summary must not expose deferred finding inventory"
                 )
+            self._prepare_native_finding_readback(assembled)
             prepared_comments = assembled.inline_comments
 
             def body_for_summary(review_summary: str) -> str:
@@ -8639,9 +10831,43 @@ class ReviewPublisher:
                 ob.fingerprint
                 for ob in prior_wstate_for_suppression.authoritative_decision_inventory.obligations
                 if ob.obligation_id in prev_disp_ids
+                and ob.native_target is not None
+                and ob.target_state in {"active", "contingent", "uncertain"}
             }
+        try:
+            reused_drift_instances = self._update_existing_drift_threads(
+                planned=planned_drift_state,
+                prepared=prepared_comments,
+                base_branch=base_branch,
+                following_native_calls=(
+                    1
+                    + 2 * len(native_host.plan.groups)
+                    + 2
+                    + 10
+                    + COMMAND_FINALIZATION_RESERVE
+                    if native_host is not None
+                    else 1
+                    + MAX_PAGINATION_PAGES
+                    + MAX_REVIEW_THREAD_PAGES
+                    + COMMAND_FINALIZATION_RESERVE
+                ),
+            )
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+            self._commit_drift_uncertain(
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                planned_drift=planned_drift_state,
+                input_key=drift_input_key,
+            )
+            return PublicationResult(
+                status="publication_incomplete", diagnostic="publication_ambiguous"
+            )
         comments = []
         for comment, fingerprint, comment_body, anchor in prepared_comments:
+            if finding_instance_fingerprint(comment) in reused_drift_instances:
+                continue
             if _should_suppress_published_finding(
                 comment,
                 fingerprint,
@@ -8663,17 +10889,7 @@ class ReviewPublisher:
                     ),
                 )
                 continue
-            comment_payload: dict[str, object] = {
-                "path": comment.path,
-                "body": comment_body,
-            }
-            if anchor == "left":
-                comment_payload["line"] = comment.line
-                comment_payload["side"] = "LEFT"
-            else:
-                comment_payload["line"] = comment.line
-                comment_payload["side"] = "RIGHT"
-            comments.append(comment_payload)
+            comments.append(self._inline_comment_payload(comment, comment_body, anchor))
         # auto-approve submits GitHub's Changes requested review when this
         # head has required fixes, then approves a later eligible head. Both
         # auto-approve and blocking fail the ReviewSensei check when required
@@ -8685,14 +10901,12 @@ class ReviewPublisher:
             retained_eligibility is not None
             and retained_eligibility.facts.has_blocking_findings
         )
-        if (
-            approval_enabled
-            and (assembled.requests_changes or retained_blocking)
-            and not write_preflight.app_authored
-        ):
-            event, published_state = "REQUEST_CHANGES", "CHANGES_REQUESTED"
-        else:
-            event, published_state = "COMMENT", "COMMENTED"
+        event, published_state = self._ordinary_review_event(
+            approval_enabled=approval_enabled,
+            requests_changes=assembled.requests_changes,
+            retained_blocking=retained_blocking,
+            app_authored=write_preflight.app_authored,
+        )
         path = self.http.repository_path(
             repository,
             f"/pulls/{pull_request}/reviews",
@@ -8774,10 +10988,16 @@ class ReviewPublisher:
             eligibility = replace(
                 eligibility,
                 native_union=NativeUnionReceipt.from_staging(
-                    native_host.plan, state, producer_id=native_host.producer_id
+                    native_host.plan,
+                    state,
+                    producer_id=native_host.producer_id,
+                    reused_roots=native_host.reused_roots,
                 ),
             )
             self._confirmed_review_id = evidence.main_review_id
+            self._adopt_native_union_finding_receipts(
+                evidence, eligibility.native_union
+            )
             self._commit_active_window_success(
                 repository_id=repository_id,
                 pull_request=pull_request,
@@ -8821,6 +11041,12 @@ class ReviewPublisher:
                 coverage_uncertainty_accepted=window_coverage_accepted,
             )
 
+        native_body_context = getattr(self, "_native_finding_context", None)
+        if (
+            native_body_context is not None
+            and getattr(self, "_ordinary_publication_observation", None) is not None
+        ):
+            native_body_context["ordinary_body_source"] = (None, body)
         try:
             status, payload = self.http.request(
                 "POST",
@@ -8834,6 +11060,12 @@ class ReviewPublisher:
                 },
             )
         except GitHubHTTPTransientError as exc:
+            if guarded_batch:
+                # No mixed historical decoder or warning-body fallback. The
+                # separately funded journal readback retains any ambiguity.
+                raise GitHubPublicationTransientError(
+                    "guarded publication native outcome is unconfirmed"
+                ) from exc
             if self._reconcile_marker(
                 token=token,
                 repository=repository,
@@ -8928,11 +11160,19 @@ class ReviewPublisher:
             raise GitHubPublicationTransientError(
                 "review publication failed temporarily (review-create transport failure)"
             ) from exc
+        if guarded_batch and (status != 200 or not isinstance(payload, dict)):
+            raise GitHubPublicationError(
+                "guarded publication review is unconfirmed; no alternative native write"
+            )
         if status == 200 and isinstance(payload, dict):
             review_id = payload.get("id")
             if isinstance(review_id, int):
                 if type(review_id) is int and review_id > 0:
                     self._check_accounting_review_id = review_id
+                    if native_body_context is not None and native_body_context.get(
+                        "ordinary_body_source"
+                    ) == (None, body):
+                        native_body_context["ordinary_body_source"] = (review_id, body)
                 self._commit_active_window_success(
                     repository_id=repository_id,
                     pull_request=pull_request,
@@ -9284,23 +11524,10 @@ class ReviewPublisher:
             return False
         return all(instance in found.by_instance for instance in instances)
 
-    def _supersede_replaced_threads(
-        self,
-        *,
-        token: str,
-        threads: Sequence[tuple[str, str]],
-        confirmed_review_id: int,
-        repository: str,
-        repository_id: int,
-        pull_request: int,
-        head_sha: str,
-        base_sha: str,
-        app_slug: str,
-        eligibility: ReviewApprovalEligibility,
-        replacements: Sequence[tuple[ReviewComment, str, str, str]],
-    ) -> str | None:
-        from .thread_resolution import FindingThreadResolver
-
+    def _matching_superseded_threads(
+        self, *, threads, repository_id, pull_request, head_sha, replacements
+    ):
+        """Pure existing cleanup selection; retained active roots never retire."""
         replacement_concerns = {item[1] for item in replacements}
         drift_state = self._drift_states.get((repository_id, pull_request))
         if drift_state is not None and drift_state.head_sha == head_sha:
@@ -9326,11 +11553,56 @@ class ReviewPublisher:
                         replacement_concerns.add(
                             finding_lifecycle_for_comment(ob.latest_comment).fingerprint
                         )
-        matching = {
+        retained_active_threads = (
+            {
+                ob.thread_binding.thread_id
+                for ob in drift_state.inventory.obligations
+                if ob.unresolved and ob.thread_binding is not None
+            }
+            if drift_state is not None
+            else set()
+        )
+        window_state = self._active_window_states.get((repository_id, pull_request))
+        if window_state is not None and window_state.head_sha == head_sha:
+            # A max-active-only round can reuse the exact native target without
+            # drift tracking. It remains an active obligation, not an obsolete
+            # predecessor merely because its original comment has an older head.
+            retained_active_threads.update(
+                slot.target
+                for slot in window_state.display_active_findings.slots
+                if slot.state == "active"
+                and not slot.target.startswith(("inline:", "body:"))
+            )
+        return {
             thread: concern
             for thread, concern in threads
-            if concern in replacement_concerns
+            if concern in replacement_concerns and thread not in retained_active_threads
         }
+
+    def _supersede_replaced_threads(
+        self,
+        *,
+        token: str,
+        threads: Sequence[tuple[str, str]],
+        confirmed_review_id: int,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility,
+        replacements: Sequence[tuple[ReviewComment, str, str, str]],
+    ) -> str | None:
+        from .thread_resolution import FindingThreadResolver
+
+        matching = self._matching_superseded_threads(
+            threads=threads,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            replacements=replacements,
+        )
         if (
             not matching
             or type(confirmed_review_id) is not int
@@ -9461,6 +11733,7 @@ class ReviewPublisher:
             app_slug=app_slug,
         )
         if native_nodes is not None:
+            self._native_binding_nodes = tuple(native_nodes)
             seen_native_ids = {
                 str(n["id"])
                 for n in native_nodes
@@ -9485,6 +11758,8 @@ class ReviewPublisher:
         by_instance: dict[str, PublishedInstance] = {}
         superseded: list[tuple[str, str]] = []
         observed_graphql_ids: set[str] = set()
+        receipt_nodes: list[Mapping[str, Any]] = []
+        self._native_binding_nodes = ()
         after: str | None = None
         pages = BoundedGraphQLPages(self.http, max_requests=MAX_REVIEW_THREAD_PAGES)
         for _ in range(MAX_REVIEW_THREAD_PAGES):
@@ -9544,6 +11819,7 @@ class ReviewPublisher:
             for node in nodes:
                 if isinstance(node, dict) and isinstance(node.get("id"), str):
                     observed_graphql_ids.add(node["id"])
+                    receipt_nodes.append(node)
             page = _suppression_root_facts(
                 nodes,
                 repository_id=repository_id,
@@ -9561,6 +11837,7 @@ class ReviewPublisher:
             if not isinstance(has_next, bool):
                 raise GitHubPublicationError("review thread response was invalid")
             if not has_next:
+                self._native_binding_nodes = tuple(receipt_nodes)
                 record_missing_threads(observed_graphql_ids)
                 return PublishedFindingSuppression(
                     by_fingerprint,
@@ -9834,9 +12111,22 @@ class ReviewPublisher:
         base_branch: str,
         base_sha: str,
         app_slug: str,
+        _adjacent_observation=None,
     ) -> _PreflightDecision:
         path = self.http.repository_path(repository, f"/pulls/{pull_request}")
-        status, payload = self.http.request("GET", path, token=token)
+        from review_sensei.source_registry import require_module_seal
+
+        from . import adjacent_publication_preflight
+
+        require_module_seal(adjacent_publication_preflight)
+        selected = adjacent_publication_preflight.consume(_adjacent_observation, self)
+        if selected is None:
+            status, payload = self.http.request("GET", path, token=token)
+            adjacent_publication_preflight.observe(
+                _adjacent_observation, self, status, payload
+            )
+        else:
+            status, payload = selected
         if status == 404:
             raise GitHubPublicationError("review target was not found")
         if status < 200 or status >= 300:
@@ -10046,6 +12336,14 @@ class ReviewPublisher:
                 persisted_index is not None
                 and any(entry.blocking for entry in persisted_index.entries)
             )
+        from review_sensei.source_registry import require_module_seal
+
+        from . import adjacent_publication_preflight
+
+        require_module_seal(adjacent_publication_preflight)
+        adjacent_publication_preflight.index(
+            self, native_host, identity_states, result_states, eligibility
+        )
         return frozenset(identity_states), frozenset(result_states), eligibility
 
     def _verify_complete_review(
@@ -10106,12 +12404,14 @@ class ReviewPublisher:
                     "complete native replay reader is unavailable"
                 )
             receipt = NativeUnionReceipt.from_document(native_document["native_union"])
+            native_evidence = reader(receipt)
             receipt.require_evidence(
-                reader(receipt),
+                native_evidence,
                 document_sha256=hashlib.sha256(
                     canonical_bytes(native_document)
                 ).hexdigest(),
             )
+            self._adopt_native_union_finding_receipts(native_evidence, receipt)
             return
         if any(
             render_finding(item.view) not in review["body"]
@@ -10130,6 +12430,25 @@ class ReviewPublisher:
         expected = {
             finding_instance_fingerprint(comment): body
             for comment, _, body, _ in assembled.inline_comments
+        }
+        # A moved concern may retain its authentic original thread/review.
+        # Only the ordinary lifecycle's independently retained binding plus a
+        # fresh exact native opening can cover that current inline instance.
+        retained_native = self._confirmed_native_finding_receipts(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            base_sha=base_sha or "",
+            review_id=review_id,
+        )
+        expected = {
+            instance: body
+            for instance, body in expected.items()
+            if not (
+                instance in retained_native
+                and retained_native[instance].review_id != review_id
+                and retained_native[instance].thread_id is not None
+            )
         }
         observed: set[str] = set()
         comments = self.http.paginate(
@@ -10405,3 +12724,51 @@ class ReviewPublisher:
 
     def http_get(self, path: str, *, token: str) -> tuple[int, Any]:
         return self.http.request("GET", path, token=token)
+
+
+from .materialized_publication_phase import (  # noqa: E402
+    install_publisher as _install_materialized_publisher,
+)
+
+_install_materialized_publisher(ReviewPublisher)
+del _install_materialized_publisher
+
+
+# Install only after all actual source classes are defined. No first-caller registration.
+from .guarded_pending_publication import install_source as _install_guarded_pending  # noqa: E402
+
+_install_guarded_pending(ReviewPublisher)
+del _install_guarded_pending
+
+
+from .ordinary_publication_reads import _install_publication_source  # noqa: E402
+
+_install_publication_source(ReviewPublisher)
+del _install_publication_source
+
+from .ordinary_drift_execution import _install_sources as _install_drift_sources  # noqa: E402
+
+_install_drift_sources(ReviewPublisher, _REVIEW_THREADS_QUERY)
+del _install_drift_sources
+
+from .quarantine_pr_observation import install_finalizer as _install_pr_finalizer  # noqa: E402
+
+_capture_quarantine_pr, _consume_quarantine_pr = _install_pr_finalizer(
+    ReviewApprovalFinalizer
+)
+del _install_pr_finalizer
+
+
+from .adjacent_publication_preflight import (  # noqa: E402
+    install_source as _install_adjacent_preflight,
+)
+
+_install_adjacent_preflight(ReviewPublisher)
+del _install_adjacent_preflight
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+from .guarded_hot_namespace import begin as _hot_namespace_begin  # noqa: E402
+
+_seal_original_source()

@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -72,6 +73,101 @@ def original_objects(fixture):
 
 
 class QuarantineEvidenceTests(unittest.TestCase):
+    def test_current_failed_publication_preserves_original_admission_for_retry(self):
+        class Recoverable(FailedPublicationFixture):
+            allow = False
+
+            def external(self, request, timeout):
+                if (
+                    self.allow
+                    and request.method == "POST"
+                    and urlsplit(request.full_url).path.endswith("/pulls/7/reviews")
+                ):
+                    return EntryFixture.external(self, request, timeout)
+                return super().external(request, timeout)
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Recoverable(directory)
+            original_objects(fixture)
+            self.assertFalse(fixture.legacy_publication_fixture)
+            self.assertEqual(fixture.invoke(human=True), 1)
+            previous = parse_session_comment(
+                fixture.comment["body"], identity=fixture.selected.identity
+            )
+            self.assertEqual(previous.transaction.phase, "publication_failed")
+            self.assertIsNone(previous.api_run_accounting["terminal_transaction"])
+            calls = fixture.provider_calls
+            fixture.allow, fixture.attempt = True, 2
+            from review_sensei_github.finding_lifecycle import restore_finding_lifecycle
+
+            from review_sensei.finding_lifecycle import decode_lifecycle_state
+
+            admitted = []
+
+            def observe(frame, event, result):
+                # The durable lifecycle is restored before retrying the native
+                # effect. Observe that actual authenticated return, without
+                # replacing a reader or demanding the obsolete result fallback.
+                if (
+                    event == "return"
+                    and frame.f_code is restore_finding_lifecycle.__code__
+                    and result is not None
+                    and result[1] is not None
+                ):
+                    admitted.append(
+                        (
+                            result[0].finding_lifecycle,
+                            decode_lifecycle_state(result[1]["lifecycle"]).state,
+                        )
+                    )
+
+            previous_profile = sys.getprofile()
+            try:
+                sys.setprofile(observe)
+                self.assertEqual(fixture.invoke(human=True), 1, fixture.error)
+            finally:
+                sys.setprofile(previous_profile)
+            self.assertTrue(admitted)
+            self.assertEqual(admitted[0][0], previous.finding_lifecycle)
+            inventories = [
+                (
+                    getattr(state, "inventory", None)
+                    or state.authoritative_decision_inventory
+                ).obligations
+                for _, state in admitted
+            ]
+            original_criteria = {
+                item.obligation_id: item.criterion for item in inventories[0]
+            }
+            self.assertTrue(original_criteria)
+            for obligations in inventories:
+                self.assertEqual(
+                    {item.obligation_id: item.criterion for item in obligations},
+                    original_criteria,
+                )
+            self.assertTrue(
+                all(
+                    any(
+                        obligation.criterion.needs_human and obligation.unresolved
+                        for obligation in obligations
+                    )
+                    for obligations in inventories
+                )
+            )
+            self.assertIn(
+                "native outcome remains uncertain; no retry dispatched", fixture.error
+            )
+            current = parse_session_comment(
+                fixture.comment["body"], identity=fixture.selected.identity
+            )
+            self.assertEqual(fixture.provider_calls, calls)
+            self.assertEqual(
+                current.transaction.transaction_id, previous.transaction.transaction_id
+            )
+            self.assertEqual(current.transaction.phase, "publication_failed")
+            self.assertIsNone(current.api_run_accounting["terminal_transaction"])
+            self.assertEqual(fixture.reviews, [])
+
     def test_actual_retained_failure_reconstructs_original_admission_without_effects(
         self,
     ):

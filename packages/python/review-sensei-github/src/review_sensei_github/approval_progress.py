@@ -132,3 +132,8 @@ def render_command_progress(
             progress.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True
         )
     return result if summary == result.summary else replace(result, summary=summary)
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

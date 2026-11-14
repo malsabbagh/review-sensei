@@ -120,7 +120,7 @@ skips `tests/dist_safe` and `tests/downstream` because they are not packages;
 `tests/conftest.py` makes `pytest` skip them too, so the packaged lanes only run
 the documented way, from an unpacked sdist against an installed wheel.
 
-Windows CI runs that same discovered checkout inventory through
+Linux, macOS and Windows CI run that same discovered checkout inventory through
 `python scripts/run_checkout_tests.py --workers 4`. It partitions sorted test IDs
 into disjoint processes with intact test classes, verifies each worker loaded
 its exact inventory, and

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -395,6 +396,7 @@ class BrokerClient:
         repository_id: int,
         pull_request: int,
         head_sha: str,
+        observe_actor_role: bool = False,
     ) -> BrokerSession:
         """Obtain a current-head session capability and its enrollment verdict."""
 
@@ -411,8 +413,11 @@ class BrokerClient:
             or re.fullmatch(r"[a-f0-9]{40}", head_sha) is None
         ):
             raise GitHubBrokerClientError("Broker session scope is invalid")
+        if type(observe_actor_role) is not bool:
+            raise GitHubBrokerClientError("Broker actor role option is invalid")
         parsed = self._post(
             {
+                **({"observe_actor_role": True} if observe_actor_role else {}),
                 "oidc_token": oidc_token,
                 "capability": "review_session",
                 "session": {
@@ -451,7 +456,7 @@ class BrokerClient:
             or SESSION_GRANT_PATTERN.fullmatch(grant) is None
         ):
             raise GitHubBrokerClientError("Broker current run grant conflicts")
-        return BrokerSession(
+        session = BrokerSession(
             token=token,
             state=state,
             reservation_owner=owner,
@@ -459,6 +464,7 @@ class BrokerClient:
             attestation=attestation,
             app_id=self._validated_app_id(parsed.get("app_id")),
         )
+        return session
 
     def open_session_release(
         self,
@@ -594,6 +600,54 @@ class BrokerClient:
             raise GitHubBrokerClientError("Broker session grant was not verified")
         return returned
 
+    def refresh_session_observation(self, grant, session_attestation, effect_sha256):
+        """One fresh observation exchange, not reusable effect authorization."""
+        if not isinstance(grant, str) or SESSION_GRANT_PATTERN.fullmatch(grant) is None:
+            raise GitHubBrokerClientError("Broker session grant is invalid")
+        authority = self._validated_attestation_grant(session_attestation)
+        observation = authority.get("current_observation")
+        if (
+            not isinstance(observation, dict)
+            or observation.get("schema_version") != "current-observation-v2"
+        ):
+            raise GitHubBrokerClientError("Broker original actor role is unavailable")
+        if (
+            not isinstance(effect_sha256, str)
+            or re.fullmatch(r"[a-f0-9]{64}", effect_sha256) is None
+        ):
+            raise GitHubBrokerClientError("Broker effect binding is invalid")
+        result = self._post(
+            {
+                "session_grant": grant,
+                "session_attestation": authority,
+                "refresh_effect_sha256": effect_sha256,
+            },
+            url=self.broker_url.removesuffix("/token") + "/session-grant",
+        )
+        from .current_trust_observation import parse_current_observation
+
+        returned = self._validated_attestation_grant(result.get("session_attestation"))
+        current = parse_current_observation(
+            result.get("current_observation"), authority=returned
+        )
+        # The broker emits its canonical closed authority in this exact JSON
+        # order; hashing the returned wire document preserves its MAC binding.
+        wire = json.dumps(returned, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        expected = {
+            "schema_version": "effect-observation-v1",
+            "effect_sha256": effect_sha256,
+            "original_attestation_sha256": hashlib.sha256(wire).hexdigest(),
+        }
+        if (
+            returned != authority
+            or current != observation
+            or result.get("observation_binding") != expected
+        ):
+            raise GitHubBrokerClientError("Broker refreshed observation is unconfirmed")
+        return current
+
     @staticmethod
     def _validated_app_id(value: object) -> int:
         if type(value) is not int or not 0 < value <= 9_007_199_254_740_991:
@@ -641,6 +695,14 @@ class BrokerClient:
             authority = {**authority, "issued_at": now, "expires_at": now + 600}
             self.authority = authority
             requested_capability = payload.get("capability", "review_publish")
+            if authority["version"] == 4 and (
+                requested_capability != "review_session"
+                or payload.get("release_only") is not None
+                or not isinstance(payload.get("session"), dict)
+            ):
+                raise GitHubBrokerClientError(
+                    "Broker observed authority requires a signed session exchange"
+                )
             if requested_capability not in CAPABILITIES[str(authority["purpose"])]:
                 raise GitHubBrokerClientError(
                     "Broker capability conflicts with run purpose"
@@ -731,3 +793,23 @@ class BrokerClient:
         if self.control is not None and control_request is not None:
             self.control.verify(parsed.get("control_receipt"), control_request)
         return parsed
+
+
+# Register actual capability transport before capturing the session observation
+# source, so both pin the same immutable validated response implementation.
+from .trust_capabilities import _install_capability_source  # noqa: E402
+
+_install_capability_source(BrokerClient)
+del _install_capability_source
+
+# Capture the actual exchange implementation once. No public model factory can
+# issue an enrollment observation; the issuer remains inside this source hook.
+from .trust_enrollment import _install_observation_source  # noqa: E402
+
+_install_observation_source(BrokerClient)
+del _install_observation_source
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

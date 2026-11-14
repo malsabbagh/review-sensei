@@ -6,10 +6,11 @@ import copy
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from collections import Counter
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -38,9 +39,38 @@ from review_sensei.cli import main
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ProviderResponse, ReviewResult
 
-# Fixed modest fixture: measured work attempts, not a shipping default/minimum.
-# Admission 11 + provider metadata 4 + completion 8 + publication 45.
+
+@contextmanager
+def forbid_replacement_phase_budget():
+    """Observe only this invocation; leave audited constructors intact."""
+    original = EvidenceReadBudget.__init__.__code__
+    previous = sys.getprofile()
+
+    def observe(frame, event, arg):
+        if event == "call" and frame.f_code is original:
+            raise AssertionError("no replacement phase budget")
+        if previous is not None:
+            previous(frame, event, arg)
+
+    try:
+        sys.setprofile(observe)
+        yield
+    finally:
+        sys.setprofile(previous)
+
+
+# Retain the existing modest fixture allocation, not a shipping default/minimum.
+# Its original admission11 + metadata4 + completion8 + publication45 allowance
+# stays fixed. The atomic reservation producer now removes four actual REST
+# requests; exact boundary measurements below account for that saving separately.
 QUALIFIED_WORK_CALLS = 11 + 4 + 8 + 45
+RESERVATION_FUSION_SAVED_CALLS = 4
+QUALIFIED_CURRENT_WORK_CALLS = QUALIFIED_WORK_CALLS - RESERVATION_FUSION_SAVED_CALLS
+# The authenticated genuinely empty original omits its redundant per-comment
+# inventory and its post-staging fence. This is a measured 14-dispatch saving,
+# not a smaller runtime quote or a change to the nonempty fixture's allowance.
+EMPTY_ORIGINAL_SAVED_CALLS = 14
+QUALIFIED_EMPTY_WORK_CALLS = QUALIFIED_CURRENT_WORK_CALLS - EMPTY_ORIGINAL_SAVED_CALLS
 # The final selected write keeps two undispatched confirmation attempts.
 QUALIFIED_CONFIRMATION_HEADROOM = 2
 QUALIFICATION_LIMIT = HOSTED_API_STARTUP_PLAN.liability + 2 * (
@@ -107,6 +137,7 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
         self.limit = limit
         self.reviews = []
         self.inline = []
+        self.threads = []
         self.check_runs = []
         self.interrupt_engine_read = False
         self.fail_terminal_patch = False
@@ -135,6 +166,26 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
             self.interrupt_engine_read = False
             self.trace.append((self.attempt, method, path))
             raise KeyboardInterrupt()
+        if "/pulls/comments/" in path or (
+            "/pulls/7/reviews/" in path and not path.endswith("/comments")
+        ):
+            assert (
+                len(self.accounted.observations)
+                == sum(a == self.attempt for a, _, _ in self.trace) + 1
+            )
+            self.trace.append((self.attempt, method, path))
+            identifier = int(path.rsplit("/", 1)[1])
+            collection = self.inline if "/pulls/comments/" in path else self.reviews
+            item = next((row for row in collection if row["id"] == identifier), None)
+            if item is None:
+                return json_response({}, 404)
+            if method == "PATCH":
+                item["body"] = payload["body"]
+                for thread in self.threads:
+                    root = thread["comments"]["nodes"][0]
+                    if root["databaseId"] == identifier:
+                        root["body"] = payload["body"]
+            return json_response(copy.deepcopy(item))
         review = path.endswith("/pulls/7/reviews")
         inline = (
             path.endswith("/pulls/7/comments")
@@ -175,15 +226,61 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
                     ]
                 )
             if inline:
-                return json_response(self.inline)
+                items = self.inline
+                if "/reviews/" in path:
+                    review_id = int(path.split("/reviews/")[1].split("/")[0])
+                    items = [
+                        item
+                        for item in items
+                        if item["pull_request_review_id"] == review_id
+                    ]
+                return json_response(copy.deepcopy(items))
             if graphql:
+                operation = payload.get("operationName")
+                if operation in {
+                    "ResolveReviewThread",
+                    "UnresolveReviewThread",
+                    "ResolutionReadback",
+                }:
+                    variables = payload["variables"]
+                    identifier = variables.get("id") or variables["input"]["threadId"]
+                    node = next(n for n in self.threads if n["id"] == identifier)
+                    if operation == "ResolutionReadback":
+                        return json_response(
+                            {
+                                "data": {
+                                    "node": {
+                                        "id": identifier,
+                                        "isResolved": node["isResolved"],
+                                    }
+                                }
+                            }
+                        )
+                    node["isResolved"] = operation == "ResolveReviewThread"
+                    field = (
+                        "resolveReviewThread"
+                        if node["isResolved"]
+                        else "unresolveReviewThread"
+                    )
+                    return json_response(
+                        {
+                            "data": {
+                                field: {
+                                    "thread": {
+                                        "id": identifier,
+                                        "isResolved": node["isResolved"],
+                                    }
+                                }
+                            }
+                        }
+                    )
                 return json_response(
                     {
                         "data": {
                             "repository": {
                                 "pullRequest": {
                                     "reviewThreads": {
-                                        "nodes": [],
+                                        "nodes": copy.deepcopy(self.threads),
                                         "pageInfo": {
                                             "hasNextPage": False,
                                             "endCursor": None,
@@ -203,10 +300,12 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
                     "commit_id": payload["commit_id"],
                     "state": "APPROVED"
                     if payload["event"] == "APPROVE"
+                    else "CHANGES_REQUESTED"
+                    if payload["event"] == "REQUEST_CHANGES"
                     else "COMMENTED",
                     "body": payload["body"],
                     "user": bot,
-                    "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/7",
+                    "pull_request_url": f"{self.api_url}/repos/owner/repo/pulls/7",
                     "html_url": "https://github.test/reviews/100",
                     "submitted_at": "2026-10-25T22:00:00Z",
                 }
@@ -216,10 +315,52 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
                         {
                             "id": 200 + len(self.inline),
                             "pull_request_review_id": item["id"],
-                            "commit_id": HEAD,
+                            "commit_id": payload["commit_id"],
+                            "created_at": item["submitted_at"],
+                            "updated_at": item["submitted_at"],
                             "pull_request_url": item["pull_request_url"],
                             "user": bot,
                             **comment,
+                        }
+                    )
+                    native = self.inline[-1]
+                    identifiers = ("PRRT_srv_Aq7J", "PRRT_srv_Kp9Z", "PRRT_srv_Mx2W")
+                    import uuid
+
+                    thread_id = (
+                        identifiers[len(self.threads)]
+                        if len(self.threads) < len(identifiers)
+                        else "PRRT_" + uuid.uuid4().hex
+                    )
+                    self.threads.append(
+                        {
+                            "id": thread_id,
+                            "isResolved": False,
+                            "isOutdated": False,
+                            "path": native["path"],
+                            "line": native.get("line"),
+                            "diffSide": native.get("side", "RIGHT"),
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "id": "PRRC_" + uuid.uuid4().hex,
+                                        "databaseId": native["id"],
+                                        "body": native["body"],
+                                        "path": native["path"],
+                                        "line": native.get("line"),
+                                        "author": {
+                                            "login": bot["login"],
+                                            "__typename": "Bot",
+                                            "databaseId": bot["id"],
+                                        },
+                                        "commit": {"oid": native["commit_id"]},
+                                        "pullRequestReview": {"databaseId": item["id"]},
+                                        "createdAt": native["created_at"],
+                                        "updatedAt": native["updated_at"],
+                                    }
+                                ],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            },
                         }
                     )
                 return json_response(copy.deepcopy(item), 200)
@@ -230,7 +371,7 @@ class LifecycleFixture(fixture_module.HostedRunFixture):
                     item = {
                         "id": 500 + len(self.check_runs),
                         "html_url": "https://github.test/checks/500",
-                        "app": {"slug": "reviewsensei"},
+                        "app": {"id": 999, "slug": "reviewsensei"},
                         **payload,
                     }
                     self.check_runs.append(item)
@@ -373,11 +514,7 @@ class CallerLifecycleTests(unittest.TestCase):
                     "REVIEWSENSEI_APP_ID": "999",
                 },
             ),
-            patch.object(
-                EvidenceReadBudget,
-                "__init__",
-                side_effect=AssertionError("no replacement phase budget"),
-            ),
+            forbid_replacement_phase_budget(),
             patch(
                 "review_sensei.cli.default_registry",
                 return_value=tx.HostedAnalysisCliTests._Registry(Provider()),
@@ -552,8 +689,8 @@ class CallerLifecycleTests(unittest.TestCase):
         self,
     ):
         for human, work in (
-            (False, QUALIFIED_WORK_CALLS),
-            (True, QUALIFIED_WORK_CALLS - 4),
+            (False, QUALIFIED_EMPTY_WORK_CALLS - 1),
+            (True, QUALIFIED_CURRENT_WORK_CALLS - 5),
         ):
             # Initial owner receives the odd unit; the successor must work with
             # floor(remaining/2). These are fixed fixture measurements only.
@@ -593,9 +730,15 @@ class CallerLifecycleTests(unittest.TestCase):
                             directory, prepared=(fixture, native), human=human
                         )
                         self.assertEqual(publication.status, "published")
-                        self.assertEqual(len(fixture.trace), 78 if human else 82)
                         self.assertEqual(
-                            fixture.accounted.accounting.confirmed, 68 if human else 72
+                            len(fixture.trace),
+                            (77 if human else 81 - EMPTY_ORIGINAL_SAVED_CALLS)
+                            - RESERVATION_FUSION_SAVED_CALLS,
+                        )
+                        self.assertEqual(
+                            fixture.accounted.accounting.confirmed,
+                            (67 if human else 71 - EMPTY_ORIGINAL_SAVED_CALLS)
+                            - RESERVATION_FUSION_SAVED_CALLS,
                         )
                         self.assertEqual(
                             fixture.accounted.usable, TERMINAL_REQUESTS - 4
@@ -603,7 +746,12 @@ class CallerLifecycleTests(unittest.TestCase):
 
     def test_successor_one_short_keeps_predecessor_capacity_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
-            fixture = LifecycleFixture(directory, limit=QUALIFICATION_LIMIT - 1)
+            fixture = LifecycleFixture(
+                directory,
+                limit=QUALIFICATION_LIMIT
+                - 2 * (EMPTY_ORIGINAL_SAVED_CALLS + RESERVATION_FUSION_SAVED_CALLS)
+                - 3,
+            )
             native, config, _, owner = fixture.prelude()
             fixture.accounted.initialize_and_activate(native, IDENTITY, config, owner)
             fixture.accounted.replace_checkpoint(native, IDENTITY)
@@ -622,7 +770,10 @@ class CallerLifecycleTests(unittest.TestCase):
             self.assertEqual(fixture.accounted.accounting.blocks[:2], original.blocks)
             self.assertEqual(fixture.accounted.accounting.remaining, 0)
             self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
-            self.assertEqual(len(fixture.trace), 100)
+            self.assertEqual(
+                len(fixture.trace),
+                99 - EMPTY_ORIGINAL_SAVED_CALLS - RESERVATION_FUSION_SAVED_CALLS,
+            )
 
     def test_worker_internal_fanout_does_not_change_public_caller_cost(self):
         observed = []

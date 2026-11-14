@@ -1,7 +1,6 @@
 """Public CLI quarantine → empty fresh review → individual decisions → verify."""
 
 import copy
-import itertools
 import json
 import os
 import random
@@ -13,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fake_github_http import json_response
+from quarantine_fixture_identity import JOURNEY_RUNS
 from review_sensei_github.publication import approval_eligibility_from_body
 from review_sensei_github.session_ledger import parse_session_comment
 from test_action_run import CommandEntryFixture
@@ -21,7 +21,7 @@ from test_quarantine_creation import CreationFixture
 from test_quarantine_evidence import git, original_objects
 from test_review_run import EntryFixture
 
-_RUNS = itertools.count(2900)
+_RUNS = JOURNEY_RUNS
 
 
 class JourneyFixture(CreationFixture, CommandEntryFixture):
@@ -105,9 +105,9 @@ class JourneyFixture(CreationFixture, CommandEntryFixture):
                                             "pullRequest": subject
                                             if item.get(
                                                 "issue_url",
-                                                "https://api.github.test/repos/owner/repo/issues/7",
+                                                f"{self.api_url}/repos/owner/repo/issues/7",
                                             )
-                                            == "https://api.github.test/repos/owner/repo/issues/7"
+                                            == f"{self.api_url}/repos/owner/repo/issues/7"
                                             else {**subject, "number": 8},
                                         }
                                         for item in selected
@@ -223,7 +223,7 @@ class JourneyFixture(CreationFixture, CommandEntryFixture):
         response = super().external(request, timeout)
         if self.comment is not None:
             self.comment.setdefault(
-                "issue_url", "https://api.github.test/repos/owner/repo/issues/7"
+                "issue_url", f"{self.api_url}/repos/owner/repo/issues/7"
             )
         return response
 
@@ -711,11 +711,150 @@ class QuarantineConsumerFaultTests(unittest.TestCase):
 
 
 class QuarantineFullAnalysisRecoveryTests(unittest.TestCase):
-    def test_failed_first_full_pass_recovers_exact_context_without_another_provider_call(
+    def test_current_empty_original_retry_preserves_projected_obligations_and_hold(
+        self,
+    ):
+        from review_sensei_github.default_human_inventory import INTENT_MARKER
+        from review_sensei_github.finding_lifecycle import _unpack_journal
+        from review_sensei_github.operation_host import comment_payload
+
+        from review_sensei.api_work import ApiRunAccounting
+        from review_sensei.bounded_evidence import read_inline_evidence
+
+        def retained_journal(record):
+            manifest = record.finding_lifecycle["manifest"]
+            document = read_inline_evidence(
+                manifest, expected_binding=manifest["binding"]
+            )
+            return _unpack_journal(document["lifecycle"])
+
+        def inventory_intents(fixture, transaction_id):
+            return [
+                payload
+                for item in fixture.extra_comments.values()
+                if INTENT_MARKER in item["body"]
+                for payload in [json.loads(comment_payload(item["body"]))]
+                if payload["binding"]["transaction_id"] == transaction_id
+            ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = JourneyFixture(directory)
+            old, registration = fixture.original_origins()
+            self.assertFalse(fixture.legacy_publication_fixture)
+            fixture.allow_publication = False
+            with registered_resource([registration]):
+                self.assertEqual(fixture.invoke(), 1)
+                self.assertEqual(
+                    fixture.error.splitlines()[0],
+                    "review-sensei: review publication lacks permission",
+                )
+                failed = fixture.current_record()
+                self.assertIsNotNone(failed.finding_lifecycle)
+                self.assertEqual(failed.transaction.phase, "publication_failed")
+                failed_journal = retained_journal(failed)
+                # This is a confirmed 403, not an unknown response-loss case.
+                # The empty original omitted redundant inventory staging; a
+                # fresh invocation cannot invent the missing original receipt.
+                self.assertEqual(
+                    [
+                        (effect["method"], effect["status"], effect["response"][0])
+                        for effect in failed_journal["effects"]
+                    ],
+                    [
+                        ("POST", "confirmed", 201),
+                        ("PATCH", "confirmed", 200),
+                        ("POST", "rejected", 403),
+                        ("PATCH", "confirmed", 200),
+                    ],
+                )
+                rejected = failed_journal["effects"][2]
+                self.assertEqual(rejected["path"], "/repos/owner/repo/pulls/7/reviews")
+                self.assertEqual(rejected["request"]["event"], "COMMENT")
+                self.assertEqual(rejected["request"]["comments"], [])
+                self.assertEqual(rejected["request"]["commit_id"], fixture.live_head)
+                self.assertEqual(rejected["response"], [403, None])
+                self.assertEqual(
+                    inventory_intents(fixture, failed.transaction.transaction_id), []
+                )
+                failed_accounting = ApiRunAccounting.from_document(
+                    failed.api_run_accounting
+                )
+                self.assertEqual(failed_accounting.uncertain, 0)
+                calls, reviews = fixture.provider_calls, len(fixture.reviews)
+                native = copy.deepcopy(
+                    (
+                        fixture.reviews,
+                        fixture.check_runs,
+                        fixture.inline,
+                        fixture.threads,
+                    )
+                )
+                comment_ids = set(fixture.extra_comments)
+                fixture.quarantine_predecessor_comment_id = None
+                fixture.attempt, fixture.allow_publication = 2, True
+                self.assertEqual(fixture.invoke(), 1)
+                self.assertEqual(
+                    fixture.error.splitlines()[0],
+                    "review-sensei: default human inventory has no confirmed complete "
+                    "original staging; fresh recovery cannot start writes",
+                )
+                self.assertNotIn(
+                    "publication admission evidence is missing", fixture.error
+                )
+                current = fixture.current_record()
+                self.assertEqual(fixture.provider_calls, calls)
+                self.assertEqual(len(fixture.reviews), reviews)
+                self.assertEqual(
+                    (
+                        fixture.reviews,
+                        fixture.check_runs,
+                        fixture.inline,
+                        fixture.threads,
+                    ),
+                    native,
+                )
+                self.assertEqual(set(fixture.extra_comments), comment_ids)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
+                self.assertEqual(retained_journal(current), failed_journal)
+                self.assertEqual(current.transaction.phase, "publication_failed")
+                self.assertEqual(
+                    inventory_intents(fixture, current.transaction.transaction_id), []
+                )
+                current_accounting = ApiRunAccounting.from_document(
+                    current.api_run_accounting
+                )
+                self.assertEqual(
+                    current_accounting.configuration, failed_accounting.configuration
+                )
+                self.assertEqual(current_accounting.uncertain, 0)
+                self.assertTrue(
+                    set(failed_accounting.completed).issubset(
+                        current_accounting.completed
+                    )
+                )
+                self.assertEqual(
+                    current.transaction.transaction_id,
+                    failed.transaction.transaction_id,
+                )
+                self.assertIsNotNone(current.finding_lifecycle)
+                self.assertEqual(current.quarantine_lineage, failed.quarantine_lineage)
+                self.assertEqual(
+                    len(fixture.selected.ledger._quarantine_authenticated.pending), 2
+                )
+                self.assertEqual(
+                    current.api_run_accounting["configuration"]["limit"], 512
+                )
+                self.assertIsNone(current.api_run_accounting["terminal_transaction"])
+                self.assertIsNone(old.api_run_accounting["terminal_transaction"])
+
+    def test_legacy_failed_first_full_pass_recovers_exact_context_without_another_provider_call(
         self,
     ):
         with tempfile.TemporaryDirectory() as directory:
             fixture = JourneyFixture(directory)
+            # This retry predates durable native-effect journalling. Current
+            # uncertain publication is separately required to remain pending.
+            fixture.legacy_publication_fixture = True
             old, registration = fixture.original_origins()
             fixture.allow_publication = False
             with registered_resource([registration]):

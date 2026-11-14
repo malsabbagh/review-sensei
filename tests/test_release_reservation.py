@@ -20,7 +20,7 @@ from review_sensei_github.session_ledger import (
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionIdentity, SessionRecord
 from tests.fake_github_http import json_response, make_http
-from tests.session_fixture_clock import SESSION_FIXTURE_NOW, SessionFixtureClockMixin
+from tests.session_fixture_clock import SESSION_FIXTURE_NOW
 from tests.test_api_work_persistence import HEAD
 from tests.test_api_work_persistence import IDENTITY as CURRENT_IDENTITY
 from tests.test_review_run import EntryFixture
@@ -30,7 +30,7 @@ IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
 RUN_ID = "10000000001"
 
 
-class ReleaseReservationTests(SessionFixtureClockMixin, unittest.TestCase):
+class ReleaseReservationTests(unittest.TestCase):
     def _retired(self, *, run_id=RUN_ID, head_sha="a" * 40):
         broker, http = Mock(), Mock()
         with self.assertRaisesRegex(

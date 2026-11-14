@@ -329,3 +329,8 @@ def read_accepted_result(reference, transaction, store, *, repository_id, app_id
     ):
         raise ReviewInputError("accepted result complete payload conflicts")
     return payload
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

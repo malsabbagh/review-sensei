@@ -288,7 +288,33 @@ class CheckpointResultStoreTests(unittest.TestCase):
                         self.assertFalse(
                             uses_grouped_publication(f.selected.http, bound)
                         )
+                        # The hot publisher installs a registered lifecycle
+                        # adapter with no command-only native budget. Decoder
+                        # installation and raw clearing must use the same key.
+                        from types import SimpleNamespace
+
+                        from review_sensei_github.finding_lifecycle import (
+                            FindingLifecycleJournal,
+                            _JournalTransport,
+                        )
+
+                        journal = FindingLifecycleJournal(
+                            SimpleNamespace(),
+                            None,
+                            f.selected.identity,
+                            operation_id="format-roundtrip",
+                            base_sha=pending.base_sha,
+                            head_sha=pending.head_sha,
+                            policy_digest=pending.policy_digest,
+                            configuration_digest=pending.configuration_digest,
+                        )
+                        wrapped = _JournalTransport(journal, store.http)
+                        store.http = wrapped
                         store.original_reference(event_key=key)
+                        self.assertEqual(
+                            uses_grouped_publication(wrapped, bound),
+                            native_format == "bounded-inline-groups-v1",
+                        )
                         self.assertEqual(
                             uses_grouped_publication(f.selected.http, bound),
                             native_format == "bounded-inline-groups-v1",

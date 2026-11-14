@@ -10,7 +10,11 @@ from pathlib import Path
 
 from review_sensei_github.api_run_host import ApiRunReviewHooks
 from review_sensei_github.api_run_requests import ApiRunSessionLedger
-from test_api_work_lifecycle import QUALIFICATION_LIMIT, LifecycleFixture
+from test_api_work_lifecycle import (
+    QUALIFICATION_LIMIT,
+    LifecycleFixture,
+    forbid_replacement_phase_budget,
+)
 from test_api_work_persistence import BASE, HEAD, IDENTITY
 
 
@@ -130,6 +134,7 @@ class EntryFixture(LifecycleFixture):
         self.selected = None
         self.provider_calls = 0
         self.provider_comments = None
+        self.active_finding_cap = None
         self.provider_summary = None
         self.event_name = "pull_request"
         self.event_document = None
@@ -145,15 +150,24 @@ class EntryFixture(LifecycleFixture):
         self.change_root = False
         self.archive_bad = None
         self.abort_fault = None
+        self.legacy_publication_fixture = False
 
     def external(self, request, timeout):
         import base64
+        import copy
         import json
         from urllib.parse import urlsplit
 
         from fake_github_http import json_response
 
         path = urlsplit(request.full_url).path
+        if request.get_method() == "GET" and "/check-runs/" in path:
+            self.trace.append((self.attempt, request.get_method(), path))
+            identifier = path.rsplit("/", 1)[-1]
+            selected = next(
+                (c for c in self.check_runs if str(c["id"]) == identifier), None
+            )
+            return json_response(copy.deepcopy(selected), 200 if selected else 404)
         if path.endswith("/collaborators/alice/permission"):
             self.trace.append((self.attempt, request.get_method(), path))
             return json_response({"permission": "maintain"})
@@ -373,7 +387,6 @@ class EntryFixture(LifecycleFixture):
         from review_sensei_github.broker_client import BrokerClient
         from review_sensei_github.http import GitHubHttp
 
-        from review_sensei.bounded_evidence import EvidenceReadBudget
         from review_sensei.models import ProviderResponse
 
         fixture = self
@@ -393,7 +406,7 @@ class EntryFixture(LifecycleFixture):
             )
 
         def http_factory(**kwargs):
-            http = GitHubHttp(api_url="https://api.github.test", **kwargs)
+            http = GitHubHttp(api_url=fixture.api_url, **kwargs)
             fixture.http = http
             return http
 
@@ -457,11 +470,32 @@ class EntryFixture(LifecycleFixture):
 
         def execute(selected, *args, **kwargs):
             fixture.selected = selected
+            if fixture.legacy_publication_fixture:
+                # Explicit old entry adapter: no current lifecycle rollout at
+                # admission or publication. Current-route tests never use it.
+                with patch.object(
+                    review_run.ReviewRun,
+                    "finding_inventory_migration_required",
+                    return_value=False,
+                ):
+                    return original_execute(selected, *args, **kwargs)
             return original_execute(selected, *args, **kwargs)
 
         def publish(hooks, *args, **kwargs):
             if fixture.before_publication:
                 fixture.before_publication()
+            if fixture.legacy_publication_fixture:
+                # Historical producer only: reproduce the pre-lifecycle wire
+                # format, never make today's ordinary-route oracle opt out.
+                kwargs["options"] = replace(
+                    kwargs["options"],
+                    max_active_findings=None,
+                    enable_drift_tracking=False,
+                )
+            if fixture.active_finding_cap is not None:
+                kwargs["options"] = replace(
+                    kwargs["options"], max_active_findings=fixture.active_finding_cap
+                )
             return original_publish(hooks, *args, **kwargs)
 
         def begin(hooks, *args, **kwargs):
@@ -514,11 +548,7 @@ class EntryFixture(LifecycleFixture):
                         "review_sensei.cli.default_registry",
                         return_value=tx.HostedAnalysisCliTests._Registry(Provider()),
                     ),
-                    patch.object(
-                        EvidenceReadBudget,
-                        "__init__",
-                        side_effect=AssertionError("no phase budget"),
-                    ),
+                    forbid_replacement_phase_budget(),
                     redirect_stdout(io.StringIO()),
                     redirect_stderr(errors),
                 ):
@@ -574,8 +604,9 @@ class EntryFixture(LifecycleFixture):
 
 
 class _CleanupTailFixture(EntryFixture):
-    def __init__(self, directory, mode, **kwargs):
+    def __init__(self, directory, mode, *, legacy_publication=False, **kwargs):
         super().__init__(directory, **kwargs)
+        self.legacy_publication_fixture = legacy_publication
         self.mode = mode
         self.threads = []
         self.mutations = []
@@ -646,36 +677,16 @@ class _CleanupTailFixture(EntryFixture):
             item = next(x for x in self.inline if x["id"] == identifier)
             if request.method == "PATCH":
                 item["body"] = payload["body"]
+                for thread in self.threads:
+                    root = thread["comments"]["nodes"][0]
+                    if root["databaseId"] == identifier:
+                        root["body"] = payload["body"]
             return json_response(copy.deepcopy(item))
         response = super().external(request, timeout)
         if path.endswith("/jobs") and self.overlap:
             value = json.loads(response.read(524288))
             value["total_count"] = len(value["jobs"])
             return json_response(value)
-        if path.endswith("/pulls/7/reviews") and request.method == "POST":
-            # The reusable fixture hardcodes its initial head for inline rows;
-            # return the submitted head on this evolving synthetic server.
-            for item in self.inline:
-                if item["pull_request_review_id"] == self.reviews[-1]["id"]:
-                    item["commit_id"] = payload["commit_id"]
-                    self.threads.append(
-                        {
-                            "id": "LIVE_" + str(item["id"]),
-                            "isResolved": False,
-                            "comments": {
-                                "nodes": [
-                                    {
-                                        "databaseId": item["id"],
-                                        "body": item["body"],
-                                        "author": {
-                                            "login": "reviewsensei",
-                                            "__typename": "Bot",
-                                        },
-                                    }
-                                ]
-                            },
-                        }
-                    )
         return response
 
 
@@ -711,7 +722,7 @@ class _ResolutionSettlementFixture(_CleanupTailFixture):
             if self.readback_fault == "denied":
                 return json_response({}, 403)
             if self.readback_fault == "malformed":
-                return json_response({"data": {"node": {"id": "LIVE_200"}}})
+                return json_response({"data": {"node": {"id": "PRRT_srv_Aq7J"}}})
             if self.readback_fault == "wrong-thread":
                 return json_response(
                     {"data": {"node": {"id": "OTHER", "isResolved": True}}}
@@ -720,14 +731,14 @@ class _ResolutionSettlementFixture(_CleanupTailFixture):
                 return json_response(
                     {
                         "errors": [{"type": "FORBIDDEN"}],
-                        "data": {"node": {"id": "LIVE_200", "isResolved": True}},
+                        "data": {"node": {"id": "PRRT_srv_Aq7J", "isResolved": True}},
                     }
                 )
             if self.readback_fault == "expired":
                 deadline = self.accounted.observations[-1]["deadline_unix_ms"]
                 self.accounted._clock = lambda: deadline / 1000 + 1
                 return json_response(
-                    {"data": {"node": {"id": "LIVE_200", "isResolved": True}}}
+                    {"data": {"node": {"id": "PRRT_srv_Aq7J", "isResolved": True}}}
                 )
         if (
             self.media_fault
@@ -892,6 +903,18 @@ class _CompletionFixture(_CleanupTailFixture):
                     }
                 }
             )
+        if request.method == "GET" and "/check-runs/" in path:
+            self.trace.append((self.attempt, request.method, path))
+            identifier = path.rsplit("/", 1)[-1]
+            selected = next(
+                (c for c in self.check_runs if str(c["id"]) == identifier), None
+            )
+            selected = copy.deepcopy(selected)
+            if selected is not None and self.completion_fault == "check":
+                selected["conclusion"] = "success"
+            if selected is not None and self.completion_fault == "check-producer":
+                selected["app"]["slug"] = "another-app"
+            return json_response(selected, 200 if selected else 404)
         if request.method == "GET" and "/check-runs" in path:
             self.trace.append((self.attempt, request.method, path))
             rows = copy.deepcopy([c for c in self.check_runs if c["head_sha"] in path])
@@ -1230,8 +1253,115 @@ os._exit(92)
                 )
                 self.assertEqual(f.accounted._terminal_reason, "publication-completion")
                 self.assertEqual(f.provider_calls, 1)
-                self.assertEqual(len(f.trace), 84 if human else 88)
+                # The genuinely empty accepted original needs no redundant
+                # per-comment inventory. Atomic reservation/transaction binding
+                # also saves four actual requests in either branch; every real
+                # dispatch still appears in original accounting.
+                self.assertEqual(len(f.trace), 95 if human else 87)
+                if not human:
+                    self.assertFalse(
+                        any(
+                            "default-human-inventory" in item["body"]
+                            for item in f.extra_comments.values()
+                        )
+                    )
+                measurement = caller_measurement(f)
+                self.assertEqual(measurement["configured_limit"], 512)
+                self.assertEqual(measurement["physical_attempts"], len(f.trace))
+                self.assertEqual(
+                    sum(measurement["physical_attempts_by_phase"].values()),
+                    len(f.trace),
+                )
+                self.assertEqual(measurement["observed_unknown_responses"], 0)
+                self.assertFalse(measurement["unconfirmed_native_mutation"])
+                from review_sensei_github.session_ledger import parse_session_comment
+
+                persisted = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertIsNotNone(persisted.finding_lifecycle)
+                self.assertEqual(persisted.transaction.phase, "publication_succeeded")
+                if human:
+                    self.assertEqual(f.threads[0]["id"], "PRRT_srv_Aq7J")
+                    self.assertEqual(
+                        f.threads[0]["comments"]["nodes"][0]["databaseId"],
+                        f.inline[0]["id"],
+                    )
                 self.assertEqual(caller_measurement(f)["startup_reservation"], 130)
+
+    def test_interruption_after_confirmed_review_keeps_truthful_pending_output(self):
+        import json
+        from unittest.mock import patch
+
+        from review_sensei_github.review_run import ReviewRunHooks
+
+        from review_sensei.errors import ReviewInputError
+
+        original = ReviewRunHooks.publish_review
+
+        def interrupted(*args, **kwargs):
+            publication = original(*args, **kwargs)
+            self.assertEqual(publication.status, "published")
+            raise ReviewInputError("synthetic interruption after confirmed review")
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EntryFixture(directory)
+            with patch.object(ReviewRunHooks, "publish_review", interrupted):
+                self.assertEqual(fixture.invoke(human=True), 1, fixture.error)
+            outcome = json.loads((fixture.root / "publication.json").read_text())
+            self.assertEqual(outcome["status"], "published_terminal_pending")
+            self.assertEqual(outcome["publication_status"], "published")
+            self.assertEqual(outcome["review_id"], fixture.reviews[0]["id"])
+            self.assertFalse(outcome["accounting_terminal"])
+            self.assertEqual(outcome["terminal_reason"], "publication_interrupted")
+            self.assertIsNone(fixture.accounted.accounting.terminal_transaction)
+            self.assertEqual(fixture.provider_calls, 1)
+            self.assertEqual(len(fixture.reviews), 1)
+
+    def test_bookkeeping_failure_preserves_confirmed_native_receipt(self):
+        import json
+        from unittest.mock import patch
+
+        from review_sensei.errors import ReviewInputError
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EntryFixture(directory)
+            with patch(
+                "review_sensei_github.application.complete_review_publication",
+                side_effect=ReviewInputError("synthetic durable completion failure"),
+            ):
+                self.assertEqual(fixture.invoke(human=True), 1, fixture.error)
+            outcome = json.loads((fixture.root / "publication.json").read_text())
+            self.assertEqual(outcome["status"], "published_terminal_pending")
+            self.assertEqual(outcome["review_id"], fixture.reviews[0]["id"])
+            self.assertFalse(outcome["accounting_terminal"])
+            self.assertIsNone(fixture.accounted.accounting.terminal_transaction)
+            self.assertEqual(len(fixture.reviews), 1)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
+
+    def test_required_fix_withholding_without_completion_proof_keeps_accounting_open(
+        self,
+    ):
+        import json
+        from unittest.mock import patch
+
+        from review_sensei_github.review_run import ReviewRunHooks
+
+        original = ReviewRunHooks.publish_review
+
+        def without_proof(*args, **kwargs):
+            publication = original(*args, **kwargs)
+            return replace(publication, finalization_completion=None)
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EntryFixture(directory)
+            with patch.object(ReviewRunHooks, "publish_review", without_proof):
+                self.assertEqual(fixture.invoke(human=True), 1, fixture.error)
+            outcome = json.loads((fixture.root / "publication.json").read_text())
+            self.assertEqual(outcome["status"], "published_terminal_pending")
+            self.assertFalse(outcome["accounting_terminal"])
+            self.assertEqual(fixture.provider_calls, 1)
+            self.assertFalse(
+                any(item["state"] == "APPROVED" for item in fixture.reviews)
+            )
 
     def test_operation_app_identity_comes_from_worker_and_cannot_fall_back(self):
         import os
@@ -1423,12 +1553,36 @@ os._exit(92)
             f = EntryFixture(
                 directory, runner_kind="local", limit=QUALIFICATION_LIMIT + 2
             )
+            f.legacy_publication_fixture = True
             self.assertEqual(f.invoke(), 0, f.error)
             self.assertEqual(f.accounted.accounting.owner.job, "local")
             self.assertEqual(len(f.transports), 1)
-            self.assertEqual(len(f.trace), 89)
+            self.assertEqual(len(f.trace), 71)
             self.assertEqual(sum(p == "/api/tags" for _, _, p in f.trace), 1)
             self.assertTrue(any(r["state"] == "APPROVED" for r in f.reviews))
+
+    def test_current_local_review_preserves_budget_and_refuses_unfunded_native_tail(
+        self,
+    ):
+        import json
+
+        for limit in (QUALIFICATION_LIMIT + 2, 512):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as directory:
+                f = EntryFixture(directory, runner_kind="local", limit=limit)
+                self.assertEqual(f.invoke(), 1 if limit < 512 else 0, f.error)
+                self.assertEqual(f.accounted.accounting.configuration.limit, limit)
+                self.assertEqual(len(f.transports), 1)
+                self.assertEqual(sum(p == "/api/tags" for _, _, p in f.trace), 1)
+                self.assertEqual(f.provider_calls, 1)
+                if limit < 512:
+                    self.assertEqual(f.reviews, [])
+                    self.assertEqual(f.check_runs, [])
+                    self.assertIsNone(f.accounted.accounting.terminal_transaction)
+                    self.assertIn("cannot fund the complete operation", f.error)
+                else:
+                    outcome = json.loads((f.root / "publication.json").read_text())
+                    self.assertTrue(outcome["accounting_terminal"])
+                    self.assertTrue(any(r["state"] == "APPROVED" for r in f.reviews))
 
     def test_unfunded_publication_stops_without_new_allowance(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1495,7 +1649,7 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
         from review_sensei.api_work import ApiRunAccounting
 
         with tempfile.TemporaryDirectory() as directory:
-            f = _ResolutionSettlementFixture(directory)
+            f = _ResolutionSettlementFixture(directory, legacy_publication=True)
             self.assertEqual(f.invoke(human=True), 0, f.error)
             f.next_run()
             self.assertEqual(f.invoke(human=True), 0, f.error)
@@ -1515,7 +1669,7 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
                     for p in b.pending
                 )
             )
-            self.assertEqual(f.mutations, ["LIVE_200"])
+            self.assertEqual(f.mutations, ["PRRT_srv_Aq7J"])
             self.assertEqual(f.graphql_operations.count("ResolutionReadback"), 1)
             self.assertEqual(f.provider_calls, 2)
             self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
@@ -1540,7 +1694,7 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
             "media",
         ):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
-                f = _ResolutionSettlementFixture(directory)
+                f = _ResolutionSettlementFixture(directory, legacy_publication=True)
                 self.assertEqual(f.invoke(human=True), 0, f.error)
                 f.next_run()
                 if fault == "lost-unstored":
@@ -1564,14 +1718,14 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
                         for o in unknown
                     )
                 )
-                self.assertEqual(f.mutations, ["LIVE_200"])
+                self.assertEqual(f.mutations, ["PRRT_srv_Aq7J"])
                 self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
 
     def test_separate_resolution_effects_keep_each_lost_response_charged(self):
         from review_sensei_github.session_ledger import parse_session_comment
 
         with tempfile.TemporaryDirectory() as directory:
-            f = _ResolutionSettlementFixture(directory)
+            f = _ResolutionSettlementFixture(directory, legacy_publication=True)
             f.provider_comments = [
                 {
                     "path": "src/app.py",
@@ -1597,7 +1751,7 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
             self.assertTrue(
                 all(o["request_id"] in f.accounted._reconciled_mutations for o in lost)
             )
-            self.assertEqual(f.mutations, ["LIVE_200", "LIVE_201"])
+            self.assertEqual(f.mutations, ["PRRT_srv_Aq7J", "PRRT_srv_Kp9Z"])
             self.assertEqual(f.graphql_operations.count("ResolutionReadback"), 2)
 
     def test_resolution_correlation_is_issued_scoped_one_use_and_does_no_io(self):
@@ -1714,7 +1868,7 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
                 yield check_scope_then_confirm
 
         with tempfile.TemporaryDirectory() as directory:
-            f = _ResolutionSettlementFixture(directory)
+            f = _ResolutionSettlementFixture(directory, legacy_publication=True)
             self.assertEqual(f.invoke(human=True), 0, f.error)
             first_caller = f.accounted
             f.next_run()
@@ -1731,14 +1885,14 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
         from review_sensei_github.session_ledger import parse_session_comment
 
         with tempfile.TemporaryDirectory() as directory:
-            f = _ResolutionSettlementFixture(directory)
+            f = _ResolutionSettlementFixture(directory, legacy_publication=True)
             self.assertEqual(f.invoke(human=True), 0, f.error)
             f.next_run()
             f.readback_fault = "unfunded"
             self.assertEqual(f.invoke(human=True), 1, f.error)
             record = parse_session_comment(f.comment["body"], identity=IDENTITY)
             self.assertIsNone(record.api_run_accounting["terminal_transaction"])
-            self.assertEqual(f.mutations, ["LIVE_200"])
+            self.assertEqual(f.mutations, ["PRRT_srv_Aq7J"])
             self.assertNotIn("ResolutionReadback", f.graphql_operations)
             lost = [o for o in f.accounted.observations if o["outcome"] == "unknown"]
             self.assertEqual(len(lost), 1)
@@ -1760,7 +1914,7 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
                 self.subTest(missing=missing),
                 tempfile.TemporaryDirectory() as directory,
             ):
-                f = _ResolutionSettlementFixture(directory)
+                f = _ResolutionSettlementFixture(directory, legacy_publication=True)
                 self.assertEqual(f.invoke(human=True), 0, f.error)
                 f.next_run()
 
@@ -1782,7 +1936,9 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
                             )
                         if operation == "ResolutionReadback":
                             return 200, {
-                                "data": {"node": {"id": "LIVE_200", "isResolved": True}}
+                                "data": {
+                                    "node": {"id": "PRRT_srv_Aq7J", "isResolved": True}
+                                }
                             }
                         return request(method, path, token=token, body=body, **kwargs)
 
@@ -1794,7 +1950,7 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
                 self.assertIsNone(record.api_run_accounting["terminal_transaction"])
                 self.assertNotIn("ResolutionReadback", f.graphql_operations)
                 self.assertEqual(
-                    f.mutations, ["LIVE_200"] if missing == "readback" else []
+                    f.mutations, ["PRRT_srv_Aq7J"] if missing == "readback" else []
                 )
                 lost = [
                     o for o in f.accounted.observations if o["outcome"] == "unknown"
@@ -1817,7 +1973,7 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
                 self.subTest(changed=changed),
                 tempfile.TemporaryDirectory() as directory,
             ):
-                f = _ResolutionSettlementFixture(directory)
+                f = _ResolutionSettlementFixture(directory, legacy_publication=True)
                 self.assertEqual(f.invoke(human=True), 0, f.error)
                 f.next_run()
 
@@ -1865,7 +2021,7 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
         from review_sensei_github.session_ledger import parse_session_comment
 
         with tempfile.TemporaryDirectory() as directory:
-            f = _ResolutionSettlementFixture(directory)
+            f = _ResolutionSettlementFixture(directory, legacy_publication=True)
             self.assertEqual(f.invoke(human=True), 0, f.error)
             f.next_run()
 
@@ -1920,7 +2076,7 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
         from review_sensei.errors import ReviewInputError
 
         with tempfile.TemporaryDirectory() as directory:
-            f = _ResolutionSettlementFixture(directory)
+            f = _ResolutionSettlementFixture(directory, legacy_publication=True)
             self.assertEqual(f.invoke(human=True), 0, f.error)
             f.next_run()
             with patch.object(
@@ -1948,6 +2104,31 @@ class ConsecutiveReviewRunTests(unittest.TestCase):
             self.assertNotIn(
                 unknown[0]["request_id"], f.accounted._reconciled_mutations
             )
+
+    def test_current_lifecycle_reuses_thread_instead_of_legacy_supersession(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _CompletionFixture(directory, mode="refused")
+            self.assertFalse(fixture.legacy_publication_fixture)
+            self.assertEqual(fixture.invoke(human=True), 0, fixture.error)
+            original_thread = fixture.threads[0]["id"]
+            original_comment = fixture.threads[0]["comments"]["nodes"][0]["databaseId"]
+            fixture.next_run()
+            self.assertEqual(fixture.invoke(human=True), 0, fixture.error)
+            self.assertEqual(fixture.mutations, [])
+            self.assertEqual(len(fixture.threads), 1)
+            self.assertEqual(fixture.threads[0]["id"], original_thread)
+            self.assertEqual(
+                fixture.threads[0]["comments"]["nodes"][0]["databaseId"],
+                original_comment,
+            )
+            self.assertFalse(fixture.threads[0]["isResolved"])
+            self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
+            record = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            self.assertIsNotNone(record.finding_lifecycle)
+            self.assertEqual(record.transaction.phase, "publication_succeeded")
+            self.assertEqual(fixture.provider_calls, 2)
 
     def test_historical_fixture_keeps_canonical_diff_bytes_with_crlf_defaults(self):
         from unittest.mock import patch
@@ -2159,7 +2340,7 @@ os._exit(92)
                     self.assertEqual(saved["comment"]["body"], saved["activation_body"])
                     self.assertIsNotNone(saved["delayed_body"])
                 (root / "parent").mkdir()
-                f = _CompletionFixture(str(root / "parent"))
+                f = _CompletionFixture(str(root / "parent"), legacy_publication=True)
                 f.root = child
                 f.policy = f.policy_ref = saved["policy"]
                 f.comment = saved["comment"]
@@ -2210,7 +2391,11 @@ os._exit(92)
 
     @staticmethod
     def historical_case(
-        directory, fixture_type=_CompletionFixture, *, partial_predecessor=False
+        directory,
+        fixture_type=_CompletionFixture,
+        *,
+        partial_predecessor=False,
+        current_route=False,
     ):
         import json
 
@@ -2218,6 +2403,7 @@ os._exit(92)
         from review_sensei_github.session_ledger import parse_session_comment
 
         f = fixture_type(directory, mode="refused")
+        f.legacy_publication_fixture = True
         patch = f.root / "review.patch"
         original = patch.read_text()
         patch.write_text(
@@ -2269,10 +2455,43 @@ os._exit(92)
             if scope is not None and scope[2] != f.requested_head:
                 thread["isResolved"] = True
         f.next_run()
+        f.legacy_publication_fixture = not current_route
         f.mode = "confirmed"
         f.live_head = f.requested_head = "e" * 40
         f.live_base = f.requested_base = "f" * 40
         return f
+
+    def test_legacy_inventory_requires_authenticated_migration_on_current_route(self):
+        import json
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = self.historical_case(directory, current_route=True)
+            previous = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(previous.finding_lifecycle)
+            provider_calls = f.provider_calls
+            reviews = len(f.reviews)
+            mutations = list(f.mutations)
+            self.assertEqual(f.invoke(human=True), 1, f.error)
+            output = json.loads((f.root / "publication.json").read_text())
+            self.assertEqual(output["status"], "handoff")
+            self.assertEqual(
+                output["diagnostic"], "durable_finding_inventory_recovery_required"
+            )
+            self.assertFalse(output["accounting_terminal"])
+            self.assertEqual(f.provider_calls, provider_calls)
+            self.assertEqual(len(f.reviews), reviews)
+            self.assertEqual(f.mutations, mutations)
+            current = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(current.finding_lifecycle)
+            self.assertIsNone(current.api_run_accounting["terminal_transaction"])
+            from review_sensei_github.api_run_history import read_previous_run
+
+            restored = read_previous_run(
+                f.selected.ledger, IDENTITY, f.accounted.accounting.previous_record
+            )
+            self.assertEqual(restored.to_dict(), previous.to_dict())
 
     def test_historical_completion_enrolls_fresh_base_and_preserves_exact_predecessor(
         self,
@@ -2624,7 +2843,7 @@ os._exit(92)
         from review_sensei_github.session_ledger import parse_session_comment
 
         with tempfile.TemporaryDirectory() as directory:
-            f = _CompletionFixture(directory, mode="confirmed")
+            f = _CompletionFixture(directory, mode="confirmed", legacy_publication=True)
             self.assertEqual(f.invoke(human=True), 0, f.error)
             f.next_run()
             f.terminal_write_fault = True
@@ -2684,7 +2903,7 @@ os._exit(92)
 
         for mode in ("confirmed", "refused", "lost-ack", "lost-unstored"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
-                f = _CleanupTailFixture(directory, mode)
+                f = _CleanupTailFixture(directory, mode, legacy_publication=True)
                 patch = f.root / "review.patch"
                 patch.write_text(
                     patch.read_text()
@@ -3088,7 +3307,8 @@ os._exit(92)
             f.before_publication = ignored_optional_failure
             self.assertEqual(f.invoke(), 1)
             current = parse_session_comment(f.comment["body"], identity=IDENTITY)
-            self.assertEqual(current.transaction.phase, "publication_succeeded")
+            self.assertEqual(current.transaction.phase, "publication_failed")
+            self.assertFalse(f.reviews)
             self.assertIsNone(current.api_run_accounting["terminal_transaction"])
             self.assertTrue(
                 any(o.get("uncertain_effect") for o in f.accounted.observations)
@@ -3349,9 +3569,13 @@ class CheckAccountingEntryTests(unittest.TestCase):
         from fake_github_http import json_response
         from review_sensei_github.session_ledger import parse_session_comment
 
-        for operation in ("lookup", "create", "update"):
+        for operation, response_status in (
+            (operation, status)
+            for operation in ("lookup", "create", "update")
+            for status in (401, 403)
+        ):
             with (
-                self.subTest(operation=operation),
+                self.subTest(operation=operation, status=response_status),
                 tempfile.TemporaryDirectory() as directory,
             ):
                 f = EntryFixture(directory)
@@ -3372,7 +3596,7 @@ class CheckAccountingEntryTests(unittest.TestCase):
                     )
                     if selected:
                         f.trace.append((f.attempt, request.method, path))
-                        return json_response({}, 403)
+                        return json_response({}, response_status)
                     return external(request, timeout)
 
                 f.external = deny_native
@@ -3385,7 +3609,7 @@ class CheckAccountingEntryTests(unittest.TestCase):
                     {
                         "code": "check_access_denied",
                         "operation": operation,
-                        "status": 403,
+                        "status": response_status,
                     },
                 )
                 record = parse_session_comment(f.comment["body"], identity=IDENTITY)
@@ -3398,7 +3622,7 @@ class CheckAccountingEntryTests(unittest.TestCase):
                 )
                 self.assertEqual(f.provider_calls, 1)
 
-    def test_unknown_check_responses_preserve_publication_and_open_accounting(self):
+    def test_check_response_loss_requires_exact_reconciliation_or_holds(self):
         import json
         from urllib.parse import urlsplit
 
@@ -3437,11 +3661,67 @@ class CheckAccountingEntryTests(unittest.TestCase):
                     return external(request, timeout)
 
                 f.external = unknown
-                self.assertEqual(f.invoke(), 1, f.error)
+                reconciled = fault == "stored-lost-create"
+                self.assertEqual(f.invoke(), 0 if reconciled else 1, f.error)
                 output = json.loads((f.root / "publication.json").read_text())
-                self.assertFalse(output["accounting_terminal"])
+                self.assertEqual(output["accounting_terminal"], reconciled)
                 record = parse_session_comment(f.comment["body"], identity=IDENTITY)
-                self.assertEqual(record.transaction.phase, "publication_succeeded")
+                if reconciled:
+                    from review_sensei.api_work import ApiRunAccounting
+
+                    durable = ApiRunAccounting.from_document(record.api_run_accounting)
+                    self.assertEqual(durable.configuration.limit, 512)
+                    self.assertEqual(durable.uncertain, 1)
+                    self.assertEqual(
+                        durable.terminal_transaction, record.transaction.transaction_id
+                    )
+                    self.assertEqual(record.transaction.phase, "publication_succeeded")
+                    self.assertEqual(output["status"], "published")
+                    lost = [
+                        item
+                        for item in f.accounted.observations
+                        if item["outcome"] == "unknown" and item["mutation"]
+                    ]
+                    self.assertEqual(len(lost), 1)
+                    self.assertIn(
+                        lost[0]["request_id"], f.accounted._reconciled_mutations
+                    )
+                    self.assertTrue(
+                        any(
+                            pending.request_id == lost[0]["request_id"]
+                            for block in durable.blocks
+                            for pending in block.pending
+                        )
+                    )
+                    self.assertEqual(len(f.check_runs), 1)
+                    self.assertEqual(f.check_runs[0]["conclusion"], "success")
+                    self.assertEqual(
+                        sum(
+                            method == "POST" and path.endswith("/check-runs")
+                            for _, method, path in f.trace
+                        ),
+                        1,
+                    )
+                    self.assertTrue(any(r["state"] == "APPROVED" for r in f.reviews))
+                    self.assertEqual(f.provider_calls, 1)
+                    continue
+                if fault == "lost-capability":
+                    self.assertEqual(record.transaction.phase, "publication_succeeded")
+                else:
+                    # The unknown initial check is retained before review POST.
+                    # New effects must not proceed past that uncertain intent.
+                    self.assertEqual(record.transaction.phase, "publication_failed")
+                    self.assertEqual(output["status"], "publication_incomplete")
+                    self.assertIsNone(output["review_id"])
+                    self.assertEqual(f.reviews, [])
+                    self.assertIsNotNone(record.finding_lifecycle)
+                    self.assertEqual(
+                        sum(
+                            method == "POST" and path.endswith("/check-runs")
+                            for _, method, path in f.trace
+                        ),
+                        1,
+                    )
                 self.assertIsNone(record.api_run_accounting["terminal_transaction"])
                 self.assertTrue(
                     any(
@@ -3552,6 +3832,93 @@ class CheckAccountingEntryTests(unittest.TestCase):
             self.assertTrue(index.entries[0].needs_human)
             self.assertFalse(index.entries[0].blocking)
 
+    def test_capped_projection_denial_binds_full_source_and_exact_native_view(self):
+        import io
+        import json
+        from unittest.mock import patch
+        from urllib.error import HTTPError
+        from urllib.parse import urlsplit
+
+        from review_sensei_github import check_accounting as evidence
+        from review_sensei_github.publication import (
+            parse_finding_index,
+            review_result_digest,
+        )
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        for fault in (None, "missing-projection", "source-clone", "cleanup-clone"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = EntryFixture(directory)
+                f.active_finding_cap = 1
+                f.provider_comments = [
+                    {
+                        "path": "src/app.py",
+                        "line": 2,
+                        "side": "RIGHT",
+                        "body": body,
+                        "severity": "high",
+                        "blocking": False,
+                        "needs_human": True,
+                    }
+                    for body in (
+                        "Confirm the external caller contract.",
+                        "Confirm the database isolation contract.",
+                    )
+                ]
+                external = f.external
+                issuer = evidence.confirm_denied_publication
+                seen = []
+
+                def denied(request, timeout):
+                    body = json.loads(request.data) if request.data else {}
+                    if body.get("capability") == "check_publish":
+                        f.trace.append(
+                            (f.attempt, request.method, urlsplit(request.full_url).path)
+                        )
+                        raise HTTPError(
+                            request.full_url, 403, "synthetic", {}, io.BytesIO(b"{}")
+                        )
+                    return external(request, timeout)
+
+                def verify(publication, **kwargs):
+                    source = kwargs["source_result"]
+                    self.assertEqual(len(source.comments), 2)
+                    subject = evidence._publication_subject(
+                        source, "owner/repo", 7, HEAD
+                    )
+                    self.assertNotEqual(
+                        subject.result_digest, review_result_digest(source)
+                    )
+                    seen.append(True)
+                    if fault == "missing-projection":
+                        evidence._PROJECTIONS.pop(id(source), None)
+                    elif fault == "source-clone":
+                        kwargs["source_result"] = replace(source)
+                    elif fault == "cleanup-clone":
+                        kwargs["cleanup"] = replace(kwargs["cleanup"])
+                    issuer(publication, **kwargs)
+
+                f.external = denied
+                with patch.object(evidence, "confirm_denied_publication", verify):
+                    self.assertEqual(f.invoke(human=True), 1, f.error)
+                self.assertEqual(seen, [True])
+                output = json.loads((f.root / "publication.json").read_text())
+                self.assertEqual(output["accounting_terminal"], fault is None)
+                record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertIsNotNone(record.finding_lifecycle)
+                self.assertEqual(
+                    record.api_run_accounting["terminal_transaction"] is not None,
+                    fault is None,
+                )
+                index = parse_finding_index(
+                    f.reviews[-1]["body"],
+                    repository_id=123,
+                    pull_request=7,
+                    head_sha=HEAD,
+                )
+                self.assertEqual(len(index.entries), 1)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+
     def test_terminal_write_failure_does_not_claim_accounting_completion(self):
         import io
         import json
@@ -3636,6 +4003,7 @@ class CheckAccountingEntryTests(unittest.TestCase):
         for fault in faults:
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 f = EntryFixture(directory)
+                f.provider_fully_reviewed = False
                 external = f.external
                 issuer = evidence.confirm_denied_publication
                 calls = []
@@ -3670,7 +4038,7 @@ class CheckAccountingEntryTests(unittest.TestCase):
 
                 f.external = denied
                 with patch.object(evidence, "confirm_denied_publication", altered):
-                    self.assertEqual(f.invoke(), 1, f.error)
+                    self.assertEqual(f.invoke(human=True), 1, f.error)
                 self.assertEqual(calls, [fault])
                 output = json.loads((f.root / "publication.json").read_text())
                 self.assertFalse(output["accounting_terminal"])

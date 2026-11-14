@@ -107,6 +107,7 @@ class CurrentReadScope:
         if status != 200:
             raise ReviewInputError("quarantine current evidence scope changed")
         self.validate_pull(pull)
+        return pull
 
     def validate_pull(self, pull):
         """Pure additional facts on a fresh action-owned PR observation.
@@ -369,7 +370,10 @@ def read_published_source(
             or set(retained_source)
             != {"schema_version", "record", "review_id", "review_body"}
             or retained_source["schema_version"]
-            != "quarantine-published-assessment-source-v1"
+            not in {
+                "quarantine-published-assessment-source-v1",
+                "quarantine-lifecycle-published-assessment-source-v1",
+            }
         ):
             raise ReviewInputError("quarantine earlier published source is unsupported")
         original = SessionRecord.from_dict(retained_source["record"])
@@ -425,10 +429,29 @@ def _read_published_record(
         or set(retained_source)
         != {"schema_version", "record", "review_id", "review_body"}
         or retained_source["schema_version"]
-        != "quarantine-published-assessment-source-v1"
+        not in {
+            "quarantine-published-assessment-source-v1",
+            "quarantine-lifecycle-published-assessment-source-v1",
+        }
         or retained_source["record"] != original.to_dict()
     ):
         raise ReviewInputError("quarantine published snapshot changed")
+    if original.finding_lifecycle is not None:
+        return _read_lifecycle_published_record(
+            ledger=ledger,
+            original=original,
+            current_scope=current_scope,
+            retained_source=retained_source,
+            complete_inventory=complete_inventory,
+        )
+    if (
+        retained_source is not None
+        and retained_source["schema_version"]
+        != "quarantine-published-assessment-source-v1"
+    ):
+        raise ReviewInputError(
+            "quarantine lifecycle source lost its retained reference"
+        )
     publication_digest = transaction_publication_digest(transaction)
 
     def matches(review):
@@ -586,6 +609,207 @@ def _read_published_record(
     }, assessments
 
 
+def _read_lifecycle_published_record(
+    *, ledger, original, current_scope, retained_source, complete_inventory
+):
+    """Read an enclosing-authenticated historical root, never select it as current.
+
+    The versioned source maps instance to immutable obligation_id and concern to
+    its original resolution_criterion digest. Display/last-comment fingerprints
+    are not identities. Repeated obligations in distinct origins remain distinct.
+    This does not complete pending effects or issue publication authority.
+    """
+    from review_sensei.finding_lifecycle import decode_lifecycle_state
+    from review_sensei.finding_lifecycle_store import _decode_selected_lifecycle
+
+    from .finding_lifecycle import _body_matches, _require_effect_scope, _unpack_journal
+    from .finding_lifecycle import _validate as validate_journal
+
+    version = "quarantine-lifecycle-published-assessment-source-v1"
+    if retained_source is not None and retained_source["schema_version"] != version:
+        raise ReviewInputError("quarantine lifecycle source version conflicts")
+    current_scope.require()
+
+    # This low-level decoder authenticates the exact manifest/producer/lengths;
+    # deliberately do not call select/restore or invent a historical load fence.
+    class HistoricalCarrierReader:
+        # No load/replace API: these bytes are historical evidence, not a
+        # synthetic current authority root. Every external part is freshly
+        # read under the existing caller meter, never a verified-part cache.
+        def evidence_producer(self):
+            return ledger.evidence_producer()
+
+        def read_evidence(self, identity, manifest, *, expected_binding):
+            from review_sensei.bounded_evidence import read_partitioned_evidence
+
+            def part(storage_id):
+                status, payload = ledger._request(
+                    "GET",
+                    ledger.http.repository_path(
+                        identity.repository, f"/issues/comments/{storage_id}"
+                    ),
+                )
+                if status != 200 or not isinstance(payload, dict):
+                    raise ReviewInputError(
+                        "quarantine lifecycle original carrier is absent"
+                    )
+                return ledger._part_from_item(payload, identity, storage_id)
+
+            return read_partitioned_evidence(
+                manifest,
+                expected_binding=expected_binding,
+                reader=part,
+                budget=ledger.evidence_budget,
+            )
+
+    stored = _decode_selected_lifecycle(HistoricalCarrierReader(), original)
+    if (
+        not isinstance(stored, dict)
+        or stored.get("schema_version") != "finding-lifecycle-packed-v3"
+    ):
+        raise ReviewInputError(
+            "quarantine lifecycle origin requires self-contained v3 evidence"
+        )
+    document = validate_journal(_unpack_journal(stored))
+    state = decode_lifecycle_state(document["lifecycle"]).state
+    transaction = original.transaction
+    binding = original.finding_lifecycle["manifest"]["binding"]
+    if (
+        state.head_sha != transaction.head_sha
+        or state.base_sha != transaction.base_sha
+        or binding["head_sha"] != transaction.head_sha
+        or binding["base_sha"] != transaction.base_sha
+        or binding["policy_digest"] != transaction.policy_digest
+        or binding["configuration_digest"] != transaction.configuration_digest
+    ):
+        raise ReviewInputError("quarantine lifecycle original scope conflicts")
+    _require_effect_scope(document, original.identity(), transaction.head_sha)
+    path = ledger.http.repository_path(
+        original.repository, f"/pulls/{original.pull_request}/reviews"
+    )
+    commits = {}
+    for effect in document["effects"]:
+        response = effect["response"]
+        request = effect["request"]
+        if (
+            effect["status"] != "confirmed"
+            or not isinstance(response, list)
+            or not 200 <= response[0] < 300
+        ):
+            continue
+        payload = response[1]
+        if not isinstance(payload, dict) or type(payload.get("id")) is not int:
+            continue
+        identifier = payload["id"]
+        if (
+            type(payload.get("producer_id")) is not int
+            or payload["producer_id"] != ledger._evidence_author_id
+            or not 0 < identifier <= 9_007_199_254_740_991
+        ):
+            continue
+        if (
+            effect["method"] == "POST"
+            and effect["path"] == path
+            and request.get("commit_id") == transaction.head_sha
+        ):
+            commits[identifier] = request.get("body")
+        elif effect["method"] == "PUT" and effect["path"] == path + "/" + str(
+            identifier
+        ):
+            precondition = effect.get("review_update_precondition")
+            if (
+                isinstance(precondition, dict)
+                and precondition.get("review_id") == identifier
+                and precondition.get("head_sha") == transaction.head_sha
+                and precondition.get("producer_id") == ledger._evidence_author_id
+            ):
+                commits[identifier] = request.get("body")
+    if not commits:
+        raise ReviewInputError(
+            "quarantine lifecycle native publication proof is unavailable"
+        )
+    rows = ledger.http.paginate(path=path, token=current_scope.metadata_token)
+    ledger._quarantine_native_reviews = (ledger.http, original.identity(), rows)
+    matched = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        user = row.get("user")
+        if (
+            type(row.get("id")) is int
+            and row["id"] in commits
+            and isinstance(user, dict)
+            and type(user.get("id")) is int
+            and user["id"] == ledger._evidence_author_id
+            and user.get("type") == "Bot"
+            and isinstance(user.get("login"), str)
+            and user["login"].casefold() == ledger.app_slug.casefold()
+            and row.get("commit_id") == transaction.head_sha
+            and row.get("state") in {"COMMENTED", "CHANGES_REQUESTED", "APPROVED"}
+            and row.get("edited_by_human") is not True
+            and _body_matches(row.get("body"), commits[row["id"]])
+        ):
+            index = parse_finding_index(
+                row["body"],
+                repository_id=original.repository_id,
+                pull_request=original.pull_request,
+                head_sha=transaction.head_sha,
+            )
+            if index is not None and index.base_sha == transaction.base_sha:
+                matched.append(row)
+    if len(matched) != 1:
+        raise ReviewInputError(
+            "quarantine lifecycle publication is missing, changed or duplicated"
+        )
+    review = matched[0]
+    source = {
+        "schema_version": version,
+        "record": original.to_dict(),
+        "review_id": review["id"],
+        "review_body": review["body"],
+    }
+    if retained_source is not None and source != retained_source:
+        raise ReviewInputError("quarantine lifecycle published snapshot changed")
+    inventory = _lifecycle_origin_inventory(
+        state, complete_inventory=complete_inventory
+    )
+    current_scope.require()
+    return source, inventory
+
+
+def _lifecycle_origin_inventory(state, *, complete_inventory):
+    """Pure immutable-criterion projection; supplies no source authentication."""
+    from review_sensei.active_finding_window import ActiveWindowRoundState
+
+    obligations: tuple[Any, ...] = (
+        state.authoritative_decision_inventory.obligations
+        if isinstance(state, ActiveWindowRoundState)
+        else state.inventory.obligations
+    )
+    assessments = []
+    for obligation in obligations:
+        criterion = (
+            obligation
+            if isinstance(state, ActiveWindowRoundState)
+            else obligation.criterion
+        )
+        if (criterion.blocking or criterion.needs_human) and (
+            complete_inventory or obligation.unresolved
+        ):
+            assessments.append(
+                {
+                    "instance": criterion.obligation_id,
+                    "concern": criterion.resolution_criterion,
+                }
+            )
+    return validate_inventory(
+        {
+            "schema_version": "quarantine-assessment-inventory-v1",
+            "assessments": sorted(assessments, key=lambda item: item["instance"]),
+        }
+    )
+
+
 def read_published_tail_sources(
     *, ledger, previous, current_scope, retained_sources=None
 ):
@@ -615,3 +839,14 @@ def read_published_tail_sources(
     if earlier is None:
         raise ReviewInputError("published-tail earlier publication is absent")
     return {"published-current": current, "published-earlier": earlier}
+
+
+from .quarantine_pr_observation import install_reader as _install_pr_reader  # noqa: E402
+
+setattr(CurrentReadScope, "require", _install_pr_reader(CurrentReadScope))
+del _install_pr_reader
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

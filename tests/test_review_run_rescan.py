@@ -3,27 +3,19 @@
 from __future__ import annotations
 
 import json
-import re
 import tempfile
 import unittest
 from dataclasses import replace
 
-from review_sensei_github.default_human_inventory import (
-    HumanInventoryStore,
-    build_human_inventory_context,
-)
-from review_sensei_github.default_human_reader import transaction_publication_digest
 from review_sensei_github.publication import (
     approval_eligibility_from_body,
-    approval_eligibility_marker,
 )
 from review_sensei_github.session_ledger import parse_session_comment
-from test_api_work_persistence import BASE, HEAD, IDENTITY
+from test_api_work_persistence import HEAD, IDENTITY
 from test_review_run import EntryFixture
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import finding_instance_fingerprint
-from review_sensei.human_inventory import inventory_from_result_document
 from review_sensei.models import ReviewResult
 
 
@@ -53,39 +45,14 @@ def partial_fixture(directory, *, limit=512):
     record = parse_session_comment(f.comment["body"], identity=IDENTITY)
     result = ReviewResult.from_dict(json.loads((f.root / "review.json").read_text()))
     source = record.transaction
-    context = build_human_inventory_context(
-        http=f.selected.http,
-        token=f.selected.ledger.token,
-        ledger=f.selected.ledger,
-        identity=IDENTITY,
-        base_sha=BASE,
-        head_sha=HEAD,
-        app_slug="reviewsensei[bot]",
-        publication_digest=transaction_publication_digest(source),
-        policy_digest=source.policy_digest,
-        configuration_digest=source.configuration_digest,
-        evidence_digest=source.evidence_digest,
-        budget=f.accounted.budget_view,
-    )
-    reference, document = HumanInventoryStore(
-        f.selected.http, f.selected.ledger.token, f.selected.ledger, context
-    ).read_available()
+    # The current ordinary producer already writes the complete human review
+    # into its authenticated eligibility. Do not rewrite that native body from
+    # an unrelated optional HumanInventoryStore carrier (or fabricate a receipt).
     eligibility = approval_eligibility_from_body(f.reviews[-1]["body"])
-    inventory = inventory_from_result_document(
-        document["human_inventory"],
-        result_digest=context.publication_digest,
-        base_sha=BASE,
-    )
-    marker = approval_eligibility_marker(
-        replace(
-            eligibility, human_review=inventory, human_inventory_reference=reference
-        )
-    )
-    f.reviews[-1]["body"] = re.sub(
-        r"<!-- reviewsensei:eligibility:v1 [A-Za-z0-9_=-]+ -->",
-        lambda _match: marker,
-        f.reviews[-1]["body"],
-    )
+    if eligibility is None or eligibility.human_review is None:
+        raise AssertionError("ordinary partial producer omitted human inventory")
+    if len(eligibility.human_review.findings) != 20:
+        raise AssertionError("ordinary partial producer lost human obligations")
     decisions = [
         {
             "fingerprint": finding_instance_fingerprint(comment),
@@ -206,7 +173,7 @@ class RetainedEntryTests(unittest.TestCase):
 
         for fault in (
             "reference",
-            "prose",
+            "carrier",
             "producer",
             "owner",
             "newer-review",
@@ -228,7 +195,9 @@ class RetainedEntryTests(unittest.TestCase):
                         doc = json.loads(
                             base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
                         )
-                        doc["human_inventory_reference"]["payload_digest"] = "f" * 64
+                        # Inline current eligibility binds its exact admitted result,
+                        # rather than an absent optional inventory-part reference.
+                        doc["result_digest"] = "f" * 64
                         replacement = (
                             "<!-- reviewsensei:eligibility:v1 "
                             + base64.urlsafe_b64encode(json.dumps(doc).encode())
@@ -239,11 +208,14 @@ class RetainedEntryTests(unittest.TestCase):
                         f.reviews[0]["body"] = f.reviews[0]["body"].replace(
                             match.group(0), replacement
                         )
-                    elif fault == "prose":
-                        f.inline[0]["body"] = f.inline[0]["body"].replace(
-                            "Confirm interface assumption 0.",
-                            "Substituted explanation.",
+                    elif fault == "carrier":
+                        record = parse_session_comment(
+                            f.comment["body"], identity=IDENTITY
                         )
+                        manifest = record.finding_lifecycle["manifest"]
+                        self.assertEqual(manifest["encoding"], "partitioned-json-v1")
+                        selected_part = int(manifest["parts"][0]["storage_id"])
+                        f.extra_comments[selected_part]["body"] += "tampered"
                     elif fault == "producer":
                         f.archive_bad = "owner"
                     elif fault == "owner":
@@ -287,6 +259,13 @@ class RetainedEntryTests(unittest.TestCase):
                             authorized = replace(authorized, review_id=999)
                         ArchivedRescanSource.create(f.selected.ledger, authorized)
                     else:
+                        # Force this supported retained-source read explicitly:
+                        # inline human eligibility needs no optional old inventory
+                        # read, so merely installing a late HTTP hook exercises none.
+                        record = parse_session_comment(
+                            f.comment["body"], identity=IDENTITY
+                        )
+                        authorized = admitted_rescan(record)
                         native = f.accounted._opener
                         ids = {
                             str(p["storage_id"])
@@ -308,6 +287,7 @@ class RetainedEntryTests(unittest.TestCase):
                             return native(req, timeout)
 
                         f.accounted._opener = lost
+                        ArchivedRescanSource.create(f.selected.ledger, authorized)
 
                 f.before_publication = corrupt
                 self.assertEqual(f.invoke(), 1, f.error)
@@ -317,6 +297,126 @@ class RetainedEntryTests(unittest.TestCase):
                 self.assertEqual(f.provider_calls, 2)
                 if fault == "lost-read":
                     self.assertGreater(f.accounted.accounting.uncertain, 0)
+
+    def test_fresh_rescan_preserves_authority_without_consuming_edited_old_prose(self):
+        """Accepted old projections are not a new rescan's finding authority.
+
+        Unresolved native-root reuse still has its own exact-readback refusal
+        tests. Here all twenty decisions are retained and a fresh analysis uses
+        the complete durable inventory, not edited REST/GraphQL/eligibility prose.
+        """
+        import base64
+
+        from review_sensei_github.finding_lifecycle import _unpack_journal
+        from review_sensei_github.publication import _APPROVAL_ELIGIBILITY_RE
+
+        from review_sensei.bounded_evidence import (
+            EvidenceReadBudget,
+            read_inline_evidence,
+            read_partitioned_evidence,
+        )
+        from review_sensei.finding_lifecycle import decode_lifecycle_state
+
+        def observe_stored_state(f, record):
+            # Inspect already-produced synthetic service bytes with the real
+            # owner/framing/digest/codec validators. This observer performs no
+            # HTTP and supplies no state or authority to the production route.
+            before = len(f.trace)
+            manifest = record.finding_lifecycle["manifest"]
+            binding = manifest["binding"]
+            if manifest["encoding"] == "inline-json-v1":
+                envelope = read_inline_evidence(manifest, expected_binding=binding)
+            else:
+                envelope = read_partitioned_evidence(
+                    manifest,
+                    reader=lambda sid: f.selected.ledger._part_from_item(
+                        f.extra_comments[int(sid)], IDENTITY, sid
+                    ),
+                    expected_binding=binding,
+                    budget=EvidenceReadBudget(),
+                )
+            self.assertEqual(len(f.trace), before)
+            journal = _unpack_journal(envelope["lifecycle"])
+            return decode_lifecycle_state(journal["lifecycle"]).state
+
+        with tempfile.TemporaryDirectory() as directory:
+            f, _source = partial_fixture(directory)
+            original = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            original_state = observe_stored_state(f, original)
+            original_obligations = original_state.inventory.obligations
+            self.assertEqual(len(original_obligations), 20)
+            request(f, 9, "rescan")
+            edited = {}
+
+            def mutate_projection_only():
+                row = f.inline[0]
+                row["body"] += "\nSubstituted explanation."
+                edited["comment_id"] = row["id"]
+                edited["comment_body"] = row["body"]
+                for thread in f.threads:
+                    for comment in thread["comments"]["nodes"]:
+                        if comment["databaseId"] == row["id"]:
+                            comment["body"] = row["body"]
+                review = f.reviews[0]
+                match = _APPROVAL_ELIGIBILITY_RE.search(review["body"])
+                raw = match.group("payload").rstrip("=")
+                document = json.loads(
+                    base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+                )
+                document["human_review"]["findings"][0]["body"] = (
+                    "Substituted explanation."
+                )
+                marker = (
+                    "<!-- reviewsensei:eligibility:v1 "
+                    + base64.urlsafe_b64encode(json.dumps(document).encode())
+                    .decode()
+                    .rstrip("=")
+                    + " -->"
+                )
+                review["body"] = review["body"].replace(match.group(0), marker)
+                edited["review_body"] = review["body"]
+
+            f.before_publication = mutate_projection_only
+            self.assertEqual(f.invoke(), 0, f.error)
+            final = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            final_state = observe_stored_state(f, final)
+            obligations = final_state.inventory.obligations
+            self.assertEqual(final.dispositions, original.dispositions)
+            self.assertEqual(len(final.dispositions), 20)
+            self.assertEqual(
+                {
+                    (o.obligation_id, o.criterion.resolution_criterion)
+                    for o in obligations
+                },
+                {
+                    (o.obligation_id, o.criterion.resolution_criterion)
+                    for o in original_obligations
+                },
+            )
+            self.assertFalse(
+                any("Substituted explanation." in str(o) for o in obligations)
+            )
+            self.assertEqual(f.reviews[0]["body"], edited["review_body"])
+            self.assertEqual(
+                next(c["body"] for c in f.inline if c["id"] == edited["comment_id"]),
+                edited["comment_body"],
+            )
+            self.assertEqual(
+                next(
+                    c["body"]
+                    for t in f.threads
+                    for c in t["comments"]["nodes"]
+                    if c["databaseId"] == edited["comment_id"]
+                ),
+                edited["comment_body"],
+            )
+            self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+            result = ReviewResult.from_dict(
+                json.loads((f.root / "review.json").read_text())
+            )
+            self.assertEqual(result.review_status, "partial")
+            self.assertEqual(f.provider_calls, 2)
+            self.assertEqual(f.accounted.accounting.configuration.limit, 512)
 
     def test_original_transaction_archive_and_accounting_only_checkpoint_are_readable(
         self,

@@ -66,7 +66,7 @@ class HostedRunFixture(StartupFixture):
                     "id": identifier,
                     "body": payload["body"],
                     "user": bot,
-                    "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+                    "issue_url": f"{self.api_url}/repos/owner/repo/issues/7",
                 }
                 self.extra_comments[identifier] = item
                 return json_response(
@@ -75,9 +75,7 @@ class HostedRunFixture(StartupFixture):
             return json_response(copy.deepcopy(self.extra_comments[identifier]))
         response = super()._external_open(request, timeout)
         if self.comment is not None:
-            self.comment["issue_url"] = (
-                "https://api.github.test/repos/owner/repo/issues/7"
-            )
+            self.comment["issue_url"] = f"{self.api_url}/repos/owner/repo/issues/7"
         if path.endswith("/pulls/7"):
             pr = json.loads(response.read(524288))
             pr.update(state="open", draft=False)

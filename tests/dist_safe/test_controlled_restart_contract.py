@@ -28,6 +28,10 @@ class _NetworkFreeSuite(unittest.TestSuite):
             return super().run(result, debug=debug)
 
 
+# Reviewed deterministic process-local construction; runtime wrappers stay intact.
+INSTALLED_SUITE_HOOK_CONTRACT = ("reproducible-module-local-v1", ("_NetworkFreeSuite",))
+
+
 def load_tests(loader, tests, pattern):
     suite = _NetworkFreeSuite()
     for module in (

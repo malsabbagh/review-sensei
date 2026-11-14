@@ -139,6 +139,30 @@ def _published_transaction(head_sha: str) -> ReviewTransaction:
 
 
 class FindingLocationDriftG16Tests(unittest.TestCase):
+    def test_human_required_projection_preserves_gate_without_inventing_blocker(self):
+        from review_sensei.finding_drift import project_drift_review_result
+
+        result = _result(_comment(blocking=False, needs_human=True))
+        evaluation = evaluate_drift_round(
+            result,
+            head_sha=HEAD_1,
+            base_sha=BASE_SHA,
+            max_active_findings=1,
+            round_number=1,
+        )
+        obligation = evaluation.inventory.obligations[0]
+        self.assertTrue(obligation.blocks_approval_now)
+        self.assertFalse(obligation.effective_blocking_now)
+        self.assertFalse(obligation.synthetic_comment_for_placement().blocks_approval)
+        projected = project_drift_review_result(result, evaluation)
+        self.assertTrue(projected.comments[0].needs_human)
+        self.assertFalse(projected.comments[0].blocks_approval)
+        for state in ("omitted-uncertain", "ambiguous-multi-target"):
+            held = replace(obligation, lifecycle_state=state)
+            self.assertTrue(held.blocks_approval_now)
+            self.assertTrue(held.effective_blocking_now)
+            self.assertTrue(held.synthetic_comment_for_placement().blocks_approval)
+
     def test_file_rename_reuses_thread_and_recovers_to_approve(self) -> None:
         publisher = SyntheticNativeDriftPublisher()
         c_crit = _comment(
@@ -1462,6 +1486,9 @@ class _DriftGitHubHost:
                     if c.get("pull_request_review_id") == rid
                 ]
                 return self._resp(matched)
+            if "/reviews/" in path and not path.endswith("/comments"):
+                rid = int(path.rsplit("/", 1)[-1])
+                return self._resp(next((r for r in self.reviews if r["id"] == rid), {}))
             if path.endswith("/pulls/1/comments"):
                 return self._resp([])
             if "/pulls/comments/" in path:
@@ -1534,10 +1561,15 @@ class _DriftGitHubHost:
                                         "id": f"PRRC_{review_id}_{idx}",
                                         "databaseId": review_id * 100 + idx,
                                         "pull_request_review_id": review_id,
+                                        "pullRequestReview": {"databaseId": review_id},
+                                        "commit": {"oid": body["commit_id"]},
                                         "body": comment["body"],
+                                        "path": comment["path"],
+                                        "line": comment["line"],
                                         "author": {
                                             "login": self.app_slug,
                                             "__typename": "Bot",
+                                            "databaseId": 9001,
                                         },
                                     }
                                 ]
@@ -1569,12 +1601,20 @@ class _DriftGitHubHost:
                     ) or variables.get("threadId")
                     for thread in self.threads:
                         if thread["id"] == tid:
-                            thread["isResolved"] = True
+                            reopening = "unresolveReviewThread" in query
+                            thread["isResolved"] = not reopening
                             return self._resp(
                                 {
                                     "data": {
-                                        "resolveReviewThread": {
-                                            "thread": {"id": tid, "isResolved": True}
+                                        (
+                                            "unresolveReviewThread"
+                                            if reopening
+                                            else "resolveReviewThread"
+                                        ): {
+                                            "thread": {
+                                                "id": tid,
+                                                "isResolved": not reopening,
+                                            }
                                         }
                                     }
                                 }
@@ -1632,6 +1672,25 @@ class _DriftGitHubHost:
                 if rev["id"] == rid:
                     rev["body"] = body["body"]
                     return self._resp(rev, 200)
+
+        if request.method == "PATCH" and "/pulls/comments/" in path:
+            cid = int(path.rsplit("/", 1)[-1])
+            for thread in self.threads:
+                for comment in thread["comments"]["nodes"]:
+                    if comment["databaseId"] == cid:
+                        comment["body"] = body["body"]
+                        return self._resp(
+                            {
+                                "id": cid,
+                                "body": comment["body"],
+                                "user": {
+                                    "id": 9001,
+                                    "type": "Bot",
+                                    "login": self.app_slug,
+                                },
+                            }
+                        )
+            return self._resp({}, 404)
 
         if request.method == "PATCH" and "/check-runs/" in path:
             assert isinstance(body, dict)
@@ -1870,11 +1929,14 @@ class OrdinaryPublisherFindingDriftTests(unittest.TestCase):
             self.assertEqual(ob2.criterion.origin_path, "src/legacy_auth.py")
             self.assertEqual(ob2.present_anchor.path, "src/token_auth.py")
             self.assertEqual(ob2.present_anchor.drift_kind, "file_rename")
-            # Old thread superseded via GraphQL ResolveReviewThread; new thread anchored on new path!
-            self.assertEqual(len(host.threads), 2)
-            self.assertTrue(host.threads[0]["isResolved"])
-            self.assertEqual(host.threads[1]["path"], "src/token_auth.py")
-            self.assertFalse(host.threads[1]["isResolved"])
+            # GitHub keeps the original anchor; the exact retained native root
+            # is updated in place and its lifecycle anchor moves independently.
+            self.assertEqual(len(host.threads), 1)
+            self.assertFalse(host.threads[0]["isResolved"])
+            self.assertEqual(ob2.thread_binding.thread_id, ob1.thread_binding.thread_id)
+            self.assertEqual(
+                ob2.thread_binding.comment_id, ob1.thread_binding.comment_id
+            )
 
             base2 = app.drift_baseline(
                 repository_id=1,
@@ -1922,13 +1984,25 @@ class OrdinaryPublisherFindingDriftTests(unittest.TestCase):
             self.assertEqual(ob3.criterion.original_fingerprint, orig_fp)
             self.assertEqual(ob3.present_anchor.path, "src/security/verifier.py")
             self.assertEqual(ob3.present_anchor.drift_kind, "cross_file_move")
-            self.assertEqual(len(host.threads), 3)
-            self.assertTrue(host.threads[1]["isResolved"])
-            self.assertEqual(host.threads[2]["path"], "src/security/verifier.py")
-            self.assertFalse(host.threads[2]["isResolved"])
+            self.assertEqual(len(host.threads), 1)
+            self.assertFalse(host.threads[0]["isResolved"])
+            self.assertEqual(ob3.thread_binding.thread_id, ob1.thread_binding.thread_id)
+            self.assertEqual(
+                ob3.thread_binding.comment_id, ob1.thread_binding.comment_id
+            )
+            self.assertEqual(
+                len(
+                    [
+                        call
+                        for call in host.calls
+                        if call[0] == "PATCH" and "/pulls/comments/" in call[1]
+                    ]
+                ),
+                2,
+            )
 
             # Round 4 (HEAD_4): verified fix bound to original resolution_criterion ->
-            # supersedes PRRT_102_0 automatically and approves!
+            # resolves the one authentic retained native thread and approves.
             host.head_sha = HEAD_4
             fix4 = ConfirmedFixEvidence(
                 obligation_id=orig_oid,
@@ -1954,7 +2028,7 @@ class OrdinaryPublisherFindingDriftTests(unittest.TestCase):
             )
             self.assertEqual(pub4.status, "published")
             self.assertIsNone(pub4.diagnostic)
-            self.assertTrue(host.threads[2]["isResolved"])
+            self.assertTrue(host.threads[0]["isResolved"])
             self.assertEqual(host.check_runs[-1]["conclusion"], "success")
             self.assertTrue(
                 any(

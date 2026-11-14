@@ -3,7 +3,6 @@
 import base64
 import copy
 import hashlib
-import itertools
 import json
 import random
 import re
@@ -16,6 +15,7 @@ from urllib.parse import urlsplit
 
 import test_quarantine_journey as journey_contract
 from fake_github_http import json_response
+from quarantine_fixture_identity import PUBLISHED_TAIL_RUNS
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
 from review_sensei_github.publication import (
     approval_eligibility_from_body,
@@ -35,11 +35,17 @@ from test_quarantine_published_tail_isolation import contract_fixture
 
 from review_sensei.bounded_evidence import canonical_bytes
 
-_RUNS = itertools.count(3900)
+_RUNS = PUBLISHED_TAIL_RUNS
 
 
 class PublishedTailJourneyFixture(JourneyFixture):
     tail_runs = None
+    # The intended 5+9 origins contain distinct criteria. Prose ordinals and
+    # moved line numbers alone deliberately do not establish finding identity.
+    stable_assessment_identities = True
+    # This origin-count fixture is not a five-thread rewrite scenario. Keep
+    # overlapping criteria unchanged; only four additional criteria are new.
+    unchanged_original_overlap = True
 
     def creator(self):
         return {**super().creator(), "created_at": "2026-10-28T00:01:00Z"}
@@ -79,26 +85,31 @@ class PublishedTailJourneyFixture(JourneyFixture):
             "id": 8_100_000,
             "body": "Late old bot reply: @reviewsensei verify. This is not a new human decision.",
             "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
-            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            "issue_url": f"{self.api_url}/repos/owner/repo/issues/7",
         }
         self.late_effects.extend(("old-reply-comment", "old-reaction-and-metadata"))
 
     def external(self, request, timeout):
         path = urlsplit(request.full_url).path
+        # Ordinary producers use the same complete, head-scoped native listing
+        # as cold successors. The base fixture omits GitHub's total_count.
+        if (
+            request.get_method() == "GET"
+            and path.endswith("/check-runs")
+            and "/commits/" in path
+        ):
+            assert (
+                request.get_header("Authorization") != "Bearer synthetic-workflow-read"
+            )
+            self._meter(request)
+            head = path.split("/commits/", 1)[1].split("/", 1)[0]
+            rows = [
+                copy.deepcopy(item)
+                for item in self.check_runs
+                if item.get("head_sha") == head
+            ]
+            return json_response({"total_count": len(rows), "check_runs": rows})
         if self.tail_runs is not None and request.get_method() == "GET":
-            if path.endswith("/check-runs") and "/commits/" in path:
-                assert (
-                    request.get_header("Authorization")
-                    != "Bearer synthetic-workflow-read"
-                )
-                self._meter(request)
-                head = path.split("/commits/", 1)[1].split("/", 1)[0]
-                rows = [
-                    copy.deepcopy(item)
-                    for item in self.check_runs
-                    if item.get("head_sha") == head
-                ]
-                return json_response({"total_count": len(rows), "check_runs": rows})
             if path.endswith("/reactions"):
                 self._meter(request)
                 return json_response([])
@@ -137,6 +148,11 @@ class PublishedTailJourneyFixture(JourneyFixture):
                 "severity": "high",
                 "blocking": False,
                 "needs_human": True,
+                **(
+                    {"evidence_id": f"published-tail-assessment-{n}"}
+                    if self.stable_assessment_identities
+                    else {}
+                ),
             }
             for n in range(published_count)
         ]
@@ -146,12 +162,27 @@ class PublishedTailJourneyFixture(JourneyFixture):
         self.provider_comments = [
             {
                 "path": "src/app.py",
-                "line": 3,
+                "line": 2
+                if self.stable_assessment_identities
+                and self.unchanged_original_overlap
+                and n < published_count
+                else 3,
                 "side": "RIGHT",
-                "body": f"Current published assessment {n} requires independent human judgment.",
+                "body": (
+                    f"Earlier published assessment {n} requires independent human judgment."
+                    if self.stable_assessment_identities
+                    and self.unchanged_original_overlap
+                    and n < published_count
+                    else f"Current published assessment {n} requires independent human judgment."
+                ),
                 "severity": "high",
                 "blocking": False,
                 "needs_human": True,
+                **(
+                    {"evidence_id": f"published-tail-assessment-{n}"}
+                    if self.stable_assessment_identities
+                    else {}
+                ),
             }
             for n in range(failed_count)
         ]
@@ -318,7 +349,7 @@ class NativePublishedTailJourneyFixture(PublishedTailJourneyFixture):
                 self._meter(request)
                 assert self.accounted.observations[-1]["mutation"] is False
                 snapshot = object.__new__(NativeCensusBackend)
-                snapshot.http = GitHubHttp(api_url="https://api.github.test")
+                snapshot.http = GitHubHttp(api_url=self.api_url)
                 snapshot.plan = SimpleNamespace(
                     repository_id=123,
                     pull_request=7,
@@ -534,6 +565,7 @@ class PublishedTailJourneyTests(unittest.TestCase):
                     "severity": "high",
                     "blocking": False,
                     "needs_human": True,
+                    "evidence_id": "published-tail-assessment-0",
                 }
             ]
             with registered_resource([registration]):
@@ -725,7 +757,7 @@ class HeavyPublishedTailJourneyFixture(PublishedTailJourneyFixture):
                 "id": identifier,
                 "body": body,
                 "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
-                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+                "issue_url": f"{self.api_url}/repos/owner/repo/issues/7",
                 "created_at": "2026-10-28T00:02:00Z",
                 "updated_at": "2026-10-28T00:02:00Z",
             }

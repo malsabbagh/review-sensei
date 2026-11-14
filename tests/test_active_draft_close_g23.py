@@ -48,6 +48,7 @@ from review_sensei_github.session_ledger import parse_session_comment
 
 from review_sensei.api_work import ApiRunAccounting
 from review_sensei.models import ReviewResult
+from tests.publication_timing_observers import at_empty_original_publication_fence
 
 
 class StateReplyFixture(FreshnessReplyFixture):
@@ -514,24 +515,11 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
         for kind in ("converted_to_draft", "closed"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
                 fx = LifecycleEntryFixture(Path(tmp))
-                original_preflight = ReviewPublisher._preflight_pr
-                transitioned = False
-
-                def transition_on_final_preflight(publisher, **kwargs):
-                    nonlocal transitioned
-                    if not transitioned and any(
-                        "default-human-inventory" in str(item.get("body", ""))
-                        for item in fx.extra_comments.values()
-                    ):
-                        transitioned = True
-                        _apply_transition(fx, kind)
-                    return original_preflight(publisher, **kwargs)
-
-                with patch.object(
-                    ReviewPublisher, "_preflight_pr", transition_on_final_preflight
-                ):
+                with at_empty_original_publication_fence(
+                    lambda: _apply_transition(fx, kind)
+                ) as transitioned:
                     code_1, out_1 = fx.run_and_read(human=False)
-                self.assertTrue(transitioned)
+                self.assertEqual(transitioned, [True])
                 self.assertEqual(code_1, 1)
                 assert out_1 is not None
                 self.assertEqual(out_1["status"], "skipped_pr_state")
@@ -663,6 +651,15 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
                                 and path.endswith("/pulls/7/reviews")
                             ):
                                 self.inject_loss = False
+                                original = parse_session_comment(
+                                    self.comment["body"], identity=IDENTITY
+                                )
+                                self.lost_transaction = (
+                                    original.transaction.transaction_id
+                                )
+                                self.lost_request_id = self.accounted.observations[-1][
+                                    "request_id"
+                                ]
                                 _apply_transition(self, kind)
                                 if stored:
                                     super().external(request, timeout)
@@ -677,48 +674,98 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
 
                     ufx = UncertainDispatchFixture(Path(tmp_u))
                     code_u, out_u = ufx.run_and_read(human=False)
-                    self.assertEqual(code_u, 1)
                     self.assertEqual(ufx.provider_calls, 1)
                     lifecycle_u = _extract_lifecycle_event(ufx.error)
-                    self.assertIsNone(
-                        lifecycle_u["caller"]["review_terminal_transaction"]
-                    )
                     self.assertGreaterEqual(
                         lifecycle_u["caller"]["recorded_pending"], 1
+                    )
+                    assert ufx.comment is not None
+                    record_u = parse_session_comment(
+                        ufx.comment["body"], identity=IDENTITY
+                    )
+                    accounting = ApiRunAccounting.from_document(
+                        record_u.api_run_accounting
+                    )
+                    self.assertEqual(
+                        record_u.transaction.transaction_id, ufx.lost_transaction
+                    )
+                    self.assertEqual(accounting.configuration.limit, 512)
+                    unknown = [
+                        observation
+                        for observation in ufx.accounted.observations
+                        if observation.get("mutation")
+                        and observation["outcome"] == "unknown"
+                    ]
+                    self.assertEqual(
+                        [observation["request_id"] for observation in unknown],
+                        [ufx.lost_request_id],
+                    )
+                    # Readback can settle the native effect, never refund or
+                    # relabel the original lost physical request as confirmed.
+                    self.assertIn(
+                        ufx.lost_request_id,
+                        {
+                            request.request_id
+                            for block in accounting.blocks
+                            for request in block.pending
+                        },
+                    )
+                    self.assertGreaterEqual(accounting.uncertain, 1)
+                    self.assertEqual(
+                        sum(
+                            method == "POST" and path.endswith("/pulls/7/reviews")
+                            for _, method, path in ufx.trace
+                        ),
+                        1,
                     )
                     # Zero APPROVE reviews emitted in all uncertain-dispatch cases.
                     self.assertNotIn("APPROVE", [r["event"] for r in ufx.review_posts])
 
                     if stored:
+                        self.assertEqual(code_u, 0, f"{out_u!r}\n{ufx.error}")
                         assert out_u is not None
-                        # Reconciled stored COMMENT without duplicating it, while
-                        # truthfully holding accounting_terminal=False over the
-                        # unconfirmed physical POST!
-                        self.assertEqual(out_u["status"], "published_terminal_pending")
+                        # Original-source exact review and inline readback is
+                        # durably retained before this one effect is settled.
+                        # Draft/closed state still prevents a new APPROVE.
+                        self.assertEqual(out_u["status"], "published")
+                        self.assertTrue(out_u["accounting_terminal"])
+                        self.assertIsNone(out_u["terminal_reason"])
                         self.assertEqual(
-                            out_u["publication_status"], "already_published"
+                            accounting.terminal_transaction, ufx.lost_transaction
                         )
-                        self.assertFalse(out_u["accounting_terminal"])
                         self.assertEqual(
-                            out_u["terminal_reason"], "terminal_close_unconfirmed"
+                            lifecycle_u["caller"]["review_terminal_transaction"],
+                            ufx.lost_transaction,
+                        )
+                        self.assertIn(
+                            ufx.lost_request_id, ufx.accounted._reconciled_mutations
                         )
                         self.assertEqual(
                             [r["event"] for r in ufx.review_posts], ["COMMENT"]
                         )
                     else:
-                        self.assertIsNone(out_u)
-                        self.assertIn(
-                            "review publication failed temporarily", ufx.error
+                        self.assertEqual(code_u, 1, f"{out_u!r}\n{ufx.error}")
+                        self.assertIsNone(
+                            lifecycle_u["caller"]["review_terminal_transaction"]
+                        )
+                        self.assertNotIn(
+                            ufx.lost_request_id, ufx.accounted._reconciled_mutations
+                        )
+                        # The durable journal now reports the unknown outcome
+                        # explicitly; it does not turn absence into completion.
+                        self.assertEqual(
+                            out_u,
+                            {
+                                "status": "publication_incomplete",
+                                "publication_status": "unknown",
+                                "accounting_terminal": False,
+                                "terminal_reason": "publication_interrupted",
+                                "review_id": None,
+                                "diagnostic": "publication_outcome_incomplete",
+                            },
                         )
                         self.assertEqual(ufx.review_posts, [])
-                        assert ufx.comment is not None
-                        record_u = parse_session_comment(
-                            ufx.comment["body"], identity=IDENTITY
-                        )
-                        assert isinstance(record_u.api_run_accounting, dict)
-                        self.assertIsNone(
-                            record_u.api_run_accounting.get("terminal_transaction")
-                        )
+                        self.assertIsNone(accounting.terminal_transaction)
 
     def test_strict_draft_boolean_validation_g24_across_all_active_work_entry_and_preflight_routes(
         self,
@@ -836,23 +883,11 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
         # never refunds N_1 (`confirmed_2 > confirmed_1`), and settles terminally.
         with tempfile.TemporaryDirectory() as tmp:
             fx = LifecycleEntryFixture(Path(tmp))
-            orig_preflight = ReviewPublisher._preflight_pr
-            transitioned = False
-
-            def draft_on_final_preflight(publisher, **kwargs):
-                nonlocal transitioned
-                if not transitioned and any(
-                    "default-human-inventory" in str(item.get("body", ""))
-                    for item in fx.extra_comments.values()
-                ):
-                    transitioned = True
-                    fx.pr_draft = True
-                return orig_preflight(publisher, **kwargs)
-
-            with patch.object(
-                ReviewPublisher, "_preflight_pr", draft_on_final_preflight
-            ):
+            with at_empty_original_publication_fence(
+                lambda: setattr(fx, "pr_draft", True)
+            ) as transitioned:
                 code_1, out_1 = fx.run_and_read(human=False)
+            self.assertEqual(transitioned, [True])
             self.assertEqual(code_1, 1)
             assert out_1 is not None
             self.assertEqual(out_1["status"], "skipped_pr_state")
@@ -918,7 +953,17 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
             ufx = _UnknownDispatchCloseFixture(Path(tmp_u))
             code_u, out_u = ufx.run_and_read(human=False)
             self.assertEqual(code_u, 1)
-            self.assertIsNone(out_u)
+            self.assertEqual(
+                out_u,
+                {
+                    "status": "publication_incomplete",
+                    "publication_status": "unknown",
+                    "accounting_terminal": False,
+                    "terminal_reason": "publication_interrupted",
+                    "review_id": None,
+                    "diagnostic": "publication_outcome_incomplete",
+                },
+            )
             self.assertEqual(ufx.provider_calls, 1)
             self.assertEqual(ufx.review_posts, [])
 

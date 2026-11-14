@@ -440,7 +440,10 @@ class CurrentProcessPackageObservationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             environment = root / "environment"
-            venv.EnvBuilder(with_pip=False).create(environment)
+            # Bootstrap the fixture's own offline installer. Developer runners
+            # may intentionally lack pip; copied relocatable POSIX interpreters
+            # can also lose their libpython relative search path.
+            venv.EnvBuilder(with_pip=True, symlinks=os.name != "nt").create(environment)
             python = environment / (
                 "Scripts/python.exe" if os.name == "nt" else "bin/python"
             )
@@ -480,7 +483,7 @@ class CurrentProcessPackageObservationTests(unittest.TestCase):
             }
             install = subprocess.run(
                 [
-                    sys.executable,
+                    str(python),
                     "-I",
                     "-m",
                     "pip",

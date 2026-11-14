@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -21,6 +22,7 @@ from typing import Any, Mapping, cast
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from weakref import WeakKeyDictionary
 
 from review_sensei.api_work import (
     LEGACY_ACCOUNTING_VERSION,
@@ -33,6 +35,10 @@ from review_sensei.api_work import (
     initial_accounting,
 )
 from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
+from review_sensei.finding_lifecycle_store import (
+    _checkpoint_pricer,
+    _install_checkpoint_pricer,
+)
 from review_sensei.models import ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
 
@@ -40,7 +46,66 @@ from .api_run_owner import claim_review_startup
 from .caller_operation import CallerOperation
 from .errors import GitHubHTTPError, GitHubPublicationTransientError
 from .http import Opener
+from .quarantine_capacity import (
+    _guarded_lifecycle_writer,
+    _install_guarded_lifecycle_writer,
+)
 from .session_ledger import GitHubIssueCommentSessionLedger
+
+
+@dataclass(frozen=True, eq=False)
+class _PlainFindingPagePlan:
+    caller: Any
+    root: str
+    record: SessionRecord
+    record_bytes: bytes
+    inventory_ids: tuple[int, ...]
+    inventory_bytes: bytes
+    page_size: int
+    page_bounds: tuple[int, ...]
+    page_requests: tuple[tuple[int, int], ...]
+    maximum_items: int
+    checkpoint_parts: tuple[int, ...]
+    root_calls: int
+    fences: int
+
+
+# These capabilities are issued only after the complete source frontier passes
+# the existing ownership/dependency checks. A caller attribute is not a grant.
+_PLAIN_FINDING_PLANS: WeakKeyDictionary[Any, _PlainFindingPagePlan] = (
+    WeakKeyDictionary()
+)
+_PLAIN_FINDING_ACTIVE: WeakKeyDictionary[Any, tuple[_PlainFindingPagePlan, bool]] = (
+    WeakKeyDictionary()
+)
+
+
+_PLAIN_FINDING_ISSUED: WeakKeyDictionary[Any, tuple[Any, ...]] = WeakKeyDictionary()
+
+
+def _plain_page_signature(plan):
+    return (
+        plan.caller,
+        plan.root,
+        id(plan.record),
+        plan.record_bytes,
+        plan.inventory_ids,
+        plan.inventory_bytes,
+        plan.page_size,
+        plan.page_bounds,
+        plan.page_requests,
+        plan.maximum_items,
+        plan.checkpoint_parts,
+        plan.root_calls,
+        plan.fences,
+    )
+
+
+def _require_plain_page_plan(plan):
+    if type(plan) is not _PlainFindingPagePlan or _PLAIN_FINDING_ISSUED.get(
+        plan
+    ) != _plain_page_signature(plan):
+        raise ReviewInputError("finding lifecycle page plan is not source-issued")
 
 
 def json_copy(value: Any) -> Any:
@@ -64,25 +129,88 @@ class _AccountedResponse:
         response: Any,
         confirmed: Callable[[], None],
         observed: Callable[[Any], None] | None = None,
+        validate_return: Callable[[], None] | None = None,
     ):
         self._response, self._confirmed = response, confirmed
         self._observed = observed
+        self._validate_return = validate_return
         self._read = False
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._response, name)
+        validate = object.__getattribute__(self, "_validate_return")
+        response = object.__getattribute__(self, "_response")
+        try:
+            return getattr(response, name)
+        finally:
+            if validate is not None:
+                validate()
 
     def __enter__(self) -> _AccountedResponse:
-        self._response.__enter__()
+        validate = object.__getattribute__(self, "_validate_return")
+        response = object.__getattribute__(self, "_response")
+        try:
+            response.__enter__()
+        except BaseException:
+            try:
+                response.__exit__(*sys.exc_info())
+            except BaseException:
+                # Cleanup cannot replace the original transport error. The
+                # captured validator below may strengthen it to a custody hold.
+                pass
+            finally:
+                if validate is not None:
+                    validate()
+            raise
+        try:
+            if validate is not None:
+                validate()
+        except BaseException:
+            try:
+                response.__exit__(*sys.exc_info())
+            except BaseException:
+                pass
+            finally:
+                if validate is not None:
+                    validate()
+            raise
         return self
 
     def __exit__(self, *args: Any) -> Any:
-        return self._response.__exit__(*args)
+        validate = object.__getattribute__(self, "_validate_return")
+        response = object.__getattribute__(self, "_response")
+        held = None
+        if validate is not None:
+            try:
+                validate()
+            except BaseException as error:
+                held = error
+        try:
+            result = response.__exit__(*args)
+        except BaseException:
+            if held is not None:
+                raise held
+            raise
+        finally:
+            if validate is not None:
+                validate()
+        if held is not None:
+            raise held
+        return result
 
     def read(self, size: int) -> Any:
-        value = self._response.read(size)
+        validate = object.__getattribute__(self, "_validate_return")
+        response = object.__getattribute__(self, "_response")
+        confirmed = object.__getattribute__(self, "_confirmed")
+        already_read = object.__getattribute__(self, "_read")
+        try:
+            value = response.read(size)
+            if not already_read:
+                # Physical completion survives a subsequent source-custody hold.
+                confirmed()
+        finally:
+            if validate is not None:
+                validate()
         if not self._read:
-            self._confirmed()
             if self._observed is not None:
                 self._observed(value)
             self._read = True
@@ -717,6 +845,14 @@ class ApiRunRequestTransport:
 
         if not isinstance(request, Request):
             raise ReviewInputError("caller request is invalid")
+        from .quarantine_creation_census import before_creation_request
+
+        before_creation_request(self, request)
+        from .quarantine_command_checkpoint import before_request as before_cold_request
+
+        before_cold_request(self, request)
+        from .trust_effects import before_request as before_trust_request
+
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))
@@ -724,12 +860,35 @@ class ApiRunRequestTransport:
             or not 0 < timeout <= 60
         ):
             raise ReviewInputError("caller request deadline is invalid")
+        trust_verification = before_trust_request(self, request)
         deadline = int((self._clock() + timeout) * 1000)
         request_deadline = self._monotonic() + timeout
+        from review_sensei.source_registry import require_module_seal
+
+        from . import guarded_hot_namespace
+
+        require_module_seal(guarded_hot_namespace)
+        if _hot_before_sequence is not guarded_hot_namespace.before_sequence:
+            raise ReviewInputError("hot namespace dispatch alias changed")
+        _hot_before_sequence(self, deadline)
+        from .quarantine_command_namespace import before_sequence
+
+        before_sequence(self, deadline)
         self._sequence += 1
         from .quarantine_census import is_readonly_census
+        from .trust_effects import verification_profile
 
-        read_only_census = is_readonly_census(request, self._quarantine_census_api_url)
+        trust_profile = verification_profile(self)
+        read_only_census = is_readonly_census(
+            request,
+            trust_profile.api_origin
+            if trust_profile is not None
+            else self._quarantine_census_api_url,
+            resolution_only=self._quarantine_census_api_url is None,
+            identity=self._effect_record.identity()
+            if self._effect_record is not None
+            else None,
+        )
         is_mutation = (
             request.get_method() in {"POST", "PUT", "PATCH", "DELETE"}
             and not read_only_census
@@ -752,7 +911,7 @@ class ApiRunRequestTransport:
             request_id = f"startup-{self.run.repository_id}-{self.run.run_id}-{self.attempt}-{self._sequence}"
         else:
             if self._active_operation is not None:
-                mutation = is_mutation
+                mutation = is_mutation and not trust_verification
                 if self._staged_part_operation is not None:
                     self._staged_part_operation.consume(mutation=mutation)
                     # The root allocation is not replenished by a child write.
@@ -854,6 +1013,9 @@ class ApiRunRequestTransport:
                 except (ValueError, TypeError, ReviewInputError):
                     pass
         self.observations.append(observation)
+        from .ordinary_native_recovery import dispatch as ordinary_recovery_dispatch
+
+        ordinary_recovery_dispatch(self, request, observation)
         try:
             from .check_accounting import _dispatch
 
@@ -875,6 +1037,46 @@ class ApiRunRequestTransport:
 
         observed_status = None
         resolution_readback = self._capture_thread_request(request, observation)
+
+        from review_sensei.source_registry import require_module_seal
+
+        from . import quarantine_command_namespace
+
+        # Authenticate the defining exports before taking snapshots.  Otherwise
+        # a substituted alias could declare itself inactive before any lease.
+        require_module_seal(quarantine_command_namespace)
+        if (
+            _bind_namespace_confirmation
+            is not quarantine_command_namespace.bind_response_confirmation
+            or _namespace_confirm_response
+            is not quarantine_command_namespace.confirm_response
+        ):
+            raise ReviewInputError("caller namespace confirmation alias changed")
+        namespace_bind_confirmation = _bind_namespace_confirmation
+        namespace_confirm_response = _namespace_confirm_response
+        # Freeze callable custody before external response code can run.  A
+        # captured object alone does not protect its mutable function metadata.
+        namespace_hook_sources = tuple(
+            (
+                hook.__code__,
+                hook.__globals__,
+                hook.__defaults__,
+                hook.__kwdefaults__,
+                tuple((cell, cell.cell_contents) for cell in hook.__closure__ or ()),
+            )
+            for hook in (namespace_bind_confirmation, namespace_confirm_response)
+        )
+        namespace_confirmation_context = (
+            self._sequence,
+            self._block,
+            request_id,
+            deadline,
+            is_mutation,
+            request.get_method() == "POST"
+            and request.full_url in self._authentication_endpoints,
+            request.get_method(),
+            request.full_url,
+        )
 
         def confirmed() -> None:
             if observation["outcome"] == "expired":
@@ -900,6 +1102,25 @@ class ApiRunRequestTransport:
                 raise EvidenceBudgetExhausted(
                     "caller response exceeded its original request deadline"
                 )
+            hook_source = namespace_hook_sources[1]
+            if (
+                namespace_confirm_response.__code__ is not hook_source[0]
+                or namespace_confirm_response.__globals__ is not hook_source[1]
+                or namespace_confirm_response.__defaults__ is not hook_source[2]
+                or namespace_confirm_response.__kwdefaults__ is not hook_source[3]
+                or len(namespace_confirm_response.__closure__ or ())
+                != len(hook_source[4])
+                or any(
+                    cell is not saved_cell or cell.cell_contents is not contents
+                    for cell, (saved_cell, contents) in zip(
+                        namespace_confirm_response.__closure__ or (),
+                        hook_source[4],
+                        strict=True,
+                    )
+                )
+            ):
+                raise ReviewInputError("caller namespace confirmation source changed")
+            namespace_confirm_response(self, confirmed, pending, observation)
             try:
                 from .check_accounting import _response
 
@@ -914,14 +1135,43 @@ class ApiRunRequestTransport:
 
         # The debit/intent above happens before the physical opener. Exceptions
         # preserve the charge; read/parse/status failures never refund it.
+        from .trust_effects import consume as consume_trust_receipt
+
+        # Capture the defining-module installed validator before external
+        # response code runs; a response cannot substitute the return hook.
+        validate_trust_return = _validate_trust_return
+        consume_trust_receipt(self, request)
         try:
             response = self._opener(request, timeout=timeout)
         except HTTPError as error:
             observed_status = error.code
             confirmed()
+            validate_trust_return(self)
             raise
-        observed_status = getattr(response, "status", None)
-        return _AccountedResponse(
+        except BaseException:
+            validate_trust_return(self)
+            raise
+        try:
+            validate_trust_return(self)
+            try:
+                observed_status = getattr(response, "status", None)
+            finally:
+                validate_trust_return(self)
+        except BaseException:
+            try:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+                else:
+                    response.__exit__(*sys.exc_info())
+            except BaseException:
+                # Preserve an established source hold; cleanup cannot make an
+                # effected request appear recoverably transient or unstarted.
+                pass
+            finally:
+                validate_trust_return(self)
+            raise
+        accounted_response = _AccountedResponse(
             response,
             confirmed,
             None
@@ -929,7 +1179,34 @@ class ApiRunRequestTransport:
             else lambda raw: self._observe_thread_readback(
                 resolution_readback, raw, observed_status
             ),
+            validate_return=lambda: validate_trust_return(self),
         )
+        hook_source = namespace_hook_sources[0]
+        if (
+            namespace_bind_confirmation.__code__ is not hook_source[0]
+            or namespace_bind_confirmation.__globals__ is not hook_source[1]
+            or namespace_bind_confirmation.__defaults__ is not hook_source[2]
+            or namespace_bind_confirmation.__kwdefaults__ is not hook_source[3]
+            or len(namespace_bind_confirmation.__closure__ or ()) != len(hook_source[4])
+            or any(
+                cell is not saved_cell or cell.cell_contents is not contents
+                for cell, (saved_cell, contents) in zip(
+                    namespace_bind_confirmation.__closure__ or (),
+                    hook_source[4],
+                    strict=True,
+                )
+            )
+        ):
+            raise ReviewInputError("caller namespace confirmation source changed")
+        namespace_bind_confirmation(
+            self,
+            confirmed,
+            pending,
+            observation,
+            response,
+            namespace_confirmation_context,
+        )
+        return accounted_response
 
     def _require_ledger(
         self, ledger: GitHubIssueCommentSessionLedger, identity: SessionIdentity
@@ -1063,6 +1340,8 @@ class ApiRunRequestTransport:
         identity: SessionIdentity,
         configuration: FrozenApiConfiguration,
         owner: ApiExecutionOwner,
+        *,
+        trust_source: tuple[Any, Any] | None = None,
     ) -> ApiRunAccounting:
         """Confirm a first run record before enabling its ordinary tranche.
 
@@ -1099,6 +1378,30 @@ class ApiRunRequestTransport:
                 "hosted-terminal", allocation.first_terminal
             )
             updated = record.evolve(api_run_accounting=state.to_document())
+            if trust_source is not None:
+                from .trust_enrollment import (
+                    current_observation,
+                    prepare_original_enrollment,
+                )
+
+                observed = current_observation(*trust_source)
+                authority = observed["authority"]
+                if (
+                    authority["run_id"] != str(self.run.run_id)
+                    or authority["run_attempt"] != owner.run_attempt
+                    or authority["job"] != owner.job
+                    or observed["app_id"] != ledger.authenticated_app_id
+                    or ledger.token != trust_source[1].token
+                    or ledger._reservation_owner
+                    != {
+                        "run_id": str(self.run.run_id),
+                        "head_sha": authority["head_sha"],
+                    }
+                ):
+                    raise ReviewInputError(
+                        "trust enrollment original caller source conflicts"
+                    )
+                updated = prepare_original_enrollment(*trust_source, updated)
             self._activation = updated, "hosted-review"
             return updated
 
@@ -1355,7 +1658,30 @@ class ApiRunRequestTransport:
             if old.action is not None:
                 from .api_run_history import read_action_result
 
-                read_action_result(ledger, identity, record)
+                retained_action = read_action_result(ledger, identity, record)
+                from .accepted_semantic_history import guard_successor_admission
+
+                guard_successor_admission(
+                    self, ledger, identity, record, retained_action
+                )
+                # Data only: this cannot authorize cancellation or dispatch.
+                self._accepted_semantic_predecessor = retained_action["result"].get(
+                    "accepted_semantic_history", {"missing": True}
+                )
+            else:
+                from .accepted_semantic_history import history_from_record
+
+                carried_history = history_from_record(ledger, identity, record)
+                from .accepted_semantic_history import guard_carried_successor
+
+                guard_carried_successor(self, ledger, identity, record, carried_history)
+                self._accepted_semantic_predecessor = (
+                    carried_history
+                    if carried_history is not None
+                    else None
+                    if old.previous_record is None
+                    else {"missing": True}
+                )
             allocation = owner_allocations(configuration.limit, self.plan.liability)
 
             def candidate_state(reference):
@@ -1374,18 +1700,29 @@ class ApiRunRequestTransport:
                     .reserve("hosted-terminal", allocation.first_terminal)
                 )
 
+            from .accepted_semantic_history import carry_history_in_rollover
+
             if completion is not None:
                 from .api_run_history import preview_retained_reference
 
                 preview = preview_retained_reference(
                     ledger, record, completion=completion
                 )
-                # Capacity only: this value is never assigned to activation,
-                # granted to a writer, persisted or treated as archive evidence.
                 record.rollover_historical_api_accounting(
                     candidate_state(preview).to_document(),
                     assessments=completion.assessments,
                 )
+
+            # Qualify metadata capacity before any archive write; no preview
+            # archive identity is installed or treated as authority.
+            preview_candidate = carry_history_in_rollover(
+                ledger,
+                identity,
+                record,
+                record,
+                getattr(self, "_accepted_semantic_predecessor", None),
+            )
+            carried_reference = preview_candidate.finding_lifecycle
             before_archive = len(self.observations)
             if completion is not None:
                 # Existing complete archive/write/readback tail plus fresh old
@@ -1430,6 +1767,14 @@ class ApiRunRequestTransport:
                 if completion is not None
                 else record.rollover_api_accounting(state.to_document())
             )
+            if carried_reference != updated.finding_lifecycle:
+                updated = updated.evolve(
+                    now=datetime.fromisoformat(
+                        updated.updated_at.replace("Z", "+00:00")
+                    ),
+                    generation=updated.generation,
+                    finding_lifecycle=carried_reference,
+                )
             self._activation = updated, "hosted-review"
             return updated
 
@@ -1542,6 +1887,24 @@ class ApiRunRequestTransport:
                 raise
             return self.reconcile_checkpoint(ledger, identity)
 
+    def action_intent_document(self, *, purpose, source, head_sha, operation_key):
+        """Pure source layout for admission sizing, never an effect authority.
+
+        This reads the current original accounting/root without changing either.
+        Actual admission still validates native custody and publishes its own
+        intent. A preview cannot substitute for that publication or its receipt.
+        """
+        return {
+            "purpose": purpose,
+            "source": source,
+            "run_id": self.run.run_id,
+            "owner": asdict(self.accounting.owner),
+            "head_sha": head_sha,
+            "configuration_digest": self.accounting.configuration.digest,
+            "operation_key": operation_key,
+            "source_root": self._root,
+        }
+
     def admit_action(
         self, ledger, identity, *, purpose, source, head_sha, operation_key
     ) -> dict[str, Any]:
@@ -1557,16 +1920,17 @@ class ApiRunRequestTransport:
         self._require_ledger(ledger, identity)
         if self._action_unresolved():
             raise ReviewInputError("caller action admission has unresolved work")
-        intent = {
-            "purpose": purpose,
-            "source": source,
-            "run_id": self.run.run_id,
-            "owner": asdict(self.accounting.owner),
-            "head_sha": head_sha,
-            "configuration_digest": self.accounting.configuration.digest,
-            "operation_key": operation_key,
-            "source_root": self._root,
-        }
+        from review_sensei.source_registry import require_instance_source
+
+        # This new pure sizing seam must never become an overridable authority
+        # factory. Check its original defining-module method before admission.
+        require_instance_source(self, methods=("action_intent_document",))
+        intent = self.action_intent_document(
+            purpose=purpose,
+            source=source,
+            head_sha=head_sha,
+            operation_key=operation_key,
+        )
         existing = self.accounting.action
         if existing is not None:
             original = existing["intent"]
@@ -1653,6 +2017,10 @@ class ApiRunRequestTransport:
                 "caller action execution is unavailable or may have started"
             )
 
+        from .accepted_semantic_history import preflight_history_capacity
+
+        preflight_history_capacity(self, identity, intent)
+
         def prepare(record):
             self._state = replace(
                 self.accounting, action={**action, "execution_started": True}
@@ -1683,8 +2051,6 @@ class ApiRunRequestTransport:
         deliberately not reconstructible from its serialized intent.
         """
         from review_sensei.bounded_evidence import (
-            MAX_PARTITION_DECODED_BYTES,
-            encode_evidence,
             inline_manifest,
             read_inline_evidence,
         )
@@ -1706,18 +2072,30 @@ class ApiRunRequestTransport:
             raise ReviewInputError(
                 "caller action result is not an owned confirmed outcome"
             )
+        from .accepted_semantic_history import enrich_settlement
+
+        result_document = enrich_settlement(
+            self, ledger, identity, action["intent"], result_document
+        )
         envelope = {
             "schema_version": "caller-action-result-v1",
             "intent_sha256": boundary.intent_sha256,
             "outcome": outcome,
             "result": json_copy(result_document),
         }
-        carrier = {
-            "schema_version": "caller-action-result-v1",
-            "payload": encode_evidence(
-                envelope, max_decoded_bytes=MAX_PARTITION_DECODED_BYTES
+        from review_sensei.action_result_codec import encode_action_result_carrier
+
+        history = result_document.get("accepted_semantic_history")
+        self._action_result_history = (
+            json_copy(history) if history is not None else None
+        )
+        carrier = encode_action_result_carrier(
+            envelope,
+            reference_history=(
+                self._effect_record is not None
+                and self._effect_record.finding_lifecycle is not None
             ),
-        }
+        )
         manifest = inline_manifest(
             carrier,
             binding=action_result_binding(
@@ -1734,7 +2112,8 @@ class ApiRunRequestTransport:
                 read_inline_evidence(
                     manifest,
                     expected_binding=cast(Mapping[str, object], manifest["binding"]),
-                )
+                ),
+                history=history,
             )
             != envelope
         ):
@@ -1804,7 +2183,18 @@ class ApiRunRequestTransport:
                     "outcome": proof.outcome,
                 },
             )
-            return record.evolve(generation=record.generation + 1)
+            from review_sensei.finding_lifecycle_store import (
+                reference_with_terminal_action_history,
+            )
+
+            reference = reference_with_terminal_action_history(
+                record,
+                accounting=self._state,
+                candidate_history=getattr(self, "_action_result_history", None),
+            )
+            return record.evolve(
+                generation=record.generation + 1, finding_lifecycle=reference
+            )
 
         confirmed = self._action_checkpoint(ledger, identity, prepare)
         read_action_result(ledger, identity, confirmed)
@@ -2034,10 +2424,31 @@ class ApiRunRequestTransport:
                 if self._terminal_reason is None
                 else QUARANTINE_CHECKPOINT_REQUESTS
             )
+        if quarantine:
+            from .quarantine_census import lifecycle_checkpoint_operation
+
+            specialized_quarantine = lifecycle_checkpoint_operation(
+                ledger, self, identity
+            )
+            if specialized_quarantine is not None:
+                # Admit the complete source-priced census/fence/stage tail,
+                # not a truncated min(capacity, remaining) operation.
+                self.budget_view.preflight(specialized_quarantine)
+                capacity = specialized_quarantine
+        confirmation_tail = WRITE_CONFIRMATION_TAIL
+        if not quarantine and isinstance(ledger, ApiRunSessionLedger):
+            if (
+                getattr(ledger._take_plain_finding_operation, "__func__", None)
+                is not ApiRunSessionLedger._take_plain_finding_operation
+            ):
+                raise ReviewInputError("finding lifecycle operation source changed")
+            specialized = ledger._take_plain_finding_operation(self, identity)
+            if specialized is not None:
+                capacity, confirmation_tail = specialized
         with self._operation(
             key,
             capacity + fences,
-            write_tail=WRITE_CONFIRMATION_TAIL,
+            write_tail=confirmation_tail,
             prewrite_reads=fences,
         ) as operation:
             self._checkpoint_operation = operation
@@ -2076,6 +2487,22 @@ class ApiRunRequestTransport:
             raise ReviewInputError("caller checkpoint publication is unconfirmed")
         persisted = ApiRunAccounting.from_document(record.api_run_accounting)
         persisted.require_successor(self.accounting)
+        from review_sensei.source_registry import require_module_seal
+
+        from . import current_quarantine_finalization, quarantine_command_successor
+
+        require_module_seal(quarantine_command_successor)
+        quarantine_command_successor.confirm_checkpoint(self, ledger, record, persisted)
+        require_module_seal(current_quarantine_finalization)
+        current_quarantine_finalization.confirm_checkpoint(
+            self, ledger, record, persisted
+        )
+        from . import guarded_hot_namespace
+
+        require_module_seal(guarded_hot_namespace)
+        if _hot_confirm_checkpoint is not guarded_hot_namespace.confirm_checkpoint:
+            raise ReviewInputError("hot namespace checkpoint alias changed")
+        _hot_confirm_checkpoint(self, ledger, record, persisted)
         from .quarantine_checkpoint import expire
 
         expire(getattr(self, "_quarantine_checkpoint_snapshot", None))
@@ -2157,6 +2584,969 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         self.evidence_budget = caller.budget_view
         self._terminal_claimed = False
         self._part_staging_identity: SessionIdentity | None = None
+
+    def preflight_finding_lifecycle_retention(
+        self, identity, *, added_parts, added_bytes, checkpoint_parts=None
+    ):
+        """Read-only proof against the existing complete run-owned frontier/tail.
+
+        No discovery, enlarged page envelope or allocation occurs here. Missing
+        authenticated context is unsupported, not permission to mint a budget.
+        Actual staging repeats its checkpoint-snapshot and capacity checks.
+        """
+        from review_sensei.bounded_evidence import MAX_STORED_PARTS
+
+        from .quarantine_published_tail import retained_storage_reserve
+
+        self.caller._require_ledger(self, identity)
+        self.caller.accounting
+        if (
+            type(added_parts) is not int
+            or type(added_bytes) is not int
+            or not 0 <= added_parts <= MAX_STORED_PARTS
+            or added_bytes < 0
+            or (added_parts == 0 and added_bytes != 0)
+            or (added_parts > 0 and added_bytes == 0)
+            or not self._inventory_complete
+            or self.caller._terminal_reason is not None
+        ):
+            raise ReviewInputError("finding lifecycle retained frontier is unsupported")
+        if not self._quarantine_required:
+            return self._preflight_plain_finding_parts(
+                identity,
+                added_parts=added_parts,
+                added_bytes=added_bytes,
+                checkpoint_parts=checkpoint_parts,
+            )
+        from .quarantine_census import lifecycle_capacity_plan
+
+        scope = lifecycle_capacity_plan(self, identity, added_parts=added_parts)
+        items = self._cached_comments()
+        carriers = tuple(self._owned_carrier_items(items, identity))
+        reserve_parts, reserve_bytes = retained_storage_reserve(self)
+        # Existing admitted tail still owns its storage promise. New lifecycle
+        # bytes cannot silently consume that independent recovery reservation.
+        from review_sensei.bounded_evidence import MAX_PART_BYTES
+
+        from .native_manifest import MANIFEST_WIRE_BOUND
+
+        authenticated = self._quarantine_authenticated
+        assert authenticated is not None
+        promised_parts = 2 * len(authenticated.pending) + 5
+        promised_bytes = (promised_parts - 1) * MAX_PART_BYTES + MANIFEST_WIRE_BOUND
+        retained_parts = len(carriers) + reserve_parts + added_parts + promised_parts
+        retained_bytes = (
+            sum(len(item["body"].encode()) for item in carriers)
+            + reserve_bytes
+            + added_bytes
+            + promised_bytes
+        )
+        comments = len(scope.plan.known) + len(scope.plan.unknown)
+        assert self.evidence_budget is not None
+        self.evidence_budget.preflight(2 * added_parts + 5)
+        return {
+            "additional_calls": 0,
+            "comment_allocations": comments,
+            "retained_parts": retained_parts,
+            "retained_bytes": retained_bytes,
+        }
+
+    @_checkpoint_pricer
+    def preflight_finding_lifecycle_checkpoint_pricing(
+        self,
+        record,
+        *,
+        added_parts,
+        added_bytes,
+        checkpoint_parts,
+        checkpoint_stage=False,
+        checkpoint_inline=False,
+        checkpoint_target=None,
+        _checkpoint_factory=None,
+    ):
+        """Issue a sealed price only for an exact source-owned checkpoint writer."""
+        from .trust_effects import verification_profile
+
+        trust_profile = verification_profile(self.caller)
+
+        def unsupported():
+            if trust_profile is not None:
+                raise ReviewInputError("trust checkpoint source scope is unsupported")
+            return None
+
+        if trust_profile is not None and (
+            self._quarantine_required
+            or checkpoint_stage
+            or added_parts != 0
+            or not isinstance(checkpoint_parts, tuple)
+            or any(type(n) is not int or n != 0 for n in checkpoint_parts)
+            or getattr(self.caller, "_controlled_restart_admission", None) is not None
+            or getattr(self, "_controlled_restart", None) is not None
+        ):
+            raise ReviewInputError(
+                "trust checkpoint pricing supports plain inline only"
+            )
+        if checkpoint_stage:
+            if not self._quarantine_required:
+                return unsupported()
+            from .quarantine_census import lifecycle_staging_pricing
+
+            return lifecycle_staging_pricing(
+                self,
+                record,
+                checkpoint_parts=checkpoint_parts,
+                target=checkpoint_target,
+                factory=_checkpoint_factory,
+            )
+        if self._quarantine_required:
+            from .quarantine_census import lifecycle_checkpoint_pricing
+
+            return lifecycle_checkpoint_pricing(
+                self,
+                record,
+                added_parts=added_parts,
+                added_bytes=added_bytes,
+                checkpoint_parts=checkpoint_parts,
+                factory=_checkpoint_factory,
+                inline=checkpoint_inline,
+            )
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .review_run import ActionRunLedger, ReviewRunLedger
+        from .run_authority import VerifiedRunAction
+
+        if type(self) not in {ApiRunSessionLedger, ActionRunLedger, ReviewRunLedger}:
+            return unsupported()
+        if type(self) is ReviewRunLedger and self.caller._abort_source is not None:
+            return unsupported()
+        expected_replace = (
+            ApiRunSessionLedger.replace
+            if type(self) is ApiRunSessionLedger
+            else ReviewRunLedger.replace
+            if type(self) is ReviewRunLedger
+            else ActionRunLedger.replace
+        )
+        implementations = (
+            ("replace", expected_replace),
+            (
+                "replace_finding_lifecycle_inline",
+                ApiRunSessionLedger.replace_finding_lifecycle_inline,
+            ),
+            (
+                "preflight_finding_lifecycle_inline",
+                ApiRunSessionLedger.preflight_finding_lifecycle_inline,
+            ),
+            (
+                "replace_finding_lifecycle_parts",
+                ApiRunSessionLedger.replace_finding_lifecycle_parts,
+            ),
+            (
+                "_preflight_plain_finding_parts",
+                ApiRunSessionLedger._preflight_plain_finding_parts,
+            ),
+            (
+                "_plain_finding_selected_input",
+                ApiRunSessionLedger._plain_finding_selected_input,
+            ),
+            ("stage_evidence", ApiRunSessionLedger.stage_evidence),
+            (
+                "_take_plain_finding_operation",
+                ApiRunSessionLedger._take_plain_finding_operation,
+            ),
+            (
+                "_read_plain_finding_pages",
+                ApiRunSessionLedger._read_plain_finding_pages,
+            ),
+            ("_bounded_comments", GitHubIssueCommentSessionLedger._bounded_comments),
+            (
+                "preflight_finding_lifecycle_retention",
+                ApiRunSessionLedger.preflight_finding_lifecycle_retention,
+            ),
+        )
+        if any(
+            getattr(getattr(self, name), "__func__", None) is not implementation
+            for name, implementation in implementations
+        ):
+            return unsupported()
+        identity = record.identity()
+        if self._plain_finding_selected_input(identity) is not record:
+            return unsupported()
+        if trust_profile is not None:
+            from .trust_enrollment import (
+                compare_current_observation,
+                original_observation,
+            )
+
+            historical = original_observation(record)
+            if (
+                historical["authority"]["current_observation"]["schema_version"]
+                != "current-observation-v2"
+            ):
+                raise ReviewInputError(
+                    "trust checkpoint original actor role is unavailable"
+                )
+            compare_current_observation(
+                trust_profile.broker, trust_profile.session, record
+            )
+        original = canonical_bytes(record.to_dict())
+        guard = getattr(self, "business_guard", None)
+        owner = getattr(guard, "__self__", None)
+        run = getattr(owner, "run", None)
+        guard_calls = 0
+        if type(self) is ActionRunLedger:
+            if (
+                getattr(guard, "__func__", None) is not VerifiedRunAction.fence
+                or type(owner) is not VerifiedRunAction
+                or run is None
+                or run.ledger is not self
+                or run.caller is not self.caller
+                or run.identity != identity
+                or owner.owner != self.caller.accounting.owner
+            ):
+                return unsupported()
+            guard_calls = 2  # actual fresh source GET and PR GET, outside checkpoint
+        elif guard is not None:
+            return unsupported()
+        authority_bytes = canonical_bytes(owner.document) if owner is not None else None
+
+        def validate():
+            if (
+                self._plain_finding_selected_input(identity) is not record
+                or verification_profile(self.caller) is not trust_profile
+                or canonical_bytes(record.to_dict()) != original
+                or any(
+                    getattr(getattr(self, name), "__func__", None) is not implementation
+                    for name, implementation in implementations
+                )
+                or getattr(self, "business_guard", None) is not guard
+                or type(self) is ReviewRunLedger
+                and self.caller._abort_source is not None
+            ):
+                return False
+            return owner is None or (
+                owner.run is run
+                and run.ledger is self
+                and run.caller is self.caller
+                and owner.owner == self.caller.accounting.owner
+                and canonical_bytes(owner.document) == authority_bytes
+            )
+
+        page_plan = None
+        observed = self.preflight_finding_lifecycle_retention(
+            identity,
+            added_parts=added_parts,
+            added_bytes=added_bytes,
+            checkpoint_parts=checkpoint_parts,
+        )
+        page_plan = _PLAIN_FINDING_PLANS.get(self)
+        source_validate = validate
+
+        def validate_page_plan():
+            if not source_validate():
+                return False
+            if page_plan is None:
+                return True
+            _require_plain_page_plan(page_plan)
+            return (
+                page_plan.record is record
+                and page_plan.caller is self.caller
+                and page_plan.root == self.caller._root
+                and page_plan.inventory_bytes
+                == canonical_bytes(self._cached_comments())
+            )
+
+        if not validate_page_plan():
+            raise ReviewInputError(
+                "finding lifecycle checkpoint pricing source changed"
+            )
+        return _checkpoint_factory(
+            self,
+            record,
+            checkpoint_parts=checkpoint_parts,
+            capacity=observed,
+            calls=tuple(
+                (5 if n == 0 else 4 + 3 * n)
+                + 2 * ((len(page_plan.page_bounds) if page_plan is not None else 1) - 1)
+                + guard_calls
+                + int(trust_profile is not None)
+                for n in checkpoint_parts
+            ),
+            validate=validate_page_plan,
+            profile="plain-v1" if trust_profile is None else "plain-trust-inline-v1",
+            page_counts=tuple(
+                (len(page_plan.page_bounds) if page_plan is not None else 1)
+                for _ in checkpoint_parts
+            ),
+        )
+
+    def preflight_finding_lifecycle_inline(self, record):
+        from review_sensei.finding_lifecycle_store import (
+            _inline_checkpoint_read_free,
+        )
+
+        if not self._quarantine_required and not _inline_checkpoint_read_free(record):
+            from .trust_effects import verification_profile
+
+            if verification_profile(self.caller) is not None:
+                raise ReviewInputError(
+                    "trust checkpoint inline source reads are unsupported"
+                )
+            return None
+        from review_sensei.finding_lifecycle_store import _qualified_checkpoint_pricer
+
+        pricer = _qualified_checkpoint_pricer(self)
+        if pricer is None:
+            return None
+        proof = pricer(
+            record,
+            added_parts=0,
+            added_bytes=0,
+            checkpoint_parts=(0,),
+            checkpoint_inline=self._quarantine_required,
+        )
+        if proof is None:
+            return None
+        return {
+            "checkpoint_pricing": proof,
+            "conditional_calls": 4,
+            "post_mutator_calls": 3,
+            "page_size": 100,
+            "sealed": bool(getattr(self, "_plain_finding_scope_active", False)),
+        }
+
+    def replace_finding_lifecycle_inline(
+        self, identity, mutate, *, record, reserved_tail_calls=0
+    ):
+        plan = self.preflight_finding_lifecycle_inline(record)
+        if plan is None or plan["sealed"]:
+            raise ReviewInputError(
+                "finding lifecycle inline source scope is unavailable"
+            )
+        return self.replace_finding_lifecycle_parts(
+            identity,
+            mutate,
+            record=record,
+            parts=0,
+            retained_bytes=0,
+            reserved_tail_calls=reserved_tail_calls,
+        )
+
+    def _preflight_plain_finding_parts(
+        self, identity, *, added_parts, added_bytes, checkpoint_parts
+    ):
+        from review_sensei.bounded_evidence import canonical_bytes
+        from review_sensei.session import MAX_SESSION_RECORD_BYTES
+
+        from .api_run_plan import NATIVE_OPERATION_REQUESTS
+        from .caller_operation import prewrite_fence_requests
+        from .session_ledger import parse_session_comment
+
+        checkpoints = (added_parts,) if checkpoint_parts is None else checkpoint_parts
+        if (
+            not isinstance(checkpoints, tuple)
+            or not checkpoints
+            or any(type(n) is not int or n < 0 for n in checkpoints)
+            or sum(checkpoints) != added_parts
+        ):
+            raise ReviewInputError("finding lifecycle checkpoint part plan conflicts")
+        fences = prewrite_fence_requests(self.caller)
+        selected = self._plain_finding_selected_input(identity)
+        root_calls = 4 if selected is not None else 5
+        # A specialized closed full-page plan can reserve more than the
+        # generic ten-call tranche, never more than the same caller can fund.
+        items = self._cached_comments()
+        if (
+            not self._inventory_complete
+            or self._history_reading
+            or self._broker is not None
+            or self._activation_ticket is not None
+            or self._tail_scan_pages is not None
+        ):
+            raise ReviewInputError("finding lifecycle plain frontier is unsupported")
+        roots = []
+        root_bodies = []
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("body"), str):
+                raise ReviewInputError("finding lifecycle plain frontier is incomplete")
+            parsed = parse_session_comment(item["body"], identity=identity)
+            if parsed is not None:
+                self._part_owner(item, identity)
+                roots.append(parsed)
+                root_bodies.append(item["body"])
+        if len(roots) != 1 or roots[0].record_sha256 != self.caller._root:
+            raise ReviewInputError("finding lifecycle retained session root changed")
+        record = roots[0]
+        history = record.convergence_history
+        baseline = history.get("baseline") if isinstance(history, Mapping) else None
+        disposition_needs_reads = record.disposition_snapshot is not None
+        if record.disposition_snapshot is not None:
+            from review_sensei.bounded_evidence import read_inline_evidence
+            from review_sensei.disposition_snapshot import (
+                normalize_snapshot,
+                snapshot_document,
+            )
+
+            snapshot = normalize_snapshot(record.disposition_snapshot)
+            assert snapshot is not None
+            manifest = snapshot["state_manifest"]
+            if (
+                snapshot["schema_version"] == "1.0"
+                and manifest["encoding"] == "inline-json-v1"
+            ):
+                binding = manifest["binding"]
+                if binding["producer"] != self.evidence_producer():
+                    raise ReviewInputError(
+                        "disposition snapshot producer does not match session"
+                    )
+                # This exact decoder cannot call a reader/transport. Validate
+                # the committed bytes before granting the zero-read plan.
+                document = read_inline_evidence(manifest, expected_binding=binding)
+                snapshot_document(
+                    document,
+                    result_digest=snapshot["result_digest"],
+                    item_count=manifest["item_count"],
+                )
+                disposition_needs_reads = False
+            elif (
+                snapshot["schema_version"] == "1.0"
+                and manifest["encoding"] == "partitioned-json-v1"
+                and selected is not None
+            ):
+                from review_sensei.bounded_evidence import read_partitioned_evidence
+
+                if manifest["binding"]["producer"] != self.evidence_producer():
+                    raise ReviewInputError("disposition snapshot producer changed")
+                assert self.evidence_budget is not None
+                document = read_partitioned_evidence(
+                    manifest,
+                    expected_binding=manifest["binding"],
+                    reader=lambda sid: self._current_plain_snapshot_part(identity, sid),
+                    budget=self.evidence_budget,
+                )
+                snapshot_document(
+                    document,
+                    result_digest=snapshot["result_digest"],
+                    item_count=manifest["item_count"],
+                )
+                disposition_needs_reads = False
+        if (
+            record.assessment_queue is not None
+            or disposition_needs_reads
+            or record.historical_assessments is not None
+            or isinstance(baseline, Mapping)
+            and baseline.get("encoding") == "partitioned-json-v1"
+        ):
+            raise ReviewInputError(
+                "finding lifecycle plain root needs unpriced evidence reads"
+            )
+        # Original single-page 512KiB response cap. Root replacement is bounded
+        # independently of compression; each carrier retains existing audited
+        # 4096-byte response metadata and canonical encoded-part wire reserve.
+        from .session_ledger import plain_session_comment_json_bound
+
+        root_wire = 6 * MAX_SESSION_RECORD_BYTES
+        if getattr(self, "_controlled_restart", None) is None:
+            grants = set(self._observed_consumed_grants)
+            if self._accepted_consumed_grant is not None:
+                grants.add(self._accepted_consumed_grant)
+            root_wire = plain_session_comment_json_bound(
+                consumed_grants=grants,
+                repository_id=identity.repository_id,
+                pull_request=identity.pull_request,
+            )
+        # The scoped source-owned path PATCHes the one selected comment. Its
+        # old body and replacement cannot coexist in a listing. Retain every
+        # metadata field/immutable part, and subtract only this exact JSON string.
+        replaced_body = (
+            len(canonical_bytes(root_bodies[0])) if selected is not None else 0
+        )
+        wire = len(canonical_bytes(items)) - replaced_body + root_wire + 4096
+        # Core supplies the sum of canonical part wire maxima (compressBound
+        # included, with the short final part), not arbitrary payload lengths.
+        # Actual staging repeats this with canonical rendered-part lengths.
+        # Keep framing/outer-JSON escapes and native metadata for every part.
+        wire += added_bytes + added_parts * (512 + 4096)
+        if len(items) + added_parts > 200:
+            raise ReviewInputError(
+                "finding lifecycle comment allocation capacity exceeded"
+            )
+        page_count = 1
+        if len(items) + added_parts >= 100 or wire >= 512 * 1024:
+            from .review_run import ActionRunLedger, ReviewRunLedger
+
+            if (
+                type(self)
+                not in {ApiRunSessionLedger, ActionRunLedger, ReviewRunLedger}
+                or selected is None
+                or getattr(self.replace_finding_lifecycle_parts, "__func__", None)
+                is not ApiRunSessionLedger.replace_finding_lifecycle_parts
+                or getattr(self._preflight_plain_finding_parts, "__func__", None)
+                is not ApiRunSessionLedger._preflight_plain_finding_parts
+                or getattr(self._bounded_comments, "__func__", None)
+                is not GitHubIssueCommentSessionLedger._bounded_comments
+            ):
+                raise ReviewInputError("finding lifecycle paged source is unqualified")
+            # GitHub returns issue comments in creation order. Pin the observed
+            # prefix; all future immutable parts append. A changed ordering is
+            # a refusal, never a reason to change pages or omit old history.
+            ids = tuple(item.get("id") for item in items)
+            if any(type(i) is not int or i <= 0 for i in ids) or len(set(ids)) != len(
+                ids
+            ):
+                raise ReviewInputError("finding lifecycle frontier identity is invalid")
+            bounds = [len(canonical_bytes(item)) for item in items]
+            root_index = next(
+                i for i, item in enumerate(items) if item["body"] == root_bodies[0]
+            )
+            bounds[root_index] += root_wire - replaced_body + 4096
+            # Per-page partitioning needs individual maxima, not an average of
+            # aggregate bytes. The original canonical part bound is unchanged.
+            from review_sensei.bounded_evidence import MAX_PART_BYTES
+
+            bounds.extend([MAX_PART_BYTES + 512 + 4096] * added_parts)
+            # Seal contiguous native offsets, not one pessimistic page size
+            # for the entire frontier. Sizes may grow only at aligned offsets;
+            # no response-driven retry or unobserved inventory is introduced.
+            requests: list[tuple[int, int]] = []
+            response_bounds: list[int] = []
+            offset = 0
+            while offset <= len(bounds):
+                for size in (100, 20, 10, 5, 1):
+                    if offset % size:
+                        continue
+                    members = bounds[offset : offset + size]
+                    bound = 2 + sum(members) + max(0, len(members) - 1)
+                    if bound < 512 * 1024:
+                        requests.append((size, offset // size + 1))
+                        response_bounds.append(bound)
+                        offset += size
+                        break
+                else:
+                    raise ReviewInputError("finding lifecycle page capacity exceeded")
+                if len(requests) > 10:
+                    raise ReviewInputError("finding lifecycle page capacity exceeded")
+            page_requests = tuple(requests)
+            page_size = page_requests[0][0]
+            page_bounds = tuple(response_bounds)
+            if self.caller._root != selected.record_sha256:
+                raise ReviewInputError("finding lifecycle page plan root changed")
+            plan = _PlainFindingPagePlan(
+                self.caller,
+                selected.record_sha256,
+                selected,
+                canonical_bytes(selected.to_dict()),
+                ids,
+                canonical_bytes(items),
+                page_size,
+                page_bounds,
+                page_requests,
+                len(bounds),
+                checkpoints,
+                root_calls,
+                fences,
+            )
+            _PLAIN_FINDING_ISSUED[plan] = _plain_page_signature(plan)
+            _PLAIN_FINDING_PLANS[self] = plan
+            page_count = len(page_bounds)
+        else:
+            _PLAIN_FINDING_PLANS.pop(self, None)
+            if any(
+                root_calls + 3 * n + (n + 1) * fences
+                > NATIVE_OPERATION_REQUESTS + fences
+                for n in checkpoints
+            ):
+                raise EvidenceBudgetExhausted(
+                    "finding lifecycle parts exceed original checkpoint operation"
+                )
+        carriers = tuple(self._owned_carrier_items(items, identity))
+        assert self.evidence_budget is not None
+        self.evidence_budget.preflight(
+            sum(
+                root_calls + 3 * n + 2 * (page_count - 1) + (n + 1) * fences
+                for n in checkpoints
+            )
+        )
+        return {
+            "additional_calls": 0,
+            "comment_allocations": len(items) + added_parts,
+            "retained_parts": len(carriers) + added_parts,
+            "retained_bytes": sum(len(i["body"].encode()) for i in carriers)
+            + added_bytes,
+        }
+
+    def _take_plain_finding_operation(self, caller, identity):
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .api_run_plan import NATIVE_OPERATION_REQUESTS, WRITE_CONFIRMATION_TAIL
+
+        active = _PLAIN_FINDING_ACTIVE.get(self)
+        if active is None:
+            return None
+        plan, consumed = active
+        _require_plain_page_plan(plan)
+        if (
+            consumed
+            or caller is not plan.caller
+            or caller is not self.caller
+            or caller._root != plan.root
+            or identity != plan.record.identity()
+            or canonical_bytes(plan.record.to_dict()) != plan.record_bytes
+            or self._plain_finding_selected_input(identity) is not plan.record
+            or len(plan.checkpoint_parts) != 1
+            or canonical_bytes(self._cached_comments()) != plan.inventory_bytes
+        ):
+            raise ReviewInputError("finding lifecycle paged operation custody changed")
+        _PLAIN_FINDING_ACTIVE[self] = (plan, True)
+        pages = len(plan.page_bounds)
+        calls = plan.root_calls + 3 * plan.checkpoint_parts[0] + 2 * (pages - 1)
+        assert self.evidence_budget is not None
+        self.evidence_budget.preflight(
+            calls + (plan.checkpoint_parts[0] + 1) * plan.fences
+        )
+        return max(
+            NATIVE_OPERATION_REQUESTS, calls
+        ), WRITE_CONFIRMATION_TAIL + pages - 1
+
+    def _read_plain_finding_pages(self, identity):
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        active = _PLAIN_FINDING_ACTIVE.get(self)
+        if active is None:
+            return None
+        plan, consumed = active
+        _require_plain_page_plan(plan)
+        if (
+            not consumed
+            or self.caller is not plan.caller
+            or self.caller._root != plan.root
+            or identity != plan.record.identity()
+            or canonical_bytes(plan.record.to_dict()) != plan.record_bytes
+        ):
+            raise ReviewInputError("finding lifecycle page plan custody changed")
+        if self._inventory_complete and not self._list_refresh:
+            return self._cached_comments()
+        collected = []
+        for (page_size, page), bound in zip(
+            plan.page_requests, plan.page_bounds, strict=True
+        ):
+            path = f"{self._comments_path(identity)}?per_page={page_size}&page={page}"
+            status, payload = self._request("GET", path)
+            if (
+                status != 200
+                or not isinstance(payload, list)
+                or len(payload) > page_size
+                or any(not isinstance(item, dict) for item in payload)
+                or len(canonical_bytes(payload)) > bound
+            ):
+                raise ReviewInputError("finding lifecycle planned page changed")
+            collected.extend(payload)
+            if len(collected) > plan.maximum_items:
+                raise ReviewInputError("finding lifecycle planned frontier grew")
+            if len(payload) < page_size:
+                observed_ids = tuple(item.get("id") for item in collected)
+                if (
+                    any(type(value) is not int or value <= 0 for value in observed_ids)
+                    or len(set(observed_ids)) != len(observed_ids)
+                    or observed_ids[: len(plan.inventory_ids)] != plan.inventory_ids
+                ):
+                    raise ReviewInputError(
+                        "finding lifecycle planned frontier order changed"
+                    )
+                self._replace_inventory(collected)
+                self._inventory_complete = True
+                self._list_refresh = False
+                self._note_anchor(collected)
+                return self._cached_comments()
+        raise ReviewInputError("finding lifecycle planned terminal page is not short")
+
+    def _current_plain_snapshot_part(self, identity, storage_id):
+        """Authenticate only the complete currently observed listing body."""
+        if not self._inventory_complete or self._list_refresh:
+            raise ReviewInputError("finding lifecycle snapshot listing is stale")
+        if not isinstance(storage_id, str) or not storage_id.isdecimal():
+            raise ReviewInputError("finding lifecycle snapshot part identity changed")
+        item = self._comments_by_id.get(int(storage_id))
+        if not isinstance(item, dict):
+            raise ReviewInputError("finding lifecycle snapshot part is missing")
+        return self._part_from_item(item, identity, storage_id)
+
+    def _plain_finding_document(self, record, manifest):
+        """Decode only bytes in the source-owned complete current listing."""
+        from review_sensei.bounded_evidence import (
+            read_inline_evidence,
+            read_partitioned_evidence,
+        )
+
+        from .finding_lifecycle_dictionary import _manifest
+
+        current_binding = record.finding_lifecycle["manifest"]["binding"]
+        binding = _manifest(manifest, current_binding)
+        if (
+            binding["producer"] != self.evidence_producer()
+            or binding["repository"] != record.repository
+            or binding["repository_id"] != record.repository_id
+            or binding["pull_request"] != record.pull_request
+            or binding["generation"] > record.generation
+            or not self._inventory_complete
+            or self._list_refresh
+        ):
+            raise ReviewInputError("finding dictionary complete listing scope changed")
+        if self.evidence_budget is None:
+            raise ReviewInputError("finding dictionary original read budget is missing")
+        self.evidence_budget.check()
+        if manifest["encoding"] == "inline-json-v1":
+            return read_inline_evidence(manifest, expected_binding=binding)
+        return read_partitioned_evidence(
+            manifest,
+            expected_binding=binding,
+            reader=lambda sid: self._current_plain_snapshot_part(
+                record.identity(), sid
+            ),
+            budget=self.evidence_budget,
+        )
+
+    def _require_plain_finding_dictionary(self, record):
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .finding_lifecycle_dictionary import is_dictionary, unpack
+
+        scope = getattr(self, "_plain_finding_dictionary_scope", None)
+        if scope is None and not getattr(self, "_plain_finding_scope_active", False):
+            return
+        if record.finding_lifecycle is None:
+            if scope is not None:
+                raise ReviewInputError("finding dictionary current root disappeared")
+            return
+        manifest = record.finding_lifecycle["manifest"]
+        envelope = self._plain_finding_document(record, manifest)
+        if not isinstance(envelope, dict) or "lifecycle" not in envelope:
+            raise ReviewInputError("finding dictionary selected carrier is invalid")
+        current = envelope["lifecycle"]
+        if is_dictionary(current):
+            base = self._plain_finding_document(record, current["dictionary_manifest"])
+            unpack(current, base=base, current_binding=manifest["binding"])
+        if scope is not None:
+            identity, carrier_bytes = scope
+            if record.identity() != identity:
+                raise ReviewInputError("finding dictionary checkpoint identity changed")
+            carrier = json.loads(carrier_bytes)
+            base = self._plain_finding_document(record, carrier["dictionary_manifest"])
+            unpack(carrier, base=base, current_binding=manifest["binding"])
+            if canonical_bytes(carrier) != carrier_bytes:
+                raise ReviewInputError("finding dictionary checkpoint bytes changed")
+
+    @contextmanager
+    def finding_dictionary_checkpoint(self, record, carrier):
+        """Additional negative dependency fences; this grants no writer authority."""
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .finding_lifecycle_dictionary import is_dictionary
+
+        if (
+            not is_dictionary(carrier)
+            or getattr(self, "_plain_finding_dictionary_scope", None) is not None
+        ):
+            raise ReviewInputError("finding dictionary checkpoint scope is invalid")
+        self._plain_finding_dictionary_scope: tuple[Any, bytes] | None = (
+            record.identity(),
+            canonical_bytes(carrier),
+        )
+        try:
+            self._require_plain_finding_dictionary(record)
+            yield
+        finally:
+            self._plain_finding_dictionary_scope = None
+
+    def _require_plain_finding_snapshot(self, record):
+        self._require_plain_finding_dictionary(record)
+        scope = getattr(self, "_plain_finding_snapshot_scope", None)
+        if scope is None:
+            return
+        identity, root, snapshot, _ids = scope
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        if (
+            record.identity() != identity
+            or canonical_bytes(record.disposition_snapshot) != snapshot
+            or self.caller._root != root
+            or self.caller._checkpoint_operation is None
+            or self.caller._active_operation is not self.caller._checkpoint_operation
+            or not self._plain_finding_scope_active
+        ):
+            raise ReviewInputError("finding lifecycle retained snapshot scope changed")
+
+    def _read_plain_finding_snapshot_part(self, identity, storage_id):
+        scope = getattr(self, "_plain_finding_snapshot_scope", None)
+        if scope is None or storage_id not in scope[3]:
+            return None
+        record = getattr(self.caller, "_effect_record", None)
+        if record is None or identity != scope[0]:
+            raise ReviewInputError("finding lifecycle snapshot scope identity changed")
+        self._require_plain_finding_snapshot(record)
+        return self._current_plain_snapshot_part(identity, storage_id)
+
+    def _plain_finding_selected_input(self, identity):
+        """Validate the existing owned complete frontier without another read."""
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        from .session_ledger import parse_session_comment
+
+        record = getattr(self.caller, "_effect_record", None)
+        if (
+            record is None
+            or record.identity() != identity
+            or record.record_sha256 != self.caller._root
+            or not self._inventory_complete
+            or self._history_reading
+            or self._broker is not None
+            or self._activation_ticket is not None
+            or self._tail_scan_pages is not None
+            or getattr(self, "_controlled_restart", None) is not None
+            or self._quarantine_required
+        ):
+            return None
+        self.caller._require_ledger(self, identity)
+        roots = []
+        for item in self._cached_comments():
+            if not isinstance(item, dict) or not isinstance(item.get("body"), str):
+                return None
+            parsed = parse_session_comment(item["body"], identity=identity)
+            if parsed is not None:
+                self._part_owner(item, identity)
+                roots.append((item.get("id"), parsed))
+        if len(roots) != 1 or type(roots[0][0]) is not int or roots[0][0] <= 0:
+            return None
+        if canonical_bytes(roots[0][1].to_dict()) != canonical_bytes(record.to_dict()):
+            raise ReviewInputError("finding lifecycle selected input bytes changed")
+        return record
+
+    def _consume_plain_finding_input(self, identity):
+        capability = getattr(self, "_plain_finding_input", None)
+        if capability is None:
+            if getattr(self, "_plain_finding_scope_active", False):
+                raise ReviewInputError(
+                    "finding lifecycle selected input already consumed"
+                )
+            return None
+        self._plain_finding_input = None
+        record, commitment = capability
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        if (
+            record is not getattr(self.caller, "_effect_record", None)
+            or record is not self._plain_finding_selected_input(identity)
+            or canonical_bytes(record.to_dict()) != commitment
+            or self.caller._checkpoint_operation is None
+            or self.caller._active_operation is not self.caller._checkpoint_operation
+        ):
+            raise ReviewInputError("finding lifecycle selected input authority changed")
+        # Run the full existing marker/producer/conflict validation over the
+        # independently observed frontier, not only the lightweight preflight.
+        self._list_refresh = False
+        comment_id, parsed = self._discover(identity)
+        if parsed is None or canonical_bytes(parsed.to_dict()) != commitment:
+            raise ReviewInputError("finding lifecycle selected frontier changed")
+        return comment_id, record
+
+    @_guarded_lifecycle_writer
+    def replace_finding_lifecycle_parts(
+        self,
+        identity,
+        mutate,
+        *,
+        record,
+        parts,
+        retained_bytes,
+        reserved_tail_calls=0,
+        _guarded_authorize=None,
+    ):
+        self.preflight_finding_lifecycle_retention(
+            identity,
+            added_parts=parts,
+            added_bytes=retained_bytes,
+            checkpoint_parts=(parts,),
+        )
+        if self._quarantine_required:
+            from .quarantine_census import (
+                activate_lifecycle_capacity,
+                lifecycle_capacity_plan,
+            )
+
+            if record is not self.caller._effect_record:
+                raise ReviewInputError("quarantine lifecycle input is not source-owned")
+            from .quarantine_action import decision_fence_capacity
+
+            business = decision_fence_capacity(self)
+            if (
+                business is None
+                or type(reserved_tail_calls) is not int
+                or reserved_tail_calls < 0
+            ):
+                raise ReviewInputError(
+                    "quarantine lifecycle complete source tail is unsupported"
+                )
+            scope = lifecycle_capacity_plan(self, identity, added_parts=parts)
+            with activate_lifecycle_capacity(scope):
+                # Whole operation, protected caller tail and the existing fresh
+                # action guard are funded before any guard/census dispatch.
+                assert self.evidence_budget is not None
+                self.evidence_budget.preflight(
+                    scope.enumeration_plan().worst_read_calls()
+                    + 6
+                    + 2 * parts
+                    + business[0]
+                    + reserved_tail_calls
+                )
+                if scope.extension is not None:
+                    if _guarded_authorize is None:
+                        raise ReviewInputError(
+                            "quarantine lifecycle writer capability is absent"
+                        )
+                    _guarded_authorize(scope)
+                return self.replace(identity, mutate)
+        if getattr(self, "_finding_lifecycle_page_size", None) is not None:
+            raise ReviewInputError("finding lifecycle scoped mutation cannot nest")
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        selected = self._plain_finding_selected_input(identity)
+        if selected is not None and record is not selected:
+            raise ReviewInputError(
+                "finding lifecycle selected input is not source-owned"
+            )
+        if getattr(self, "_plain_finding_scope_active", False):
+            raise ReviewInputError("finding lifecycle selected input cannot nest")
+        page_plan = _PLAIN_FINDING_PLANS.pop(self, None)
+        if page_plan is not None:
+            _PLAIN_FINDING_ACTIVE[self] = (page_plan, False)
+        self._finding_lifecycle_page_size = 100
+        self._plain_finding_input = (
+            (record, canonical_bytes(record.to_dict()))
+            if selected is not None
+            else None
+        )
+        self._plain_finding_scope_active = selected is not None
+        self._plain_finding_snapshot_scope = None
+        snapshot = record.disposition_snapshot
+        if (
+            selected is not None
+            and snapshot is not None
+            and snapshot["schema_version"] == "1.0"
+            and snapshot["state_manifest"]["encoding"] == "partitioned-json-v1"
+        ):
+            self._plain_finding_snapshot_scope = (
+                identity,
+                record.record_sha256,
+                canonical_bytes(snapshot),
+                frozenset(p["storage_id"] for p in snapshot["state_manifest"]["parts"]),
+            )
+        try:
+            return self.replace(identity, mutate)
+        finally:
+            self._plain_finding_snapshot_scope = None
+            self._plain_finding_input = None
+            self._plain_finding_scope_active = False
+            self._finding_lifecycle_page_size = None
+            _PLAIN_FINDING_ACTIVE.pop(self, None)
 
     def stage_disposition_snapshot_batch(self, identity, **kwargs):
         if self._part_staging_identity is not None:
@@ -2262,7 +3652,21 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
 
     def load(self, identity: SessionIdentity, **kwargs: Any) -> Any:
         with self.caller.read_operation("native-load"):
-            return super().load(identity, **kwargs)
+            loaded = super().load(identity, **kwargs)
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        owned = self.caller._effect_record
+        observed = loaded.record
+        if (
+            loaded.status in {"ok", "migrated"}
+            and owned is not None
+            and observed is not None
+            and observed.identity() == owned.identity() == identity
+            and observed.record_sha256 == owned.record_sha256 == self.caller._root
+            and canonical_bytes(observed.to_dict()) == canonical_bytes(owned.to_dict())
+        ):
+            return replace(loaded, record=owned)
+        return loaded
 
     def _fetch_pages(
         self, identity: SessionIdentity, *, since: str | None
@@ -2296,3 +3700,86 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         now: datetime | None = None,
     ) -> SessionRecord:
         return self.caller.replace_checkpoint(self, identity, mutate, now=now)
+
+
+# Register the exact source implementation, not a generic cheaper-count hook.
+
+
+_install_checkpoint_pricer(
+    ApiRunSessionLedger.preflight_finding_lifecycle_checkpoint_pricing
+)
+
+
+from .guarded_hot_namespace import (  # noqa: E402
+    before_sequence as _hot_before_sequence,
+)
+from .guarded_hot_namespace import (  # noqa: E402
+    confirm_checkpoint as _hot_confirm_checkpoint,
+)
+from .guarded_hot_namespace import (  # noqa: E402
+    install_caller as _install_hot_namespace,
+)
+
+_install_hot_namespace(ApiRunRequestTransport)
+del _install_hot_namespace
+
+
+from .quarantine_command_namespace import (  # noqa: E402
+    bind_response_confirmation as _bind_namespace_confirmation,
+)
+from .quarantine_command_namespace import (  # noqa: E402
+    confirm_response as _namespace_confirm_response,
+)
+from .quarantine_command_namespace import (  # noqa: E402
+    install as _install_cold_namespace,
+)
+
+_install_cold_namespace(ApiRunRequestTransport)
+del _install_cold_namespace
+
+
+from .quarantine_command_checkpoint import install_source as _install_cold_source  # noqa: E402
+
+_install_cold_source("open", ApiRunRequestTransport.open)
+del _install_cold_source
+
+
+# Capture guarded/trust transport identities only after the source-owned
+# materialized phase wrapper is installed. No late wrapper is silently trusted.
+from .materialized_publication_phase import (  # noqa: E402
+    install_caller as _install_materialized_phase,
+)
+
+_install_materialized_phase(ApiRunRequestTransport)
+del _install_materialized_phase
+
+
+_install_guarded_lifecycle_writer(ApiRunSessionLedger, ApiRunRequestTransport)
+
+
+# Pin the ordinary physical dispatch implementation before any mode can issue
+# a trust-effect profile. The default path retains zero extra requests.
+from .trust_effects import _install_transport_source  # noqa: E402
+
+_install_transport_source(ApiRunRequestTransport)
+del _install_transport_source
+
+# Capture final installed closures at the defining source boundary, before the
+# module seal. Closed default-only planners reject replaced dynamic exports
+# before invoking them; this does not enable or re-install a trust profile.
+from . import trust_effects as _installed_trust_effects  # noqa: E402
+
+_original_trust_verification_calls = _installed_trust_effects.verification_calls
+_original_trust_verification_profile = _installed_trust_effects.verification_profile
+
+
+from .trust_capabilities import _install_capability_transport  # noqa: E402
+from .trust_effects import after_response as _validate_trust_return  # noqa: E402
+
+_install_capability_transport(ApiRunRequestTransport)
+del _install_capability_transport
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

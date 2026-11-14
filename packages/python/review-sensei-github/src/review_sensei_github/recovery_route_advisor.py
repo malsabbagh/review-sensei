@@ -1834,7 +1834,8 @@ def _assemble_attempt_evidence_packet(
     resolved_case_id = case_id
     if resolved_case_id is None:
         if (
-            identity.pull_request == REVIEWSENSEI_443_PULL_REQUEST
+            identity.repository.casefold() == REVIEWSENSEI_443_REPOSITORY.casefold()
+            and identity.pull_request == REVIEWSENSEI_443_PULL_REQUEST
             and run_id == REVIEWSENSEI_443_RUN_ID
             and session_gen == REVIEWSENSEI_443_GENERATION
         ):

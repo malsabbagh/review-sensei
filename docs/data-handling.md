@@ -57,6 +57,19 @@ is bounded to the existing 8,192-byte ceiling plus one overflow sentinel before
 JSON parsing. Invalid evidence still occupies its existing storage allowance;
 pruning does not reset accounting, enlarge capacity or authorize recovery.
 
+The bounded finding-lifecycle candidate retains normalized validated finding
+prose, internal admission flags, hidden obligations, native identity/body
+commitments and pending effect intents in the existing session evidence carrier.
+It does not retain prompts, raw provider responses or credentials, and does not
+capture additional raw source context. Hosted evidence comments have the
+repository's existing visibility; compression is not encryption. Public status
+summaries do not enumerate deferred findings, but repository readers can access
+the underlying evidence. The existing finite retention, response and request
+limits continue to apply. See
+[finding and artifact lifecycle](finding-and-artifact-lifecycle.md) for the
+carrier, restart and migration boundaries. No new storage destination or access
+grant is introduced.
+
 Lens documents are read only for the current review and are not persisted by
 the core. The optional in-memory `ReviewContextCache` stores only bounded
 metadata such as coverage mode and generation; it is repository/PR-scoped,

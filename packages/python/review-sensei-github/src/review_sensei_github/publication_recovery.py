@@ -279,6 +279,20 @@ class _PaginationObservationHttp(GitHubHttp):
         operation = _PAGINATION_OBSERVATIONS.setdefault(budget, WeakKeyDictionary())
         self._oversized_page_ceilings = operation.setdefault(base, {})
 
+        from review_sensei.source_registry import require_module_seal
+
+        from . import capacity_transport_membership
+
+        require_module_seal(capacity_transport_membership)
+        capacity_transport_membership.register_wrapper(self)
+
+    @property
+    def preflight_native_batch(self):
+        # Preserve the source journal's pure complete-batch admission across
+        # this accounting-only wrapper. Absence must remain AttributeError;
+        # no wrapper can manufacture a successful admission callback.
+        return getattr(self.transport, "preflight_native_batch")
+
     def pagination_page_size(self, path: str, offset: int = 0) -> int:
         parsed = urlsplit(path)
         query = parse_qs(parsed.query)
@@ -346,6 +360,20 @@ class PublicationBudgetHttp(GitHubHttp):
             raise GitHubPublicationError("publication budget identity mismatches")
         self._already_charged = known_wrapper or known_feedback
         self.transport = _PaginationObservationHttp(http, budget)
+
+        from review_sensei.source_registry import require_module_seal
+
+        from . import capacity_transport_membership
+
+        require_module_seal(capacity_transport_membership)
+        capacity_transport_membership.register_wrapper(self)
+
+    @property
+    def preflight_native_batch(self):
+        # Preserve the source journal's pure complete-batch admission across
+        # this accounting-only wrapper. Absence must remain AttributeError;
+        # no wrapper can manufacture a successful admission callback.
+        return getattr(self.transport, "preflight_native_batch")
 
     def pagination_page_size(self, path: str, offset: int = 0) -> int:
         """Reuse only oversized-request ceilings at this exact item offset."""
@@ -1031,9 +1059,16 @@ def retain_review_result(
         assert validated.transaction is not None
         if already_retained:
             if validated.transaction.phase == "publication_pending":
-                mark_review_publication_unconfirmed(
-                    ledger, identity, validated.transaction
-                )
+                from review_sensei import publication_intent_fusion
+                from review_sensei.source_registry import require_module_seal
+
+                require_module_seal(publication_intent_fusion)
+                defer_current = publication_intent_fusion.defer_current
+
+                if not defer_current():
+                    mark_review_publication_unconfirmed(
+                        ledger, identity, validated.transaction
+                    )
             return
         event_key = _event_key(identity, validated.transaction)
         primed_comments = None
@@ -1141,10 +1176,42 @@ def retain_review_result(
                 loaded=_loaded if primed_comments is not None else None,
             )
             if validated.transaction.phase == "publication_pending":
-                mark_review_publication_unconfirmed(
-                    ledger, identity, validated.transaction
-                )
+                from review_sensei import publication_intent_fusion
+                from review_sensei.source_registry import require_module_seal
+
+                require_module_seal(publication_intent_fusion)
+                defer_current = publication_intent_fusion.defer_current
+
+                if not defer_current():
+                    mark_review_publication_unconfirmed(
+                        ledger, identity, validated.transaction
+                    )
     except (ValueError, ReviewInputError) as exc:
         raise GitHubPublicationError(
             "publication result not retained: " + str(exc)
         ) from exc
+
+
+from review_sensei.publication_intent_fusion import install_retention as _install_fusion  # noqa: E402
+
+_install_fusion(globals())
+del _install_fusion
+
+
+from .materialized_publication_phase import (  # noqa: E402
+    install_retention as _install_materialized_phase,
+)
+
+_install_materialized_phase(globals())
+del _install_materialized_phase
+
+
+from .empty_original_admission import install_recovery as _install_empty_recovery  # noqa: E402
+
+recover_retained_review_result = _install_empty_recovery(recover_retained_review_result)
+del _install_empty_recovery
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

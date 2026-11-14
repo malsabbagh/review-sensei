@@ -1642,7 +1642,7 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
         # 1. SiteVault #142 (`phase=no-transaction`, `record.transaction=None`,
         #    `analysis_abort=None`, released reservation, no live settlement receipt):
         sv_142_id = SessionIdentity(
-            repository="org/sitevault",
+            repository="malsabbagh/site-vault",
             pull_request=SITEVAULT_142_PULL_REQUEST,
             repository_id=900142,
         )
@@ -1692,6 +1692,34 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             diagnostics_available=False,
             session_comment_ref={"id": 14201, "bytes": 1024, "sha256": "9" * 64},
         )
+
+        # A lookalike/foreign repository must not inherit this historical incident label.
+        for foreign_repository in ("other/site-vault", "malsabbagh/site-vault-copy"):
+            with self.subTest(foreign_repository=foreign_repository):
+                foreign_packet = build_no_transaction_attempt_packet(
+                    SessionRecord._construct(
+                        **{
+                            **{
+                                key: value
+                                for key, value in vars(sv_142_rec).items()
+                                if key != "record_sha256" and not key.startswith("_")
+                            },
+                            "repository": foreign_repository,
+                        }
+                    ),
+                    owner_ceased=True,
+                    diagnostics_available=False,
+                    session_comment_ref={
+                        "id": 14201,
+                        "bytes": 1024,
+                        "sha256": "9" * 64,
+                    },
+                )
+                self.assertNotEqual(foreign_packet.case_id, SITEVAULT_142_CASE_ID)
+                self.assertTrue(
+                    foreign_packet.case_id.startswith(foreign_repository + "#")
+                )
+                self.assertFalse(foreign_packet.authority)
         self.assertEqual(sv_142_rec.record_sha256, sv_142_orig_sha)
         self.assertFalse(pkt_142_cold.authority)
         self.assertFalse(pkt_142_cold.reenroll_permitted)
@@ -1738,7 +1766,7 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
         # 2. SiteVault #153 (distinct PR & case_id; unconfirmed abort / unknown dispatch
         #    and active reservation shapes without resetting or reenrolling):
         sv_153_id = SessionIdentity(
-            repository="org/sitevault",
+            repository="malsabbagh/site-vault",
             pull_request=SITEVAULT_153_PULL_REQUEST,
             repository_id=900142,
         )

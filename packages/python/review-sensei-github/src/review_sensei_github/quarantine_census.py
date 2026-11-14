@@ -12,6 +12,9 @@ from __future__ import annotations
 import json
 import re
 import time
+import weakref
+from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlsplit
 
 from review_sensei.errors import ReviewInputError
@@ -67,7 +70,7 @@ def _unique(pairs):
     return result
 
 
-def is_readonly_census(request, api_url):
+def is_readonly_census(request, api_url, *, identity=None, resolution_only=False):
     """Classify only closed source reads, never arbitrary GraphQL POSTs."""
     if not isinstance(api_url, str) or request.get_method() != "POST":
         return False
@@ -86,6 +89,30 @@ def is_readonly_census(request, api_url):
     except (ValueError, UnicodeError):
         return False
     if not isinstance(value, dict) or not isinstance(value.get("query"), str):
+        return False
+    # This ordinary discovery POST is a read, but only for the current root's
+    # repository/PR and the original single bounded source operation.
+    from review_sensei.session import SessionIdentity
+    from review_sensei.source_registry import require_module_seal
+
+    from . import thread_resolution
+
+    if resolution_only and value.get("operationName") == "FindingResolutionThreads":
+        try:
+            require_module_seal(thread_resolution)
+        except ReviewInputError:
+            return False
+        variables = value.get("variables")
+        return (
+            type(identity) is SessionIdentity
+            and set(value) == {"query", "operationName", "variables"}
+            and value["query"] == thread_resolution._QUERY
+            and isinstance(variables, dict)
+            and _variables(variables)
+            and variables["owner"] + "/" + variables["name"] == identity.repository
+            and variables["number"] == identity.pull_request
+        )
+    if resolution_only:
         return False
     if value["query"] == QUERY:
         return set(value) == {"query", "variables"} and _variables(value["variables"])
@@ -300,12 +327,57 @@ def fetch_comments(
     observe_request=None,
 ):
     """Complete bounded census; every failed adaptive attempt spends a call."""
+    from review_sensei.source_registry import require_module_seal
+
+    from . import historical_invocation_census
     from .publication_recovery import _publication_transport
+    from .quarantine_creation_census import selected_plan
+
+    require_module_seal(historical_invocation_census)
+    historical_reader = historical_invocation_census.choose(ledger, identity)
+    creation = selected_plan(ledger, identity)
+    if creation is not None:
+        from .packed_comment_census import fetch_packed_comments
+
+        return fetch_packed_comments(
+            ledger,
+            identity,
+            plan=creation,
+            max_requests=min(
+                creation.worst_read_calls(),
+                10 if max_requests is None else max_requests,
+            ),
+            timeout_seconds=timeout_seconds,
+            before_read=before_read,
+            observe_request=observe_request,
+        )
+
+    lifecycle = getattr(ledger, "_quarantine_lifecycle_capacity", None)
+    if lifecycle is not None:
+        from .packed_comment_census import fetch_packed_comments
+
+        if type(lifecycle) is not _LifecycleCapacity:
+            raise ReviewInputError("quarantine lifecycle census scope is unissued")
+        lifetime_plan = _LifecycleCapacity.require(lifecycle, ledger, identity)
+        if historical_reader is None:
+            return fetch_packed_comments(
+                ledger,
+                identity,
+                plan=lifetime_plan,
+                max_requests=max_requests,
+                timeout_seconds=timeout_seconds,
+                before_read=before_read,
+                observe_request=observe_request,
+            )
 
     guard = getattr(
         _publication_transport(ledger.http), "_quarantine_capacity_guard", None
     )
-    if guard is not None and guard.comment_plan is not None:
+    if (
+        historical_reader is None
+        and guard is not None
+        and guard.comment_plan is not None
+    ):
         from .packed_comment_census import fetch_packed_comments
 
         if guard.identity != identity:
@@ -319,6 +391,12 @@ def fetch_comments(
             before_read=before_read,
             observe_request=observe_request,
         )
+    from .quarantine_command_execution import (
+        begin_receipt_census,
+        observe_receipt_census,
+    )
+
+    receipt_census = begin_receipt_census(ledger, identity)
     owner, name = identity.repository.split("/", 1)
     profiles = getattr(ledger, "_quarantine_census_sizes", None)
     if profiles is None:
@@ -328,13 +406,17 @@ def fetch_comments(
     seen_ids: set[int] = set()
     cursors: set[str] = set()
     after, total = None, None
-    certified = getattr(ledger, "_quarantine_capacity_cursor", False)
+    certified = historical_reader is not None or getattr(
+        ledger, "_quarantine_capacity_cursor", False
+    )
     first = 100 if certified else _page_hint(ledger, seen_ids)
     requests = (
         MAX_PAGINATION_PAGES
         if max_requests is None
         else min(max_requests, MAX_PAGINATION_PAGES)
     )
+    if historical_reader is not None:
+        requests = min(requests, 1)
     if type(requests) is not int or not 1 <= requests <= MAX_PAGINATION_PAGES:
         raise ReviewInputError("quarantine census request bound is invalid")
     deadline = time.monotonic() + (
@@ -469,7 +551,12 @@ def fetch_comments(
                 or (not nodes and cursor is not None)
             ):
                 raise ReviewInputError("quarantine census terminal page is incomplete")
-            return collected
+            if historical_reader is not None:
+                require_module_seal(historical_invocation_census)
+                historical_invocation_census.finish(
+                    historical_reader, ledger, identity, collected, response
+                )
+            return observe_receipt_census(receipt_census, collected)
         if (
             len(nodes) != first
             or not _cursor(cursor)
@@ -482,3 +569,624 @@ def fetch_comments(
     raise ReviewInputError(
         "quarantine complete census exceeded its physical request bound"
     )
+
+
+# This scope refines enumeration capacity only. It does not authorize a native
+# mutation, settle an old writer, or replace the checkpoint's fresh root fences.
+_LIFECYCLE_ISSUED: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+_LIFECYCLE_ACTIVE: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True, eq=False)
+class _LifecycleCapacity:
+    ledger: Any
+    caller: Any
+    identity: Any
+    record: Any
+    root: str
+    record_bytes: bytes
+    profile: bytes
+    plan: Any
+    parts: int
+    extension: Any = None
+    read_plan: Any = None
+
+    def enumeration_plan(self):
+        return self.plan if self.read_plan is None else self.read_plan
+
+    def _require_scope(self, ledger, identity):
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        issued = _LIFECYCLE_ACTIVE.get(self)
+        if (
+            issued is None
+            or issued[0] != _LifecycleCapacity._seal(self)
+            or ledger is not self.ledger
+            or ledger.caller is not self.caller
+            or identity != self.identity
+            or self.caller._root != self.root
+            or self.caller._effect_record is not self.record
+            or canonical_bytes(self.record.to_dict()) != self.record_bytes
+            or canonical_bytes(_lifecycle_profile(ledger)) != self.profile
+        ):
+            raise ReviewInputError("quarantine lifecycle census scope changed")
+        if self.read_plan is not None:
+            from review_sensei.source_registry import require_module_seal
+
+            from . import materialized_publication_phase
+
+            require_module_seal(materialized_publication_phase)
+            materialized_publication_phase.require_invocation_read_plan(self)
+        return issued
+
+    def require(self, ledger, identity):
+        issued = _LifecycleCapacity._require_scope(self, ledger, identity)
+        operation = self.caller._checkpoint_operation
+        if operation is None or self.caller._active_operation is not operation:
+            raise ReviewInputError(
+                "quarantine lifecycle census is outside its checkpoint"
+            )
+        if issued[1] is None:
+            if self.extension is not None:
+                from .quarantine_capacity import activate_lifecycle_extension
+
+                activate_lifecycle_extension(
+                    self.extension, capability=issued[2], operation=operation
+                )
+            _LIFECYCLE_ACTIVE[self] = (issued[0], operation, None)
+        elif operation is not issued[1]:
+            raise ReviewInputError("quarantine lifecycle census operation changed")
+        self.caller._require_ledger(ledger, identity)
+        self.caller.budget_view.check()
+        return _LifecycleCapacity.enumeration_plan(self)
+
+    def _seal(self):
+        return (
+            id(self.ledger),
+            id(self.caller),
+            self.identity,
+            id(self.record),
+            self.root,
+            self.record_bytes,
+            self.profile,
+            id(self.plan),
+            tuple(sorted(self.plan.known.items())),
+            self.plan.unknown,
+            tuple(sorted(self.plan.metadata_known.items())),
+            self.plan.metadata_unknown,
+            self.parts,
+            id(self.extension),
+            id(self.read_plan),
+            None
+            if self.read_plan is None
+            else (
+                tuple(self.read_plan.known.items()),
+                self.read_plan.unknown,
+                tuple(self.read_plan.metadata_known.items()),
+                self.read_plan.metadata_unknown,
+            ),
+        )
+
+
+def _lifecycle_profile(ledger):
+    from .publication_recovery import _publication_transport
+    from .quarantine_origin import _AUTHENTICATED, AuthenticatedQuarantine
+
+    authenticated = ledger._quarantine_authenticated
+    guard = getattr(
+        _publication_transport(ledger.http), "_quarantine_capacity_guard", None
+    )
+    if guard is not None:
+        from .quarantine_capacity import installed_capacity
+
+        try:
+            installed_capacity(ledger, ledger.caller._effect_record.identity())
+        except ReviewInputError as exc:
+            raise ReviewInputError(
+                "quarantine lifecycle capacity source profile changed"
+            ) from exc
+    if (
+        type(authenticated) is not AuthenticatedQuarantine
+        or authenticated not in _AUTHENTICATED
+    ):
+        raise ReviewInputError("quarantine lifecycle capacity source profile changed")
+    return {
+        "guard": id(guard) if guard is not None else None,
+        "tail": ledger._quarantine_native_comment_bounds,
+        "tail_parts": ledger._quarantine_native_tail_parts,
+        "producer": ledger.evidence_producer(),
+        "authenticated_source": id(authenticated),
+        "isolation": authenticated.archive["target_isolation"],
+        "lineage": authenticated.lineage,
+    }
+
+
+def lifecycle_capacity_plan(ledger, identity, *, added_parts):
+    """Pure full-frontier capacity from the already authenticated two-root scope."""
+    from review_sensei.bounded_evidence import MAX_PART_BYTES, canonical_bytes
+
+    from .api_run_requests import ApiRunSessionLedger
+    from .packed_comment_census import CommentAllocationPlan, wire
+    from .quarantine_capacity import full_review_comment_tail, native_reserve
+    from .quarantine_origin import (
+        _AUTHENTICATED,
+        AuthenticatedQuarantine,
+        read_predecessor,
+    )
+    from .review_run import ActionRunLedger, ReviewRunLedger
+    from .session_ledger import parse_session_comment, plain_session_comment_json_bound
+
+    if (
+        type(ledger) not in {ApiRunSessionLedger, ActionRunLedger, ReviewRunLedger}
+        or type(added_parts) is not int
+        or not 0 <= added_parts <= 256
+    ):
+        raise ReviewInputError("quarantine lifecycle capacity source is unsupported")
+    caller = ledger.caller
+    caller._require_ledger(ledger, identity)
+    record = caller._effect_record
+    authenticated = ledger._quarantine_authenticated
+    if (
+        not ledger._quarantine_required
+        or not ledger._inventory_complete
+        or record is None
+        or record.record_sha256 != caller._root
+        or type(authenticated) is not AuthenticatedQuarantine
+        or authenticated not in _AUTHENTICATED
+        or authenticated.original_caller is not caller
+        or authenticated.original_identity != identity
+        or canonical_bytes(record.quarantine_lineage) != authenticated.lineage_bytes
+    ):
+        raise ReviewInputError(
+            "quarantine lifecycle capacity lacks authenticated current lineage"
+        )
+    receipt = None
+    if authenticated.record_sha256 != record.record_sha256:
+        from .quarantine_checkpoint import confirmed_checkpoint_capacity
+
+        receipt = confirmed_checkpoint_capacity(caller, ledger, identity)
+    predecessor = read_predecessor(authenticated.archive)
+    lineage = authenticated.lineage
+    expected = {lineage["predecessor_comment_id"]: predecessor.record_sha256}
+    from .publication_recovery import _publication_transport
+
+    guard = getattr(
+        _publication_transport(ledger.http), "_quarantine_capacity_guard", None
+    )
+    root_wire_bound = 9 + plain_session_comment_json_bound()
+    if guard is not None:
+        from .quarantine_capacity import installed_capacity
+
+        guard = installed_capacity(ledger, identity)
+        # The original guard rejects every root PATCH above this already
+        # admitted bound. Preserve its bound, not an unreachable larger root.
+        root_wire_bound = guard.closure_wire
+    roots, known = {}, {}
+    replaced = False
+    for row in ledger._cached_comments():
+        identifier, body = row.get("id"), row.get("body")
+        if (
+            type(identifier) is not int
+            or identifier <= 0
+            or identifier in known
+            or not isinstance(body, str)
+        ):
+            raise ReviewInputError(
+                "quarantine lifecycle capacity frontier is incomplete"
+            )
+        if receipt is not None and identifier == receipt.comment_id:
+            previous = parse_session_comment(body, identity=identity)
+            if (
+                previous is None
+                or previous.record_sha256 != authenticated.record_sha256
+                or canonical_bytes(previous.quarantine_lineage)
+                != authenticated.lineage_bytes
+            ):
+                raise ReviewInputError(
+                    "quarantine lifecycle receipt predecessor changed"
+                )
+            ledger._part_owner(row, identity)
+            body = receipt.body
+            replaced = True
+        known[identifier] = wire({"body": body})
+        from .native_operation_envelope import OPERATION_WIRE_BOUND
+        from .operation_host import OPERATION_COMMENT_MARKER
+
+        if body.startswith(OPERATION_COMMENT_MARKER + "\n"):
+            known[identifier] = max(known[identifier], OPERATION_WIRE_BOUND)
+        parsed = parse_session_comment(body, identity=identity)
+        if parsed is not None:
+            ledger._part_owner(row, identity)
+            roots[identifier] = parsed.record_sha256
+            if parsed.record_sha256 == record.record_sha256:
+                if canonical_bytes(parsed.to_dict()) != canonical_bytes(
+                    record.to_dict()
+                ):
+                    raise ReviewInputError(
+                        "quarantine lifecycle selected record changed"
+                    )
+                if identifier in expected:
+                    raise ReviewInputError(
+                        "quarantine lifecycle root collides with predecessor"
+                    )
+                expected[identifier] = record.record_sha256
+            # Preserve both roots' maximum legal renderer width. The old root
+            # can never be silently removed from the capacity calculation.
+            known[identifier] = max(
+                known[identifier],
+                root_wire_bound,
+            )
+    if (
+        (receipt is not None and not replaced)
+        or len(expected) != 2
+        or roots != expected
+        or predecessor.record_sha256 != lineage["predecessor_record_sha256"]
+    ):
+        raise ReviewInputError("quarantine lifecycle predecessor/current roots changed")
+    tail = full_review_comment_tail()
+    if ledger._quarantine_native_comment_bounds not in (None, tail):
+        raise ReviewInputError(
+            "quarantine lifecycle original tail profile is unsupported"
+        )
+    isolation = authenticated.archive["target_isolation"]
+    from .publication_recovery import _publication_transport
+
+    guard = getattr(
+        _publication_transport(ledger.http), "_quarantine_capacity_guard", None
+    )
+    extension = None
+    if guard is not None:
+        from .quarantine_capacity import lifecycle_capacity_extension
+
+        if native_reserve(isolation) is None:
+            raise ReviewInputError("quarantine lifecycle guard isolation changed")
+        extension = lifecycle_capacity_extension(
+            ledger, identity, known=known, added_parts=added_parts
+        )
+        plan = extension.plan
+    else:
+        if (
+            isolation.get("schema_version") != "quarantine-target-isolation-v1"
+            or native_reserve(isolation) is not None
+        ):
+            raise ReviewInputError(
+                "quarantine lifecycle original capacity guard is missing"
+            )
+        # Every original event/archive and native tail remains reserved.
+        promised_parts = 2 * len(authenticated.pending) + 5
+        plan = CommentAllocationPlan(
+            known,
+            (*tail, *((MAX_PART_BYTES + 512,) * (added_parts + promised_parts))),
+        )
+    from review_sensei.source_registry import require_module_seal
+
+    from . import materialized_publication_phase
+
+    require_module_seal(materialized_publication_phase)
+    read_plan = materialized_publication_phase.invocation_read_plan(
+        ledger, identity, plan=plan, added_parts=added_parts
+    )
+    enumeration = plan if read_plan is None else read_plan
+    if enumeration.worst_read_calls() > MAX_PAGINATION_PAGES:
+        raise ReviewInputError(
+            "quarantine lifecycle complete census exceeds original request bound"
+        )
+    scope = _LifecycleCapacity(
+        ledger,
+        caller,
+        identity,
+        record,
+        record.record_sha256,
+        canonical_bytes(record.to_dict()),
+        canonical_bytes(_lifecycle_profile(ledger)),
+        plan,
+        added_parts,
+        extension,
+        read_plan,
+    )
+    _LIFECYCLE_ISSUED[scope] = _LifecycleCapacity._seal(scope)
+    return scope
+
+
+def activate_lifecycle_capacity(scope):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def active():
+        if type(scope) is not _LifecycleCapacity or _LIFECYCLE_ISSUED.pop(
+            scope, None
+        ) != _LifecycleCapacity._seal(scope):
+            raise ReviewInputError(
+                "quarantine lifecycle capacity was not source-issued"
+            )
+        ledger = scope.ledger
+        if getattr(ledger, "_quarantine_lifecycle_capacity", None) is not None:
+            raise ReviewInputError("quarantine lifecycle census cannot nest")
+        _LIFECYCLE_ACTIVE[scope] = (_LifecycleCapacity._seal(scope), None, None)
+        ledger._quarantine_lifecycle_capacity = scope
+        try:
+            yield
+        finally:
+            ledger._quarantine_lifecycle_capacity = None
+            _LIFECYCLE_ACTIVE.pop(scope, None)
+
+    return active()
+
+
+def _bind_lifecycle_activation(scope, capability):
+    issued = _LifecycleCapacity._require_scope(scope, scope.ledger, scope.identity)
+    if issued[1] is not None or issued[2] is not None:
+        raise ReviewInputError("quarantine lifecycle writer capability was reused")
+    _LIFECYCLE_ACTIVE[scope] = (issued[0], None, capability)
+
+
+def lifecycle_checkpoint_operation(ledger, caller, identity):
+    """Price only the active source-issued quarantine lifecycle checkpoint."""
+    scope = getattr(ledger, "_quarantine_lifecycle_capacity", None)
+    if scope is None:
+        return None
+    if type(scope) is not _LifecycleCapacity or scope.caller is not caller:
+        raise ReviewInputError("quarantine lifecycle checkpoint scope is unissued")
+    _LifecycleCapacity._require_scope(scope, ledger, identity)
+    return (
+        _LifecycleCapacity.enumeration_plan(scope).worst_read_calls()
+        + 6
+        + 2 * scope.parts
+    )
+
+
+def lifecycle_checkpoint_pricing(
+    ledger, record, *, added_parts, added_bytes, checkpoint_parts, factory, inline=False
+):
+    """Closed legacy-isolation review writer, not generic quarantine pricing."""
+    from review_sensei.bounded_evidence import PARTITION_ENCODING, canonical_bytes
+
+    from .api_run_requests import ApiRunSessionLedger
+    from .quarantine_evidence import CurrentReadScope
+    from .quarantine_origin import QuarantineOriginReader
+    from .review_run import ActionRunLedger, ReviewRunLedger
+    from .session_ledger import GitHubIssueCommentSessionLedger
+
+    caller = ledger.caller
+    reader = ledger._quarantine_origin_reader
+    if (
+        type(ledger) not in {ApiRunSessionLedger, ReviewRunLedger, ActionRunLedger}
+        or (type(ledger) is ActionRunLedger and not inline)
+        or record is not caller._effect_record
+        or caller._abort_source is not None
+        or getattr(caller, "_controlled_restart_admission", None) is not None
+        or ledger._broker is not None
+        or type(reader) is not QuarantineOriginReader
+        or type(reader.current_scope) is not CurrentReadScope
+        or (not any(checkpoint_parts) and not inline)
+        or (
+            inline
+            and (checkpoint_parts != (0,) or added_parts != 0 or added_bytes != 0)
+        )
+        or any(type(n) is not int or n < 0 for n in checkpoint_parts)
+        or record.assessment_queue is not None
+        or record.disposition_snapshot is not None
+    ):
+        return None
+    baseline = (
+        record.convergence_history.get("baseline")
+        if isinstance(record.convergence_history, dict)
+        else None
+    )
+    if isinstance(baseline, dict) and baseline.get("encoding") == PARTITION_ENCODING:
+        return None
+    methods = (
+        (ledger, "replace", type(ledger).replace),
+        (ledger, "_discover", GitHubIssueCommentSessionLedger._discover),
+        (
+            ledger,
+            "replace_finding_lifecycle_parts",
+            ApiRunSessionLedger.replace_finding_lifecycle_parts,
+        ),
+        (ledger, "stage_evidence", ApiRunSessionLedger.stage_evidence),
+        (reader, "read", QuarantineOriginReader.read),
+        (reader.current_scope, "require", CurrentReadScope.require),
+    )
+    if any(
+        getattr(getattr(obj, name), "__func__", None) is not source
+        for obj, name, source in methods
+    ):
+        return None
+    from .quarantine_action import decision_fence_capacity
+
+    business = decision_fence_capacity(ledger)
+    if business is None:
+        return None
+    scope = lifecycle_capacity_plan(ledger, record.identity(), added_parts=added_parts)
+    auth = ledger._quarantine_authenticated
+    lineage = auth.lineage
+    cache_key = lineage["origin_manifest"]["sha256"], lineage["scope_sha256"]
+    expected = canonical_bytes(
+        {
+            "sources": json.loads(auth.source_documents_bytes),
+            "inventories": auth.inventories,
+        }
+    )
+    if reader._authenticated_sources.get(cache_key) != expected:
+        return None
+    original = canonical_bytes(record.to_dict())
+
+    def validate():
+        if (
+            _LIFECYCLE_ISSUED.get(scope) != _LifecycleCapacity._seal(scope)
+            or scope.record is not record
+            or scope.parts != added_parts
+            or caller._effect_record is not record
+            or caller._root != record.record_sha256
+            or canonical_bytes(record.to_dict()) != original
+            or reader._authenticated_sources.get(cache_key) != expected
+            or decision_fence_capacity(ledger) != business
+            or any(
+                getattr(getattr(obj, name), "__func__", None) is not source
+                for obj, name, source in methods
+            )
+        ):
+            return False
+        current = lifecycle_capacity_plan(
+            ledger, record.identity(), added_parts=added_parts
+        )
+        return (
+            current.plan == scope.plan
+            and current.profile == scope.profile
+            and _LifecycleCapacity.enumeration_plan(current)
+            == _LifecycleCapacity.enumeration_plan(scope)
+        )
+
+    capacity = ledger.preflight_finding_lifecycle_retention(
+        record.identity(),
+        added_parts=added_parts,
+        added_bytes=added_bytes,
+        checkpoint_parts=checkpoint_parts,
+    )
+    pages = _LifecycleCapacity.enumeration_plan(scope).worst_read_calls()
+    return factory(
+        ledger,
+        record,
+        checkpoint_parts=checkpoint_parts,
+        capacity=capacity,
+        calls=tuple(
+            pages + 6 + business[0] if inline else 17 if n == 0 else pages + 6 + 2 * n
+            for n in checkpoint_parts
+        ),
+        validate=validate,
+        page_counts=tuple(pages for _ in checkpoint_parts),
+        profile="quarantine-inline-v1" if inline else "quarantine-complete-census-v1",
+    )
+
+
+def lifecycle_staging_pricing(ledger, record, *, checkpoint_parts, target, factory):
+    """Remaining work in the existing fresh-owned quarantine checkpoint only."""
+    from review_sensei.bounded_evidence import canonical_bytes
+
+    from .quarantine_checkpoint import _ISSUED, _CheckpointSnapshot
+
+    scope = getattr(ledger, "_quarantine_lifecycle_capacity", None)
+    snapshot = getattr(ledger, "_quarantine_checkpoint_snapshot", None)
+    if (
+        type(scope) is not _LifecycleCapacity
+        or type(snapshot) is not _CheckpointSnapshot
+    ):
+        return None
+    issued = _LIFECYCLE_ACTIVE.get(scope)
+    original_profile = json.loads(scope.profile)
+    from .api_run_requests import ApiRunSessionLedger
+    from .quarantine_evidence import CurrentReadScope
+    from .quarantine_origin import QuarantineOriginReader
+    from .session_ledger import GitHubIssueCommentSessionLedger
+
+    reader = ledger._quarantine_origin_reader
+    methods = (
+        (ledger, "replace", type(ledger).replace),
+        (ledger, "_discover", GitHubIssueCommentSessionLedger._discover),
+        (ledger, "stage_evidence", ApiRunSessionLedger.stage_evidence),
+        (
+            ledger,
+            "replace_finding_lifecycle_parts",
+            ApiRunSessionLedger.replace_finding_lifecycle_parts,
+        ),
+        (reader, "read", QuarantineOriginReader.read),
+        (reader.current_scope, "require", CurrentReadScope.require),
+        (snapshot, "require", _CheckpointSnapshot.require),
+        (snapshot, "get", _CheckpointSnapshot.get),
+        (snapshot, "preflight_staging", _CheckpointSnapshot.preflight_staging),
+    )
+    target_bytes = canonical_bytes(target)
+    if (
+        not isinstance(target, dict)
+        or set(target)
+        != (
+            {"binding", "document_sha256", "parts", "item_count", "manifest_allowance"}
+            | ({"inline_manifest"} if scope.parts == 0 else set())
+        )
+        or not isinstance(target["parts"], tuple)
+        or len(target["parts"]) != scope.parts
+    ):
+        return None
+
+    if scope.parts == 0:
+        import hashlib
+
+        from review_sensei.bounded_evidence import read_inline_evidence
+
+        manifest = target["inline_manifest"]
+        document = read_inline_evidence(manifest, expected_binding=target["binding"])
+        if (
+            len(canonical_bytes(manifest)) > target["manifest_allowance"]
+            or manifest["item_count"] != target["item_count"]
+            or hashlib.sha256(canonical_bytes(document)).hexdigest()
+            != target["document_sha256"]
+        ):
+            return None
+
+    def validate():
+        active = _LIFECYCLE_ACTIVE.get(scope)
+        if (
+            active is None
+            or active != issued
+            or active[0] != _LifecycleCapacity._seal(scope)
+            or snapshot not in _ISSUED
+            or snapshot.ledger is not ledger
+            or snapshot.caller is not scope.caller
+            or snapshot.operation is not active[1]
+            or snapshot.record is not record
+            or snapshot.candidate is not None
+            or snapshot.staged
+            or snapshot.operation.write_attempted
+            or canonical_bytes(target) != target_bytes
+            or not ledger._mutation_active
+            or scope.caller._effect_record is not scope.record
+            or scope.caller._root != scope.root
+            or canonical_bytes(record.to_dict()) != scope.record_bytes
+            or canonical_bytes(scope.record.to_dict()) != scope.record_bytes
+            or checkpoint_parts != (scope.parts,)
+            or scope.parts < 0
+            or any(
+                getattr(getattr(obj, name), "__func__", None) is not source
+                for obj, name, source in methods
+            )
+        ):
+            return False
+        _CheckpointSnapshot.require(snapshot)
+        # Fresh discovery legitimately replaces the authenticated object; the
+        # issued snapshot, not byte equality alone, establishes this handoff.
+        current = _lifecycle_profile(ledger)
+        current.pop("authenticated_source")
+        previous = dict(original_profile)
+        previous.pop("authenticated_source")
+        return (
+            canonical_bytes(current) == canonical_bytes(previous)
+            and ledger._quarantine_authenticated.record_sha256 == scope.root
+        )
+
+    if not validate():
+        return None
+    return factory(
+        ledger,
+        record,
+        checkpoint_parts=checkpoint_parts,
+        capacity={},
+        calls=(2 * scope.parts + 5,),
+        validate=validate,
+        page_counts=(1,),
+        profile="quarantine-staging-v1"
+        if scope.parts
+        else "quarantine-inline-staging-v1",
+        staging_target=target,
+    )
+
+
+from .materialized_publication_phase import (  # noqa: E402
+    install_census as _install_materialized_phase,
+)
+
+_install_materialized_phase(globals())
+del _install_materialized_phase
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

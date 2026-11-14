@@ -1427,12 +1427,12 @@ def build_no_transaction_attempt_packet(
         repo_lower = resolved_identity.repository.casefold()
         if (
             resolved_identity.pull_request == SITEVAULT_142_PULL_REQUEST
-            and "sitevault" in repo_lower
+            and repo_lower == "malsabbagh/site-vault"
         ):
             resolved_case_id = SITEVAULT_142_CASE_ID
         elif (
             resolved_identity.pull_request == SITEVAULT_153_PULL_REQUEST
-            and "sitevault" in repo_lower
+            and repo_lower == "malsabbagh/site-vault"
         ):
             resolved_case_id = SITEVAULT_153_CASE_ID
         else:

@@ -54,6 +54,34 @@ def _remember_confirmation(snapshot, record):
     return record
 
 
+def confirmed_checkpoint_capacity(caller, ledger, identity):
+    """Read an existing owned GET receipt for sizing, never consume or authorize it."""
+    receipt = _CONFIRMED.get(caller)
+    record = caller._effect_record
+    if (
+        type(receipt) is not _ConfirmedCheckpoint
+        or receipt.ledger_ref() is not ledger
+        or receipt.identity != identity
+        or caller._block != receipt.block
+        or caller._checkpoint is not None
+        or record is not receipt.record
+        or caller._root != record.record_sha256
+        or ledger.caller is not caller
+    ):
+        raise ReviewInputError(
+            "quarantine lifecycle current checkpoint receipt is unavailable"
+        )
+    parsed = parse_session_comment(receipt.body, identity=identity)
+    if parsed is None or canonical_bytes(parsed.to_dict()) != canonical_bytes(
+        record.to_dict()
+    ):
+        raise ReviewInputError(
+            "quarantine lifecycle current checkpoint receipt changed"
+        )
+    caller._require_ledger(ledger, identity)
+    return receipt
+
+
 def take_confirmed_checkpoint(caller, ledger, identity, *, staging):
     receipt = _CONFIRMED.pop(caller, None)
     if (
@@ -194,6 +222,14 @@ class _CheckpointSnapshot:
         return parsed
 
     def get(self, *, candidate=False):
+        from .quarantine_candidate_receipt import begin, finish
+
+        receipt = begin(self, candidate=candidate)
+        from .quarantine_command_checkpoint import after_get, before_get
+
+        cold_get, reused = before_get(self, candidate=candidate)
+        if reused is not None:
+            return reused
         self.require()
         record = self.candidate if candidate else self.record
         body = self.candidate_body if candidate else self.body
@@ -209,7 +245,9 @@ class _CheckpointSnapshot:
             raise ReviewInputError(
                 "quarantine exact checkpoint readback is unavailable"
             )
-        return self.validate(payload, record=record, body=body)
+        parsed = self.validate(payload, record=record, body=body)
+        after_get(cold_get, self, parsed)
+        return finish(receipt, self, parsed, payload) if candidate else parsed
 
 
 def expire(snapshot: _CheckpointSnapshot | None):
@@ -264,7 +302,7 @@ def replace_quarantine_checkpoint(caller, ledger, identity, mutate, *, now=None)
         identity,
         operation,
         caller._block,
-        caller._root,
+        record.record_sha256,
         comment_id,
         item["user"]["id"],
         record,
@@ -355,3 +393,27 @@ def reconcile_quarantine_checkpoint(caller, ledger, identity):
             "quarantine checkpoint reconciliation has no issued snapshot"
         )
     return _remember_confirmation(snapshot, snapshot.get(candidate=True))
+
+
+from .quarantine_command_checkpoint import install_source as _install_cold_source  # noqa: E402
+
+_install_cold_source("get", _CheckpointSnapshot.get)
+del _install_cold_source
+
+from .quarantine_candidate_receipt import install_source as _install_candidate_receipt  # noqa: E402
+
+# Capture the defining GET producer before the hot-path wrapper is installed.
+_install_candidate_receipt(_CheckpointSnapshot)
+del _install_candidate_receipt
+
+from .materialized_publication_phase import (  # noqa: E402
+    install_checkpoint as _install_materialized_checkpoint,
+)
+
+_install_materialized_checkpoint(_CheckpointSnapshot)
+del _install_materialized_checkpoint
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

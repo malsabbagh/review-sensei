@@ -107,6 +107,10 @@ class InstalledPublicationRecoveryReadPhaseTests(
     pass
 
 
+# Reviewed deterministic process-local construction; runtime wrappers stay intact.
+INSTALLED_SUITE_HOOK_CONTRACT = ("reproducible-module-local-v1", ())
+
+
 def load_tests(loader, suite, pattern):
     # Include all public codec/finalizer/consumer classes without duplicating
     # imported fixture classes or exposing a checkout src directory.

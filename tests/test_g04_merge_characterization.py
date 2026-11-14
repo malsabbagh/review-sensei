@@ -167,8 +167,27 @@ class G04HostedMergeCharacterization(unittest.TestCase):
                     code = f.invoke_fresh()
                     row = f.observation(case=f"source_{direction}_{timing}", code=code)
                     self.assertEqual(code, 1)
-                    self.assertTrue(row["accounting_available"])
-                    self.assertEqual(f.provider_calls, 1)
+                    if timing == "before_acquisition" and direction == "clears":
+                        self.assertEqual(
+                            f.broker_head_rejections,
+                            [(f.original_head, f.resolved_head)],
+                        )
+                        self.assertIn("Broker token request was rejected", f.error)
+                        self.assertIn('"step":"broker_actions"', f.error)
+                        self.assertEqual(f.provider_calls, 0)
+                        self.assertEqual(row["analyzed_diff_sha256"], [])
+                        self.assertEqual(row["provider_has_exact_diff"], [])
+                        self.assertEqual(len(f.acquisitions), 1)
+                        self.assertFalse(f.reviews)
+                        self.assertFalse(f.check_runs)
+                        self.assertIsNone(f.comment)
+                        self.assertFalse(row["accounting_available"])
+                        self.assertIsNone(row["phase"])
+                        self.assertIsNone(row["terminal_transaction"])
+                        self.assertFalse(row["final_actual_conflict"])
+                        continue
+                    self.assertTrue(row["accounting_available"], row)
+                    self.assertEqual(f.provider_calls, 1, row)
                     self.assertEqual(
                         row["analyzed_diff_sha256"],
                         [f.acquisitions[0]["expected_diff_sha256"]],
@@ -220,11 +239,19 @@ class G04HostedMergeCharacterization(unittest.TestCase):
                 else:
                     f.source_fault = guard
                 code = f.invoke_fresh()
-                f.observation(case=f"initial_guard_{guard}", code=code)
+                row = f.observation(case=f"initial_guard_{guard}", code=code)
                 self.assertEqual(code, 1)
                 self.assertEqual(f.provider_calls, 0)
-                self.assertEqual(f.acquisitions, [])
+                self.assertEqual(
+                    len(f.acquisitions),
+                    1 if guard in {"broker_refusal", "overlap"} else 0,
+                )
+                self.assertEqual(row["analyzed_diff_sha256"], [])
+                self.assertEqual(row["provider_has_exact_diff"], [])
                 self.assertFalse(f.reviews)
+                self.assertFalse(f.check_runs)
+                self.assertIsNone(f.comment)
+                self.assertIsNone(row["terminal_transaction"])
 
     def test_late_draft_or_closed_state_is_not_overridden_by_clean_mergeability(self):
         for timing in ("during_analysis", "before_publication"):

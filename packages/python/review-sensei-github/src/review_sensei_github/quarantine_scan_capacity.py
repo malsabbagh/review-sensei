@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import math
+import sys
+from dataclasses import dataclass
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from review_sensei.errors import ReviewInputError
+from review_sensei.source_registry import require_module_seal
 
 from .http import HISTORY_PAGE_SIZES, MAX_GITHUB_RESPONSE_BYTES, MAX_PAGINATION_PAGES
 
@@ -112,3 +117,141 @@ class CapacityCommentReader:
         if expected_items is not None and len(rows) != expected_items:
             raise ReviewInputError("quarantine capacity census membership changed")
         return rows
+
+
+def bounded_review_page(count, largest):
+    """Price a fixed-width complete walk, including its short final page."""
+    require_module_seal(sys.modules[__name__])
+    if type(count) is not int or count < 0 or type(largest) is not int or largest < 0:
+        raise ReviewInputError("quarantine review bounds are invalid")
+    if largest > PAGE_BYTES:
+        raise ReviewInputError("quarantine review item exceeds response bound")
+    width = min(100, PAGE_BYTES // max(1, largest))
+    return width, count // width + 1
+
+
+@dataclass(frozen=True)
+class _ReviewWalk:
+    ledger: object
+    identity: object
+    guard: Any
+    certificate: dict
+    width: int
+    requests: int
+
+    def validate(self, rows):
+        """Negative checks only, after fresh charged complete JSON responses."""
+        from .quarantine_capacity import installed_capacity
+
+        guard = installed_capacity(self.ledger, self.identity)
+        if guard is not self.guard or guard.certificates["reviews"] != self.certificate:
+            raise ReviewInputError("quarantine review capacity changed during census")
+        if len(rows) > self.certificate["count_upper_bound"]:
+            raise ReviewInputError("quarantine review census exceeded item bound")
+        seen, total = set(), 0
+        for row in rows:
+            if (
+                type(row) is not dict
+                or type(row.get("id")) is not int
+                or row["id"] <= 0
+                or row["id"] in seen
+            ):
+                raise ReviewInputError("quarantine review census identity is invalid")
+            seen.add(row["id"])
+            size = len(
+                json.dumps(row, ensure_ascii=True, separators=(",", ":")).encode()
+            )
+            if size > self.certificate["largest_upper_bound"]:
+                raise ReviewInputError(
+                    "quarantine review census exceeded item wire bound"
+                )
+            total += size
+        if total > self.certificate["encoded_bytes_upper_bound"]:
+            raise ReviewInputError("quarantine review census exceeded total wire bound")
+
+
+def capacity_review_walk(http, path):
+    """Select only the installed owner's complete fixed-scope review bound.
+
+    This grants no write authority or completeness from an observation. All
+    known and unknown native allocations remain in the guard's original totals.
+    An uninstalled preview, arbitrary path or alternate query cannot issue it.
+    """
+    from . import capacity_transport_membership
+
+    require_module_seal(capacity_transport_membership)
+    if capacity_transport_membership.never_installed(http):
+        return None
+
+    from . import publication, publication_recovery, quarantine_capacity
+
+    require_module_seal(publication)
+    require_module_seal(publication_recovery)
+    require_module_seal(quarantine_capacity)
+    review_walk_owner = quarantine_capacity.review_walk_owner
+    _BudgetedReviewPagination = publication._BudgetedReviewPagination
+    _publication_transport = publication_recovery._publication_transport
+    base = http.transport if type(http) is _BudgetedReviewPagination else http
+    transport = _publication_transport(base)
+    # An installed lifetime cannot become an ordinary fallback by losing its
+    # owner/reader attribute. Validate exact custody before touching a replaced
+    # guard or considering a non-review path.
+    if capacity_transport_membership.was_installed(transport):
+        raw = object.__getattribute__(transport, "__dict__")
+        guard = raw.get("_quarantine_capacity_guard") if type(raw) is dict else None
+        if type(guard) is not quarantine_capacity.NativeCapacityGuard:
+            raise ReviewInputError("installed review capacity guard was replaced")
+        review_walk_owner(transport)
+    from . import historical_review_census
+
+    require_module_seal(historical_review_census)
+    resolved = historical_review_census.resolve_journal(base)
+    guard = getattr(transport, "_quarantine_capacity_guard", None)
+    reader = getattr(guard, "comment_reader", None)
+    if resolved is not None:
+        ledger, guard, transport = resolved
+    elif guard is None or type(reader) is not CapacityCommentReader:
+        if capacity_transport_membership.was_installed(transport):
+            raise ReviewInputError("installed review capacity or reader was removed")
+        return None
+    # Installed readers use the authenticated defining method, never an
+    # instance callback supplied during the preceding external response.
+    from . import http as native_http
+
+    require_module_seal(native_http)
+    if "repository_path" in object.__getattribute__(transport, "__dict__"):
+        raise ReviewInputError("quarantine review repository path was shadowed")
+    expected = native_http.GitHubHttp.repository_path(
+        transport,
+        guard.identity.repository,
+        f"/pulls/{guard.identity.pull_request}/reviews",
+    )
+    if path != expected:
+        return None
+    if guard.certificates["reviews"]["reader"] != "bounded-cold-reviews":
+        return None
+    if resolved is None:
+        ledger, guard = review_walk_owner(transport)
+    else:
+        owner, installed = review_walk_owner(transport)
+        if owner is not ledger or installed is not guard:
+            raise ReviewInputError("historical review installed owner changed")
+    require_module_seal(historical_review_census)
+    invocation = historical_review_census.choose(ledger, guard)
+    if invocation is not None:
+        return invocation
+    certificate = dict(guard.certificates["reviews"])
+    width, requests = bounded_review_page(
+        certificate["count_upper_bound"], certificate["largest_upper_bound"]
+    )
+    if (
+        requests > MAX_PAGINATION_PAGES
+        or requests != certificate["physical_reads_upper_bound"]
+    ):
+        raise ReviewInputError("quarantine review physical bound is invalid")
+    return _ReviewWalk(ledger, guard.identity, guard, certificate, width, requests)
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

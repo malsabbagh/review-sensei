@@ -2098,6 +2098,17 @@ class ActionPinPolicyTests(InstalledAccountingChecks, unittest.TestCase):
         )
         self.assertIn('--start-directory "$suite/dist_safe" --workers 4', text)
         self.assertIn("--split-module test_quarantine_contract.py", text)
+        self.assertEqual(
+            re.findall(r"--reviewed-local-hook ([a-z_]+)", text),
+            [
+                "test_approval_lifecycle_contract",
+                "test_controlled_restart_contract",
+                "test_default_human_inventory_contract",
+                "test_native_group_contract",
+                "test_provider_common_flow_contract",
+                "test_quarantine_contract",
+            ],
+        )
         self.assertIn("tests/fixtures/installed-unit-log-delta-seconds.json", text)
         self.assertIn('unittest discover -s "$suite/downstream" -v', text)
         self.assertNotIn(

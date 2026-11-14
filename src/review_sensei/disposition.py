@@ -1462,8 +1462,22 @@ def _evolve_dispositions(
         and callable(getattr(ledger, "stage_disposition_snapshot_batch", None))
         and len(kept) >= DISPOSITION_PAGE_ITEMS
     )
+    from .session import disposition_snapshot_capacity
+
+    action = (
+        record.api_run_accounting.get("action")
+        if isinstance(record.api_run_accounting, Mapping)
+        else None
+    )
+    joint_root_pressure = (
+        record.finding_lifecycle is not None
+        and isinstance(action, Mapping)
+        and action.get("phase") == "pending"
+        and disposition_array_bytes(kept) > disposition_snapshot_capacity(record)
+    )
     needs_snapshot = (
         record.disposition_snapshot is not None
+        or joint_root_pressure
         or first_page
         or (head_sha is not None and headed > MAX_DISPOSITIONS_PER_HEAD)
         or disposition_array_bytes(kept) > MAX_DISPOSITION_BYTES
@@ -1655,14 +1669,15 @@ def session_honors_coverage_uncertainty(
     )
 
 
-def session_dispositions(
-    record: SessionRecord, *, ledger: object | None = None
+def decode_session_dispositions(
+    rows: Sequence[Mapping[str, object]],
 ) -> tuple[FindingDisposition, ...]:
-    """Decode the bounded dispositions persisted on one session record."""
+    """Decode authenticated disposition rows without reading a ledger or root.
 
-    if not isinstance(record, SessionRecord):
-        raise ReviewInputError("session record is invalid")
-    from .session import read_session_dispositions
+    Snapshot rows can additionally retain resolution proof fields. The command
+    finalizer consumes the same decision projection for previews and real reads;
+    those additional proof fields remain in their authenticated carrier.
+    """
 
     return tuple(
         FindingDisposition(
@@ -1682,8 +1697,20 @@ def session_dispositions(
                 cast(Sequence[str], item.get("incomplete_coverage") or ())
             ),
         )
-        for item in read_session_dispositions(ledger, record)
+        for item in rows
     )
+
+
+def session_dispositions(
+    record: SessionRecord, *, ledger: object | None = None
+) -> tuple[FindingDisposition, ...]:
+    """Decode the bounded dispositions persisted on one session record."""
+
+    if not isinstance(record, SessionRecord):
+        raise ReviewInputError("session record is invalid")
+    from .session import read_session_dispositions
+
+    return decode_session_dispositions(read_session_dispositions(ledger, record))
 
 
 def render_convergence_summary(
@@ -1741,6 +1768,7 @@ __all__ = [
     "MaintainerCommandResult",
     "apply_session_command",
     "authorized_maintainer",
+    "decode_session_dispositions",
     "disposition_honors_coverage_uncertainty",
     "disposition_honors_fingerprint",
     "incomplete_coverage_from_result",
@@ -1749,3 +1777,8 @@ __all__ = [
     "session_dispositions",
     "session_honors_coverage_uncertainty",
 ]
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

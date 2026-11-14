@@ -1485,6 +1485,7 @@ class OrdinaryPublisherTrustTransitionTests(unittest.TestCase):
             # Round 1 succeeds under matching enrolled trust boundary:
             res1, blockers1 = self._blocking_result()
             pub1 = app.publish_review(
+                observed_trust=enrolled,
                 options=options,
                 oidc_token="oidc-1",
                 repository="acme/widgets",
@@ -1596,9 +1597,7 @@ class OrdinaryPublisherTrustTransitionTests(unittest.TestCase):
                 app_slug="reviewsensei[bot]",
             )
             self.assertFalse(cmd_res.applied)
-            self.assertEqual(
-                cmd_res.summary, "trust-transition-refused:actor_privilege_downgrade"
-            )
+            self.assertEqual(cmd_res.summary, "trust-observation-incomplete")
 
             with self.assertRaisesRegex(
                 GitHubPublicationError, "trust-transition-refused:app_reinstall"
@@ -1631,6 +1630,7 @@ class OrdinaryPublisherTrustTransitionTests(unittest.TestCase):
                 r"repository trust transition refused \(before_native_effect\): trust-transition-refused:ownership_transfer",
             ):
                 app.publish_review(
+                    observed_trust=enrolled,
                     options=options,
                     oidc_token="oidc-live-transfer",
                     repository="acme/widgets",
@@ -1676,6 +1676,7 @@ class OrdinaryPublisherTrustTransitionTests(unittest.TestCase):
             # Round 1: initial blocking review on acme/widgets (repository_id=9001)
             res1, blockers1 = self._blocking_result()
             pub1 = app.publish_review(
+                observed_trust=enrolled,
                 options=options,
                 oidc_token="oidc-1",
                 repository="acme/widgets",
@@ -1697,6 +1698,7 @@ class OrdinaryPublisherTrustTransitionTests(unittest.TestCase):
             host.fail_next_review_post_transient = True
             with self.assertRaises(GitHubPublicationTransientError):
                 app.publish_review(
+                    observed_trust=enrolled,
                     options=options,
                     oidc_token="oidc-2-loss",
                     repository="acme/widgets",
@@ -1860,6 +1862,7 @@ class OrdinaryPublisherTrustTransitionTests(unittest.TestCase):
                 GitHubPublicationError, "trust-transition-refused:ownership_transfer"
             ):
                 app.publish_review(
+                    observed_trust=enrolled,
                     options=options,
                     oidc_token="oidc-stale-slug",
                     repository="acme/widgets",

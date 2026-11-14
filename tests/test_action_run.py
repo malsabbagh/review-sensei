@@ -12,9 +12,10 @@ import hashlib
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -28,6 +29,7 @@ from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.run_authority import REQUEST_KEYS, parse_authority
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_lifecycle import forbid_replacement_phase_budget
 from test_api_work_persistence import HEAD, IDENTITY
 from test_review_run import (
     EntryFixture,
@@ -36,7 +38,6 @@ from test_review_run import (
 )
 
 from review_sensei.api_work import ApiExecutionOwner, ApiRunAccounting
-from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 
 
@@ -183,6 +184,10 @@ class CommandEntryFixture(EntryFixture):
             payload = json.loads(request.data)
             if payload.get("operationName") == "ResolveReviewThread":
                 identifier = payload["variables"]["input"]["threadId"]
+                selected = next(
+                    thread for thread in self.threads if thread["id"] == identifier
+                )
+                selected["isResolved"] = True
                 self.resolved_threads.add(identifier)
                 return json_response(
                     {
@@ -213,23 +218,11 @@ class CommandEntryFixture(EntryFixture):
                                 "reviewThreads": {
                                     "nodes": [
                                         {
-                                            "id": "PRRT_" + str(item["id"]),
-                                            "isResolved": "PRRT_" + str(item["id"])
-                                            in self.resolved_threads,
-                                            "comments": {
-                                                "nodes": [
-                                                    {
-                                                        "databaseId": item["id"],
-                                                        "body": item["body"],
-                                                        "author": {
-                                                            "login": "reviewsensei[bot]",
-                                                            "__typename": "Bot",
-                                                        },
-                                                    }
-                                                ]
-                                            },
+                                            **copy.deepcopy(thread),
+                                            "isResolved": thread["isResolved"]
+                                            or thread["id"] in self.resolved_threads,
                                         }
-                                        for item in self.inline
+                                        for thread in self.threads
                                     ],
                                     "pageInfo": {
                                         "hasNextPage": False,
@@ -331,6 +324,8 @@ class CommandEntryFixture(EntryFixture):
         event_file.write_text(json.dumps(event))
         fixture = self
         original_bootstrap = action_run.bootstrap
+        original_code = getattr(original_bootstrap, "__code__", None)
+        original_globals = getattr(original_bootstrap, "__globals__", None)
 
         def caller_factory(**kwargs):
             caller = ApiRunRequestTransport(**kwargs)
@@ -348,13 +343,29 @@ class CommandEntryFixture(EntryFixture):
             fixture.http = http
             return http
 
-        def capture_run(*args, **kwargs):
-            run = original_bootstrap(*args, **kwargs)
-            fixture.selected = run
-            after_bootstrap = getattr(fixture, "after_action_bootstrap", None)
-            if after_bootstrap is not None:
-                after_bootstrap(run)
-            return run
+        @contextmanager
+        def capture_scope():
+            previous = sys.getprofile()
+
+            def observe(frame, event, arg):
+                if (
+                    event == "return"
+                    and frame.f_code is original_code
+                    and frame.f_globals is original_globals
+                    and isinstance(arg, review_run.ReviewRun)
+                ):
+                    fixture.selected = arg
+                    after_bootstrap = getattr(fixture, "after_action_bootstrap", None)
+                    if after_bootstrap is not None:
+                        after_bootstrap(arg)
+                if previous is not None:
+                    previous(frame, event, arg)
+
+            try:
+                sys.setprofile(observe)
+                yield
+            finally:
+                sys.setprofile(previous)
 
         environment = {
             **fixture_process_environment(),
@@ -389,12 +400,8 @@ class CommandEntryFixture(EntryFixture):
                         review_run, "BrokerClient", side_effect=broker_factory
                     ),
                     patch.object(review_run, "GitHubHttp", side_effect=http_factory),
-                    patch.object(action_run, "bootstrap", side_effect=capture_run),
-                    patch.object(
-                        EvidenceReadBudget,
-                        "__init__",
-                        side_effect=AssertionError("no replacement phase budget"),
-                    ),
+                    capture_scope(),
+                    forbid_replacement_phase_budget(),
                     redirect_stdout(output),
                     redirect_stderr(errors),
                 ):
@@ -1366,6 +1373,7 @@ class CurrentCommandEntryTests(unittest.TestCase):
         from review_sensei_github.publication import parse_finding_index
 
         from review_sensei.bounded_evidence import MAX_MANIFEST_BYTES, canonical_bytes
+        from review_sensei.session import read_session_dispositions
 
         with tempfile.TemporaryDirectory() as directory:
             f = CommandEntryFixture(directory)
@@ -1401,7 +1409,10 @@ class CurrentCommandEntryTests(unittest.TestCase):
                 )
                 self.assertEqual(f.invoke_command(), 0, (f.error, f.exception))
                 current = parse_session_comment(f.comment["body"], identity=IDENTITY)
-                self.assertEqual(len(current.dispositions), start + 10)
+                self.assertEqual(
+                    len(read_session_dispositions(f.selected.ledger, current)),
+                    start + 10,
+                )
                 self.assertEqual(
                     current.transaction.transaction_id,
                     original.transaction.transaction_id,
@@ -1429,12 +1440,16 @@ class CurrentCommandEntryTests(unittest.TestCase):
                 self.assertEqual(f.provider_calls, 1)
             self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
             self.assertEqual(len(f.resolved_threads), 20)
-            decisions = copy.deepcopy(current.dispositions)
+            decisions = copy.deepcopy(
+                read_session_dispositions(f.selected.ledger, current)
+            )
             f.SOURCE_ID += 1
             f.select_command("@reviewsensei verify", new_run=True)
             self.assertEqual(f.invoke_command(), 0, (f.error, f.exception))
             verified = parse_session_comment(f.comment["body"], identity=IDENTITY)
-            self.assertEqual(verified.dispositions, decisions)
+            self.assertEqual(
+                read_session_dispositions(f.selected.ledger, verified), decisions
+            )
             self.assertEqual(verified.api_run_accounting["action"]["phase"], "terminal")
             self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
             self.assertEqual(f.provider_calls, 1)
@@ -1443,7 +1458,9 @@ class CurrentCommandEntryTests(unittest.TestCase):
             f.action_fault = "business-absent"
             self.assertNotEqual(f.invoke_command(), 0)
             refused = parse_session_comment(f.comment["body"], identity=IDENTITY)
-            self.assertEqual(refused.dispositions, decisions)
+            self.assertEqual(
+                read_session_dispositions(f.selected.ledger, refused), decisions
+            )
             self.assertEqual(refused.api_run_accounting["action"]["phase"], "pending")
             refused_root = f.comment["body"]
             f.SOURCE_ID += 1

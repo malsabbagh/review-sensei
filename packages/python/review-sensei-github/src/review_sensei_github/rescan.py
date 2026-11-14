@@ -38,6 +38,53 @@ from review_sensei_github.trigger import (
 )
 
 
+def _remaining_publication_digest(ledger, loaded, source, retained):
+    """Reproduce the selected lifecycle projection, not a reduced baseline.
+
+    The original result is independently checked by the caller. Its displayed
+    projection may have durable instance identities or hidden findings, so its
+    publication digest is not the original result digest. Both inputs come from
+    the same authenticated root; ordinary reader fences and budgets still apply.
+    """
+    record = loaded.record
+    if record.finding_lifecycle is None:
+        return review_result_digest(replace(retained, transaction=source))
+    if record.transaction is None or not record.transaction.logical_identity_matches(
+        source
+    ):
+        raise ReviewInputError("remaining lifecycle source transaction changed")
+    from review_sensei.active_finding_window import (
+        ActiveWindowRoundState,
+        project_display_review_result,
+    )
+    from review_sensei.finding_drift import project_drift_review_result
+    from review_sensei.finding_lifecycle import decode_lifecycle_state
+    from review_sensei.finding_lifecycle_store import read_finding_lifecycle
+
+    from .finding_lifecycle import _require_effect_scope, _unpack_journal, _validate
+    from .finding_lifecycle_dictionary import resolve_stored
+
+    binding = record.finding_lifecycle["manifest"]["binding"]
+    if any(
+        binding[name] != getattr(source, name)
+        for name in ("head_sha", "base_sha", "policy_digest", "configuration_digest")
+    ):
+        raise ReviewInputError("remaining lifecycle source scope changed")
+    stored = read_finding_lifecycle(ledger, record, _selected_load=loaded)
+    document = _validate(_unpack_journal(resolve_stored(ledger, record, stored)))
+    _require_effect_scope(document, record.identity(), source.head_sha)
+    state = decode_lifecycle_state(document["lifecycle"]).state
+    if state.head_sha != source.head_sha or state.base_sha != source.base_sha:
+        raise ReviewInputError("remaining lifecycle state scope changed")
+    original = replace(retained, transaction=source)
+    projected = (
+        project_display_review_result(original, state)
+        if isinstance(state, ActiveWindowRoundState)
+        else project_drift_review_result(original, state)
+    )
+    return review_result_digest(projected)
+
+
 def _object(value):
     if not isinstance(value, dict):
         raise ReviewInputError("explicit rescan metadata is invalid")
@@ -447,7 +494,7 @@ def resolve_rescan(
             not retained.transaction.logical_identity_matches(source)
             or retained.content_digest() != source.result_sha256
             or eligibility.result_digest
-            != review_result_digest(replace(retained, transaction=source))
+            != _remaining_publication_digest(ledger, loaded, source, retained)
         ):
             raise ReviewInputError(
                 "remaining review published source does not match retained evidence"

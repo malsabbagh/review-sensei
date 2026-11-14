@@ -30,8 +30,8 @@ from review_sensei.quarantine_state import assessment_cursor
 from .api_run_owner import ApiRunActionsEvidence
 from .api_run_plan import owner_allocations
 from .errors import GitHubPublicationTransientError
-from .http import MAX_PAGINATION_PAGES
 from .quarantine_activation import CreationSlot, registered_activation
+from .quarantine_creation_census import creation_executor, install_creation_executor
 from .quarantine_evidence import (
     CurrentReadScope,
     read_published_source,
@@ -309,7 +309,7 @@ def _body(part):
     )
 
 
-def _stage(prepared, document, binding, count):
+def _stage(prepared, document, binding, count, dispatch):
     from .session_ledger import retained_carrier_body
 
     ledger, identity = prepared.ledger, prepared.identity
@@ -340,9 +340,10 @@ def _stage(prepared, document, binding, count):
         # positive first-execution slot remains mandatory even for identical IO.
         _fence(prepared)
         try:
-            status, payload = ledger._request(
-                "POST", ledger._comments_path(identity), body={"body": body}
-            )
+            with dispatch("carrier", ledger._comments_path(identity), {"body": body}):
+                status, payload = ledger._request(
+                    "POST", ledger._comments_path(identity), body={"body": body}
+                )
         except GitHubPublicationTransientError:
             status, payload = 0, None
         if status == 201 and isinstance(payload, dict):
@@ -520,7 +521,7 @@ def _roots(ledger, identity, items):
     return roots
 
 
-def plan_quarantine(prepared):
+def _plan_quarantine(prepared):
     """Complete conservative plan before the first carrier POST.
 
     Unknown returned storage IDs use their maximum supported 19-digit width.
@@ -636,7 +637,9 @@ def plan_quarantine(prepared):
         comment_bounds=comment_bounds,
         root_slot=parts,
     )
+    census_calls = 10
     return {
+        "census_calls": census_calls,
         "parts": parts,
         "origin_parts": origin_parts,
         "wire_bytes_upper_bound": wire_bytes,
@@ -647,19 +650,37 @@ def plan_quarantine(prepared):
         # Three current fences plus one POST per part; two complete bounded
         # listings, slot revalidation, final current fences and one root POST.
         "requests": 4 * parts
-        + 2 * MAX_PAGINATION_PAGES
+        + 2 * census_calls
         + 6
         + (2 if prepared.slot.publication_scope is not None else 0),
     }
 
 
-def create_quarantine(prepared, *, actions_token):
+def plan_quarantine(prepared):
+    from .quarantine_creation_census import prepare_census
+
+    return prepare_census(prepared)
+
+
+@creation_executor
+def create_quarantine(prepared, *, actions_token, _creation_dispatch):
     """Consume the issued process preparation and slot before one new-root POST."""
     if type(prepared) is not PreparedQuarantine:
         raise ReviewInputError("quarantine requires issued complete preparation")
     if actions_token != prepared.actions_token:
         raise ReviewInputError("quarantine creation Actions capability changed")
     prepared.require()
+    plan = plan_quarantine(prepared)
+    from .quarantine_creation_census import creation_census
+
+    with creation_census(prepared, plan):
+        return _execute_creation(prepared, plan, _creation_dispatch)
+
+
+def _execute_creation(prepared, plan, dispatch):
+    from .quarantine_creation_census import require_execution
+
+    require_execution(prepared, plan)
     ledger, identity, old, slot = (
         prepared.ledger,
         prepared.identity,
@@ -671,17 +692,18 @@ def create_quarantine(prepared, *, actions_token):
     caller._producer = ledger.evidence_producer()
     object.__setattr__(prepared, "_consumed", True)
     sources = json.loads(prepared.sources)
-    plan = plan_quarantine(prepared)
     ledger.evidence_budget.preflight(plan["requests"])
     origins = []
     for item in sources:
-        manifest = _stage(prepared, item["source"], item["binding"], 1)
+        manifest = _stage(prepared, item["source"], item["binding"], 1, dispatch)
         count = len(item["inventory"]["assessments"])
         inventory = inline_manifest(
             item["inventory"], binding=item["binding"], item_count=count
         )
         if inventory is None:
-            inventory = _stage(prepared, item["inventory"], item["binding"], count)
+            inventory = _stage(
+                prepared, item["inventory"], item["binding"], count, dispatch
+            )
         origin = {
             "schema_version": "quarantine-assessment-origin-v1",
             "kind": item["kind"],
@@ -692,7 +714,7 @@ def create_quarantine(prepared, *, actions_token):
         origins.append(origin)
     origins.sort(key=lambda item: item["scope_sha256"])
     archive, binding = _archive(prepared, origins)
-    origin_manifest = _stage(prepared, archive, binding, 1)
+    origin_manifest = _stage(prepared, archive, binding, 1, dispatch)
     record = _candidate(prepared, origin_manifest, len(origins))
     caller._activation = record, "hosted-review"
     items = _complete_comments(ledger, identity)
@@ -733,12 +755,13 @@ def create_quarantine(prepared, *, actions_token):
         ledger._reuse_listed_parts = prior_reuse
         ledger._quarantine_complete_read = False
     _fence(prepared, revalidate_slot=True)
-    ledger.evidence_budget.preflight(1 + MAX_PAGINATION_PAGES)
+    ledger.evidence_budget.preflight(1 + plan["census_calls"])
     slot.consume_creation(http=ledger.http, identity=identity, run_id=caller.run.run_id)
     try:
-        status, payload = ledger._request(
-            "POST", ledger._comments_path(identity), body={"body": body}
-        )
+        with dispatch("root", ledger._comments_path(identity), {"body": body}):
+            status, payload = ledger._request(
+                "POST", ledger._comments_path(identity), body={"body": body}
+            )
     except GitHubPublicationTransientError:
         status, payload = 0, None
     if status not in {0, 200, 201, 202, 409, 422, 429} and status < 500:
@@ -765,3 +788,6 @@ def create_quarantine(prepared, *, actions_token):
     caller._accept_activation(ledger, selected[1])
     caller.bind_terminal_reservation("hosted-terminal")
     return selected[1]
+
+
+install_creation_executor(create_quarantine, _execute_creation, _stage)

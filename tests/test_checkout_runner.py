@@ -107,6 +107,56 @@ class CheckoutRunnerTests(CheckoutAccountingChecks, unittest.TestCase):
             receipts = sorted(path.name for path in directory.glob("receipt-*"))
             return result, receipts
 
+    def test_linux_route_preserves_complete_inventory_on_both_python_versions(self):
+        import shlex
+
+        import yaml
+
+        jobs = yaml.safe_load(
+            (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        )["jobs"]
+        compatibility = jobs["compatibility"]
+        for version in ("3.11", "3.14"):
+            self.assertIn(
+                {"os": "ubuntu-latest", "python-version": version},
+                compatibility["strategy"]["matrix"]["include"],
+            )
+        routes = [
+            step
+            for step in compatibility["steps"]
+            if step.get("if") == "runner.os == 'Linux'"
+        ]
+        self.assertEqual(len(routes), 1)
+        linux = routes[0]
+        # Exact arguments prohibit hidden selection/exclusion or coverage changes.
+        self.assertEqual(
+            shlex.split(linux["run"]),
+            [
+                "python",
+                "scripts/run_checkout_tests.py",
+                "--workers",
+                "4",
+                "--controller-module",
+                "test_provider_common_flow",
+                "--costs",
+                "tests/fixtures/checkout-class-seconds-macos.json",
+                "--report",
+                "${{ runner.temp }}/checkout-timings.json",
+            ],
+        )
+        self.assertFalse(linux.get("continue-on-error", False))
+        self.assertNotIn("timeout-minutes", linux)
+        self.assertNotIn("permissions", linux)
+        upload = next(
+            step
+            for step in compatibility["steps"]
+            if "upload-artifact@" in step.get("uses", "")
+        )
+        self.assertEqual(upload.get("if"), "always()")
+        self.assertEqual(
+            upload["with"]["path"], "${{ runner.temp }}/checkout-timings.json"
+        )
+
     def test_windows_costs_route_and_schedule_discovered_classes(self):
         import shlex
 

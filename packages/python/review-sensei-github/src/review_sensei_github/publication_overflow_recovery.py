@@ -1559,7 +1559,7 @@ def build_publication_overflow_attempt_packet(
     if resolved_case_id is None:
         if (
             identity.pull_request == TASKALONG_41_PULL_REQUEST
-            and "taskalong" in identity.repository.casefold()
+            and identity.repository.casefold() == "malsabbagh/taskalong"
         ):
             resolved_case_id = TASKALONG_41_CASE_ID
         else:

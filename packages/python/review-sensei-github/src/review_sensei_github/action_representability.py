@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
+from datetime import datetime
 from typing import Any
 
 from review_sensei.disposition import (
@@ -23,6 +24,12 @@ from review_sensei.terminal_representability import (
     format_terminal_refusal_summary,
     preview_session_command_representability,
     require_terminal_action_representable,
+)
+
+from .accepted_semantic_history import (
+    history_reference_reserve,
+    preflight_history_capacity,
+    prospective_history,
 )
 
 
@@ -189,6 +196,8 @@ def guard_current_command_representability(
     policy_digest: str | None = None,
     provenance: str | None = None,
     incomplete_coverage: Sequence[str] | None = None,
+    capacity_preview: dict[str, object] | None = None,
+    now: datetime | None = None,
 ) -> MaintainerCommandResult | None:
     """Validate pre-effect terminal representability before mutating the session ledger.
 
@@ -201,6 +210,8 @@ def guard_current_command_representability(
     any business write if even the refusal receipt cannot settle.
     """
 
+    if capacity_preview is not None:
+        capacity_preview.clear()
     run = getattr(current_action, "run", None)
     if run is None:
         return None
@@ -242,8 +253,22 @@ def guard_current_command_representability(
         ledger=ledger,
         current_record=current_record,
     )
+    admitted_action = caller.accounting.action
+    if (
+        admitted_action is None
+        and getattr(caller, "_accepted_semantic_context", None) is not None
+    ):
+        raise ReviewInputError("semantic capacity preview requires an admitted action")
+    history = (
+        prospective_history(caller, identity, admitted_action["intent"])
+        if admitted_action is not None
+        else None
+    )
+    details: dict[str, object] = {}
     _preview_res, _preview_rec, report = preview_session_command_representability(
         identity=identity,
+        capacity_details=details,
+        now=now,
         current_record=current_record,
         command=command,
         intent_sha256=intent_digest,
@@ -270,8 +295,32 @@ def guard_current_command_representability(
         pricing=pricing,
         consumed_grants=consumed_grants,
         allow_v3_writer=False,
+        result_metadata={"accepted_semantic_history": history}
+        if history is not None
+        else None,
+        future_reserve_bytes=(
+            preflight_history_capacity(caller, identity, admitted_action["intent"])
+            if admitted_action is not None
+            else 0
+        ),
     )
     if report.representable:
+        if capacity_preview is not None:
+            # Sizing data only. The preview record may contain synthetic part
+            # identifiers and must never be loaded or selected as authority.
+            capacity_preview.update(
+                result=_preview_res, record=_preview_rec, details=details
+            )
+            if (
+                current_record is not None
+                and current_record.quarantine_lineage is not None
+                and current_record.finding_lifecycle is not None
+            ):
+                from .current_quarantine_finalization import capture_terminal_preview
+
+                capacity_preview["current_terminal_preview"] = capture_terminal_preview(
+                    ledger, current_record, _preview_rec, details, report
+                )
         return None
 
     refusal_result = MaintainerCommandResult(
@@ -312,6 +361,16 @@ def require_action_settlement_representable(
     caller = run.caller
     ledger = run.ledger
     identity = run.identity
+    from .accepted_semantic_history import enrich_settlement
+
+    if getattr(caller, "_accepted_semantic_context", None) is not None:
+        result_document = enrich_settlement(
+            caller,
+            ledger,
+            identity,
+            caller.accounting.action["intent"],
+            dict(result_document),
+        )
     current_record = getattr(caller, "_effect_record", None)
     intent_digest, binding = _binding_from_caller(
         identity=identity,
@@ -348,6 +407,9 @@ def require_action_settlement_representable(
         pricing=pricing,
         consumed_grants=consumed_grants,
         allow_v3_writer=False,
+        future_reserve_bytes=history_reference_reserve(
+            current_record, result_document.get("accepted_semantic_history")
+        ),
         action_name=action_name,
     )
     return require_terminal_action_representable(report)
@@ -357,3 +419,8 @@ __all__ = [
     "guard_current_command_representability",
     "require_action_settlement_representable",
 ]
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

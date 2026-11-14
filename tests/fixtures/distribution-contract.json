@@ -159,6 +159,7 @@
         "tests/test_quarantine_evidence.py",
         "tests/test_quarantine_isolation.py",
         "tests/test_quarantine_journey.py",
+        "tests/quarantine_fixture_identity.py",
         "tests/test_quarantine_lineage.py",
         "tests/test_quarantine_origin.py",
         "tests/test_quarantine_record.py",
@@ -211,6 +212,7 @@
       ],
       "description": "Developer checkout lane. Requires scripts/, .github/, packages/, deploy/, and checkout-only fixtures. Compatibility and quality CI continue to run this broader suite.",
       "modules": [
+        "tests/test_native_event_classification.py",
         "tests/__init__.py",
         "tests/test_ci_policy.py",
         "tests/test_checkout_runner.py",

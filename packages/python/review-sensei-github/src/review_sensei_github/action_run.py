@@ -458,215 +458,232 @@ def _options(run: ReviewRun) -> GitHubWriteOptions:
 
 
 def execute_command(run: ReviewRun, args: Any) -> int:
-    assert run.identity.repository_id is not None
-    authority = VerifiedRunAction(run)
-    if not isinstance(run.ledger, ActionRunLedger):
-        raise ReviewInputError("command requires its current action ledger")
-    run.ledger.business_guard = authority.fence
-    source = authority.document["source"]
-    actor = authority.document["actor"]
-    from .historical_assessment_action import parse_historical_command
-    from .quarantine_action import parse_quarantine_command
+    from review_sensei.source_registry import require_module_seal
 
-    historical = parse_historical_command(args.comment_body)
-    quarantine = parse_quarantine_command(args.comment_body)
-    command = (
-        historical
-        or quarantine
-        or parse_maintainer_command(
-            args.comment_body,
-            actor=actor["login"],
-            head_sha=run.head_sha,
-            command_id=str(source["id"]),
+    from . import historical_terminal_fence
+
+    require_module_seal(historical_terminal_fence)
+    with historical_terminal_fence.execution_scope():
+        assert run.identity.repository_id is not None
+        authority = VerifiedRunAction(run)
+        if not isinstance(run.ledger, ActionRunLedger):
+            raise ReviewInputError("command requires its current action ledger")
+        run.ledger.business_guard = authority.fence
+        source = authority.document["source"]
+        actor = authority.document["actor"]
+        from .historical_assessment_action import parse_historical_command
+        from .quarantine_action import parse_quarantine_command
+
+        historical = parse_historical_command(args.comment_body)
+        quarantine = parse_quarantine_command(args.comment_body)
+        command = (
+            historical
+            or quarantine
+            or parse_maintainer_command(
+                args.comment_body,
+                actor=actor["login"],
+                head_sha=run.head_sha,
+                command_id=str(source["id"]),
+            )
         )
-    )
-    if command is None:
-        raise ReviewInputError("authenticated source is not a supported command")
-    key = hashlib.sha256(
-        canonical_bytes(
-            {
-                "purpose": "command",
-                "repository_id": run.identity.repository_id,
-                "pull_request": run.identity.pull_request,
-                "head_sha": run.head_sha,
-                "source": source,
-                "configuration": run.caller.accounting.configuration.digest,
+        if command is None:
+            raise ReviewInputError("authenticated source is not a supported command")
+        key = hashlib.sha256(
+            canonical_bytes(
+                {
+                    "purpose": "command",
+                    "repository_id": run.identity.repository_id,
+                    "pull_request": run.identity.pull_request,
+                    "head_sha": run.head_sha,
+                    "source": source,
+                    "configuration": run.caller.accounting.configuration.digest,
+                }
+            )
+        ).hexdigest()
+        caller = run.caller
+        intent = caller.admit_action(
+            run.ledger,
+            run.identity,
+            purpose="command",
+            source=source,
+            head_sha=run.head_sha,
+            operation_key=key,
+        )
+        inventory = (
+            current_inventory(run)
+            if command.finding_reference or command.finding_references
+            else None
+        )
+        app = application(run)
+        from .commands import lookup_collaborator_permission
+
+        permission = None
+        if command.action in {
+            "accept-risk",
+            "accept-coverage-uncertainty",
+            "continue",
+            "reenroll",
+            "dismiss",
+            "defer",
+            "approve-media",
+        }:
+            permission = lookup_collaborator_permission(
+                run.http,
+                token=run.ledger.token,
+                repository=run.identity.repository,
+                actor=actor["login"],
+            )
+        quarantine_refusal = None
+        if quarantine is not None:
+            from .quarantine_action import (
+                QuarantineTargetRefusal,
+                issue_decision_fence,
+                prepare_quarantine_target,
+            )
+
+            try:
+                quarantine_target = prepare_quarantine_target(
+                    run, authority, quarantine, app, permission
+                )
+                run.ledger.business_guard = issue_decision_fence(run, authority)
+            except QuarantineTargetRefusal as error:
+                quarantine_refusal = str(error)
+        historical_refusal = None
+        if historical is not None:
+            from .historical_assessment_action import (
+                HistoricalTargetRefusal,
+                prepare_historical_target,
+            )
+
+            try:
+                historical_target = prepare_historical_target(
+                    run, authority, historical, app, permission
+                )
+            except HistoricalTargetRefusal as error:
+                # This process has not entered a decision mutation. A definite
+                # selector/role refusal can finish as a charged explicit no-op;
+                # transport/budget uncertainty and stale authority still escape.
+                historical_refusal = str(error)
+        fenced_comment = authority.fence()
+        verify_live_comment_source(
+            bound_source=source,
+            live_comment=fenced_comment,
+            phase="unstarted_intent",
+        )
+        boundary = caller.begin_action_effect(run.ledger, run.identity, intent)
+        explicit_mode = getattr(args, "review_mode", None)
+        if (
+            explicit_mode is None
+            and not os.environ.get("REVIEWSENSEI_REVIEW_MODE", "").strip()
+            and run.plan.policy.reviews == "advisory"
+        ):
+            explicit_mode = "advisory"
+        if quarantine_refusal is not None:
+            from review_sensei.disposition import MaintainerCommandResult
+
+            result = MaintainerCommandResult(
+                action=command.action,
+                applied=False,
+                operator_paused=run.ledger.load(run.identity).record.operator_paused,
+                summary="Carried historical assessment refused: " + quarantine_refusal,
+            )
+        elif quarantine is not None:
+            from .quarantine_action import apply_quarantine_target
+
+            result = apply_quarantine_target(
+                run, authority, quarantine, quarantine_target, app
+            )
+        elif historical_refusal is not None:
+            from review_sensei.disposition import MaintainerCommandResult
+
+            result = MaintainerCommandResult(
+                action=command.action,
+                applied=False,
+                operator_paused=run.ledger.load(run.identity).record.operator_paused,
+                summary="Historical assessment refused: " + historical_refusal,
+            )
+        elif historical is not None:
+            from .historical_assessment_action import apply_historical_target
+
+            result = apply_historical_target(
+                run, authority, historical, historical_target, app
+            )
+        else:
+            result = app.apply_maintainer_command(
+                options=_options(run),
+                oidc_token=run.oidc,
+                repository=run.identity.repository,
+                repository_id=run.identity.repository_id,
+                pull_request=run.identity.pull_request,
+                head_sha=run.head_sha,
+                body=args.comment_body,
+                actor_login=actor["login"],
+                actor_type=actor["type"],
+                association=actor["association"],
+                app_slug=args.app_slug,
+                source_comment_id=args.source_comment_id,
+                current_action=authority,
+                finding_inventory=inventory,
+                actor_permission=permission,
+                command_budget=caller.budget_view,
+                media_budget=caller.budget_view,
+                media_read_token=run.ledger.token,
+                operation_entry="enabled",
+                app_id=run.ledger.authenticated_app_id,
+                run_id=str(caller.run.run_id),
+                run_attempt=str(caller.attempt),
+                reviews_policy=run.plan.policy.reviews,
+                convergence_policy=resolve_review_convergence_policy(
+                    mode=explicit_mode, quality=run.plan.policy.review_quality
+                ),
+            )
+        if result.evaluation_failed:
+            raise ReviewInputError(
+                "command effect or required finalization remains unconfirmed: "
+                + result.summary
+            )
+        outcome = (
+            {"kind": "applied", "reason": None}
+            if result.applied
+            else {
+                "kind": "explicit_noop",
+                "reason": "status" if command.action == "status" else "no_change",
             }
         )
-    ).hexdigest()
-    caller = run.caller
-    intent = caller.admit_action(
-        run.ledger,
-        run.identity,
-        purpose="command",
-        source=source,
-        head_sha=run.head_sha,
-        operation_key=key,
-    )
-    inventory = (
-        current_inventory(run)
-        if command.finding_reference or command.finding_references
-        else None
-    )
-    app = application(run)
-    from .commands import lookup_collaborator_permission
+        require_action_settlement_representable(
+            run,
+            outcome=outcome,
+            result_document=asdict(result),
+            extra_work_requests=2 if result.receipts else 0,
+            action_name=command.action,
+        )
+        # Receipt publication is part of this same action and must be confirmed.
+        if result.receipts:
+            from .action_receipt import publish_command_receipt
 
-    permission = None
-    if command.action in {
-        "accept-risk",
-        "accept-coverage-uncertainty",
-        "continue",
-        "reenroll",
-        "dismiss",
-        "defer",
-        "approve-media",
-    }:
-        permission = lookup_collaborator_permission(
-            run.http,
-            token=run.ledger.token,
-            repository=run.identity.repository,
-            actor=actor["login"],
+            publish_command_receipt(run, authority, args.comment_body, result)
+        proof = caller.settle_action_effect(
+            run.ledger,
+            run.identity,
+            boundary,
+            outcome=outcome,
+            result_document=asdict(result),
         )
-    quarantine_refusal = None
-    if quarantine is not None:
-        from .quarantine_action import (
-            QuarantineTargetRefusal,
-            decision_authority,
-            prepare_quarantine_target,
-        )
+        from review_sensei.source_registry import require_module_seal
 
-        try:
-            quarantine_target = prepare_quarantine_target(
-                run, authority, quarantine, app, permission
-            )
-            run.ledger.business_guard = lambda: decision_authority(run, authority)
-        except QuarantineTargetRefusal as error:
-            quarantine_refusal = str(error)
-    historical_refusal = None
-    if historical is not None:
-        from .historical_assessment_action import (
-            HistoricalTargetRefusal,
-            prepare_historical_target,
-        )
+        from . import current_quarantine_finalization
 
-        try:
-            historical_target = prepare_historical_target(
-                run, authority, historical, app, permission
-            )
-        except HistoricalTargetRefusal as error:
-            # This process has not entered a decision mutation. A definite
-            # selector/role refusal can finish as a charged explicit no-op;
-            # transport/budget uncertainty and stale authority still escape.
-            historical_refusal = str(error)
-    fenced_comment = authority.fence()
-    verify_live_comment_source(
-        bound_source=source,
-        live_comment=fenced_comment,
-        phase="unstarted_intent",
-    )
-    boundary = caller.begin_action_effect(run.ledger, run.identity, intent)
-    explicit_mode = getattr(args, "review_mode", None)
-    if (
-        explicit_mode is None
-        and not os.environ.get("REVIEWSENSEI_REVIEW_MODE", "").strip()
-        and run.plan.policy.reviews == "advisory"
-    ):
-        explicit_mode = "advisory"
-    if quarantine_refusal is not None:
-        from review_sensei.disposition import MaintainerCommandResult
+        require_module_seal(current_quarantine_finalization)
+        current_quarantine_finalization.before_terminal(caller, run, proof)
 
-        result = MaintainerCommandResult(
-            action=command.action,
-            applied=False,
-            operator_paused=run.ledger.load(run.identity).record.operator_paused,
-            summary="Carried historical assessment refused: " + quarantine_refusal,
-        )
-    elif quarantine is not None:
-        from .quarantine_action import apply_quarantine_target
+        from . import historical_terminal_fence
 
-        result = apply_quarantine_target(
-            run, authority, quarantine, quarantine_target, app
-        )
-    elif historical_refusal is not None:
-        from review_sensei.disposition import MaintainerCommandResult
-
-        result = MaintainerCommandResult(
-            action=command.action,
-            applied=False,
-            operator_paused=run.ledger.load(run.identity).record.operator_paused,
-            summary="Historical assessment refused: " + historical_refusal,
-        )
-    elif historical is not None:
-        from .historical_assessment_action import apply_historical_target
-
-        result = apply_historical_target(
-            run, authority, historical, historical_target, app
-        )
-    else:
-        result = app.apply_maintainer_command(
-            options=_options(run),
-            oidc_token=run.oidc,
-            repository=run.identity.repository,
-            repository_id=run.identity.repository_id,
-            pull_request=run.identity.pull_request,
-            head_sha=run.head_sha,
-            body=args.comment_body,
-            actor_login=actor["login"],
-            actor_type=actor["type"],
-            association=actor["association"],
-            app_slug=args.app_slug,
-            source_comment_id=args.source_comment_id,
-            current_action=authority,
-            finding_inventory=inventory,
-            actor_permission=permission,
-            command_budget=caller.budget_view,
-            media_budget=caller.budget_view,
-            media_read_token=run.ledger.token,
-            operation_entry="enabled",
-            app_id=run.ledger.authenticated_app_id,
-            run_id=str(caller.run.run_id),
-            run_attempt=str(caller.attempt),
-            reviews_policy=run.plan.policy.reviews,
-            convergence_policy=resolve_review_convergence_policy(
-                mode=explicit_mode, quality=run.plan.policy.review_quality
-            ),
-        )
-    if result.evaluation_failed:
-        raise ReviewInputError(
-            "command effect or required finalization remains unconfirmed: "
-            + result.summary
-        )
-    outcome = (
-        {"kind": "applied", "reason": None}
-        if result.applied
-        else {
-            "kind": "explicit_noop",
-            "reason": "status" if command.action == "status" else "no_change",
-        }
-    )
-    require_action_settlement_representable(
-        run,
-        outcome=outcome,
-        result_document=asdict(result),
-        extra_work_requests=2 if result.receipts else 0,
-        action_name=command.action,
-    )
-    # Receipt publication is part of this same action and must be confirmed.
-    if result.receipts:
-        from .action_receipt import publish_command_receipt
-
-        publish_command_receipt(run, authority, args.comment_body, result)
-    proof = caller.settle_action_effect(
-        run.ledger,
-        run.identity,
-        boundary,
-        outcome=outcome,
-        result_document=asdict(result),
-    )
-    caller.begin_terminal("action-completion")
-    caller.close_action(run.ledger, run.identity, proof)
-    print(result.summary)
-    return command_exit_code(result)
+        require_module_seal(historical_terminal_fence)
+        historical_terminal_fence.before_terminal(caller, run, proof)
+        caller.begin_terminal("action-completion")
+        caller.close_action(run.ledger, run.identity, proof)
+        print(result.summary)
+        return command_exit_code(result)
 
 
 def run_action(
@@ -684,6 +701,11 @@ def run_action(
     parser = argparse.ArgumentParser(prog="review-sensei-github " + purpose + "-run")
     parser.add_argument("--policy-commit", required=True)
     parser.add_argument("--run-directory", type=Path, required=True)
+    parser.add_argument(
+        "--enable-current-trust-enrollment",
+        action="store_true",
+        help="Observe original enrollment with a compatible v4 broker; not continuous trust or effect authorization.",
+    )
     parser.add_argument(
         "--verify-source-before-intent",
         action="store_true",
@@ -729,6 +751,7 @@ def run_action(
             purpose=purpose,
             source=source,
             rollover_service=rollover_service,
+            enable_current_trust_enrollment=options.enable_current_trust_enrollment,
         )
     same_run_gate = (
         unstarted_recovery
@@ -760,8 +783,49 @@ def run_action(
             was_queued_replaced=was_queued_replaced,
             current_state_fingerprint=current_state_fingerprint,
         )
+    # Ordinary admission consumes authenticated retained semantic history.
+    # Supplied convergence records remain model inputs, never its replacement.
+    from .accepted_semantic_history import prepare_action
+
+    semantic_command = (
+        parse_maintainer_command(
+            args.comment_body,
+            actor="classification-only",
+            head_sha=run.head_sha,
+            command_id=str(source["id"]),
+        )
+        if purpose == "command"
+        else None
+    )
+    prepare_action(
+        run,
+        allow_unqualified=purpose == "reply"
+        or (
+            purpose == "command"
+            and (
+                parse_historical_command(args.comment_body) is not None
+                or parse_quarantine_command(args.comment_body) is not None
+            )
+        )
+        or (semantic_command is not None),
+    )
     if purpose == "command":
         return execute_command(run, args)
     from .action_reply import execute_reply
 
     return execute_reply(run, args)
+
+
+# One-time registration captures the actual ordinary command source. Merely
+# constructing a status plan cannot install a transport dispatch permit.
+import sys as _sys  # noqa: E402
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+from .trust_effects import _install_command_source  # noqa: E402
+
+_install_command_source(_sys.modules[__name__])
+from .trust_effects import _finish_command_source  # noqa: E402
+
+_seal_original_source()
+_finish_command_source(_sys.modules[__name__])
