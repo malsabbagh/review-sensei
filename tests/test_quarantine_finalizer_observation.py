@@ -81,6 +81,50 @@ class QuarantineFinalizerObservationTests(unittest.TestCase):
                         run = frame.f_locals["run"]
                         before = len(fixture.trace)
                         record = run.caller._effect_record
+                        from review_sensei_github.quarantine_command_finalization import (
+                            prepare,
+                        )
+
+                        from review_sensei.errors import ReviewInputError
+
+                        finalizer = prepared["app"].reviewer.finalizer
+                        preparation = prepare(
+                            run,
+                            prepared["authority"],
+                            prepared["target"],
+                            prepared["app"],
+                        )
+                        shadows = []
+
+                        def shadow(*args, **kwargs):
+                            shadows.append(True)
+                            raise AssertionError("substituted copy hook was invoked")
+
+                        for name in (
+                            "__copy__",
+                            "__deepcopy__",
+                            "__reduce__",
+                            "__reduce_ex__",
+                            "__getstate__",
+                            "__setstate__",
+                            "prepare_command_capacity",
+                        ):
+                            with (
+                                self.subTest(copy_hook=name),
+                                patch.object(finalizer, name, shadow, create=True),
+                            ):
+                                with self.assertRaises(ReviewInputError):
+                                    prepared[
+                                        "app"
+                                    ]._observe_quarantine_command_finalization(
+                                        run, prepared["authority"], prepared["target"]
+                                    )
+                                with self.assertRaises(ReviewInputError):
+                                    type(finalizer).prepare_quarantine_command_capacity(
+                                        finalizer, preparation
+                                    )
+                        self.assertEqual(shadows, [])
+                        self.assertEqual(len(fixture.trace), before)
                         plan = prepared["app"]._observe_quarantine_command_finalization(
                             run, prepared["authority"], prepared["target"]
                         )

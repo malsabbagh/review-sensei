@@ -4758,12 +4758,16 @@ class GitHubApplication:
         from review_sensei.disposition import session_dispositions
 
         from .finding_lifecycle import FindingLifecycleJournal
-        from .quarantine_command_finalization import prepare
+        from .quarantine_command_finalization import (
+            prepare,
+            require_finalizer_copy_source,
+        )
         from .quarantine_lifecycle_transfer import sizing_snapshot
 
         preparation = prepare(run, authority, target, self)
         record, document = sizing_snapshot(target, run)
         finalizer = getattr(self.reviewer, "finalizer", None)
+        require_finalizer_copy_source(finalizer)
         budget = run.caller.budget_view
         if (
             type(finalizer) is not ReviewApprovalFinalizer

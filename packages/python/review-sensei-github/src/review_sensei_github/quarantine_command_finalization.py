@@ -78,6 +78,35 @@ def require_observation(observation):
     return require(saved[0])
 
 
+def require_finalizer_copy_source(finalizer):
+    """Reject executable instance substitution before invoking copy protocols."""
+    from review_sensei.source_registry import require_instance_source
+
+    from .publication import ReviewApprovalFinalizer
+
+    if type(finalizer) is not ReviewApprovalFinalizer:
+        raise ReviewInputError("quarantine finalizer copy source is unsupported")
+    require_instance_source(finalizer, methods=())
+    if any(
+        name in finalizer.__dict__
+        for name in (
+            "__copy__",
+            "__deepcopy__",
+            "__reduce__",
+            "__reduce_ex__",
+            "__getstate__",
+            "__setstate__",
+        )
+    ):
+        raise ReviewInputError("quarantine finalizer copy protocol changed")
+    methods = tuple(
+        name
+        for name in dir(type(finalizer))
+        if not name.startswith("__") and callable(getattr(type(finalizer), name))
+    )
+    require_instance_source(finalizer, methods=methods)
+
+
 def prepare(run, authority, target, app):
     from . import quarantine_action, quarantine_lifecycle_transfer
     from .application import GitHubApplication

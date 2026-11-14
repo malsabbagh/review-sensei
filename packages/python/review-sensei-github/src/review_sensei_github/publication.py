@@ -3250,8 +3250,12 @@ class ReviewApprovalFinalizer:
         """Observe hypothetical native work, without issuing physical admission."""
         from copy import copy
 
-        from .quarantine_command_finalization import require
+        from .quarantine_command_finalization import (
+            require,
+            require_finalizer_copy_source,
+        )
 
+        require_finalizer_copy_source(self)
         require(preparation)
         operation = copy(self)
         operation._quarantine_capacity_preparation = preparation
