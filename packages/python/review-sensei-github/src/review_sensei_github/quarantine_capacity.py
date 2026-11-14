@@ -1156,6 +1156,14 @@ def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
         historical_execution,
     )
     _CAPACITY_EXTENSIONS[proof] = _extension_seal(proof)
+    if (
+        sizing is not None
+        and sizing[0].__name__ == "review_sensei_github.current_quarantine_finalization"
+    ):
+        from review_sensei.source_registry import require_module_seal
+
+        require_module_seal(sizing[0])
+        sizing[0].capture_lifecycle_extension(proof, ledger, identity)
     return proof
 
 
