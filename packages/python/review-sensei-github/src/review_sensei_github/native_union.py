@@ -480,135 +480,166 @@ class NativeUnionReceipt:
         The two finite presentation modes are selected only by the immutable
         complete plan hash; this never changes the retained approval facts.
         """
-        from dataclasses import replace
+        import sys
 
-        from review_sensei.context import finding_lifecycle_for_comment
-        from review_sensei.human_assessment import finding_instance_fingerprint
-        from review_sensei.presentation import (
-            assign_finding_identifiers,
-            build_finding_view,
-            render_finding,
+        from review_sensei.source_registry import require_module_seal
+
+        require_module_seal(sys.modules[__name__])
+        return reconstruct_original_plan(
+            result,
+            index,
+            base_sha=self.base_sha,
+            head_sha=self.head_sha,
+            inline_count=self.inline_count,
+            plan_sha256=self.plan_sha256,
+            pull_request=self.pull_request,
+            repository_id=self.repository_id,
+            result_digest=self.result_digest,
+            result_sha256=self.result_sha256,
+            reused_roots=self.reused_roots,
+            transaction_id=self.transaction_id,
+            main_body=main_body,
         )
 
-        from .native_review_groups import NativeInline, NativeReviewPlan
-        from .publication import render_native_inline
 
-        transaction = result.transaction
-        if (
-            transaction is None
-            or transaction.transaction_id != self.transaction_id
-            or result.content_digest() != self.result_sha256
-            or (transaction.head_sha, transaction.base_sha)
-            != (self.head_sha, self.base_sha)
-            or index.result_digest != self.result_digest
-            or index.base_sha != self.base_sha
-        ):
-            raise ReviewInputError(
-                "native union original result/admission scope conflicts"
+def reconstruct_original_plan(
+    result: ReviewResult,
+    index: FindingIndex,
+    *,
+    base_sha,
+    head_sha,
+    inline_count,
+    plan_sha256,
+    pull_request,
+    repository_id,
+    result_digest,
+    result_sha256,
+    reused_roots,
+    transaction_id,
+    main_body: str | None,
+) -> NativeReviewPlan:
+    """Original cold rendering from explicit data; no positive native evidence."""
+    from dataclasses import replace
+
+    from review_sensei.context import finding_lifecycle_for_comment
+    from review_sensei.human_assessment import finding_instance_fingerprint
+    from review_sensei.presentation import (
+        assign_finding_identifiers,
+        build_finding_view,
+        render_finding,
+    )
+
+    from .native_review_groups import NativeInline, NativeReviewPlan
+    from .publication import render_native_inline
+
+    transaction = result.transaction
+    if (
+        transaction is None
+        or transaction.transaction_id != transaction_id
+        or result.content_digest() != result_sha256
+        or (transaction.head_sha, transaction.base_sha) != (head_sha, base_sha)
+        or index.result_digest != result_digest
+        or index.base_sha != base_sha
+    ):
+        raise ReviewInputError("native union original result/admission scope conflicts")
+    entries = {entry.instance: entry for entry in index.entries}
+    if len(entries) != len(index.entries):
+        raise ReviewInputError("native union original admission duplicates an instance")
+    reused = {root.instance: root for root in reused_roots}
+    if not set(reused) <= set(entries) or any(
+        entries[instance].body_placed for instance in reused
+    ):
+        raise ReviewInputError("native union reused roots conflict with original index")
+    states = {item.fingerprint: item.state for item in result.finding_lifecycles}
+    originals = {}
+    instances = [finding_instance_fingerprint(comment) for comment in result.comments]
+    identifiers = assign_finding_identifiers(instances)
+    for comment, instance in zip(result.comments, instances, strict=True):
+        fingerprint = finding_lifecycle_for_comment(comment).fingerprint
+        if states.get(fingerprint, "new") in {"fixed", "outdated"}:
+            continue
+        if instance not in originals:
+            originals[instance] = (comment, fingerprint)
+    if set(originals) != set(entries) or any(
+        entries[instance].lifecycle != fingerprint
+        for instance, (_, fingerprint) in originals.items()
+    ):
+        raise ReviewInputError("native union original admission membership conflicts")
+    for advisory in (False, True):
+        items = []
+        body_complete = True
+        for instance, (comment, fingerprint) in originals.items():
+            entry = entries[instance]
+            comment = replace(
+                comment,
+                effective_blocking=entry.blocking,
+                needs_human=entry.needs_human,
             )
-        entries = {entry.instance: entry for entry in index.entries}
-        if len(entries) != len(index.entries):
-            raise ReviewInputError(
-                "native union original admission duplicates an instance"
-            )
-        reused = {root.instance: root for root in self.reused_roots}
-        if not set(reused) <= set(entries) or any(
-            entries[instance].body_placed for instance in reused
-        ):
-            raise ReviewInputError(
-                "native union reused roots conflict with original index"
-            )
-        states = {item.fingerprint: item.state for item in result.finding_lifecycles}
-        originals = {}
-        instances = [
-            finding_instance_fingerprint(comment) for comment in result.comments
-        ]
-        identifiers = assign_finding_identifiers(instances)
-        for comment, instance in zip(result.comments, instances, strict=True):
-            fingerprint = finding_lifecycle_for_comment(comment).fingerprint
-            if states.get(fingerprint, "new") in {"fixed", "outdated"}:
-                continue
-            if instance not in originals:
-                originals[instance] = (comment, fingerprint)
-        if set(originals) != set(entries) or any(
-            entries[instance].lifecycle != fingerprint
-            for instance, (_, fingerprint) in originals.items()
-        ):
-            raise ReviewInputError(
-                "native union original admission membership conflicts"
-            )
-        for advisory in (False, True):
-            items = []
-            body_complete = True
-            for instance, (comment, fingerprint) in originals.items():
-                entry = entries[instance]
-                comment = replace(
-                    comment,
-                    effective_blocking=entry.blocking,
-                    needs_human=entry.needs_human,
-                )
-                if not entry.body_placed and (
-                    comment.side not in {"LEFT", "RIGHT"} or comment.line is None
-                ):
-                    raise ReviewInputError(
-                        "native union retained inline location is invalid"
-                    )
-                state = states.get(fingerprint, "new")
-                view = replace(
-                    build_finding_view(
-                        comment,
-                        fingerprint=fingerprint,
-                        identifier=identifiers[instance],
-                        lifecycle_state=state,
-                        placement="body" if entry.body_placed else "inline",
-                        advisory=advisory,
-                        literal_malformed_fences=True,
-                    ),
-                    repeat=True,
-                )
-                if entry.body_placed:
-                    if main_body is not None and render_finding(view) not in main_body:
-                        body_complete = False
-                    continue
-                body = render_native_inline(
-                    comment,
-                    view=view,
-                    result=result,
-                    repository_id=self.repository_id,
-                    pull_request=self.pull_request,
-                    head_sha=self.head_sha,
-                    base_sha=self.base_sha,
-                    fingerprint=fingerprint,
-                    state=state,
-                )
-                if instance in reused:
-                    if (
-                        hashlib.sha256(body.encode("utf-8")).hexdigest()
-                        != reused[instance].body_sha256
-                    ):
-                        body_complete = False
-                    continue
-                items.append(
-                    NativeInline.from_prepared(
-                        comment, body, anchor=comment.side.lower()
-                    )
-                )
-            plan = NativeReviewPlan.prepare(
-                repository_id=self.repository_id,
-                pull_request=self.pull_request,
-                base_sha=self.base_sha,
-                head_sha=self.head_sha,
-                transaction_id=self.transaction_id,
-                result_sha256=self.result_sha256,
-                items=tuple(items),
-            )
-            if (
-                plan.sha256 == self.plan_sha256
-                and len(plan.items) + len(reused) == self.inline_count
-                and body_complete
+            if not entry.body_placed and (
+                comment.side not in {"LEFT", "RIGHT"} or comment.line is None
             ):
-                return plan
-        raise ReviewInputError("native union complete original rendering changed")
+                raise ReviewInputError(
+                    "native union retained inline location is invalid"
+                )
+            state = states.get(fingerprint, "new")
+            view = replace(
+                build_finding_view(
+                    comment,
+                    fingerprint=fingerprint,
+                    identifier=identifiers[instance],
+                    lifecycle_state=state,
+                    placement="body" if entry.body_placed else "inline",
+                    advisory=advisory,
+                    literal_malformed_fences=True,
+                ),
+                repeat=True,
+            )
+            if entry.body_placed:
+                if main_body is not None and render_finding(view) not in main_body:
+                    body_complete = False
+                continue
+            body = render_native_inline(
+                comment,
+                view=view,
+                result=result,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                fingerprint=fingerprint,
+                state=state,
+            )
+            if instance in reused:
+                if (
+                    hashlib.sha256(body.encode("utf-8")).hexdigest()
+                    != reused[instance].body_sha256
+                ):
+                    body_complete = False
+                continue
+            items.append(
+                NativeInline.from_prepared(comment, body, anchor=comment.side.lower())
+            )
+        plan = NativeReviewPlan.prepare(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            transaction_id=transaction_id,
+            result_sha256=result_sha256,
+            items=tuple(items),
+        )
+        if (
+            plan.sha256 == plan_sha256
+            and len(plan.items) + len(reused) == inline_count
+            and body_complete
+        ):
+            return plan
+    raise ReviewInputError("native union complete original rendering changed")
 
 
 NativeUnionReader = Callable[[NativeUnionReceipt], "NativePublicationEvidence"]
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

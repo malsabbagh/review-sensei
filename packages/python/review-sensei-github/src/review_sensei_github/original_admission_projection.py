@@ -23,7 +23,12 @@ from review_sensei.human_assessment import finding_instance_fingerprint
 from review_sensei.models import ReviewResult
 
 from .lifecycle_admission import restore_original_lifecycle_admission
-from .publication import IndexedFinding, finding_index_marker, review_result_digest
+from .publication import (
+    IndexedFinding,
+    finding_index_marker,
+    parse_finding_index,
+    review_result_digest,
+)
 
 VERSION = "original-admission-projection-v1"
 FIELDS = frozenset(
@@ -114,10 +119,42 @@ def _reconstruct(source, lifecycle, *, identity):
     return restored, index
 
 
+def _require_exact_index_membership(index, expected, source, identity):
+    if type(index) is not str:
+        raise ReviewInputError("original admission index is not a marker")
+    tx = source.transaction
+    scope = dict(
+        repository_id=identity.repository_id,
+        pull_request=identity.pull_request,
+        head_sha=tx.head_sha,
+    )
+    actual = parse_finding_index(index, **scope)
+    original = parse_finding_index(expected, **scope)
+    if (
+        actual is None
+        or original is None
+        or actual.base_sha != original.base_sha
+        or actual.result_digest != original.result_digest
+        or len(actual.entries) != len(original.entries)
+        or {entry.instance: entry for entry in actual.entries}
+        != {entry.instance: entry for entry in original.entries}
+        or index
+        != finding_index_marker(
+            **scope,
+            base_sha=actual.base_sha,
+            result_digest=actual.result_digest,
+            entries=actual.entries,
+            complete_inventory=True,
+        )
+    ):
+        raise ReviewInputError("original admission retained index conflicts")
+
+
 def project_original_admission(source, lifecycle, index, *, identity):
     """Validate original producer values; copying this data confers no authority."""
     restored, expected = _reconstruct(source, lifecycle, identity=identity)
-    if index != expected or any(
+    _require_exact_index_membership(index, expected, source, identity)
+    if any(
         (a.effective_blocking, a.needs_human) != (b.effective_blocking, b.needs_human)
         for a, b in zip(source.comments, restored.comments, strict=True)
     ):
@@ -158,9 +195,8 @@ def restore_original_admission(value, source, *, identity):
     restored, index = _reconstruct(
         source, value["original_lifecycle"], identity=identity
     )
-    if index != value["finding_index"]:
-        raise ReviewInputError("original admission retained index conflicts")
-    return restored, index
+    _require_exact_index_membership(value["finding_index"], index, restored, identity)
+    return restored, value["finding_index"]
 
 
 def require_preserved_original_admission(before, after):

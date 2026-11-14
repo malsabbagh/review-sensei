@@ -34,7 +34,7 @@ FIELDS = frozenset(
 
 
 def _descriptor(document, source, identity, plan):
-    restored, _ = restore_original_admission(
+    restored, retained_index = restore_original_admission(
         document["original_admission"], source, identity=identity
     )
     tx = restored.transaction
@@ -71,6 +71,38 @@ def _descriptor(document, source, identity, plan):
         )
     ):
         raise ReviewInputError("grouped inline plan binding changed")
+    from review_sensei.source_registry import require_module_seal
+
+    from . import native_union
+
+    require_module_seal(native_union)
+    from .publication import parse_finding_index, review_result_digest
+
+    retained = parse_finding_index(
+        retained_index,
+        repository_id=identity.repository_id,
+        pull_request=identity.pull_request,
+        head_sha=tx.head_sha,
+    )
+    if retained is None:
+        raise ReviewInputError("grouped inline original index is absent")
+    original_plan = native_union.reconstruct_original_plan(
+        restored,
+        retained,
+        repository_id=identity.repository_id,
+        pull_request=identity.pull_request,
+        base_sha=tx.base_sha,
+        head_sha=tx.head_sha,
+        transaction_id=tx.transaction_id,
+        result_sha256=tx.result_sha256,
+        result_digest=review_result_digest(restored),
+        plan_sha256=plan.sha256,
+        inline_count=len(plan.items),
+        reused_roots=(),
+        main_body=None,
+    )
+    if original_plan != plan:
+        raise ReviewInputError("grouped inline plan differs from original rendering")
     effects = document["effects"]
     if not isinstance(effects, list) or len(effects) not in (3, 4):
         raise ReviewInputError("grouped inline effect sequence is incomplete")

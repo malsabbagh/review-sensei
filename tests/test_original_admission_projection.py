@@ -245,3 +245,57 @@ class OriginalAdmissionProjectionTests(unittest.TestCase):
         changed_input["original_lifecycle"]["input_identity"][2] = "e" * 64
         with self.assertRaises(ReviewInputError):
             require_preserved_original_admission(projection, changed_input)
+
+    def test_complete_display_permutation_retains_exact_producer_index(self):
+        from review_sensei_github.publication import parse_finding_index
+
+        source, _, lifecycle, index, _ = self.inputs()
+        parsed = parse_finding_index(
+            index,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD_SHA,
+        )
+        self.assertGreater(len(parsed.entries), 1)
+
+        def marker(entries):
+            return finding_index_marker(
+                repository_id=IDENTITY.repository_id,
+                pull_request=IDENTITY.pull_request,
+                head_sha=HEAD_SHA,
+                base_sha=BASE_SHA,
+                result_digest=parsed.result_digest,
+                entries=entries,
+                complete_inventory=True,
+            )
+
+        permuted = marker(tuple(reversed(parsed.entries)))
+        self.assertNotEqual(permuted, index)
+        projected = project_original_admission(
+            source, lifecycle, permuted, identity=IDENTITY
+        )
+        self.assertEqual(projected["finding_index"], permuted)
+        _, restored_index = restore_original_admission(
+            projected, ReviewResult.from_dict(source.to_dict()), identity=IDENTITY
+        )
+        self.assertEqual(restored_index, permuted)
+        for entries in (
+            parsed.entries[:-1],
+            (replace(parsed.entries[0], needs_human=False), *parsed.entries[1:]),
+            (replace(parsed.entries[0], body_placed=True), *parsed.entries[1:]),
+        ):
+            with self.assertRaises(ReviewInputError):
+                project_original_admission(
+                    source, lifecycle, marker(entries), identity=IDENTITY
+                )
+        import base64
+        import re
+
+        single = marker((parsed.entries[0],))
+        encoded = re.search(r"entries=([A-Za-z0-9_-]+)", single).group(1)
+        raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        duplicate = single.replace(
+            encoded, base64.urlsafe_b64encode(raw * 2).decode().rstrip("=")
+        )
+        with self.assertRaises(ReviewInputError):
+            project_original_admission(source, lifecycle, duplicate, identity=IDENTITY)

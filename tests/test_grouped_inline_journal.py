@@ -17,7 +17,6 @@ from review_sensei_github.original_admission_journal import (
 
 from review_sensei.errors import ReviewInputError
 from tests.test_guarded_publication_batch import GuardedPairSchemaTests
-from tests.test_native_group_publication import GroupWriterBackend
 from tests.test_original_admission_projection import OriginalAdmissionProjectionTests
 from tests.test_review_transaction import IDENTITY
 
@@ -27,7 +26,48 @@ class GroupedInlineJournalTests(unittest.TestCase):
         source, _, lifecycle, _, projection = (
             OriginalAdmissionProjectionTests().inputs()
         )
-        plan = GroupWriterBackend().plan
+        from review_sensei_github.native_review_groups import (
+            NativeInline,
+            NativeReviewPlan,
+        )
+        from review_sensei_github.publication import ReviewPublisher
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.diff import DiffAnalysis
+        from review_sensei.placement import HostPlacementFacts
+
+        assembled = ReviewPublisher._assemble_review_body(
+            object.__new__(ReviewPublisher),
+            result=source,
+            analysis=DiffAnalysis(
+                changed_lines={"f.py": frozenset({1, 2})},
+                changed_paths=("f.py",),
+                diff_bytes=100,
+                diff_files=1,
+                diff_hunks=1,
+                diff_lines=5,
+            ),
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            read_facts=lambda: HostPlacementFacts(),
+            auto_approve=True,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=source.transaction.head_sha,
+            base_sha=source.transaction.base_sha,
+            literal_malformed_fences=True,
+        )
+        plan = NativeReviewPlan.prepare(
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            base_sha=source.transaction.base_sha,
+            head_sha=source.transaction.head_sha,
+            transaction_id=source.transaction.transaction_id,
+            result_sha256=source.transaction.result_sha256,
+            items=tuple(
+                NativeInline.from_prepared(comment, body, anchor=anchor)
+                for comment, _, body, anchor in assembled.inline_comments
+            ),
+        )
         base = GuardedPairSchemaTests().pair()
         base.pop("guarded_publication_pair")
         base["schema_version"] = "finding-lifecycle-journal-v2"
@@ -201,3 +241,84 @@ class GroupedInlineJournalTests(unittest.TestCase):
                 grouped_inline_journal(
                     changed, projection, source, identity=IDENTITY, plan=plan
                 )
+
+    def test_coherent_alternate_plan_part_and_descriptor_are_not_original(self):
+        from review_sensei_github.native_review_groups import NativeReviewPlan
+
+        source, projection, plan, base = self.inputs()
+        self.assertGreater(len(plan.items), 1)
+        alternate = NativeReviewPlan.prepare(
+            repository_id=plan.repository_id,
+            pull_request=plan.pull_request,
+            base_sha=plan.base_sha,
+            head_sha=plan.head_sha,
+            transaction_id=plan.transaction_id,
+            result_sha256=plan.result_sha256,
+            items=(
+                replace(plan.items[0], body=plan.items[0].body + " altered"),
+                *plan.items[1:],
+            ),
+        )
+        base["effects"][2]["request"] = _request_identity(alternate.part_payload(0))
+        effect = base["effects"][2]
+        effect["request_sha256"] = _digest(
+            {k: effect[k] for k in ("method", "path", "request")}
+        )
+        with self.assertRaises(ReviewInputError):
+            grouped_inline_journal(
+                base, projection, source, identity=IDENTITY, plan=alternate
+            )
+
+    def test_replaced_original_cold_renderer_is_not_equivalent_authority(self):
+        from unittest.mock import patch
+
+        source, projection, plan, base = self.inputs()
+        with patch(
+            "review_sensei_github.native_union.reconstruct_original_plan",
+            return_value=plan,
+        ) as altered:
+            with self.assertRaises(ReviewInputError):
+                grouped_inline_journal(
+                    base, projection, source, identity=IDENTITY, plan=plan
+                )
+            altered.assert_not_called()
+
+    def test_display_index_permutation_keeps_original_native_order(self):
+        from review_sensei_github.publication import (
+            finding_index_marker,
+            parse_finding_index,
+        )
+
+        source, projection, plan, base = self.inputs()
+        original_index = projection["finding_index"]
+        parsed = parse_finding_index(
+            original_index,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=plan.head_sha,
+        )
+        projection["finding_index"] = finding_index_marker(
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=plan.head_sha,
+            base_sha=plan.base_sha,
+            result_digest=parsed.result_digest,
+            entries=tuple(reversed(parsed.entries)),
+            complete_inventory=True,
+        )
+        self.assertNotEqual(projection["finding_index"], original_index)
+        framed = grouped_inline_journal(
+            base, projection, source, identity=IDENTITY, plan=plan
+        )
+        decoded = unpack_original_admission_journal(
+            pack_original_admission_journal(
+                framed, source, identity=IDENTITY, plan=plan
+            ),
+            source,
+            identity=IDENTITY,
+            plan=plan,
+        )
+        self.assertEqual(
+            decoded["original_admission"]["finding_index"], projection["finding_index"]
+        )
+        self.assertEqual(decoded["grouped_inline_pair"]["plan_sha256"], plan.sha256)
