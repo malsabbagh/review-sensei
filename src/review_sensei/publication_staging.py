@@ -427,12 +427,39 @@ class PublicationStaging:
 
 
 def normalize_staging(value: object) -> dict[str, object] | None:
+    if (
+        isinstance(value, dict)
+        and value.get("schema_version") == "publication-staging-v3"
+    ):
+        from .grouped_publication_declarations import GroupedDeclarations
+
+        return GroupedDeclarations.from_document(value).to_document()
     return (
         None if value is None else PublicationStaging.from_document(value).to_document()
     )
 
 
 def require_staging_successor(before: object, after: object) -> None:
+    if any(
+        isinstance(value, dict)
+        and value.get("schema_version") == "publication-staging-v3"
+        for value in (before, after)
+    ):
+        from .grouped_publication_declarations import (
+            GroupedDeclarations,
+            require_declaration_transition,
+        )
+
+        new = GroupedDeclarations.from_document(after)
+        if before is None:
+            if new.phase != "declared":
+                raise ReviewInputError(
+                    "grouped staging must begin with unconfirmed declarations"
+                )
+        else:
+            old = GroupedDeclarations.from_document(before)
+            require_declaration_transition(old, new)
+        return
     old = None if before is None else PublicationStaging.from_document(before)
     new = None if after is None else PublicationStaging.from_document(after)
     if old == new:

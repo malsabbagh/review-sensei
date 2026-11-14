@@ -1128,11 +1128,22 @@ class SessionRecord:
         if staging is not None:
             from .publication_staging import PublicationStaging
 
-            frontier = PublicationStaging.from_document(staging)
-            if not frontier.complete and (
+            if staging.get("schema_version") == "publication-staging-v3":
+                from .grouped_publication_declarations import GroupedDeclarations
+
+                declared = GroupedDeclarations.from_document(staging)
+                staging_complete = declared.phase == "finished"
+                staging_transaction = declared.transaction_id
+                staging_result = declared.result_sha256
+            else:
+                frontier = PublicationStaging.from_document(staging)
+                staging_complete = frontier.complete
+                staging_transaction = frontier.transaction_id
+                staging_result = frontier.result_sha256
+            if not staging_complete and (
                 self.transaction is None
-                or self.transaction.transaction_id != frontier.transaction_id
-                or self.transaction.result_sha256 != frontier.result_sha256
+                or self.transaction.transaction_id != staging_transaction
+                or self.transaction.result_sha256 != staging_result
                 or self.transaction.phase
                 not in {"publication_pending", "publication_failed"}
             ):

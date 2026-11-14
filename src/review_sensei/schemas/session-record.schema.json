@@ -773,165 +773,359 @@
       "$ref": "https://reviewsensei.dev/schemas/v1/quarantine-lineage.schema.json"
     },
     "publication_staging": {
-      "description": "Closed bounded frontier for a multipart native publication. Unknown attempts are retained.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schema_version",
-        "transaction_id",
-        "result_sha256",
-        "plan_sha256",
-        "part_count",
-        "attempted_parts",
-        "attempt_tokens",
-        "receipts",
-        "final_attempted",
-        "final_token",
-        "final_receipt",
-        "manifest_required",
-        "manifest_attempted",
-        "manifest_token",
-        "manifest_receipt"
-      ],
-      "properties": {
-        "schema_version": {
-          "const": "publication-staging-v2"
-        },
-        "transaction_id": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
-        },
-        "result_sha256": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
-        },
-        "plan_sha256": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
-        },
-        "part_count": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 8
-        },
-        "attempted_parts": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 8
-        },
-        "attempt_tokens": {
-          "type": "array",
-          "maxItems": 8,
-          "uniqueItems": true,
-          "items": {
-            "type": "string",
-            "pattern": "^[a-f0-9]{32}$"
-          }
-        },
-        "receipts": {
-          "type": "array",
-          "maxItems": 8,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "native_id",
-              "content_sha256"
-            ],
-            "properties": {
-              "native_id": {
+      "oneOf": [
+        {
+          "description": "Closed bounded frontier for a multipart native publication. Unknown attempts are retained.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "transaction_id",
+            "result_sha256",
+            "plan_sha256",
+            "part_count",
+            "attempted_parts",
+            "attempt_tokens",
+            "receipts",
+            "final_attempted",
+            "final_token",
+            "final_receipt",
+            "manifest_required",
+            "manifest_attempted",
+            "manifest_token",
+            "manifest_receipt"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "publication-staging-v2"
+            },
+            "transaction_id": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "result_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "plan_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "part_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8
+            },
+            "attempted_parts": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8
+            },
+            "attempt_tokens": {
+              "type": "array",
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": {
                 "type": "string",
-                "pattern": "^[A-Za-z0-9_:.=-]{1,64}$"
-              },
-              "content_sha256": {
-                "type": "string",
-                "pattern": "^[a-f0-9]{64}$"
+                "pattern": "^[a-f0-9]{32}$"
               }
-            }
-          }
-        },
-        "final_attempted": {
-          "type": "boolean"
-        },
-        "final_token": {
-          "anyOf": [
-            {
-              "type": "string",
-              "pattern": "^[a-f0-9]{32}$"
             },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "manifest_required": {
-          "type": "boolean"
-        },
-        "manifest_attempted": {
-          "type": "boolean"
-        },
-        "manifest_token": {
-          "anyOf": [
-            {
-              "type": "string",
-              "pattern": "^[a-f0-9]{32}$"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "manifest_receipt": {
-          "anyOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "native_id",
-                "content_sha256"
-              ],
-              "properties": {
-                "native_id": {
-                  "type": "string",
-                  "pattern": "^[A-Za-z0-9_:.=-]{1,64}$"
-                },
-                "content_sha256": {
-                  "type": "string",
-                  "pattern": "^[a-f0-9]{64}$"
+            "receipts": {
+              "type": "array",
+              "maxItems": 8,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "native_id",
+                  "content_sha256"
+                ],
+                "properties": {
+                  "native_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_:.=-]{1,64}$"
+                  },
+                  "content_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
                 }
               }
             },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "final_receipt": {
-          "anyOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "native_id",
-                "content_sha256"
-              ],
-              "properties": {
-                "native_id": {
+            "final_attempted": {
+              "type": "boolean"
+            },
+            "final_token": {
+              "anyOf": [
+                {
                   "type": "string",
-                  "pattern": "^[A-Za-z0-9_:.=-]{1,64}$"
+                  "pattern": "^[a-f0-9]{32}$"
                 },
-                "content_sha256": {
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "manifest_required": {
+              "type": "boolean"
+            },
+            "manifest_attempted": {
+              "type": "boolean"
+            },
+            "manifest_token": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{32}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "manifest_receipt": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "native_id",
+                    "content_sha256"
+                  ],
+                  "properties": {
+                    "native_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_:.=-]{1,64}$"
+                    },
+                    "content_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "final_receipt": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "native_id",
+                    "content_sha256"
+                  ],
+                  "properties": {
+                    "native_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_:.=-]{1,64}$"
+                    },
+                    "content_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Finite grouped declarations are preservation data, never native replay authority. Runtime validation additionally enforces exact scope, ordering and signed-63 native identities.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "transaction_id",
+            "result_sha256",
+            "plan_sha256",
+            "part_count",
+            "declarations",
+            "phase",
+            "part_receipt",
+            "manifest_receipt",
+            "final_request_sha256",
+            "final_receipt"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": "publication-staging-v3"
+            },
+            "transaction_id": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "result_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "plan_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "part_count": {
+              "const": 1
+            },
+            "declarations": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "prefixItems": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "role",
+                    "token"
+                  ],
+                  "properties": {
+                    "role": {
+                      "const": "part"
+                    },
+                    "token": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{32}$"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "role",
+                    "token"
+                  ],
+                  "properties": {
+                    "role": {
+                      "const": "manifest"
+                    },
+                    "token": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{32}$"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "role",
+                    "token"
+                  ],
+                  "properties": {
+                    "role": {
+                      "const": "final"
+                    },
+                    "token": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{32}$"
+                    }
+                  }
+                }
+              ]
+            },
+            "phase": {
+              "enum": [
+                "declared",
+                "final-intent",
+                "finished",
+                "held"
+              ]
+            },
+            "part_receipt": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "native_id",
+                    "content_sha256"
+                  ],
+                  "properties": {
+                    "native_id": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]{0,18}$"
+                    },
+                    "content_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  }
+                }
+              ]
+            },
+            "manifest_receipt": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "native_id",
+                    "content_sha256"
+                  ],
+                  "properties": {
+                    "native_id": {
+                      "type": "string",
+                      "pattern": "^issue:[1-9][0-9]{0,18}$"
+                    },
+                    "content_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  }
+                }
+              ]
+            },
+            "final_request_sha256": {
+              "anyOf": [
+                {
                   "type": "string",
                   "pattern": "^[a-f0-9]{64}$"
+                },
+                {
+                  "type": "null"
                 }
-              }
+              ]
             },
-            {
-              "type": "null"
+            "final_receipt": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "native_id",
+                    "content_sha256"
+                  ],
+                  "properties": {
+                    "native_id": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]{0,18}$"
+                    },
+                    "content_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  }
+                }
+              ]
             }
-          ]
+          }
         }
-      }
+      ]
     },
     "finding_lifecycle": {
       "type": "object",
