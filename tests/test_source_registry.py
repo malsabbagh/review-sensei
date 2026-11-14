@@ -92,6 +92,59 @@ class SourceRegistryTests(unittest.TestCase):
                 require_module_seal(http)
         require_module_seal(http)
 
+    def test_plain_function_cannot_acquire_a_forged_unwrap_target(self):
+        function = disposition.apply_session_command
+        self.assertFalse(hasattr(function, "__wrapped__"))
+        with patch.object(function, "__wrapped__", lambda: None, create=True):
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(disposition)
+        require_module_seal(disposition)
+
+    def test_original_wrapper_chain_binds_links_and_inner_source(self):
+        import inspect
+
+        from review_sensei_github import finding_lifecycle
+
+        from review_sensei.source_registry import require_instance_source
+
+        cls = finding_lifecycle.FindingLifecycleJournal
+        function = cls.preflight_command_finalization
+        original = function.__wrapped__
+        inner = inspect.unwrap(function)
+        journal = object.__new__(cls)
+        methods = ("preflight_command_finalization",)
+        require_module_seal(finding_lifecycle)
+        require_instance_source(journal, methods=methods)
+        copied = types.FunctionType(original.__code__, original.__globals__)
+        for replacement in (copied, function):
+            with (
+                self.subTest(link=replacement),
+                patch.object(function, "__wrapped__", replacement),
+            ):
+                with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                    require_module_seal(finding_lifecycle)
+                with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                    require_instance_source(journal, methods=methods)
+        for attribute, replacement in (
+            ("__code__", inner.__code__.replace(co_name="forged_inner")),
+            ("__defaults__", (object(),)),
+            ("__kwdefaults__", {"forged": object()}),
+        ):
+            with self.subTest(attribute=attribute):
+                previous = getattr(inner, attribute)
+                try:
+                    setattr(inner, attribute, replacement)
+                    with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                        require_module_seal(finding_lifecycle)
+                    with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                        require_instance_source(journal, methods=methods)
+                finally:
+                    setattr(inner, attribute, previous)
+        require_module_seal(finding_lifecycle)
+        require_instance_source(journal, methods=methods)
+        self.assertIs(function.__wrapped__, original)
+        self.assertIs(inspect.unwrap(function), inner)
+
     def test_stdlib_copy_preserves_original_class_and_slot_cache_is_pinned(self):
         import copy
 

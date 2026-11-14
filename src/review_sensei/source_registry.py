@@ -20,6 +20,9 @@ def _build_registry():
 
     classes: dict[type, Any] = {}
     function_defaults: dict[Any, Any] = {}
+    function_wrappers: dict[Any, Any] = {}
+    function_definitions: dict[Any, Any] = {}
+    no_wrapper = object()
 
     def default_snapshot(value, ancestors=()):
         # Retain both binding identity and container contents. In particular the
@@ -52,6 +55,47 @@ def _build_registry():
 
     def normalize(value):
         return getattr(value, "__func__", value)
+
+    def remember_function(function):
+        # inspect.unwrap follows mutable function metadata. Pin each original
+        # link and inner definition, not just the visible wrapper's code.
+        seen = set()
+        while True:
+            if not inspect.isfunction(function) or function in seen:
+                raise ReviewInputError("original source wrapper chain is invalid")
+            seen.add(function)
+            if function in function_defaults:
+                return  # Never replace an earlier defining-module snapshot.
+            wrapped = vars(function).get("__wrapped__", no_wrapper)
+            function_defaults[function] = defaults(function)
+            function_wrappers[function] = wrapped
+            function_definitions[function] = (
+                function.__code__,
+                function.__globals__,
+            )
+            if wrapped is no_wrapper:
+                return
+            function = wrapped
+
+    def function_unchanged(function):
+        seen = set()
+        while function not in seen:
+            seen.add(function)
+            definition = function_definitions.get(function)
+            if (
+                definition is None
+                or function.__code__ is not definition[0]
+                or function.__globals__ is not definition[1]
+                or defaults(function) != function_defaults[function]
+                or vars(function).get("__wrapped__", no_wrapper)
+                is not function_wrappers[function]
+            ):
+                return False
+            wrapped = function_wrappers[function]
+            if wrapped is no_wrapper:
+                return True
+            function = wrapped
+        return False
 
     def seal_module():
         current = inspect.currentframe()
@@ -135,9 +179,7 @@ def _build_registry():
                 bindings.extend(members)
         for _owner, _name, original, _code in bindings:
             if inspect.isfunction(original):
-                # An imported function may already have an earlier defining
-                # module seal. Never replace that original snapshot.
-                function_defaults.setdefault(original, defaults(original))
+                remember_function(original)
         registered[module] = tuple(bindings)
 
     def require_bindings(bindings):
@@ -150,10 +192,7 @@ def _build_registry():
             if (
                 current is not original
                 or getattr(current, "__code__", None) is not code
-                or (
-                    inspect.isfunction(current)
-                    and defaults(current) != function_defaults[current]
-                )
+                or (inspect.isfunction(current) and not function_unchanged(current))
             ):
                 raise ReviewInputError("original module source changed: " + name)
 
