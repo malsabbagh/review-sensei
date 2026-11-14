@@ -144,8 +144,7 @@ class GuardedHotNamespaceTests(unittest.TestCase):
         from review_sensei.models import ReviewTransaction
         from review_sensei.session import SessionRecord
 
-        transaction = ReviewTransaction(
-            transaction_id="a" * 64,
+        transaction = ReviewTransaction.create(
             repository=IDENTITY.repository,
             pull_request=IDENTITY.pull_request,
             base_sha="b" * 40,
