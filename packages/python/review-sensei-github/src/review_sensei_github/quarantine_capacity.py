@@ -22,7 +22,11 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.quarantine_assessments import pending_assessments
 
 from .http import MAX_GITHUB_RESPONSE_BYTES, MAX_PAGINATION_ITEMS, MAX_PAGINATION_PAGES
-from .quarantine_scan_capacity import cold_cursor_requests, cold_rest_requests
+from .quarantine_scan_capacity import (
+    bounded_review_page,
+    cold_cursor_requests,
+    cold_rest_requests,
+)
 
 _SURFACES = (
     "issue_comments",
@@ -614,6 +618,9 @@ class NativeCapacityGuard:
                 pages = max(
                     pages, cold_rest_requests(count, largest, (100, 50, 20, 10, 5, 1))
                 )
+            bounded_reviews = surface == "reviews" and not self.complete_tail
+            if bounded_reviews:
+                _width, pages = bounded_review_page(count, largest)
             if pages > MAX_PAGINATION_PAGES:
                 raise ReviewInputError(
                     f"quarantine {surface} page/encoded-byte capacity exceeded"
@@ -623,7 +630,9 @@ class NativeCapacityGuard:
                 "encoded_bytes_upper_bound": size,
                 "largest_upper_bound": largest,
                 "physical_reads_upper_bound": pages,
-                "reader": "packed-comments"
+                "reader": "bounded-cold-reviews"
+                if bounded_reviews
+                else "packed-comments"
                 if surface == "issue_comments" and self.comment_plan is not None
                 else "closed-comment-cursor"
                 if surface == "issue_comments" and self.cursor
@@ -1010,6 +1019,20 @@ def installed_capacity(ledger, identity):
         raise ReviewInputError("quarantine lifecycle installed capacity source changed")
     NativeCapacityGuard.require(guard, guard.stats)
     return guard
+
+
+def review_walk_owner(transport):
+    """Read current installed custody, including an authenticated owner transfer."""
+    guard = getattr(transport, "_quarantine_capacity_guard", None)
+    if not isinstance(guard, NativeCapacityGuard):
+        raise ReviewInputError("quarantine review capacity is not installed")
+    installed = _INSTALLED_GUARDS.get(guard)
+    if installed is None or installed[1]() is not transport:
+        raise ReviewInputError("quarantine review capacity is not installed")
+    ledger = installed[0]()
+    if ledger is None:
+        raise ReviewInputError("quarantine review capacity owner is unavailable")
+    return ledger, installed_capacity(ledger, guard.identity)
 
 
 _CAPACITY_EXTENSIONS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()

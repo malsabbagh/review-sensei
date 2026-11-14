@@ -453,6 +453,17 @@ class GitHubHttp:
                 before_read=before_read,
                 expected_items=expected_items,
             )
+        from .quarantine_scan_capacity import capacity_review_walk
+
+        review_walk = capacity_review_walk(self, path)
+        if review_walk is not None:
+            # No adaptive probes/retries: the installed lifetime frontier pays
+            # for this exact safe width, including the final empty/short page.
+            page_sizes = (review_walk.width,)
+            max_requests = min(
+                max_requests if max_requests is not None else MAX_PAGINATION_PAGES,
+                review_walk.requests,
+            )
         requests = 0
         collected: list[Any] = []
         separator = "&" if "?" in path else "?"
@@ -535,6 +546,19 @@ class GitHubHttp:
                 raise GitHubHTTPPaginationLimitError(
                     "GitHub pagination exceeded its expected inventory"
                 )
+            if review_walk is not None:
+                if (
+                    len(
+                        json.dumps(
+                            body, ensure_ascii=True, separators=(",", ":")
+                        ).encode()
+                    )
+                    > MAX_GITHUB_RESPONSE_BYTES
+                ):
+                    raise GitHubHTTPResponseTooLargeError(
+                        "quarantine review page exceeds response bound"
+                    )
+                review_walk.validate([*collected, *body])
             collected.extend(body)
             if len(body) < page_size:
                 if expected_items is not None and len(collected) != expected_items:
