@@ -153,7 +153,7 @@ def formatter_growth_bound(*, call_limit, source_review_id, approval_review_id):
     return prose + width(observations) + 1
 
 
-def command_result_capacity_bound(
+def command_result_capacity_upper(
     result,
     *,
     binding,
@@ -191,8 +191,36 @@ def command_result_capacity_bound(
         source_review_id=source_review_id,
         approval_review_id=approval_review_id,
     )
-    return raw_result_manifest_bound(
+    return raw_result_manifest_upper(
         envelope_bytes=size, binding=binding, reference_history=reference_history
+    )
+
+
+def command_result_capacity_bound(
+    result,
+    *,
+    binding,
+    intent_sha256,
+    outcome,
+    call_limit,
+    reference_history,
+    source_review_id,
+    approval_review_id,
+):
+    """Byte count of the same inert, domain-constrained terminal upper shape."""
+    return len(
+        canonical_bytes(
+            command_result_capacity_upper(
+                result,
+                binding=binding,
+                intent_sha256=intent_sha256,
+                outcome=outcome,
+                call_limit=call_limit,
+                reference_history=reference_history,
+                source_review_id=source_review_id,
+                approval_review_id=approval_review_id,
+            )
+        )
     )
 
 

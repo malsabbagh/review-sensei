@@ -69,6 +69,17 @@ class CommandResultWireBoundTests(unittest.TestCase):
             approval_review_id=2**63 - 1,
             reference_history=True,
         )
+        upper = bound.command_result_capacity_upper(
+            base,
+            binding=BINDING,
+            intent_sha256="c" * 64,
+            outcome=outcome,
+            call_limit=1152,
+            source_review_id=42,
+            approval_review_id=2**63 - 1,
+            reference_history=True,
+        )
+        self.assertEqual(size, len(canonical_bytes(upper)))
         strings = GitHubApplication._refinalize_command.__code__.co_consts
         suffixes = [
             value
