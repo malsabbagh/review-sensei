@@ -763,15 +763,35 @@ class HumanAssessmentTests(unittest.TestCase):
     def test_retry_after_durable_reassessment_resumes_approval_without_inference(self):
         state = State()
         provider = Provider(response_for(state.eligibility))
+        import inspect
+        import sys
+
         finalize = ReviewApprovalFinalizer.finalize
-        with patch.object(
-            ReviewApprovalFinalizer,
-            "finalize",
-            side_effect=GitHubPublicationTransientError("interrupted"),
-        ):
+        original = inspect.unwrap(finalize)
+        code, globals_ = original.__code__, original.__globals__
+        faults = []
+
+        def interrupt_durable_finalizer(current, method, path, body):
+            if method != "GET" or path != "/repos/owner/repo/pulls/1":
+                return
+            frame = sys._getframe(1)
+            while frame is not None:
+                if frame.f_code is code and frame.f_globals is globals_:
+                    self.assertEqual(current.events(), ["COMMENT"])
+                    self.assertTrue(current.replies)
+                    faults.append((method, path, len(current.replies)))
+                    raise TimeoutError("interrupted durable reassessment finalizer")
+                frame = frame.f_back
+
+        state.hook = interrupt_durable_finalizer
+        try:
             interrupted, _ = state.application_reply(provider)
             self.assertEqual(interrupted.status, "replied")
             self.assertEqual(interrupted.approval_status, "approval_withheld")
+        finally:
+            state.hook = None
+        self.assertTrue(faults, "original durable finalizer fault was not reached")
+        self.assertIs(original.__code__, code)
         self.assertEqual(state.events(), ["COMMENT"])
         retry_provider = Provider({})
         outcome, broker = state.application_reply(retry_provider)
