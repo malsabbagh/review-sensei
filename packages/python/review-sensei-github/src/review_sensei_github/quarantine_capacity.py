@@ -1046,6 +1046,32 @@ class _LifecycleExtension:
     state: bytes
     plan: Any
     bounds: tuple[int, ...]
+    sizing: tuple[Any, Any, tuple[tuple[int, int], ...], int] | None = None
+
+
+def _current_lifecycle_sizing(ledger, identity, known, added_parts):
+    """Obtain only a source-issued detached proposal, never runtime authority."""
+    import importlib
+
+    from review_sensei.source_registry import require_module_seal
+
+    name = "review_sensei_github.current_quarantine_finalization"
+    try:
+        issuer = importlib.import_module(name)
+    except ModuleNotFoundError as error:
+        if error.name != name:
+            raise
+        return None
+    require_module_seal(issuer)
+    token = issuer.lifecycle_sizing_context(
+        ledger, identity, known=known, added_parts=added_parts
+    )
+    if token is None:
+        return None
+    issuer.validate_lifecycle_sizing_context(
+        token, ledger, identity, known=known, added_parts=added_parts
+    )
+    return issuer, token, tuple(known.items()), added_parts
 
 
 def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
@@ -1057,13 +1083,17 @@ def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
     guard = installed_capacity(ledger, identity)
     old = guard.comment_plan
     if (
-        not guard.complete_tail
-        or old is None
+        old is None
         or guard.comment_bounds is None
         or type(added_parts) is not int
         or not 0 <= added_parts <= MAX_STORED_PARTS
     ):
         raise ReviewInputError("quarantine lifecycle installed tail is unsupported")
+    sizing = None
+    if not guard.complete_tail:
+        sizing = _current_lifecycle_sizing(ledger, identity, known, added_parts)
+        if sizing is None:
+            raise ReviewInputError("quarantine lifecycle installed tail is unsupported")
     bounds = (MAX_PART_BYTES + 512,) * added_parts
     if set(old.known) - set(known):
         raise ReviewInputError(
@@ -1096,7 +1126,7 @@ def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
     preview.certificates = deepcopy(guard.certificates)
     NativeCapacityGuard.require(preview, preview.stats)
     proof = _LifecycleExtension(
-        guard, ledger, identity, _guard_state(guard), plan, bounds
+        guard, ledger, identity, _guard_state(guard), plan, bounds, sizing
     )
     _CAPACITY_EXTENSIONS[proof] = _extension_seal(proof)
     return proof
@@ -1115,6 +1145,14 @@ def _extension_seal(proof):
         tuple(plan.metadata_known.items()),
         plan.metadata_unknown,
         proof.bounds,
+        None
+        if proof.sizing is None
+        else (
+            id(proof.sizing[0]),
+            id(proof.sizing[1]),
+            proof.sizing[2],
+            proof.sizing[3],
+        ),
     )
 
 
@@ -1313,6 +1351,10 @@ def activate_lifecycle_extension(proof, *, capability=None, operation=None):
         proof
     ) != _extension_seal(proof):
         raise ReviewInputError("quarantine lifecycle capacity extension is unissued")
+    if proof.sizing is not None:
+        raise ReviewInputError(
+            "quarantine lifecycle sizing proposal cannot authorize execution"
+        )
     issued[2](operation)
     guard = installed_capacity(proof.ledger, proof.identity)
     if guard is not proof.guard or _guard_state(guard) != proof.state:
@@ -1799,3 +1841,8 @@ def install_retained_capacity(ledger, identity, authenticated, *, token):
             installed[3],
         )
     return guard
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()
