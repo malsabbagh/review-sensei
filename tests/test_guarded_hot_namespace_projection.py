@@ -115,6 +115,15 @@ class GuardedHotNamespaceProjectionSourceTests(unittest.TestCase):
                 outer.assertEqual(bound.completed, initial.completed)
                 outer.assertEqual(bound.owner, initial.owner)
                 outer.assertEqual(bound.configuration, initial.configuration)
+                outer.assertEqual(
+                    tuple(
+                        next(
+                            block for block in initial.blocks if block.block_id == key
+                        ).undispatched
+                        for key in entry["blocks"]
+                    ),
+                    (90, 50),
+                )
                 for before, after in zip(initial.blocks, bound.blocks, strict=True):
                     if before.block_id in entry["blocks"]:
                         outer.assertEqual(
