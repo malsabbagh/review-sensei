@@ -11,6 +11,39 @@ from tests.test_api_work import accounting
 
 
 class CurrentCommandProjectionTests(unittest.TestCase):
+    def test_future_known_prefix_retains_every_unknown_and_metadata_bound(self):
+        from itertools import combinations
+
+        from review_sensei_github.current_command_projection import future_census_bound
+        from review_sensei_github.packed_comment_census import CommentAllocationPlan
+
+        from review_sensei.bounded_evidence import MAX_PART_BYTES
+
+        original = CommentAllocationPlan(
+            {11: 32000, 12: 24000, 13: 12000},
+            (32000,) * 6,
+            metadata_known={11: 120, 12: 140},
+            metadata_unknown=373,
+        )
+        before = (tuple(original.known.items()), original.unknown)
+        bound = future_census_bound(original, 2)
+        for count in range(3):
+            for positions in combinations(range(3 + count), count):
+                old = iter(original.known.items())
+                future = iter([(21 + i, MAX_PART_BYTES + 512) for i in range(count)])
+                known = dict(
+                    next(future) if i in positions else next(old)
+                    for i in range(3 + count)
+                )
+                prefix = CommentAllocationPlan(
+                    known,
+                    original.unknown,
+                    metadata_known=original.metadata_known,
+                    metadata_unknown=original.metadata_unknown,
+                )
+                self.assertLessEqual(prefix.worst_read_calls(), bound)
+        self.assertEqual((tuple(original.known.items()), original.unknown), before)
+
     def test_bounded_invocation_preserves_undispatched_funding_and_unknowns(self):
         state = accounting(limit=1152).reserve("ordinary", 380).reserve("terminal", 68)
         old = PendingApiRequest("retained-unknown", 100)

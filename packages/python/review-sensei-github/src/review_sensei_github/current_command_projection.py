@@ -61,6 +61,50 @@ def pending_accounting(
     return projected.to_document()
 
 
+def future_census_bound(plan, added_parts):
+    """Read-only envelope for every known-ID refinement prefix.
+
+    Exact echoed creates may become known while their original uncertainty
+    slots remain. Price both occurrences, including the new known-ID metadata
+    maximum, without modifying or installing any lifetime allocation plan.
+    """
+    from review_sensei.bounded_evidence import MAX_PART_BYTES, MAX_PARTS
+
+    from . import packed_comment_census
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(packed_comment_census)
+    if (
+        type(plan) is not packed_comment_census.CommentAllocationPlan
+        or type(added_parts) is not int
+        or not 0 <= added_parts <= MAX_PARTS
+    ):
+        raise ReviewInputError("current future census data is unsupported")
+    before = (
+        tuple(plan.known.items()),
+        plan.unknown,
+        tuple(plan.metadata_known.items()),
+        plan.metadata_unknown,
+    )
+    envelope = packed_comment_census.CommentAllocationPlan(
+        plan.known,
+        (*plan.unknown, *((MAX_PART_BYTES + 512,) * added_parts)),
+        metadata_known=plan.metadata_known,
+        metadata_unknown=max(
+            plan.metadata_unknown, packed_comment_census.NODE_METADATA_BYTES
+        ),
+    )
+    after = (
+        tuple(plan.known.items()),
+        plan.unknown,
+        tuple(plan.metadata_known.items()),
+        plan.metadata_unknown,
+    )
+    if before != after:
+        raise ReviewInputError("current future census changed allocation custody")
+    return envelope.worst_read_calls()
+
+
 def _maximum_candidate(journal, current, document, *, item_count, tail, exact):
     from review_sensei import bounded_evidence as evidence
     from review_sensei import finding_lifecycle_store as store

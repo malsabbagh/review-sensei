@@ -677,7 +677,11 @@ def capture_completed_preview(
 
     from . import api_run_plan, caller_operation, quarantine_capacity
     from .command_result_capacity import command_result_capacity_upper
-    from .current_command_projection import pending_accounting, project
+    from .current_command_projection import (
+        future_census_bound,
+        pending_accounting,
+        project,
+    )
     from .quarantine_command_namespace import observed_sequence
 
     caller = journal.ledger.caller
@@ -695,7 +699,11 @@ def capture_completed_preview(
         raise ReviewInputError("current terminal trust fence is not bounded")
     guard = quarantine_capacity.installed_capacity(journal.ledger, journal.identity)
     full_plan = _extended_plan(plan, journal, quote["added_parts"])
-    census = full_plan.worst_read_calls()
+    from .http import MAX_PAGINATION_PAGES
+
+    census = future_census_bound(full_plan, quote["added_parts"])
+    if census > MAX_PAGINATION_PAGES:
+        raise ReviewInputError("current future census exceeds original read ceiling")
     # These remain proposed reachable request counts, not funding changes or
     # permission to consume them. Full execution-path/source fencing is separate.
     ordinary = quote["conditional_calls"] + quote["reserved_tail_calls"]
