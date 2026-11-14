@@ -558,3 +558,22 @@ for operation in (lambda:m.never_installed(GitHubHttp()), root, root.__wrapped__
             with self.assertRaises(ReviewInputError):
                 capacity_review_walk(ledger.http, "/repos/o/r/pulls/1/reviews")
             request.assert_not_called()
+
+    def test_forged_export_dictionary_property_is_not_called(self):
+        from review_sensei_github import capacity_transport_membership as membership
+        from review_sensei_github import http as native_http
+
+        from review_sensei.errors import ReviewInputError
+
+        calls = []
+
+        class Forged:
+            @property
+            def __dict__(self):
+                calls.append("dictionary")
+                return {}
+
+        with patch.object(native_http, "GitHubHttp", Forged):
+            with self.assertRaises(ReviewInputError):
+                membership.never_installed(Forged())
+        self.assertEqual(calls, [])

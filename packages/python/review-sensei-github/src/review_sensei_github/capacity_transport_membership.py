@@ -419,9 +419,6 @@ def _registry():
                 return False
             cls = type(value)
             if cls is vars(native_http).get("GitHubHttp"):
-                raw = object.__getattribute__(value, "__dict__")
-                if type(raw) is not dict or any(type(key) is not str for key in raw):
-                    raise ReviewInputError("capacity transport fields changed")
                 # Lifetime nonmembership is already established. This is only
                 # original base identity, not a reader or execution capability;
                 # ordinary request overrides remain the public generic seam.
@@ -429,6 +426,8 @@ def _registry():
                     value, module=native_http, name="GitHubHttp"
                 )
                 raw = object.__getattribute__(value, "__dict__")
+                if type(raw) is not dict or any(type(key) is not str for key in raw):
+                    raise ReviewInputError("capacity transport fields changed")
                 if (
                     type(raw) is not dict
                     or raw.get("_quarantine_capacity_guard") is not None
