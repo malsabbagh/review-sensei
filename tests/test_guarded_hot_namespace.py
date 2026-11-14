@@ -207,14 +207,13 @@ class GuardedHotNamespaceEligibleTests(unittest.TestCase):
         import copy
         import sys
 
+        from hot_original_entry import invoke_original
         from review_sensei_github import finding_lifecycle
         from review_sensei_github.quarantine_published_tail import BROKER_QUALIFICATIONS
         from test_quarantine_activation import registered_resource
         from test_quarantine_published_tail_journey import (
             NativePublishedTailJourneyFixture,
         )
-
-        from hot_original_entry import invoke_original
 
         original = finding_lifecycle.FindingLifecycleJournal
         observed = []
