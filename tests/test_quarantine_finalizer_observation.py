@@ -178,6 +178,70 @@ class QuarantineFinalizerObservationTests(unittest.TestCase):
                                 ),
                                 prior_witness,
                             )
+                            self.compiler_receipt = {
+                                "frozen_limit": run.caller.accounting.configuration.limit,
+                                "startup_liability": run.caller.accounting.startup.liability,
+                                "prior_liability": run.caller.accounting.prior_nonstartup_liability,
+                                "confirmed": run.caller.accounting.confirmed,
+                                "uncertain": run.caller.accounting.uncertain,
+                                "remaining_unallocated": run.caller.accounting.remaining,
+                                "ordinary_remaining": run.caller.budget_view.ordinary_remaining(),
+                                "ordinary_hold": run.caller.budget_view._ordinary_hold,
+                                "blocks": [
+                                    {
+                                        "role": "ordinary"
+                                        if block.block_id == run.caller._block
+                                        else "terminal"
+                                        if block.block_id == run.caller._terminal_block
+                                        else "other",
+                                        "undispatched": block.undispatched,
+                                    }
+                                    for block in run.caller.accounting.blocks
+                                ],
+                                "branch_checkpoints": [
+                                    len(branch) for branch in measurements["branches"]
+                                ],
+                                "native_requests": len(measurements["native_requests"]),
+                                "guard_certificates": None
+                                if observed_source["guard"] is None
+                                else copy.deepcopy(
+                                    observed_source["guard"].certificates
+                                ),
+                            }
+                            from review_sensei_github import (
+                                quarantine_command_finalization,
+                            )
+                            from review_sensei_github.command_finalization_plan import (
+                                attach_execution_reads,
+                            )
+
+                            private_plan = (
+                                quarantine_command_finalization._NATIVE_PLANS[plan]
+                            )
+                            with self.assertRaisesRegex(
+                                ReviewInputError, "read_tail_unqualified"
+                            ):
+                                private_plan.journal.preflight_command_finalization(
+                                    private_plan,
+                                    preview_record=private_plan.record,
+                                    capacity_details={
+                                        "original_root": private_plan.record.record_sha256,
+                                        "preview_root": private_plan.record.record_sha256,
+                                        "intent_sha256": "0" * 64,
+                                        "staged_parts": (),
+                                    },
+                                    http=private_plan.http,
+                                    budget=private_plan.budget,
+                                )
+                            with self.assertRaisesRegex(
+                                ReviewInputError, "cannot authorize execution"
+                            ):
+                                attach_execution_reads(
+                                    private_plan,
+                                    None,
+                                    private_plan.journal,
+                                    dispositions=(),
+                                )
                             self.assertGreater(measurements["max_checkpoints"], 0)
                             for branch in measurements["branches"]:
                                 for checkpoint in branch:

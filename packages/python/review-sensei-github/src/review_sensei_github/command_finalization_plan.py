@@ -471,11 +471,20 @@ class ClosedCommandReads(GitHubHttp):
 
 def attach_execution_reads(plan, finalizer, journal, *, dispositions, check_token=None):
     """Transfer only a negative read bound across the same source operation."""
+    import json
     from copy import copy
     from hashlib import sha256
 
     from .publication import ReviewApprovalFinalizer
 
+    if (
+        type(plan) is CommandFinalizationPlan
+        and json.loads(plan.payload).get("read_contract")
+        == "quarantine-sizing-observation-only-v1"
+    ):
+        raise ReviewInputError(
+            "quarantine sizing observation cannot authorize execution"
+        )
     if (
         type(plan) is not CommandFinalizationPlan
         or plan not in _ISSUED
