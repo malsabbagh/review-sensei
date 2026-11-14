@@ -1,5 +1,6 @@
 """Real diff-derived cold location drift, without supplied drift descriptors."""
 
+import copy
 import hashlib
 import json
 import subprocess
@@ -7,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from review_sensei_github.publication import NativeFindingReceipt
 from test_review_run import EntryFixture
@@ -14,17 +16,39 @@ from test_review_run import EntryFixture
 from review_sensei.bounded_evidence import canonical_bytes
 from tests.test_ordinary_native_recovery_cold import subprocess_environment
 
+
+class ColdDriftEntryFixture(EntryFixture):
+    """Return the real complete, head-selected check census HTTP shape."""
+
+    def external(self, request, timeout):
+        from fake_github_http import json_response
+
+        path = urlsplit(request.full_url).path
+        if (
+            request.get_method() == "GET"
+            and "/commits/" in path
+            and path.endswith("/check-runs")
+        ):
+            self.trace.append((self.attempt, request.get_method(), path))
+            head = path.split("/commits/", 1)[1].split("/", 1)[0]
+            rows = [
+                copy.deepcopy(row) for row in self.check_runs if row["head_sha"] == head
+            ]
+            return json_response({"check_runs": rows, "total_count": len(rows)})
+        return super().external(request, timeout)
+
+
 CHILD = r"""
 import copy,dis,inspect,json,sys
 from dataclasses import asdict
 from pathlib import Path
-from test_review_run import EntryFixture
+from tests.test_ordinary_cold_location_drift import ColdDriftEntryFixture
 from review_sensei_github import finding_lifecycle as lifecycle
 from review_sensei_github.session_ledger import parse_session_comment
 from review_sensei.finding_lifecycle import decode_lifecycle_state
 from test_api_work_persistence import IDENTITY
 p=json.loads(Path(sys.argv[1]).read_text())
-f=EntryFixture(sys.argv[2],limit=512)
+f=ColdDriftEntryFixture(sys.argv[2],limit=512)
 f.root=Path(p['root']);f.policy=f.policy_ref=p['policy'];f.config_bytes=bytes.fromhex(p['config'])
 for k,v in p['remote'].items():
     if k=='extra_comments':v={int(a):b for a,b in v.items()}
@@ -58,7 +82,7 @@ class OrdinaryColdLocationDriftTests(unittest.TestCase):
             root = Path(directory)
             source = root / "source"
             source.mkdir()
-            f = EntryFixture(str(source), limit=512)
+            f = ColdDriftEntryFixture(str(source), limit=512)
             f.active_finding_cap = 1
             comment = {
                 "path": "src/app.py",

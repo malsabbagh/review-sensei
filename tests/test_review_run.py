@@ -1254,9 +1254,10 @@ os._exit(92)
                 self.assertEqual(f.accounted._terminal_reason, "publication-completion")
                 self.assertEqual(f.provider_calls, 1)
                 # The genuinely empty accepted original needs no redundant
-                # per-comment inventory. Nonempty human admission is unchanged;
-                # every actual dispatch still appears in original accounting.
-                self.assertEqual(len(f.trace), 99 if human else 91)
+                # per-comment inventory. Atomic reservation/transaction binding
+                # also saves four actual requests in either branch; every real
+                # dispatch still appears in original accounting.
+                self.assertEqual(len(f.trace), 95 if human else 87)
                 if not human:
                     self.assertFalse(
                         any(
@@ -1556,7 +1557,7 @@ os._exit(92)
             self.assertEqual(f.invoke(), 0, f.error)
             self.assertEqual(f.accounted.accounting.owner.job, "local")
             self.assertEqual(len(f.transports), 1)
-            self.assertEqual(len(f.trace), 75)
+            self.assertEqual(len(f.trace), 71)
             self.assertEqual(sum(p == "/api/tags" for _, _, p in f.trace), 1)
             self.assertTrue(any(r["state"] == "APPROVED" for r in f.reviews))
 
