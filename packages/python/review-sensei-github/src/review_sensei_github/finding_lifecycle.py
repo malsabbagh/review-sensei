@@ -3592,7 +3592,9 @@ class FindingLifecycleJournal:
             return None
         if path.endswith("/reviews") and effect["method"] == "POST":
             rid = value.get("id")
-            if type(rid) is not int or rid <= 0:
+            # Match compact-receipt identity bounds before the native value
+            # can become a follow-up request path, not only after readback.
+            if type(rid) is not int or not 0 < rid <= 9_223_372_036_854_775_807:
                 return None
             expected = request.get("comments", [])
             status, inline = http.request(
