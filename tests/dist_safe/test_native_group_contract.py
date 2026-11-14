@@ -20,6 +20,10 @@ if not is_disarmed() and not Path(
     )
 
 
+# Reviewed deterministic process-local construction; runtime wrappers stay intact.
+INSTALLED_SUITE_HOOK_CONTRACT = ("reproducible-module-local-v1", ())
+
+
 def load_tests(loader, tests, pattern):
     modules = [path.stem for path in sorted(_TESTS.glob("test_native_*.py"))]
     modules.extend(("test_publication_staging", "test_packed_comment_census"))

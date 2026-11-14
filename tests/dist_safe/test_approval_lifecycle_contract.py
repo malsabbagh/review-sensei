@@ -39,6 +39,9 @@ from review_sensei.mixed_coverage import (  # noqa: E402
 )
 from review_sensei.models import ReviewComment, ReviewResult  # noqa: E402
 
+# Reviewed deterministic process-local construction; runtime wrappers stay intact.
+INSTALLED_SUITE_HOOK_CONTRACT = ("reproducible-module-local-v1", ())
+
 
 def load_tests(loader, tests, pattern):
     # Reuse the unchanged incident regression instead of a second implementation.

@@ -1,7 +1,8 @@
 """Run installed tests with exact accounting and isolated import semantics.
 
 Hook-bearing suites execute their original discovered root once in the -I
-controller. Hook-free suites may use isolated workers and measured scheduling.
+controller. Explicitly reviewed reproducible module-local hooks may opt into
+isolated workers; unknown hooks retain original-root execution.
 Fixture skips are recorded from actual unittest dispatch, never inferred from
 all unstarted tests sharing a fixture name.
 """
@@ -211,10 +212,34 @@ class FixtureDispatchTracker:
 class HookAwareLoader(unittest.TestLoader):
     hook_seen = False
 
+    def __init__(self):
+        super().__init__()
+        self.hook_modules = []
+        self.local_loader = True
+
     def loadTestsFromModule(self, module, *args, **kwargs):
-        if getattr(module, "load_tests", None) is not None:
+        hooked = getattr(module, "load_tests", None) is not None
+        if hooked:
             self.hook_seen = True
-        return super().loadTestsFromModule(module, *args, **kwargs)
+            self.hook_modules.append(module)
+        before = (
+            self.suiteClass,
+            self.testMethodPrefix,
+            self.sortTestMethodsUsing,
+            self.testNamePatterns,
+        )
+        suite = super().loadTestsFromModule(module, *args, **kwargs)
+        self.local_loader &= (
+            before
+            == (
+                self.suiteClass,
+                self.testMethodPrefix,
+                self.sortTestMethodsUsing,
+                self.testNamePatterns,
+            )
+            and self.suiteClass is unittest.TestSuite
+        )
+        return suite
 
 
 def describe(item, cases=None):
@@ -270,7 +295,7 @@ def discover(directory: Path, pattern: str, cases=None, original=None):
     if loader.errors:
         raise ValueError("test discovery reported an import error")
     if original is not None:
-        original.extend([suite, loader.hook_seen])
+        original.extend([suite, loader.hook_seen, loader])
     children = list(suite)
     if len(files) != len(children) or not files:
         raise ValueError("discovered modules cannot be mapped exactly to source files")
@@ -361,6 +386,158 @@ def build_units(files, descriptions, children, split_files):
     return units
 
 
+LOCAL_HOOK_CONTRACT = "reproducible-module-local-v1"
+
+
+def local_hook_snapshot(original, children, descriptions, units, requested):
+    """Validate a reviewed construction contract, never infer purity from IDs.
+
+    The opt-in promises deterministic, process-local discovery with no external
+    effects or inter-module execution dependencies. Structural checks supplement
+    that source review; they do not prove arbitrary Python callbacks pure.
+    """
+    root, _hook_seen, loader = original
+    names = [module.__name__ for module in loader.hook_modules]
+    if (
+        not requested
+        or len(set(requested)) != len(requested)
+        or len(set(names)) != len(names)
+        or set(requested) != set(names)
+        or not loader.local_loader
+        or type(root) is not unittest.TestSuite
+        or set(vars(root)) != {"_tests", "_removed_tests"}
+        or root._removed_tests != 0
+        or type(root._tests) is not list
+    ):
+        raise ValueError("hooks lack a complete reviewed local discovery contract")
+    wrappers = set()
+    for module in loader.hook_modules:
+        declaration = vars(module).get("INSTALLED_SUITE_HOOK_CONTRACT")
+        if (
+            type(declaration) is not tuple
+            or len(declaration) != 2
+            or type(declaration[0]) is not str
+            or declaration[0] != LOCAL_HOOK_CONTRACT
+            or type(declaration[1]) is not tuple
+        ):
+            raise ValueError("hook has no reviewed local declaration")
+        for name in declaration[1]:
+            cls = vars(module).get(name) if type(name) is str else None
+            if (
+                type(cls) is not type
+                or cls.__module__ != module.__name__
+                or cls.__bases__ != (unittest.TestSuite,)
+                or not set(vars(cls))
+                <= {
+                    "__module__",
+                    "__doc__",
+                    "run",
+                    "__firstlineno__",
+                    "__static_attributes__",
+                }
+                or "run" not in vars(cls)
+            ):
+                raise ValueError("custom hook wrapper is not an original local suite")
+            wrappers.add(cls)
+
+    containers = []
+
+    def data(value, ancestors=()):
+        if type(value) in (type(None), bool, int, str):
+            return [type(value).__name__, value]
+        if type(value) is float and math.isfinite(value):
+            return ["float", value]
+        if id(value) in ancestors:
+            raise ValueError("cyclic configured hook state is unsupported")
+        if type(value) in (list, dict):
+            if any(value is previous for previous in containers):
+                raise ValueError("shared mutable hook configuration is unsupported")
+            containers.append(value)
+        ancestors = (*ancestors, id(value))
+        if type(value) in (list, tuple):
+            return [type(value).__name__, [data(v, ancestors) for v in value]]
+        if type(value) is dict:
+            return [
+                "dict",
+                [[data(k, ancestors), data(v, ancestors)] for k, v in value.items()],
+            ]
+        raise ValueError("configured hook state is not reproducible data")
+
+    seen = set()
+    standard_equalities = unittest.TestCase()._type_equality_funcs
+
+    def standard_equality_table(value):
+        return (
+            type(value) is dict
+            and len(value) == len(standard_equalities)
+            and all(
+                type(key) is type and type(entry) is str for key, entry in value.items()
+            )
+            and value == standard_equalities
+        )
+
+    def snapshot(item):
+        if id(item) in seen:
+            raise ValueError("hook suite repeats an object")
+        seen.add(id(item))
+        cls = type(item)
+        if type(cls) is not type or cls.__getattribute__ is not object.__getattribute__:
+            raise ValueError("hook fixture lookup is not stable")
+        if isinstance(item, unittest.TestSuite):
+            if cls is not unittest.TestSuite and cls not in wrappers:
+                raise ValueError("hook contains an unreviewed suite wrapper")
+            state = vars(item)
+            if (
+                type(state.get("_tests")) is not list
+                or state.get("_removed_tests") != 0
+            ):
+                raise ValueError("hook suite was already consumed")
+            return {
+                "suite": f"{cls.__module__}.{cls.__qualname__}",
+                "state": data({k: v for k, v in state.items() if k != "_tests"}),
+                "children": [snapshot(child) for child in state["_tests"]],
+            }
+        if (
+            not isinstance(item, unittest.TestCase)
+            or cls.id is not unittest.TestCase.id
+            or any(
+                "__class__" in vars(base) for base in cls.__mro__ if base is not object
+            )
+            or not standard_equality_table(vars(item).get("_type_equality_funcs"))
+            or vars(item).get("_outcome") is not None
+            or vars(item).get("_cleanups") != []
+            or vars(item).get("_subtest") is not None
+        ):
+            raise ValueError(
+                "configured test identity or fixture behavior is unsupported"
+            )
+        return {
+            "test": describe(item),
+            "state": data(
+                {k: v for k, v in vars(item).items() if k != "_type_equality_funcs"}
+            ),
+        }
+
+    snapshots = [snapshot(child) for child in children]
+    # Every complete module/class fixture belongs to exactly one scheduling unit.
+    # Repeated noncontiguous scopes are not silently merged or reordered.
+    owners = {"module": {}, "class": {}}
+    for index, unit in enumerate(units):
+        previous = {"module": None, "class": None}
+        blocks = {"module": set(), "class": set()}
+        for leaf in unit_leaves(unit, descriptions):
+            for scope in owners:
+                key = leaf[scope]
+                if owners[scope].setdefault(key, index) != index:
+                    raise ValueError("reviewed hooks share a fixture across units")
+                if previous[scope] != key:
+                    if key in blocks[scope]:
+                        raise ValueError("reviewed hook repeats a fixture block")
+                    blocks[scope].add(key)
+                    previous[scope] = key
+    return snapshots
+
+
 def unit_leaves(unit, descriptions):
     description = descriptions[unit["file"]]
     if unit["children"] is None:
@@ -419,7 +596,10 @@ def worker(
     cases = []
     original_suite = None
     if discovered is None:
-        files, descriptions, children = discover(directory, manifest["pattern"], cases)
+        original = []
+        files, descriptions, children = discover(
+            directory, manifest["pattern"], cases, original
+        )
     else:
         files, descriptions, children, cases, original_suite, prepared_units = (
             discovered
@@ -435,6 +615,21 @@ def worker(
     )
     if units != manifest["units"]:
         raise ValueError("worker fixture-boundary units differ from discovery")
+    if manifest.get("local_hook_snapshot") is not None:
+        if (
+            discovered is not None
+            or local_hook_snapshot(
+                original,
+                children,
+                descriptions,
+                units,
+                manifest["reviewed_local_hooks"],
+            )
+            != manifest["local_hook_snapshot"]
+        ):
+            raise ValueError(
+                "worker reviewed hook configuration differs from discovery"
+            )
     indices = manifest["indices"]
     if not indices or any(
         type(index) is not int or not 0 <= index < len(units) for index in indices
@@ -538,6 +733,12 @@ def main() -> int:
     parser.add_argument("--pattern", default="test*.py")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--split-module", action="append", default=[])
+    parser.add_argument(
+        "--reviewed-local-hook",
+        action="append",
+        default=[],
+        help="Opt into a source-reviewed reproducible local hook",
+    )
     parser.add_argument("--costs", type=Path, help="Measured scheduling weights")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--worker-manifest", type=Path, help=argparse.SUPPRESS)
@@ -563,6 +764,17 @@ def main() -> int:
         )
         groups = partition_units(units, descriptions, args.workers, costs)
         fallback = original[1]
+        hook_snapshot = None
+        fallback_reason = None
+        if fallback and args.reviewed_local_hook:
+            try:
+                hook_snapshot = local_hook_snapshot(
+                    original, children, descriptions, units, args.reviewed_local_hook
+                )
+            except ValueError as error:
+                fallback_reason = str(error)
+            else:
+                fallback = False
         if fallback:
             groups = [list(range(len(units)))]
     except (ValueError, OSError, ImportError, json.JSONDecodeError) as error:
@@ -593,6 +805,8 @@ def main() -> int:
                         "split_files": args.split_module,
                         "units": units,
                         "indices": groups[index],
+                        "reviewed_local_hooks": args.reviewed_local_hook,
+                        "local_hook_snapshot": hook_snapshot,
                     }
                 ),
                 encoding="utf-8",
@@ -752,6 +966,14 @@ def main() -> int:
                         if costs is not None
                         else [],
                         "complete": complete,
+                        "hook_mode": "original-root"
+                        if fallback
+                        else (
+                            "reviewed-local"
+                            if hook_snapshot is not None
+                            else "hook-free"
+                        ),
+                        "fallback_reason": fallback_reason,
                         "elapsed_seconds": round(time.monotonic() - started, 3),
                         "workers": reports,
                     },
