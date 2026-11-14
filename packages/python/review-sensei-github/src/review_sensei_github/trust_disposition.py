@@ -35,6 +35,43 @@ def _build_preparation():
     issued: WeakKeyDictionary[DispositionPreparation, Any] = WeakKeyDictionary()
     observed: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
+    def require_methods(instance):
+        from review_sensei.source_registry import require_instance_source
+
+        require_instance_source(instance, methods=())
+        names = tuple(
+            name
+            for name in dir(type(instance))
+            if not name.startswith("__") and callable(getattr(type(instance), name))
+        )
+        require_instance_source(instance, methods=names)
+
+    def require_value(value, seen=None):
+        from dataclasses import fields, is_dataclass
+
+        if type(value) in (str, bytes, int, float, bool, type(None)):
+            return
+        seen = set() if seen is None else seen
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if type(value) is dict:
+            for key, item in value.items():
+                require_value(key, seen)
+                require_value(item, seen)
+        elif type(value) in (tuple, list, set, frozenset):
+            for item in value:
+                require_value(item, seen)
+        elif not isinstance(value, type) and is_dataclass(value):
+            require_methods(value)
+            source_type: Any = type(value)
+            for field in fields(source_type):
+                require_value(object.__getattribute__(value, field.name), seen)
+        else:
+            raise ReviewInputError(
+                "trust disposition sizing value source is unsupported"
+            )
+
     def collect(run, args):
         """Collect actual sources and a detached preview without admitting intent."""
         from .action_representability import _command_pricing
@@ -50,6 +87,13 @@ def _build_preparation():
         require_source = capture_status_source()
         require_source()
         caller = run.caller
+        for instance in (caller, run.ledger, caller.budget_view):
+            require_methods(instance)
+        require_value(run.identity)
+        require_value(caller.accounting)
+        from .trust_status import _StatusRoute
+
+        _StatusRoute.require_budget_source(caller)
         profile = verification_profile(caller)
         if profile is None:
             raise ReviewInputError("trust disposition source profile is unavailable")
@@ -211,6 +255,16 @@ def _build_preparation():
 
     def fingerprint(context):
         run, args = context["run"], context["args"]
+        for value in (
+            context["record"],
+            context["preview"],
+            context["result"],
+            context["document"],
+            context["details"],
+            run.identity,
+        ):
+            require_value(value)
+        require_methods(context["authority"])
         return canonical_bytes(
             {
                 "scope": [
@@ -264,26 +318,40 @@ def _build_preparation():
         return receipt
 
     def sizing_snapshot(plan):
-        from review_sensei.source_registry import require_instance_source
-
-        require_instance_source(
-            plan, methods=("require", "can_reuse_retained_lifecycle")
-        )
+        require_methods(plan)
         journal = plan.journal
-        require_instance_source(
+        for instance in (
             journal,
-            methods=(
-                "_command_branch_documents",
-                "_document",
-                "_preflight_effect",
-                "_body_receipts",
-                "_check_precondition",
-                "_native_review_commitment",
-                "_receipts_match_update_precondition",
-                "_updated_binding_proof_state",
-            ),
-        )
-        require_instance_source(journal.reviewer, methods=("native_finding_receipts",))
+            journal.reviewer,
+            journal.ledger,
+            journal.ledger.caller,
+            plan.budget,
+        ):
+            require_methods(instance)
+        from .trust_status import _StatusRoute
+
+        _StatusRoute.require_budget_source(journal.ledger.caller)
+        for value in (
+            plan.record,
+            journal._record,
+            journal.identity,
+            plan.states,
+            journal._planned,
+            getattr(journal, "_finalizer_capacity_states", ()),
+            journal.effects,
+            getattr(journal, "_observed_check_reads", {}),
+            journal.ledger.caller.accounting,
+        ):
+            require_value(value)
+        for name in (
+            "_active_window_states",
+            "_drift_states",
+            "_drift_concern_history",
+            "_native_finding_receipt_records",
+            "_drift_inputs",
+            "_active_window_inputs",
+        ):
+            require_value(getattr(journal.reviewer, name, {}))
         plan.require(journal, http=plan.http, budget=plan.budget)
         return (
             plan.http,

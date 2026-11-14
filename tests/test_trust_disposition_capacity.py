@@ -39,7 +39,13 @@ class PreentryCapacityTests(unittest.TestCase):
                 )
 
     def test_changed_observed_plan_expires_without_price_or_effect(self):
-        self._exercise_source_capacity(original_role=True, tamper_plan=True)
+        self._exercise_source_capacity(original_role=True, tamper_plan="payload")
+
+    def test_current_record_virtual_method_is_not_invoked(self):
+        self._exercise_source_capacity(original_role=True, tamper_plan="record")
+
+    def test_nested_state_virtual_method_is_not_invoked(self):
+        self._exercise_source_capacity(original_role=True, tamper_plan="nested")
 
     def _exercise_source_capacity(
         self, *, original_role, remaining=None, tamper_plan=False
@@ -224,12 +230,29 @@ class PreentryCapacityTests(unittest.TestCase):
                     plan.journal._preflight_preentry_command_branches(plan)
             self.assertEqual(plan_callbacks, [])
             body_callbacks = []
-            with patch.object(
-                plan.journal, "_body_receipts", lambda *a: body_callbacks.append(True)
+            for name in (
+                "_body_receipts",
+                "_pending_wire",
+                "_state",
+                "_check_commitment",
             ):
+                before_callbacks = len(run.caller.observations)
+                with patch.object(
+                    plan.journal, name, lambda *a: body_callbacks.append(True)
+                ):
+                    with self.assertRaises(ReviewInputError):
+                        plan.journal._preflight_preentry_command_branches(plan)
+                self.assertEqual(len(run.caller.observations), before_callbacks)
+            self.assertEqual(body_callbacks, [])
+            ledger_callbacks = []
+            with patch.object(
+                run.ledger, "evidence_producer", lambda: ledger_callbacks.append(True)
+            ):
+                before_ledger = len(run.caller.observations)
                 with self.assertRaises(ReviewInputError):
                     plan.journal._preflight_preentry_command_branches(plan)
-            self.assertEqual(body_callbacks, [])
+                self.assertEqual(len(run.caller.observations), before_ledger)
+            self.assertEqual(ledger_callbacks, [])
             original_quote = plan.journal._preflight_preentry_command_branches
             substituted = []
             with patch.object(
@@ -259,18 +282,37 @@ class PreentryCapacityTests(unittest.TestCase):
             if tamper_plan:
                 import json
 
-                old_payload = plan.payload
-                value = json.loads(old_payload)
-                value["execution_read_tail"] = {
-                    key: 0 for key in value["execution_read_tail"]
-                }
-                object.__setattr__(plan, "payload", json.dumps(value).encode())
+                callbacks = []
+                if tamper_plan == "payload":
+                    target, attribute, previous = plan, "payload", plan.payload
+                    value = json.loads(previous)
+                    value["execution_read_tail"] = {
+                        key: 0 for key in value["execution_read_tail"]
+                    }
+                    replacement = json.dumps(value).encode()
+                else:
+                    target = (
+                        plan.record
+                        if tamper_plan == "record"
+                        else plan.states[0].inventory.obligations[0].latest_comment
+                    )
+                    attribute, previous = "to_dict", None
+                    self.assertIsNotNone(target)
+
+                    def replacement(*a, **k):
+                        return callbacks.append(True)
+
+                object.__setattr__(target, attribute, replacement)
                 before_requests = len(run.caller.observations)
                 try:
-                    with self.assertRaisesRegex(ReviewInputError, "custody changed"):
+                    with self.assertRaises(ReviewInputError):
                         plan.journal._preflight_preentry_command_branches(plan)
                 finally:
-                    object.__setattr__(plan, "payload", old_payload)
+                    if previous is None:
+                        object.__delattr__(target, attribute)
+                    else:
+                        object.__setattr__(target, attribute, previous)
+                self.assertEqual(callbacks, [])
                 self.assertEqual(len(run.caller.observations), before_requests)
             elif original_role and remaining == 103:
                 from review_sensei.errors import EvidenceBudgetExhausted

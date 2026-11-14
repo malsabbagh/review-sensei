@@ -2173,3 +2173,8 @@ __all__ = [
     "reconcile_uncertain_slot",
     "select_display_active_window",
 ]
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

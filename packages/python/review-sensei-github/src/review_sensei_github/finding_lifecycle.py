@@ -1533,19 +1533,20 @@ class FindingLifecycleJournal:
             plan, methods=("require", "can_reuse_retained_lifecycle")
         )
         require_module_seal(sys.modules[trust_disposition.__name__])
-        require_instance_source(
+        for instance in (
             self,
-            methods=(
-                "_command_branch_documents",
-                "_document",
-                "_preflight_effect",
-                "_body_receipts",
-                "_check_precondition",
-                "_native_review_commitment",
-                "_receipts_match_update_precondition",
-                "_updated_binding_proof_state",
-            ),
-        )
+            self.reviewer,
+            self.ledger,
+            self.ledger.caller,
+            plan.budget,
+        ):
+            require_instance_source(instance, methods=())
+            methods = tuple(
+                name
+                for name in dir(type(instance))
+                if not name.startswith("__") and callable(getattr(type(instance), name))
+            )
+            require_instance_source(instance, methods=methods)
         if getattr(self.ledger, "business_guard", None) is not None:
             raise ReviewInputError(
                 "command pre-entry sizing cannot replace an existing guard"
