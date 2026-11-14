@@ -177,11 +177,12 @@ def capacity_review_walk(http, path):
     known and unknown native allocations remain in the guard's original totals.
     An uninstalled preview, arbitrary path or alternate query cannot issue it.
     """
-    from . import publication, publication_recovery
-    from .quarantine_capacity import review_walk_owner
+    from . import publication, publication_recovery, quarantine_capacity
 
     require_module_seal(publication)
     require_module_seal(publication_recovery)
+    require_module_seal(quarantine_capacity)
+    review_walk_owner = quarantine_capacity.review_walk_owner
     _BudgetedReviewPagination = publication._BudgetedReviewPagination
     _publication_transport = publication_recovery._publication_transport
     base = http.transport if type(http) is _BudgetedReviewPagination else http

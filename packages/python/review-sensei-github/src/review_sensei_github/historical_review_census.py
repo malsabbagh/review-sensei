@@ -34,8 +34,10 @@ def _registry():
     pending: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
 
     def issue(lease, entry: Any):
+        from . import http as native_http
         from . import quarantine_historical_execution as historical
 
+        require_module_seal(native_http)
         require_module_seal(sys.modules[__name__])
         require_module_seal(historical)
         frame = sys._getframe(1)
@@ -65,7 +67,8 @@ def _registry():
             or update[:2]
             != [
                 "PUT",
-                entry["run"].http.repository_path(
+                native_http.GitHubHttp.repository_path(
+                    entry["run"].http,
                     entry["identity"].repository,
                     f"/pulls/{entry['identity'].pull_request}/reviews/{before['id']}",
                 ),
@@ -107,25 +110,43 @@ def _registry():
         )
         from . import quarantine_historical_execution as historical
 
-        require_module_seal(publication_recovery)
-        original_http = http
-        http = publication_recovery._publication_transport(http)
-        if type(http) is not finding_lifecycle._JournalTransport:
-            return None
-        journal = vars(http).get("journal")
-        if type(journal) is not finding_lifecycle.FindingLifecycleJournal:
-            return None
-        saved = issued.get(journal.ledger.caller)
-        if saved is None:
-            return None
+        # Authenticate defining exports before even testing their types. A
+        # substituted ledger must not execute a property during selection.
         for module in (
             sys.modules[__name__],
             command_finalization_plan,
             finding_lifecycle,
+            publication_recovery,
             quarantine_scan_capacity,
             historical,
         ):
             require_module_seal(module)
+        original_http = http
+        http = publication_recovery._publication_transport(http)
+        if type(http) is not finding_lifecycle._JournalTransport:
+            return None
+        # This original registry authenticates the adapter, journal and exact
+        # delegate before we follow any ownership fields.
+        delegate = command_finalization_plan.registered_journal_delegate(http)
+        journal = object.__getattribute__(http, "__dict__").get("journal")
+        if type(journal) is not finding_lifecycle.FindingLifecycleJournal:
+            raise ReviewInputError("historical journal reader class changed")
+        matches = [
+            value for value in issued.values() if value["entry"]["journal"] is journal
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise ReviewInputError("historical journal reader has simultaneous owner")
+        saved = matches[0]
+        entry = saved["entry"]
+        ledger = object.__getattribute__(journal, "__dict__").get("ledger")
+        if (
+            ledger is not entry["ledger"]
+            or object.__getattribute__(ledger, "__dict__").get("caller")
+            is not entry["caller"]
+        ):
+            raise ReviewInputError("historical journal reader raw owner changed")
         frame = sys._getframe(1)
         if (
             frame.f_code is not quarantine_scan_capacity.capacity_review_walk.__code__
@@ -133,11 +154,7 @@ def _registry():
             or frame.f_locals.get("base") is not original_http
         ):
             raise ReviewInputError("historical journal reader selection is foreign")
-        entry = saved["entry"]
         historical.require_closed(saved["lease"], entry["run"])
-        if entry["journal"] is not journal:
-            raise ReviewInputError("historical journal reader owner changed")
-        delegate = command_finalization_plan.registered_journal_delegate(http)
         transport = publication_recovery._publication_transport(delegate)
         if transport is not publication_recovery._publication_transport(
             entry["run"].http
@@ -149,10 +166,6 @@ def _registry():
         from . import quarantine_historical_execution as historical
         from . import quarantine_scan_capacity
 
-        caller = ledger.caller
-        saved = issued.get(caller)
-        if saved is None or caller._terminal_reason is not None:
-            return None
         require_module_seal(sys.modules[__name__])
         require_module_seal(quarantine_scan_capacity)
         frame = sys._getframe(1)
@@ -163,6 +176,19 @@ def _registry():
             or frame.f_locals.get("guard") is not guard
         ):
             raise ReviewInputError("historical review selection source changed")
+        matches = [
+            value for value in issued.values() if value["entry"]["ledger"] is ledger
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise ReviewInputError("historical review selection has simultaneous owner")
+        saved = matches[0]
+        caller = saved["entry"]["caller"]
+        if object.__getattribute__(ledger, "__dict__").get("caller") is not caller:
+            raise ReviewInputError("historical review raw caller changed")
+        if caller._terminal_reason is not None:
+            return None
         entry = saved["entry"]
         if entry["phase"] >= 7:
             return None

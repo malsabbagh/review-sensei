@@ -145,10 +145,62 @@ class HistoricalReviewCensusTests(unittest.TestCase):
 
                 original_resolver = publication_recovery._publication_transport
                 early_injected = []
+                from review_sensei_github import (
+                    finding_lifecycle,
+                    publication,
+                    quarantine_capacity,
+                )
+
+                original_owner = quarantine_capacity.review_walk_owner
+                original_journal_class = finding_lifecycle.FindingLifecycleJournal
+                restored_fields = []
+
+                class FakeLedger:
+                    @property
+                    def caller(self):
+                        fixture.fake_calls += 1
+                        return runs[0].caller
+
+                class FakeJournal:
+                    @property
+                    def ledger(self):
+                        fixture.fake_calls += 1
+                        return FakeLedger()
+
+                def restore_inner():
+                    finding_lifecycle.FindingLifecycleJournal = original_journal_class
+                    for owner, field, value in restored_fields:
+                        setattr(owner, field, value)
 
                 def observe(frame, event, result):
                     if (
-                        fault == "early_export"
+                        fault in ("inner_class", "inner_ledger")
+                        and runs
+                        and frame.f_code is scan.capacity_review_walk.__code__
+                    ):
+                        if event == "call" and not early_injected:
+                            http = frame.f_locals["http"]
+                            base = (
+                                http.transport
+                                if type(http) is publication._BudgetedReviewPagination
+                                else http
+                            )
+                            adapter = original_resolver(base)
+                            journal = vars(adapter)["journal"]
+                            if fault == "inner_class":
+                                restored_fields.append((adapter, "journal", journal))
+                                finding_lifecycle.FindingLifecycleJournal = FakeJournal
+                                adapter.journal = FakeJournal()
+                            else:
+                                restored_fields.append(
+                                    (journal, "ledger", journal.ledger)
+                                )
+                                journal.ledger = FakeLedger()
+                            early_injected.append(True)
+                        elif event == "return":
+                            restore_inner()
+                    if (
+                        fault in ("early_export", "capacity_export")
                         and runs
                         and frame.f_code is scan.capacity_review_walk.__code__
                     ):
@@ -157,9 +209,13 @@ class HistoricalReviewCensusTests(unittest.TestCase):
                             def fake(*args):
                                 fixture.fake_calls += 1
 
-                            publication_recovery._publication_transport = fake
+                            if fault == "capacity_export":
+                                quarantine_capacity.review_walk_owner = fake
+                            else:
+                                publication_recovery._publication_transport = fake
                             early_injected.append(True)
                         elif event == "return":
+                            quarantine_capacity.review_walk_owner = original_owner
                             publication_recovery._publication_transport = (
                                 original_resolver
                             )
@@ -172,7 +228,10 @@ class HistoricalReviewCensusTests(unittest.TestCase):
                         runs.append(frame.f_locals["run"])
 
                 def trace(frame, event, arg):
-                    if frame.f_code is original_finish.__code__:
+                    if frame.f_code in (
+                        original_finish.__code__,
+                        reviews.resolve_journal.__code__,
+                    ):
                         if event == "exception":
                             errors.append(str(arg[1]))
                         return trace
@@ -186,15 +245,31 @@ class HistoricalReviewCensusTests(unittest.TestCase):
                 finally:
                     sys.settrace(previous_trace)
                     sys.setprofile(previous)
+                    restore_inner()
+                    quarantine_capacity.review_walk_owner = original_owner
                     reviews.finish = original_finish
                     publication_recovery._publication_transport = original_resolver
                 self.assertEqual(len(runs), 1)
                 caller = runs[0].caller
                 self.assertEqual(code, 1, fixture.error)
                 self.assertEqual(
-                    fixture.native_attempts, 0 if fault == "early_export" else 1
+                    fixture.native_attempts,
+                    0
+                    if fault
+                    in (
+                        "early_export",
+                        "capacity_export",
+                        "inner_class",
+                        "inner_ledger",
+                    )
+                    else 1,
                 )
-                if fault == "early_export":
+                if fault in (
+                    "early_export",
+                    "capacity_export",
+                    "inner_class",
+                    "inner_ledger",
+                ):
                     self.assertEqual(early_injected, [True])
                 self.assertEqual(fixture.fake_calls, 0)
                 self.assertEqual(fixture.native_puts, 0)
@@ -219,6 +294,10 @@ class HistoricalReviewCensusTests(unittest.TestCase):
                         for row in fixture.extra_comments.values()
                     )
                 )
+                if fault == "inner_ledger":
+                    self.assertIn("historical journal reader raw owner changed", errors)
+                elif fault == "inner_class":
+                    self.assertTrue(any("source" in error for error in errors), errors)
                 if fault in ("missing", "foreign", "malformed"):
                     self.assertIn("historical review membership changed", errors)
                 elif fault == "wire":
@@ -301,3 +380,12 @@ class HistoricalReviewCensusTests(unittest.TestCase):
         self.assertEqual(
             refused, ["historical review reader has simultaneous or foreign scope"]
         )
+
+    def test_preselection_inner_class_substitution_executes_no_fake_properties(self):
+        self.exercise_fault("inner_class")
+
+    def test_preselection_ledger_substitution_executes_no_fake_caller(self):
+        self.exercise_fault("inner_ledger")
+
+    def test_preselection_capacity_owner_export_is_authenticated(self):
+        self.exercise_fault("capacity_export")
