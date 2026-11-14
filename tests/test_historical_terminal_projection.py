@@ -192,3 +192,75 @@ class HistoricalTerminalProjectionTests(unittest.TestCase):
                 self.assertEqual(candidate.blocks[0], original.blocks[0])
                 self.assertEqual(candidate.blocks[-1], original.blocks[-1])
                 self.assertEqual(candidate.remaining, original.remaining)
+
+    def test_run_data_source_ignores_unrelated_constructor_alias(self):
+        # Source-only object: no initialized execution/run custody is claimed.
+        from copy import copy
+
+        from review_sensei_github import review_run
+
+        from review_sensei.source_registry import (
+            require_instance_source,
+            require_original_class_identity,
+        )
+
+        run = object.__new__(review_run.ReviewRun)
+        calls = []
+
+        def replacement(*args, **kwargs):
+            calls.append((args, kwargs))
+
+        with patch.object(review_run, "ApiRunRequestTransport", replacement):
+            require_original_class_identity(run, module=review_run, name="ReviewRun")
+            require_instance_source(run, methods=())
+        for candidate in (run, copy(run), object()):
+            # Class identity alone never supplies original activation/lifetime.
+            with self.assertRaisesRegex(ReviewInputError, "original source"):
+                projection.require_activation(candidate, {})
+            with self.assertRaisesRegex(ReviewInputError, "original activation"):
+                fence.require_active(candidate, object())
+        self.assertEqual(calls, [])
+
+    def test_run_data_export_and_class_changes_refuse_without_callback(self):
+        from review_sensei_github import review_run
+
+        from review_sensei.source_registry import (
+            require_instance_source,
+            require_original_class_identity,
+        )
+
+        cls = review_run.ReviewRun
+        run = object.__new__(cls)
+        calls = []
+
+        class Poison:
+            def __getattribute__(self, name):
+                calls.append(name)
+                raise AssertionError(name)
+
+        with patch.object(review_run, "ReviewRun", Poison()):
+            with self.assertRaisesRegex(ReviewInputError, "class identity changed"):
+                require_original_class_identity(
+                    run, module=review_run, name="ReviewRun"
+                )
+
+        class Subclass(cls):
+            pass
+
+        for candidate in (object.__new__(Subclass), Poison()):
+            with self.assertRaises(ReviewInputError):
+                require_original_class_identity(
+                    candidate, module=review_run, name="ReviewRun"
+                )
+
+        def changed(*args):
+            calls.append(args)
+
+        for name in ("retained_analysis", "__getattribute__", "__setattr__"):
+            with patch.object(cls, name, changed, create=True):
+                require_original_class_identity(
+                    run, module=review_run, name="ReviewRun"
+                )
+                with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                    require_instance_source(run, methods=())
+        self.assertEqual(calls, [])

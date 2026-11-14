@@ -16,7 +16,11 @@ from weakref import ref
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
-from review_sensei.source_registry import require_instance_source, require_module_seal
+from review_sensei.source_registry import (
+    require_instance_source,
+    require_module_seal,
+    require_original_class_identity,
+)
 
 
 def _frame(function, module, start) -> FrameType:
@@ -112,7 +116,6 @@ def require_projection_shape(run: Any):
         api_run_plan,
         action_run,
         quarantine_command_namespace,
-        review_run,
     ):
         require_module_seal(module)
     frame = sys._getframe(1)
@@ -122,8 +125,8 @@ def require_projection_shape(run: Any):
         or frame.f_locals.get("run") is not run
     ):
         raise ReviewInputError("terminal projection shape lacks original source")
-    if type(run) is not review_run.ReviewRun:
-        raise ReviewInputError("terminal projection run is not original")
+    require_original_class_identity(run, module=review_run, name="ReviewRun")
+    run = cast(Any, run)
     require_instance_source(run, methods=())
     caller = run.caller
     if type(caller) is not api_run_requests.ApiRunRequestTransport:
