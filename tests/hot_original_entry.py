@@ -206,5 +206,6 @@ def invoke_original(fixture):
             fixture.run_heads[fixture.run_id, fixture.attempt] = fixture.requested_head
         return result, wire
     finally:
+        fixture.error = errors.getvalue()
         sys.setprofile(previous)
         os.chdir(old)
