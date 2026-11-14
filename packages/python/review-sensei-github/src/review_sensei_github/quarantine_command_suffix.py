@@ -134,6 +134,11 @@ def _registry():
         ):
             return None
         guard = installed_capacity(run.ledger, run.identity)
+        if guard.complete_tail:
+            # Existing complete-tail routes retain their original admission.
+            # This experimental proposal concerns only the previously held
+            # incomplete command envelope and cannot broaden that envelope.
+            return None
         captured = completed.pop(run.ledger, None)
         state = run.caller.accounting
         if state.prior_nonstartup_liability or any(
@@ -219,7 +224,7 @@ def _registry():
                 "guarded suffix preparation is not a confirmed bounded paid prefix"
             )
         state = run.caller.accounting
-        recipe = intermediate_suffix_recipe(observation)
+        recipe = intermediate_suffix_recipe(observation, comment_rows=rows)
         if run.caller.budget_view.ordinary_remaining() < recipe["combined_loss_calls"]:
             raise ReviewInputError("guarded suffix complete ordinary tail is unfunded")
         token = SuffixProposal()

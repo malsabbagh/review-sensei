@@ -25,6 +25,7 @@ class GuardedSuffixTests(unittest.TestCase):
         recipes = []
         preparation_counts = []
         rendered_inputs = []
+        replay_refusals = []
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
@@ -54,6 +55,23 @@ class GuardedSuffixTests(unittest.TestCase):
                 )
 
                 def observe(frame, event, arg):
+                    if (
+                        event == "return"
+                        and frame.f_code is finalization.observe_plan.__code__
+                        and arg is not None
+                    ):
+                        values = frame.f_locals
+                        with self.assertRaisesRegex(
+                            ReviewInputError, "original uncompacted plan source"
+                        ):
+                            finalization.observe_plan(
+                                values["finalizer"],
+                                payload=values["payload"],
+                                states=values["states"],
+                                check_token=values["check_token"],
+                                cleanup_instances=values["cleanup_instances"],
+                            )
+                        replay_refusals.append(arg)
                     if (
                         event == "return"
                         and frame.f_code
@@ -93,7 +111,47 @@ class GuardedSuffixTests(unittest.TestCase):
                         and frame.f_code is suffix.prepare.__code__
                         and arg is not None
                     ):
+                        observation = frame.f_locals["observation"]
+                        plan = finalization._NATIVE_PLANS[observation]
+                        journal = plan.journal
+                        import json
+
+                        review_id = json.loads(plan.payload)["review_before"]["id"]
+                        finalization._require_no_body_readback(journal, review_id)
+                        original_receipts = getattr(
+                            journal.reviewer, "_native_finding_receipt_records", None
+                        )
+                        try:
+                            journal.reviewer._native_finding_receipt_records = {
+                                (
+                                    journal.identity.repository_id,
+                                    journal.identity.pull_request,
+                                ): {
+                                    "synthetic-extra": {
+                                        "review_id": review_id,
+                                        "comment_id": None,
+                                        "thread_id": None,
+                                    }
+                                }
+                            }
+                            with self.assertRaisesRegex(
+                                ReviewInputError, "separately priced readback"
+                            ):
+                                finalization._require_no_body_readback(
+                                    journal, review_id
+                                )
+                        finally:
+                            if original_receipts is None:
+                                journal.reviewer.__dict__.pop(
+                                    "_native_finding_receipt_records", None
+                                )
+                            else:
+                                journal.reviewer._native_finding_receipt_records = (
+                                    original_receipts
+                                )
+                        finalization._require_no_body_readback(journal, review_id)
                         recipe = frame.f_locals["recipe"]
+                        self.assertEqual(recipe["cache_prefix_unknown"], 16)
                         self.assertEqual(recipe["normal_calls"], 98)
                         self.assertEqual(recipe["combined_loss_calls"], 105)
                         self.assertTrue(
@@ -177,6 +235,7 @@ class GuardedSuffixTests(unittest.TestCase):
                 self.assertFalse(caller.accounting.action["execution_started"])
                 self.assertEqual(caller.accounting.remaining, 190)
 
+                self.assertTrue(replay_refusals)
                 self.assertTrue(rendered_inputs)
                 overflow_refusals = 0
                 for record, accounting, witness, upper, grants in rendered_inputs:

@@ -37,8 +37,31 @@ class QuarantineFinalizerObservation:
 
 
 def observe_plan(finalizer, *, payload, states, check_token, cleanup_instances=None):
+    import inspect
+
     from review_sensei.finding_lifecycle import encode_lifecycle_state
 
+    from . import publication
+
+    require_module_seal(publication)
+    frame = sys._getframe(1)
+    source = publication.ReviewApprovalFinalizer._refinalize_with_dispositions_impl
+    if (
+        frame.f_code is not inspect.unwrap(source).__code__
+        or frame.f_globals is not vars(publication)
+        or frame.f_locals.get("self") is not finalizer
+        or frame.f_locals.get("compacted") is not False
+        or frame.f_locals.get("update_capacity_states") is not states
+        or frame.f_locals.get("check_token") is not check_token
+        or frame.f_locals.get("cleanup_instances") is not cleanup_instances
+        or payload.get("review_before") is not frame.f_locals.get("chosen")
+        or canonical_bytes(payload.get("frontier")) != frame.f_locals.get("plain")
+    ):
+        raise ReviewInputError(
+            "quarantine sizing requires original uncompacted plan source"
+        )
+    if finalizer is None or states is None:
+        raise ReviewInputError("quarantine sizing original inputs are unavailable")
     require(finalizer._quarantine_capacity_preparation, finalizer=finalizer)
     if (
         payload.get("read_contract") != "quarantine-sizing-observation-only-v1"
@@ -270,8 +293,15 @@ def _root_growth_measurement(record, accounting, witness, result_upper=None, gra
             record=candidate,
             consumed_grants=grants,
         )
-        # Exercise the exact original serialized form, including its marker,
-        # ASCII escaping, history/result carriers and retained grant framing.
+        # Exercise the exact original readable comment contract as well as
+        # construction: its marker/schema cannot be inferred from byte counts.
+        restored = session_ledger.parse_session_comment(
+            body, identity=record.identity()
+        )
+        if restored is None or canonical_bytes(restored.to_dict()) != canonical_bytes(
+            candidate.to_dict()
+        ):
+            raise ReviewInputError("cold projected comment is not exactly readable")
         return len(canonical_bytes(candidate.to_dict())), len(body.encode())
 
     ordinary, ordinary_body = render(raw)
@@ -473,15 +503,52 @@ def _measure_inline_branches(observation):
     }
 
 
-def intermediate_suffix_recipe(observation):
+def _require_no_body_readback(journal, review_id):
+    """The inline-only recipe cannot omit an independently retained body GET."""
+    from review_sensei.source_registry import require_instance_source
+
+    require_instance_source(journal, methods=("_body_receipts",))
+    require_instance_source(journal.reviewer, methods=("native_finding_receipts",))
+    path = journal.ledger.http.repository_path(
+        journal.identity.repository,
+        f"/pulls/{journal.identity.pull_request}/reviews/{review_id}",
+    )
+    if journal._body_receipts(review_id) or any(
+        effect["method"] == "PUT"
+        and effect["path"] == path
+        and "review_update_precondition" in effect
+        for effect in journal.effects
+    ):
+        raise ReviewInputError(
+            "guarded intermediate body receipt requires separately priced readback"
+        )
+
+
+def intermediate_suffix_recipe(observation, *, comment_rows):
     """Derive the closed intermediate recipe; data, not an execution lease."""
     from copy import copy, deepcopy
 
     from review_sensei.bounded_evidence import partition_evidence
 
-    from . import finding_lifecycle, quarantine_action, quarantine_capacity
+    from . import (
+        finding_lifecycle,
+        quarantine_action,
+        quarantine_capacity,
+        quarantine_command_suffix,
+    )
     from .quarantine_creation import _body
 
+    require_module_seal(quarantine_command_suffix)
+    frame = sys._getframe(1)
+    if (
+        frame.f_code is not quarantine_command_suffix.prepare.__code__
+        or frame.f_globals is not vars(quarantine_command_suffix)
+        or frame.f_locals.get("observation") is not observation
+        or frame.f_locals.get("rows") is not comment_rows
+        or frame.f_locals.get("captured", {}).get("rows")
+        != canonical_bytes(comment_rows)
+    ):
+        raise ReviewInputError("guarded suffix cache prefix lacks original paid census")
     saved = require_observation(observation)
     plan = _NATIVE_PLANS.get(observation)
     if plan is None or saved["guard"] is None:
@@ -502,6 +569,7 @@ def intermediate_suffix_recipe(observation):
         raise ReviewInputError(
             "guarded suffix requires one update and check replay only"
         )
+    _require_no_body_readback(plan.journal, payload["review_before"]["id"])
     method, path, raw = check
     keys = {
         finding_lifecycle._digest({"method": method, "path": path, "request": value})
@@ -535,6 +603,43 @@ def intermediate_suffix_recipe(observation):
         "reaction_bounds",
     ):
         setattr(projected, name, deepcopy(getattr(guard, name)))
+    from .native_operation_envelope import OPERATION_WIRE_BOUND
+    from .operation_host import OPERATION_COMMENT_MARKER
+    from .packed_comment_census import CommentAllocationPlan
+    from .session_ledger import parse_session_comment
+
+    if not isinstance(comment_rows, list):
+        raise ReviewInputError("guarded suffix complete census rows are unavailable")
+    full_known = {}
+    for row in comment_rows:
+        identifier, body = row["id"], row["body"]
+        if identifier in full_known:
+            raise ReviewInputError("guarded suffix paid census has duplicate members")
+        bound = max(
+            guard.comment_plan.known.get(identifier, 0),
+            quarantine_capacity._wire({"body": body}),
+        )
+        if body.startswith(OPERATION_COMMENT_MARKER + "\n"):
+            bound = max(bound, OPERATION_WIRE_BOUND)
+        if parse_session_comment(body, identity=saved["run"].identity) is not None:
+            bound = max(bound, guard.closure_wire)
+        full_known[identifier] = bound
+    if set(guard.comment_plan.known) - set(full_known):
+        raise ReviewInputError("guarded suffix retained known member disappeared")
+
+    def full_cache_plan():
+        # Exact-echo guard refinement is optional and can decline a C increase.
+        # A later lifecycle scope still sees the actual cached immutable ID.
+        # Price that appended known member independently, retaining every old
+        # unknown allocation and both roots' original closure wire ceilings.
+        return CommentAllocationPlan(
+            full_known,
+            guard.comment_plan.unknown,
+            metadata_known=guard.comment_plan.metadata_known,
+            metadata_unknown=guard.comment_plan.metadata_unknown,
+        )
+
+    cache_plan = full_cache_plan()
     prefixes = []
 
     def capture():
@@ -543,7 +648,10 @@ def intermediate_suffix_recipe(observation):
             raise ReviewInputError("guarded suffix review reader is unsupported")
         prefixes.append(
             (
-                projected.comment_plan.worst_read_calls(),
+                max(
+                    projected.comment_plan.worst_read_calls(),
+                    cache_plan.worst_read_calls(),
+                ),
                 certificate["physical_reads_upper_bound"],
             )
         )
@@ -566,7 +674,12 @@ def intermediate_suffix_recipe(observation):
         "POST", run.ledger._comments_path(run.identity), {"body": event_body}
     )
     capture()
-    projected.after_response("POST", {"id": int("9" * 64), "body": event_body})
+    future_id = int("9" * 64)
+    if future_id in full_known:
+        raise ReviewInputError("guarded suffix synthetic future ID collides")
+    projected.after_response("POST", {"id": future_id, "body": event_body})
+    full_known[future_id] = quarantine_capacity._wire({"body": event_body})
+    cache_plan = full_cache_plan()
     capture()
     projected.before_request(*review)
     capture()
@@ -604,6 +717,8 @@ def intermediate_suffix_recipe(observation):
         "normal_calls": normal,
         "combined_loss_calls": normal + 3 + 4,
         "comment_reads": C,
+        "cache_prefix_known": len(cache_plan.known),
+        "cache_prefix_unknown": len(cache_plan.unknown),
         "review_reads": R,
         "root_measurement": measured,
         "review": json.loads(canonical_bytes(review)),
