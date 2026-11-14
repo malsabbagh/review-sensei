@@ -1236,12 +1236,14 @@ def _build():
         merely observed successful prefix supplies this certificate.
         """
         entry = active.get()
+        caller = getattr(ledger, "caller", None)
         if (
             entry is None
+            or caller is None
             or ledger is None
             or not entry["closed"]
             or entry["ledger"] is not ledger
-            or entry["caller"] is not getattr(ledger, "caller", None)
+            or entry["caller"] is not caller
             or added_parts != 0
         ):
             return None
@@ -1323,7 +1325,7 @@ def _build():
             metadata_known=plan.metadata_known,
             metadata_unknown=plan.metadata_unknown,
         )
-        entry["read_plans"].append((selected, plan, entry["caller"]._root))
+        entry["read_plans"].append((selected, plan, caller._root))
         return selected
 
     def require_invocation_read_plan(scope):
