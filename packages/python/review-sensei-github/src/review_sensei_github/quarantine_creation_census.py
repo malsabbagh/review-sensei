@@ -46,6 +46,15 @@ def _require_lifetime_capacity(plan):
     return total
 
 
+def _plan_seal(plan):
+    return (
+        tuple(plan.known.items()),
+        plan.unknown,
+        tuple(plan.metadata_known.items()),
+        plan.metadata_unknown,
+    )
+
+
 def prepare_census(prepared):
     from .native_operation_envelope import OPERATION_WIRE_BOUND
     from .operation_host import OPERATION_COMMENT_MARKER
@@ -79,18 +88,45 @@ def prepare_census(prepared):
             ledger.token,
         ),
     )
-    # Guarded writers retain their original mutable-object/receipt bounds.
-    # Their separate extension must be authenticated, not replaced here.
+    # The authentic native guard already priced every retained maximum and
+    # every unknown allocation, including the predecessor's late writes.
+    # Pin that whole envelope, not a successful-prefix or phase-only discount.
+    transport = _publication_transport(ledger.http)
+    guard = getattr(transport, "_quarantine_capacity_guard", None)
+    if guard is not None:
+        from review_sensei.source_registry import require_module_seal
+
+        from . import packed_comment_census
+        from .quarantine_capacity import installed_capacity
+
+        require_module_seal(packed_comment_census)
+        guard = installed_capacity(ledger, identity)
+        plan = guard.comment_plan
+        if type(plan) is not CommentAllocationPlan:
+            return result
+        calls = plan.worst_read_calls()
+        if not 1 <= calls <= 10 or guard.comment_read_calls != calls:
+            return result
+        result["requests"] -= 2 * (10 - calls)
+        result["census_calls"] = calls
+        original = _PLANS[prepared]
+        _PLANS[prepared] = (
+            *original[:6],
+            plan,
+            canonical_bytes(result),
+            original[8],
+            guard,
+            calls,
+            _plan_seal(plan),
+        )
+        return result
+    # Legacy unguarded writers retain their separate source-bound phase proof.
     if (
         prepared.isolation.receipt.get("schema_version")
         != "quarantine-target-isolation-v1"
         or prepared.isolation.receipt.get("contract")
         != "literal-blocker-path-prepublication-v1"
         or native_reserve(prepared.isolation.receipt) is not None
-        or getattr(
-            _publication_transport(ledger.http), "_quarantine_capacity_guard", None
-        )
-        is not None
     ):
         return result
     if not ledger._inventory_complete or not (
@@ -184,6 +220,26 @@ def _require_scope(prepared, issued):
         caller._slot,
         _publication_transport(ledger.http),
     )
+    native = issued[9] if len(issued) == 12 else None
+    if native is not None:
+        from review_sensei.source_registry import require_module_seal
+
+        from . import packed_comment_census
+        from .quarantine_capacity import installed_capacity
+
+        require_module_seal(packed_comment_census)
+        guard = installed_capacity(ledger, prepared.identity)
+        plan = issued[6]
+        current = guard.comment_plan
+        if (
+            guard is not native
+            or current is None
+            or current.unknown != plan.unknown
+            or any(current.known.get(key, 0) < size for key, size in plan.known.items())
+            or _plan_seal(plan) != issued[11]
+            or guard.comment_read_calls != issued[10]
+        ):
+            raise ReviewInputError("quarantine creation native census source changed")
     if (
         ledger is not issued[0]
         or ledger.http is not issued[1]
@@ -194,6 +250,7 @@ def _require_scope(prepared, issued):
         or any(a is not b for a, b in zip(objects, issued[8][:5]))
         or ledger.token != issued[8][5]
         or issued[6] is not None
+        and native is None
         and getattr(objects[4], "_quarantine_capacity_guard", None) is not None
     ):
         raise ReviewInputError("quarantine creation request phase changed")
