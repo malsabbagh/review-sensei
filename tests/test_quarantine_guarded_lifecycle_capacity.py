@@ -229,11 +229,12 @@ class GuardedLifecycleCapacityTests(unittest.TestCase):
                 result = fixture.invoke()
             self.assertTrue(observed, fixture.error)
             self.assertTrue(activated, fixture.error)
-            # This source-only regression does not erase the independently
-            # measured full publication tail hold under the original budget.
-            self.assertEqual(result, 1, fixture.error)
-            self.assertIn(
-                "caller run cannot fund the complete operation", fixture.error
+            # The closed empty-history producer now funds its complete tail.
+            # Its success does not settle the original historical transaction
+            # or authorize any copied/stale capacity extension tested above.
+            self.assertEqual(result, 0, fixture.error)
+            self.assertFalse(
+                any(review.get("state") == "APPROVED" for review in fixture.reviews)
             )
             self.assertEqual(fixture.accounted.accounting.configuration.limit, 512)
             self.assertIsNone(old.api_run_accounting["terminal_transaction"])
@@ -289,7 +290,13 @@ class GuardedLifecycleCapacityTests(unittest.TestCase):
 
                 fixture.external = lose
                 with registered_resource([registration]):
-                    self.assertEqual(fixture.invoke(), 1, fixture.error)
+                    self.assertEqual(
+                        fixture.invoke(), 0 if stored else 1, fixture.error
+                    )
+                # Exact readback may confirm a stored checkpoint. That is not
+                # a refund of the unknown physical caller mutation or the
+                # installed native allocation pool.
+                self.assertGreaterEqual(fixture.accounted.accounting.uncertain, 1)
                 self.assertEqual(len(attempts), 1, fixture.error)
                 guard, remaining, growth, unknown = attempts[0]
                 self.assertEqual(tuple(guard.comment_bounds), remaining)

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from review_sensei_github.guarded_publication_plan import require_durable_floor
+from review_sensei_github.guarded_pending_publication import admit as admit_pending
 from review_sensei_github.publication_recovery import _publication_transport
 from test_quarantine_activation import registered_resource
 from test_quarantine_journey import JourneyFixture
@@ -64,7 +64,7 @@ class GuardedFloorProfileTests(unittest.TestCase):
                     if (
                         not changed
                         and event == "call"
-                        and frame.f_code is require_durable_floor.__code__
+                        and frame.f_code is admit_pending.__code__
                     ):
                         journal = frame.f_locals["journal"]
                         if journal is not None and journal._record.quarantine_lineage:
@@ -77,20 +77,18 @@ class GuardedFloorProfileTests(unittest.TestCase):
                             changed.append((transport, guard))
                     return observe
 
-                prior = sys.gettrace()
+                prior = sys.getprofile()
                 try:
-                    sys.settrace(observe)
+                    sys.setprofile(observe)
                     with registered_resource([registration]):
                         self.assertNotEqual(fixture.invoke(), 0)
                 finally:
-                    sys.settrace(prior)
+                    sys.setprofile(prior)
                     for transport, guard in changed:
                         transport._quarantine_capacity_guard = guard
                 self.assertEqual(len(changed), 1)
                 self.assertIn(
-                    "original capacity guard is missing"
-                    if replacement == "missing"
-                    else "installed capacity source changed",
+                    "installed capacity source changed",
                     fixture.error,
                 )
                 self.assertEqual(fixture.reviews, reviews)

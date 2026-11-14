@@ -1,4 +1,8 @@
-"""Actual guarded producer refuses unfunded durable effects before native work."""
+"""Nonempty guarded routes retain their conservative pre-native floor.
+
+The separately qualified empty pending-history route has a complete three-CAS
+plan. It is not evidence that an ordinary nonempty successor can use that plan.
+"""
 
 import copy
 import sys
@@ -14,7 +18,7 @@ from test_quarantine_published_tail_journey import (
 
 
 class GuardedPublicationFloorTests(unittest.TestCase):
-    def test_original_512_refuses_before_check_or_review(self):
+    def test_nonempty_original_funding_refuses_before_check_or_review(self):
         self._exercise()
 
     def test_copied_installed_guard_cannot_supply_floor_quote(self):
@@ -26,16 +30,37 @@ class GuardedPublicationFloorTests(unittest.TestCase):
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             fixture = PublishedTailJourneyFixture(directory)
-            old, registration = fixture.original_origins(
-                failed_count=9, published_count=5
+            from tests.test_quarantine_evidence import git
+
+            fixture.config_bytes = fixture.config_bytes.replace(
+                b"api_request_limit: 512", b"api_request_limit: 494"
             )
+            (fixture.root / ".reviewsensei.yml").write_bytes(fixture.config_bytes)
+            git(fixture.root, "add", ".reviewsensei.yml")
+            git(fixture.root, "commit", "-m", "nonempty original floor allocation")
+            old, registration = fixture.original_origins(
+                failed_count=1, published_count=1
+            )
+            fixture.provider_comments = [
+                {
+                    "path": "src/app.py",
+                    "line": 2,
+                    "side": "RIGHT",
+                    "body": "Fresh independent finding cannot use the empty-history plan.",
+                    "severity": "high",
+                    "blocking": True,
+                    "evidence_id": "fresh-nonempty-floor",
+                }
+            ]
             reviews = copy.deepcopy(fixture.reviews)
             old_body = fixture.comment["body"]
             from review_sensei_github.guarded_publication_plan import (
                 require_durable_floor,
             )
 
-            refused = []
+            quotes = []
+            from review_sensei_github.api_run_budget import CallerRunBudget
+
             changed = []
 
             def observe(frame, event, arg):
@@ -59,28 +84,35 @@ class GuardedPublicationFloorTests(unittest.TestCase):
                         transport._quarantine_capacity_guard = copy.copy(original)
                         changed.append((transport, original))
                 if (
-                    frame.f_code is require_durable_floor.__code__
-                    and event == "exception"
+                    event == "call"
+                    and frame.f_code is CallerRunBudget.preflight.__code__
+                    and frame.f_back is not None
+                    and frame.f_back.f_code is require_durable_floor.__code__
                 ):
-                    if type(arg[1]).__name__ == "EvidenceBudgetExhausted":
-                        refused.append(
-                            (
-                                frame.f_locals["minimum_checkpoint"],
-                                frame.f_locals["minimum_calls"],
-                            )
+                    quotes.append(
+                        (
+                            frame.f_back.f_locals["minimum_checkpoint"],
+                            frame.f_locals["calls"],
+                            frame.f_locals["self"].ordinary_remaining(),
                         )
+                    )
                 return observe
 
-            previous = sys.gettrace()
+            previous = sys.getprofile()
             try:
-                sys.settrace(observe)
+                sys.setprofile(observe)
                 with registered_resource([registration]):
                     self.assertNotEqual(fixture.invoke(), 0)
             finally:
-                sys.settrace(previous)
+                sys.setprofile(previous)
                 for transport, original in changed:
                     transport._quarantine_capacity_guard = original
-            self.assertEqual(refused, [] if copy_guard else [(15, 63)])
+            self.assertEqual(
+                [(part, calls) for part, calls, _ in quotes],
+                [] if copy_guard else [(15, 63)],
+                fixture.error,
+            )
+            self.assertTrue(all(remaining < calls for _, calls, remaining in quotes))
             if copy_guard:
                 self.assertEqual(len(changed), 1)
                 self.assertIn("installed capacity source changed", fixture.error)
@@ -95,7 +127,7 @@ class GuardedPublicationFloorTests(unittest.TestCase):
             self.assertEqual(forbidden, [])
             self.assertEqual(
                 fixture.current_record().api_run_accounting["configuration"]["limit"],
-                512,
+                494,
             )
 
             from review_sensei.api_work import ApiRunAccounting
