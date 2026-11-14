@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from review_sensei_github import historical_record_snapshot as snapshot
+from review_sensei_github import historical_terminal_fence as fence
 
 import tests.test_api_work_actions as actions
 from review_sensei.api_work import MAX_API_REQUEST_LIMIT
@@ -27,7 +28,7 @@ class HistoricalRecordSnapshotTests(unittest.TestCase):
                     self.subTest(name=name),
                     self.assertRaisesRegex(ReviewInputError, "declared fields changed"),
                 ):
-                    snapshot._record_snapshot(changed)
+                    fence._record_data(changed)
             self.assertEqual(calls, [])
             changed = copy.copy(record)
             object.__setattr__(changed, "repository_id", MAX_API_REQUEST_LIMIT + 1)
@@ -44,5 +45,5 @@ class HistoricalRecordSnapshotTests(unittest.TestCase):
                 raise AssertionError("record callback invoked")
 
         with self.assertRaisesRegex(ReviewInputError, "record source changed"):
-            snapshot._record_snapshot(Poison())
+            fence._record_data(Poison())
         self.assertEqual(calls, [])

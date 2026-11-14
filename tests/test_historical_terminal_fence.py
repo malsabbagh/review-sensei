@@ -1,6 +1,8 @@
 """Negative terminal source seams do not issue execution or funding."""
 
+import gc
 import unittest
+import weakref
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -12,6 +14,28 @@ from review_sensei.errors import ReviewInputError
 
 
 class HistoricalTerminalFenceTests(unittest.TestCase):
+    def test_inactive_lifetime_releases_frame_on_success_and_exception(self):
+        class Caller:
+            pass
+
+        def run(raises):
+            caller = Caller()
+            reference = weakref.ref(caller)
+            try:
+                with fence.execution_scope():
+                    if raises:
+                        raise ReviewInputError("synthetic inactive exit")
+            except ReviewInputError:
+                if not raises:
+                    raise
+            return reference
+
+        for raises in (False, True):
+            with self.subTest(raises=raises):
+                reference = run(raises)
+                gc.collect()
+                self.assertIsNone(reference())
+
     def test_unissued_source_cannot_start_and_inactive_hooks_do_not_traverse(self):
         calls = []
 

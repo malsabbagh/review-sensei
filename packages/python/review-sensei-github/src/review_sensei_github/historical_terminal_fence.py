@@ -8,6 +8,7 @@ may make one original close, in one existing sixteen-attempt operation.
 import hashlib
 import inspect
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict
 from types import FrameType
 from typing import Any, cast
@@ -72,10 +73,81 @@ def _operation_shape(operation):
         raise ReviewInputError("historical terminal original operation bound changed")
 
 
+def _record_data(record):
+    from . import historical_record_snapshot
+
+    require_module_seal(historical_record_snapshot)
+    return historical_record_snapshot._record_snapshot(record)
+
+
+def _accounting_data(state):
+    from review_sensei import api_work
+
+    from . import guarded_pending_publication
+
+    require_module_seal(api_work)
+    require_module_seal(guarded_pending_publication)
+    if type(state) is not api_work.ApiRunAccounting:
+        raise ReviewInputError("historical terminal accounting type changed")
+    guarded_pending_publication._original_accounting_graph(state, models=True)
+    require_instance_source(state, methods=("to_document",))
+    return api_work.ApiRunAccounting.to_document(state)
+
+
 def _registry():
     # id lookup does not invoke an unissued object's hash or property callbacks.
     active: dict[int, Any] = {}
     closed: dict[int, Any] = {}
+    lifetimes: dict[int, Any] = {}
+
+    def retire(caller):
+        key = id(caller)
+
+        def clear_closed(_value: Any, key: int = key) -> None:
+            closed.pop(key, None)
+
+        ended = ref(caller, clear_closed)
+        active.pop(key, None)
+        closed[key] = ended
+
+    @contextmanager
+    def execution_scope():
+        """Passive lifetime until genuine closed activation binds this frame."""
+        require_module_seal(sys.modules[__name__])
+        execution = sys._getframe(1).f_back
+        if execution is None or id(execution) in lifetimes:
+            raise ReviewInputError(
+                "historical terminal lifetime is missing or repeated"
+            )
+        # Do not impose new whole-command source requirements on inactive
+        # ordinary commands. start() authenticates this exact frame/source
+        # before any historical restriction is registered.
+        lifetimes[id(execution)] = execution
+        try:
+            yield
+        finally:
+            try:
+                entries = tuple(
+                    entry
+                    for entry in active.values()
+                    if entry["execution"] is execution
+                )
+                for entry in entries:
+                    caller = entry["caller"]
+                    valid = (
+                        cast(Any, execution.f_locals).get("caller") is caller
+                        and lifetimes.get(id(execution)) is execution
+                        and sys._getframe(1).f_back is execution
+                    )
+                    # Retire even on corrupted locals: no failing validation
+                    # may leave the caller/run/frame retained by this registry.
+                    retire(caller)
+                    if not valid:
+                        raise ReviewInputError(
+                            "historical terminal lifetime owner changed"
+                        )
+            finally:
+                lifetimes.pop(id(execution), None)
 
     def start(run, lease):
         from . import (
@@ -105,10 +177,13 @@ def _registry():
         _zero_fences(caller)
         execution = _frame(action_run.execute_command, action_run, frame)
         if (
-            cast(Any, execution.f_locals).get("run") is not run
+            lifetimes.get(id(execution)) is not execution
+            or cast(Any, execution.f_locals).get("run") is not run
             or cast(Any, execution.f_locals).get("caller") is not caller
         ):
             raise ReviewInputError("historical terminal original command owner changed")
+        _accounting_data(caller.accounting)
+        record_data = _record_data(caller._effect_record)
         terminal = next(
             b for b in caller.accounting.blocks if b.block_id == caller._terminal_block
         )
@@ -142,7 +217,12 @@ def _registry():
             attempts=0,
             root=caller._root,
             record=caller._effect_record,
-            record_bytes=canonical_bytes(caller._effect_record.to_dict()),
+            record_bytes=canonical_bytes(record_data),
+            record_identity=(
+                record_data["repository"],
+                record_data["pull_request"],
+                record_data["repository_id"],
+            ),
             owner=canonical_bytes(asdict(caller.accounting.owner)),
             configuration=canonical_bytes(asdict(caller.accounting.configuration)),
             intent=canonical_bytes(caller.accounting.action["intent"]),
@@ -174,10 +254,8 @@ def _registry():
         _zero_fences(caller)
         execution = _frame(action_run.execute_command, action_run, sys._getframe(1))
         state = caller.accounting
-        from . import guarded_pending_publication
-
-        require_module_seal(guarded_pending_publication)
-        guarded_pending_publication._original_accounting_graph(state, models=True)
+        _accounting_data(state)
+        record_data = _record_data(entry["record"])
         if (
             entry["caller"] is not caller
             or execution is not entry["execution"]
@@ -192,7 +270,7 @@ def _registry():
             or canonical_bytes(state.action["intent"]) != entry["intent"]
             or caller._root != entry["root"]
             or caller._effect_record is not entry["record"]
-            or canonical_bytes(entry["record"].to_dict()) != entry["record_bytes"]
+            or canonical_bytes(record_data) != entry["record_bytes"]
         ):
             raise ReviewInputError("historical terminal invocation custody changed")
         pending = frozenset(
@@ -220,7 +298,7 @@ def _registry():
         state = common(entry, caller)
         if (
             frame is not entry["execution"]
-            or frame.f_code is not action_run.execute_command.__code__
+            or frame.f_code is not inspect.unwrap(action_run.execute_command).__code__
             or cast(Any, frame.f_locals).get("proof") is not proof
             or cast(Any, frame.f_locals).get("run") is not run
             or run is not entry["run"]
@@ -389,13 +467,21 @@ def _registry():
                 "historical terminal successor lacks original confirmation"
             )
         common(entry, caller)
+        record_data = _record_data(record)
+        checkpoint_data = _record_data(caller._checkpoint)
+        persisted_data = _accounting_data(persisted)
         if (
             ledger is not entry["ledger"]
             or caller._checkpoint is None
-            or record.record_sha256 != caller._checkpoint.record_sha256
-            or record.identity() != entry["identity"]
-            or canonical_bytes(record.api_run_accounting)
-            != canonical_bytes(persisted.to_document())
+            or record_data["record_sha256"] != checkpoint_data["record_sha256"]
+            or (
+                record_data["repository"],
+                record_data["pull_request"],
+                record_data["repository_id"],
+            )
+            != entry["record_identity"]
+            or canonical_bytes(record_data["api_run_accounting"])
+            != canonical_bytes(persisted_data)
         ):
             raise ReviewInputError("historical terminal confirmed root changed")
         terminal = (
@@ -421,28 +507,24 @@ def _registry():
                 < 34
             ):
                 raise ReviewInputError("historical terminal close successor changed")
-            active.pop(id(caller))
-            key = id(caller)
-
-            def clear_closed(_value: Any, key: int = key) -> None:
-                closed.pop(key, None)
-
-            closed[key] = ref(caller, clear_closed)
+            retire(caller)
         else:
             if entry["phase"] != "ordinary":
                 raise ReviewInputError(
                     "historical terminal operation confirmed a nonterminal root"
                 )
             entry.update(
-                root=record.record_sha256,
+                root=record_data["record_sha256"],
                 record=record,
-                record_bytes=canonical_bytes(record.to_dict()),
+                record_bytes=canonical_bytes(record_data),
             )
 
-    return start, before_terminal, before_request, confirm_checkpoint
+    return execution_scope, start, before_terminal, before_request, confirm_checkpoint
 
 
-start, before_terminal, before_request, confirm_checkpoint = _registry()
+execution_scope, start, before_terminal, before_request, confirm_checkpoint = (
+    _registry()
+)
 del _registry
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
