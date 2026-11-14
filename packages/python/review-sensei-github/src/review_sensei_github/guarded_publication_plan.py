@@ -96,3 +96,99 @@ def require_durable_floor(journal, *, checks_enabled):
     # receipt, allowing all intermediate confirmations to coalesce.
     minimum_calls = 4 * minimum_checkpoint + 3
     ledger.caller.budget_view.preflight(minimum_calls)
+
+
+def require_grouped_durable_floor(publisher, journal, host, *, checks_enabled):
+    """Negative-only floor for the original fresh grouped producer.
+
+    Each group and the final union review pass through the original lifecycle
+    journal. Their independently durable staging/manifest protocol adds work;
+    it does not replace journal intent or the last receipt checkpoint.
+    """
+    import inspect
+
+    from review_sensei.source_registry import (
+        require_instance_source,
+        require_module_seal,
+    )
+
+    from . import native_group_publication, native_review_groups, publication
+    from .finding_lifecycle import FindingLifecycleJournal
+    from .quarantine_capacity import installed_capacity
+    from .quarantine_census import lifecycle_checkpoint_pricing
+
+    if journal is None or not checks_enabled or journal.effects:
+        return
+    if journal._record.quarantine_lineage is None:
+        return
+    require_module_seal(publication)
+    require_module_seal(native_group_publication)
+    require_module_seal(native_review_groups)
+    if (
+        type(journal) is not FindingLifecycleJournal
+        or type(publisher) is not publication.ReviewPublisher
+        or journal.reviewer is not publisher
+        or type(host) is not native_group_publication.NativeGroupPublication
+        or type(host.plan) is not native_review_groups.NativeReviewPlan
+    ):
+        raise ReviewInputError("grouped durable floor requires original source")
+    require_instance_source(publisher, methods=("_publish_impl",))
+    require_instance_source(journal, methods=("request", "checkpoint", "finish"))
+    require_instance_source(
+        host, methods=("_publish_parts", "publish_final", "checkpoint")
+    )
+    require_instance_source(host.plan, methods=("part_payload",))
+    original = publication.ReviewPublisher._publish_impl
+    while hasattr(original, "__wrapped__"):
+        original = original.__wrapped__
+    frame = inspect.currentframe()
+    frame = frame.f_back if frame is not None else None
+    if (
+        frame is None
+        or frame.f_code is not original.__code__
+        or frame.f_globals is not vars(publication)
+        or not {"self", "lifecycle_journal", "native_host"} <= frame.f_locals.keys()
+        or frame.f_locals["self"] is not publisher
+        or frame.f_locals["lifecycle_journal"] is not journal
+        or frame.f_locals["native_host"] is not host
+        or frame.f_locals.get("grouped_publication") is not True
+        or host.http is not publisher.http
+        or host.ledger is not journal.ledger
+        or host.identity != journal.identity
+    ):
+        raise ReviewInputError("grouped durable floor producer frame changed")
+    record = journal._record
+    # Retained staging may replay fewer effects. This bound covers only fresh
+    # source publication and must not turn a recovered prefix into a new plan.
+    if record.publication_staging is not None:
+        return
+    if (
+        record.transaction is None
+        or host.plan.transaction_id != record.transaction.transaction_id
+    ):
+        raise ReviewInputError("grouped durable floor transaction changed")
+    installed_capacity(journal.ledger, journal.identity)
+
+    def quote(owner, selected, *, calls, validate, **_unused):
+        if owner is not journal.ledger or selected is not record or not validate():
+            raise ReviewInputError("grouped durable floor checkpoint source changed")
+        if len(calls) != 1 or type(calls[0]) is not int or calls[0] < 1:
+            raise ReviewInputError("grouped durable floor checkpoint quote changed")
+        return calls[0]
+
+    checkpoint = lifecycle_checkpoint_pricing(
+        journal.ledger,
+        record,
+        added_parts=0,
+        added_bytes=0,
+        checkpoint_parts=(0,),
+        factory=quote,
+        inline=True,
+    )
+    if checkpoint is None:
+        return  # No source quote can manufacture admission.
+    groups = len(host.plan.groups)
+    # Two check effects, one POST per group and one final union POST. Every
+    # pending intent needs a checkpoint; finish needs one final checkpoint.
+    # This omits staging CAS, manifest writes, complete reads and trust fences.
+    journal.ledger.caller.budget_view.preflight((groups + 4) * checkpoint + groups + 3)

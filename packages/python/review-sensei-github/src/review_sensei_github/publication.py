@@ -10431,6 +10431,15 @@ class ReviewPublisher:
             )
         )
         guarded_batch = False
+        if not write_preflight.app_authored and grouped_publication:
+            from .guarded_publication_plan import require_grouped_durable_floor
+
+            require_grouped_durable_floor(
+                self,
+                lifecycle_journal,
+                native_host,
+                checks_enabled=check_token is not None,
+            )
         if not write_preflight.app_authored and not grouped_publication:
             from .guarded_pending_publication import admit as admit_guarded_pending
             from .guarded_publication_plan import require_durable_floor
