@@ -848,6 +848,9 @@ class ApiRunRequestTransport:
         from .quarantine_creation_census import before_creation_request
 
         before_creation_request(self, request)
+        from .quarantine_command_checkpoint import before_request as before_cold_request
+
+        before_cold_request(self, request)
         from .trust_effects import before_request as before_trust_request
 
         if (
@@ -3593,6 +3596,12 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
 _install_checkpoint_pricer(
     ApiRunSessionLedger.preflight_finding_lifecycle_checkpoint_pricing
 )
+
+
+from .quarantine_command_checkpoint import install_source as _install_cold_source  # noqa: E402
+
+_install_cold_source("open", ApiRunRequestTransport.open)
+del _install_cold_source
 
 
 # Capture guarded/trust transport identities only after the source-owned

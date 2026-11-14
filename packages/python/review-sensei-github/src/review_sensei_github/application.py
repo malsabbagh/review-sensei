@@ -5142,7 +5142,14 @@ class GitHubApplication:
                 original_refinalize = refinalize
 
                 def refinalize(**arguments):
-                    with journal.transports(finalizer=finalizer):
+                    from .quarantine_command_checkpoint import (
+                        phase as cold_checkpoint_phase,
+                    )
+
+                    with (
+                        journal.transports(finalizer=finalizer),
+                        cold_checkpoint_phase(journal),
+                    ):
                         execute_refinalize = original_refinalize
                         if _capacity_plan is not None:
                             if prepared_check is None:

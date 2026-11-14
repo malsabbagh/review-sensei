@@ -225,6 +225,11 @@ class _CheckpointSnapshot:
         from .quarantine_candidate_receipt import begin, finish
 
         receipt = begin(self, candidate=candidate)
+        from .quarantine_command_checkpoint import after_get, before_get
+
+        cold_get, reused = before_get(self, candidate=candidate)
+        if reused is not None:
+            return reused
         self.require()
         record = self.candidate if candidate else self.record
         body = self.candidate_body if candidate else self.body
@@ -241,6 +246,7 @@ class _CheckpointSnapshot:
                 "quarantine exact checkpoint readback is unavailable"
             )
         parsed = self.validate(payload, record=record, body=body)
+        after_get(cold_get, self, parsed)
         return finish(receipt, self, parsed, payload) if candidate else parsed
 
 
@@ -388,6 +394,11 @@ def reconcile_quarantine_checkpoint(caller, ledger, identity):
         )
     return _remember_confirmation(snapshot, snapshot.get(candidate=True))
 
+
+from .quarantine_command_checkpoint import install_source as _install_cold_source  # noqa: E402
+
+_install_cold_source("get", _CheckpointSnapshot.get)
+del _install_cold_source
 
 from .quarantine_candidate_receipt import install_source as _install_candidate_receipt  # noqa: E402
 
