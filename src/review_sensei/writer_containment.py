@@ -283,21 +283,6 @@ class ContainedForwardingCoordinator(AuthorityHost):
     def _connect_frontier(self) -> sqlite3.Connection:
         return sqlite3.connect(self.frontier_path, isolation_level=None, timeout=5)
 
-    def _cleanup_unactivated_epoch_state(self, epoch_key: str) -> None:
-        try:
-            with closing(self._connect_frontier()) as db:
-                db.execute("DELETE FROM frontier WHERE key=?", (epoch_key,))
-                db.commit()
-        except sqlite3.Error:
-            pass
-        try:
-            with closing(sqlite3.connect(self.authority_path, timeout=5)) as db:
-                db.execute("DELETE FROM roots WHERE key=?", (epoch_key,))
-                db.execute("DELETE FROM history WHERE key=?", (epoch_key,))
-                db.commit()
-        except sqlite3.Error:
-            pass
-
     @staticmethod
     def _scope_key(base_store_id: str, repository_id: int, pull_request: int) -> str:
         _require_containment(
@@ -449,7 +434,11 @@ class ContainedForwardingCoordinator(AuthorityHost):
             except BaseException:
                 self._grants.pop(grant_id, None)
                 _ISSUED_TOKENS.discard(token)
-                self._cleanup_unactivated_epoch_state(bound_access.key)
+                # Epoch keys are shared by independent contenders. A failed
+                # attempt does not own the durable rows: deleting them could
+                # erase another writer's root, history, or confirmed frontier.
+                # Retain partial initialization as evidence and fail closed;
+                # there is no implicit reenrollment or accounting reset.
                 raise
             return token, snapshot
 
@@ -602,7 +591,11 @@ class ContainedForwardingCoordinator(AuthorityHost):
             except BaseException:
                 self._grants.pop(grant_id, None)
                 _ISSUED_TOKENS.discard(successor_token)
-                self._cleanup_unactivated_epoch_state(bound_access.key)
+                # Epoch keys are shared by independent contenders. A failed
+                # attempt does not own the durable rows: deleting them could
+                # erase another writer's root, history, or confirmed frontier.
+                # Retain partial initialization as evidence and fail closed;
+                # there is no implicit reenrollment or accounting reset.
                 raise
             return successor_token, snapshot
 

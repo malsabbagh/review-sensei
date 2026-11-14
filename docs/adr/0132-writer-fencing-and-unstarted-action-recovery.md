@@ -110,3 +110,27 @@ comparison against a supplied integer, not an authenticated witness producer.
 SQLite locking and durable nonrollback frontier hosting remain deployment gates;
 unsupported or conflicting storage must refuse rather than fall back to an
 in-process lock. `LIVE_CANONICAL_CUTOVER_ENABLED` remains `False`.
+
+### Contending epoch initialization retains evidence (2026-11-13)
+
+Independent coordinators derive the same epoch key when competing to enroll an
+initial writer or succeed the same predecessor. Failure is not proof that the
+failing coordinator owns that key. Enrollment and cutover therefore revoke only
+their own process-local grant on failure; they never delete canonical roots,
+history, or frontier rows. A losing initializer must leave the winner's evidence
+intact. Partial initialization without confirmed activation remains a fail-closed
+hold with its original bytes and accounting, not an automatically reset epoch.
+
+`test_writer_epoch_contention` exercises initial enrollment and successor races
+using a second Python process between real initialization and activation. It
+checks exact root/frontier/history retention, one admitted writer, and one later
+settled synthetic effect. A post-persistence failure control retains unactivated
+evidence and refuses unchanged enrollment. These tests qualify only the local
+candidate and these interleavings, not a deployed all-writer fencing guarantee.
+
+This replaces destructive failure cleanup, not the epoch store format or any
+funding ceiling. No recovery procedure for abandoned initialization is introduced.
+Preserve such evidence for a separately qualified recovery; do not restore the
+old cleanup to unstick it. Rollback must retain the evidence-preserving behavior
+or keep the authority candidate unused. Live cutover stays disabled, and external
+epoch authentication, credential containment, and deployment remain open gates.

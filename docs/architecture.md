@@ -1066,3 +1066,10 @@ Known-marker reads are reused within existing bounds, with no extra census,
 storage or allowance. Bound transaction validation is unchanged. This correction
 does not supply durable slot/effect restoration or close G10/G14/G16. See
 [ADR 0134](adr/0134-bounded-active-findings-and-artifact-authority.md).
+
+### Candidate epoch contention preserves durable evidence
+
+On failure, revoke own grant only; preserve shared epochs.
+Partial epochs stay held, not reset. Independent-process tests cover winner
+preservation and post-persistence failure, not deployed all-writer containment.
+The contained-writer candidate remains disabled. See [ADR 0132](adr/0132-writer-fencing-and-unstarted-action-recovery.md).
