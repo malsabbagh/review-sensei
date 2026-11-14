@@ -1074,7 +1074,9 @@ def _prepare_lifecycle(
     from .publication_intent_fusion import prospective_transaction
 
     fused_transaction = prospective_transaction(ledger, record)
-    fusion_fields = {} if fused_transaction is None else {"transaction": fused_transaction}
+    fusion_fields = (
+        {} if fused_transaction is None else {"transaction": fused_transaction}
+    )
     previous = normalize_reference(record.finding_lifecycle)
     require_accepted_operation(
         record,
@@ -1272,7 +1274,9 @@ def stage_finding_lifecycle(
 
     require_stage(ledger, record, document)
     fused_transaction = prospective_transaction(ledger, record)
-    fusion_fields = {} if fused_transaction is None else {"transaction": fused_transaction}
+    fusion_fields = (
+        {} if fused_transaction is None else {"transaction": fused_transaction}
+    )
     reference, envelope, parts, allowance, prospective_record = _prepare_lifecycle(
         ledger,
         record,

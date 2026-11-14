@@ -77,6 +77,11 @@ class PreentryCapacityTests(unittest.TestCase):
             original_role=True, tamper_plan="_batch_body_updates"
         )
 
+    def test_closed_guarded_publication_pair_rejects_callbacks_before_sizing(self):
+        self._exercise_source_capacity(
+            original_role=True, tamper_plan="_guarded_publication_pair"
+        )
+
     def test_copy_protocol__reduce_ex___rejects_callback_before_sizing(self):
         self._exercise_source_capacity(original_role=True, tamper_plan="__reduce_ex__")
 

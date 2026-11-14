@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from review_sensei_github.guarded_publication_plan import require_durable_floor
+from review_sensei_github.api_run_budget import CallerRunBudget
 from test_quarantine_activation import registered_resource
 from test_quarantine_published_tail_journey import (
     BROKER_QUALIFICATIONS,
@@ -15,15 +15,23 @@ from test_quarantine_published_tail_journey import (
 
 from review_sensei.api_work import ApiRunAccounting
 from review_sensei.bounded_evidence import canonical_bytes
+from tests.test_quarantine_evidence import git
 
 
 class GuardedPendingPublicationTests(unittest.TestCase):
-    def test_one_plus_one_original_total_holds_before_service_mutations(self):
+    def test_one_short_original_total_holds_before_service_mutations(self):
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             fixture = PublishedTailJourneyFixture(directory)
+            # Configure the original producer itself, never mutate a live budget.
+            fixture.config_bytes = fixture.config_bytes.replace(
+                b"api_request_limit: 512", b"api_request_limit: 504"
+            )
+            (fixture.root / ".reviewsensei.yml").write_bytes(fixture.config_bytes)
+            git(fixture.root, "add", ".reviewsensei.yml")
+            git(fixture.root, "commit", "-m", "one-short original request allocation")
             old, registration = fixture.original_origins(
                 failed_count=1, published_count=1
             )
@@ -37,15 +45,15 @@ class GuardedPendingPublicationTests(unittest.TestCase):
 
             def observe(frame, event, arg):
                 if (
-                    frame.f_code is require_durable_floor.__code__
-                    and event == "exception"
-                    and type(arg[1]).__name__ == "EvidenceBudgetExhausted"
+                    frame.f_code is CallerRunBudget.preflight.__code__
+                    and event == "call"
+                    and frame.f_locals["calls"] == 70
                 ):
-                    journal = frame.f_locals["journal"]
+                    budget = frame.f_locals["self"]
                     quotes.append(
                         (
-                            frame.f_locals["minimum_calls"],
-                            journal.ledger.caller.budget_view.ordinary_remaining(),
+                            frame.f_locals["calls"],
+                            budget.ordinary_remaining(),
                         )
                     )
                 return observe
@@ -57,7 +65,7 @@ class GuardedPendingPublicationTests(unittest.TestCase):
                     self.assertNotEqual(fixture.invoke(), 0)
             finally:
                 sys.settrace(prior)
-            self.assertEqual(quotes, [(63, 51)])
+            self.assertEqual(quotes, [(70, 69)])
             self.assertEqual(fixture.check_runs, checks)
             self.assertEqual(fixture.reviews, reviews)
             self.assertEqual(fixture.comment["body"], old_body)
@@ -74,7 +82,7 @@ class GuardedPendingPublicationTests(unittest.TestCase):
             accounting = ApiRunAccounting.from_document(
                 fixture.current_record().api_run_accounting
             )
-            self.assertEqual(accounting.configuration.limit, 512)
+            self.assertEqual(accounting.configuration.limit, 504)
             self.assertEqual(accounting.startup.liability, 130)
             self.assertEqual(accounting.startup_used, (("hosted", 1),))
             self.assertGreater(accounting.confirmed, 0)

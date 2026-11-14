@@ -2378,7 +2378,12 @@ class FindingLifecycleJournal:
                             outcome["effects"][-1]["response"] = effect_response
                             candidates.append(
                                 _maximum_native_allocation(
-                                    _pack_journal(outcome), _pair_source=self if outcome.get("schema_version") == "finding-lifecycle-journal-v3" else None, preserve_observed=True
+                                    _pack_journal(outcome),
+                                    _pair_source=self
+                                    if outcome.get("schema_version")
+                                    == "finding-lifecycle-journal-v3"
+                                    else None,
+                                    preserve_observed=True,
                                 )
                             )
         future = max(candidates, key=lambda v: len(canonical_bytes(v)))
@@ -2572,7 +2577,8 @@ class FindingLifecycleJournal:
                 receipt = self._compact_response(response[1], effect=effect)
                 validate_review_receipt(self, effect, receipt)
                 effect["status"], effect["response"] = (
-                    "confirmed", [response[0], receipt],
+                    "confirmed",
+                    [response[0], receipt],
                 )
         self.checkpoint()
 
@@ -2615,8 +2621,14 @@ class FindingLifecycleJournal:
         from .guarded_publication_batch import intercept_request
 
         handled, response = intercept_request(
-            self, http, method, path, token=token, body=raw_request,
-            kwargs=kwargs, prepare_only=_prepare_only,
+            self,
+            http,
+            method,
+            path,
+            token=token,
+            body=raw_request,
+            kwargs=kwargs,
+            prepare_only=_prepare_only,
         )
         if handled:
             return response
