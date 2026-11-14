@@ -95,6 +95,7 @@ print(json.dumps({"code":code,"error":f.error,"states":observed[-1] if observed 
     "terminal":now.terminal_transaction,"no_process_authority":True,"no_native_effects":no_native_effects,"review_states":[r["state"] for r in f.reviews],"check_ids":[c["id"] for c in f.check_runs],"check_statuses":[c["status"] for c in f.check_runs],"provider_calls":f.provider_calls}))
 """
 
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_cold_confirmed_and_unmatched_carriers_preserve_unknown_charges(self):
         for changed in (False, True):
             with (

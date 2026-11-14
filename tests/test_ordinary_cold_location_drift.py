@@ -33,7 +33,7 @@ for k,v in p['remote'].items():
 f.next_run();f.active_finding_cap=1
 f.run_id=p.get('run_id',f.run_id)
 f.live_head=f.requested_head=p.get('head',f.live_head)
-(f.root/'review.patch').write_text(p['diff'])
+(f.root/'review.patch').write_bytes(p['diff'].encode('utf-8'))
 f.provider_comments=p['comments']
 seen=[];original=lifecycle.restore_finding_lifecycle
 def capture(*a,**kw):

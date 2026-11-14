@@ -1,6 +1,7 @@
 """A process crash cannot turn ephemeral settlement into durable authority."""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ class SimulatedProcessCrash(BaseException):
 
 
 class OrdinaryNativeRecoveryCrashTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_crash_after_confirmed_receipt_before_terminal_keeps_cold_liability(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

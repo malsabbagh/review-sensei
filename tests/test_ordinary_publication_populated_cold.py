@@ -1,6 +1,7 @@
 """A cold populated replay preserves complete original hidden criteria."""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ from tests import test_ordinary_native_recovery_custody as custody
 
 
 class OrdinaryPopulatedColdTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_confirmed_check_crash_resumes_populated_original_at_512(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -225,6 +227,7 @@ class OrdinaryPopulatedColdTests(unittest.TestCase):
             self.assertEqual([r["state"] for r in fixture.reviews], ["COMMENTED"])
             self.assertEqual(fixture.check_runs[0]["conclusion"], "action_required")
 
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
     def test_fresh_process_changed_original_criterion_holds_before_native_write(self):
         self.fault = "criterion"
         self.test_confirmed_check_crash_resumes_populated_original_at_512()
