@@ -91,20 +91,25 @@ class PublishedTailJourneyFixture(JourneyFixture):
 
     def external(self, request, timeout):
         path = urlsplit(request.full_url).path
+        # Ordinary producers use the same complete, head-scoped native listing
+        # as cold successors. The base fixture omits GitHub's total_count.
+        if (
+            request.get_method() == "GET"
+            and path.endswith("/check-runs")
+            and "/commits/" in path
+        ):
+            assert (
+                request.get_header("Authorization") != "Bearer synthetic-workflow-read"
+            )
+            self._meter(request)
+            head = path.split("/commits/", 1)[1].split("/", 1)[0]
+            rows = [
+                copy.deepcopy(item)
+                for item in self.check_runs
+                if item.get("head_sha") == head
+            ]
+            return json_response({"total_count": len(rows), "check_runs": rows})
         if self.tail_runs is not None and request.get_method() == "GET":
-            if path.endswith("/check-runs") and "/commits/" in path:
-                assert (
-                    request.get_header("Authorization")
-                    != "Bearer synthetic-workflow-read"
-                )
-                self._meter(request)
-                head = path.split("/commits/", 1)[1].split("/", 1)[0]
-                rows = [
-                    copy.deepcopy(item)
-                    for item in self.check_runs
-                    if item.get("head_sha") == head
-                ]
-                return json_response({"total_count": len(rows), "check_runs": rows})
             if path.endswith("/reactions"):
                 self._meter(request)
                 return json_response([])

@@ -1,9 +1,9 @@
-"""Detached sizing experiments for a conservatively stopped drift route.
+"""Source-produced sizing for the conservatively stopped ordinary drift route.
 
-Nothing in this module admits a route, installs a read discount, suppresses an
-existing preflight, or authorizes dispatch.  A future consumer must separately
-prove a permanent stop before journal staging on every unsuccessful prefix.
-The existing ordinary publisher does not consume these envelopes.
+Sizing alone admits no work. The original publication observer's invocation-local
+execution mode consumes this envelope only after binding the original source,
+result, inventory, caller, and complete stopped-prefix reservation. The original
+journal remains the sole owner of intents, receipts, and physical accounting.
 """
 
 from __future__ import annotations
@@ -161,7 +161,7 @@ def stopped_prefix_documents(journal, requests, *, body_updates=()):
     return tuple(documents), len(shadow.effects) + 1
 
 
-def observe_current(
+def _observe_source(
     publisher,
     journal,
     *,
@@ -175,20 +175,17 @@ def observe_current(
     complete_inventory,
     convergence_policy,
     auto_approval,
+    preserve_explanations=False,
 ):
     """Read and project the real pre-effect source, without admitting dispatch.
 
-    This diagnostic preparation intentionally uses the existing bounded census
+    This source preparation uses the existing bounded census
     and its original meter. Its return value is not a registered receipt or a
     capability, and cannot replace any later native or journal preflight.
     """
     from .ordinary_publication_plan import current_request_branches
     from .ordinary_publication_reads import _require_reader_profile
 
-    # Explicit internal diagnostic selection only. Ordinary callers retain
-    # their conservative route until the complete execution consumer qualifies.
-    if getattr(publisher, "_ordinary_drift_measurement", False) is not True:
-        return None
     if journal is None:
         return None
     _require_preparation_source(
@@ -204,6 +201,7 @@ def observe_current(
         marker,
         complete_inventory,
         auto_approval,
+        preserve_explanations,
     )
     if planned is None or complete_inventory is not True:
         return None
@@ -248,6 +246,7 @@ def observe_current(
         marker,
         complete_inventory,
         auto_approval,
+        preserve_explanations,
     )
     if (
         journal._record.record_sha256 != original_root
@@ -271,10 +270,10 @@ def observe_current(
     if not updates or any(
         resolved or carried for _, _, _, resolved, _, carried in updates
     ):
-        return None
+        raise ReviewInputError("ordinary drift census selected unsupported updates")
     edits = tuple(row for row in updates if row[1] != row[4])
     if not edits:
-        return None
+        raise ReviewInputError("ordinary drift census selected no updates")
     branches = current_request_branches(
         publisher,
         journal,
@@ -285,6 +284,8 @@ def observe_current(
         outcome=outcome,
         policy=policy,
         complete_inventory=complete_inventory,
+        check_published=True,
+        preserve_explanations=preserve_explanations,
     )
     from .finding_lifecycle import _request_identity
 
@@ -313,7 +314,7 @@ def observe_current(
     projections = []
     for branch in branches:
         # Only normal check/check/review sequences belong to the stopped
-        # experiment. Existing warning/cleanup branches remain unqualified.
+        # route. Existing warning/cleanup branches remain unqualified.
         if len(branch) != 3 or not branch[-1][1].endswith("/reviews"):
             continue
         method, path, body, condition = branch[-1]
@@ -329,12 +330,18 @@ def observe_current(
         )
         projections.append((requests, documents, item_count))
     if not projections:
-        return None
+        raise ReviewInputError("ordinary drift source branches are unavailable")
     # Measure already-packed wire alternatives. The core applies its original
     # outer compressBound; no exact-document proof or discounted dispatch is
-    # supplied. Fourteen reads is an experimental envelope, not a qualified
-    # reader profile, and must not be consumed as execution authority.
+    # supplied. The sealed negative read contract supplies the finite role
+    # envelope; execution still requires original observer custody and parsers.
     from review_sensei.finding_lifecycle_store import preflight_finding_lifecycle
+    from review_sensei.source_registry import require_module_seal
+
+    from . import ordinary_drift_read_contract
+
+    require_module_seal(ordinary_drift_read_contract)
+    read_calls = sum(ordinary_drift_read_contract.read_limits().values())
 
     documents = tuple(
         max(
@@ -354,12 +361,13 @@ def observe_current(
         policy_digest=journal.policy_digest,
         configuration_digest=journal.configuration_digest,
         item_count=max(count for _, _, count in projections),
-        reserved_tail_calls=14
+        reserved_tail_calls=read_calls
         + max(len(requests) for requests, _, _ in projections)
         + 6,
     )
     return {
         "quote": quote,
+        "success_frame_bound": True,
         "root": original_root,
         "record": original_record,
         "inventory": original_inventory,
@@ -370,3 +378,15 @@ def observe_current(
         "usable_after": caller.usable,
         "projections": tuple(projections),
     }
+
+
+def observe_current(publisher, journal, **arguments):
+    """Explicit diagnostic only; its detached result grants no authority."""
+    if getattr(publisher, "_ordinary_drift_measurement", False) is not True:
+        return None
+    return _observe_source(publisher, journal, **arguments)
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

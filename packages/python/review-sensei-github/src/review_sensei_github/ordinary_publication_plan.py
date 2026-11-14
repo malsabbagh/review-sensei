@@ -374,6 +374,30 @@ def admit_current(
     window_non_inline_blocking=False,
 ):
     """The closed ordinary source route, before its first business effect."""
+    if getattr(observer, "family", "fresh") == "drift":
+        from .ordinary_drift_execution import prepare_current
+
+        return prepare_current(
+            publisher,
+            observer,
+            journal,
+            original_result=original_result,
+            result=result,
+            assembled=assembled,
+            eligibility=eligibility,
+            marker=marker,
+            outcome=outcome,
+            policy=policy,
+            complete_inventory=complete_inventory,
+            checks_enabled=checks_enabled,
+            grouped=grouped,
+            planned_window=planned_window,
+            planned_drift=planned_drift,
+            convergence_policy=convergence_policy,
+            auto_approval=auto_approval,
+            preserve_explanations=preserve_explanations,
+            window_non_inline_blocking=window_non_inline_blocking,
+        )
     if convergence_policy is not None:
         assembled = publisher._adjust_assembled_for_drift(
             publisher._adjust_assembled_for_window(

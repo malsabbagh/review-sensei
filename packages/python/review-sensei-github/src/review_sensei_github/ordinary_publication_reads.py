@@ -142,7 +142,7 @@ def _require_reader_profile(publisher):
         raise ReviewInputError("ordinary publication extended reader is unqualified")
 
 
-def select_publication_observation(publisher, journal, *, result):
+def select_publication_observation(publisher, journal, *, result, family="fresh"):
     """Choose an optional profile before issuing any observer or read quote.
 
     Unsupported initial implementations retain the conservative route. Once an
@@ -172,7 +172,7 @@ def select_publication_observation(publisher, journal, *, result):
             _transport_signature(transport, journal, budget)
     except ReviewInputError:
         return nullcontext(None)
-    return observe_publication(publisher, journal)
+    return observe_publication(publisher, journal, family=family)
 
 
 def unbound_population(journal, result, state):
@@ -285,14 +285,18 @@ def issued_witness(journal):
 
 
 class _Observation:
-    def __init__(self, publisher, journal, budget):
+    def __init__(self, publisher, journal, budget, *, family="fresh"):
         self.publisher, self.journal, self.budget = publisher, journal, budget
+        if family not in {"fresh", "drift"}:
+            raise ReviewInputError("ordinary publication family is unavailable")
+        self.family = family
         self.scope = (
             journal.ledger,
             journal.identity,
             journal.operation_id,
             journal.head_sha,
             journal.base_sha,
+            family,
         )
         _OBSERVED[self] = {}
         self.bindings: list[tuple[Any, str, Any, Any, Any]] = []
@@ -316,6 +320,7 @@ class _Observation:
                 journal.operation_id,
                 journal.head_sha,
                 journal.base_sha,
+                self.family,
             )
         ):
             raise ReviewInputError("ordinary publication read scope expired or changed")
@@ -539,6 +544,12 @@ class _Observation:
 
     def read(self, transport, method, path, kwargs):
         self._require(self.journal, self.publisher)
+        if self.family == "drift":
+            from .ordinary_drift_execution import handle_request
+
+            handled, response = handle_request(self, transport, method, path, kwargs)
+            if handled:
+                return response
         if not any(transport is old for _, _, old, _, _ in self.bindings):
             raise ReviewInputError("ordinary publication read transport is unbound")
         body = kwargs.get("body")
@@ -658,7 +669,7 @@ _OBSERVATION_METHODS = {
 
 
 @contextmanager
-def observe_publication(publisher, journal):
+def observe_publication(publisher, journal, *, family="fresh"):
     owners = _source_guard(publisher, journal)
     budget = (
         journal._native_budget
@@ -667,7 +678,7 @@ def observe_publication(publisher, journal):
     )
     if budget is None:
         raise ReviewInputError("ordinary publication read budget is absent")
-    observation = _Observation(publisher, journal, budget)
+    observation = _Observation(publisher, journal, budget, family=family)
     for owner, attr in [(owner, "http") for owner in owners] + [
         (journal, "_readback_http")
     ]:
@@ -681,6 +692,10 @@ def observe_publication(publisher, journal):
             setattr(owner, attr, wrapper)
         yield observation
     finally:
+        if observation.family == "drift":
+            from .ordinary_drift_execution import close
+
+            close(observation)
         _ACTIVE.pop(observation, None)
         _OBSERVED.pop(observation, None)
         _REMAINING.pop(observation, None)

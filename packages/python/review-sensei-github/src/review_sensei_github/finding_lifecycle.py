@@ -4004,6 +4004,12 @@ restore_finding_lifecycle = _install_empty_restore(restore_finding_lifecycle)
 del _install_empty_restore
 
 
+from .ordinary_drift_execution import _install_checkpoint_source  # noqa: E402
+
+_install_checkpoint_source(FindingLifecycleJournal)
+del _install_checkpoint_source
+
+
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
 
 _seal_original_source()

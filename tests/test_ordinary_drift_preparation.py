@@ -1,20 +1,19 @@
-"""Measure actual pre-check drift source without granting discounted execution."""
+"""Actual pre-check drift source pricing and source-substitution refusal."""
 
 import copy
+import dis
 import json
 import sys
 import tempfile
 import unittest
-from dataclasses import replace
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from review_sensei_github.approval import ReviewApprovalEligibility
-from review_sensei_github.ordinary_drift_plan import observe_current
+from review_sensei_github.ordinary_drift_plan import _observe_source
 from review_sensei_github.publication import (
     ReviewPublisher,
     approval_eligibility_from_body,
-    approval_eligibility_marker,
 )
 
 from review_sensei.bounded_evidence import canonical_bytes
@@ -51,11 +50,10 @@ class OrdinaryDriftPreparationTests(unittest.TestCase):
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             fixture = ChangedPreparationSource(directory)
-            source = observe_current.__code__
+            source = _observe_source.__code__
 
             def inspect(frame, event, value):
                 if frame.f_code is source and event == "call":
-                    frame.f_locals["publisher"]._ordinary_drift_measurement = True
                     planned = frame.f_locals["planned"]
                     if planned is not None and any(
                         ob.thread_binding is not None
@@ -89,14 +87,10 @@ class OrdinaryDriftPreparationTests(unittest.TestCase):
         ):
             fixture = PublishedTailJourneyFixture(directory)
             observations, actual_updates, sources, later_bodies = [], [], [], []
-            code = observe_current.__code__
+            code = _observe_source.__code__
             update_code = ReviewPublisher._prepare_existing_drift_updates.__code__
 
             def inspect(frame, event, value):
-                if frame.f_code is code and event == "call":
-                    # Diagnostic-only selection, not an executable profile or
-                    # replacement of any source method/callback.
-                    frame.f_locals["publisher"]._ordinary_drift_measurement = True
                 if (
                     event == "call"
                     and frame.f_code
@@ -104,7 +98,11 @@ class OrdinaryDriftPreparationTests(unittest.TestCase):
                     and observations
                 ):
                     later_bodies.append(frame.f_back.f_locals["body"])
-                if event != "return":
+                if frame.f_code not in (code, update_code):
+                    return
+                if event != "return" or not dis.opname[
+                    frame.f_code.co_code[frame.f_lasti]
+                ].startswith("RETURN"):
                     return
                 if frame.f_code is code and value is not None:
                     journal = frame.f_locals["journal"]
@@ -130,11 +128,7 @@ class OrdinaryDriftPreparationTests(unittest.TestCase):
             previous = sys.getprofile()
             try:
                 sys.setprofile(inspect)
-                # The old downstream generic batch gate deliberately remains.
-                # This test proves preparation, not completed publication or a
-                # new permission to spend the experimental read envelope.
-                with self.assertRaises(AssertionError):
-                    fixture.original_origins(failed_count=9, published_count=5)
+                fixture.original_origins(failed_count=9, published_count=5)
             finally:
                 sys.setprofile(previous)
             self.assertEqual(len(observations), 1, fixture.error)
@@ -151,17 +145,9 @@ class OrdinaryDriftPreparationTests(unittest.TestCase):
             actual_eligibility = approval_eligibility_from_body(later_bodies[0])
             self.assertIsInstance(actual_eligibility, ReviewApprovalEligibility)
             assert isinstance(actual_eligibility, ReviewApprovalEligibility)
-            normalized_eligibility = replace(
-                actual_eligibility,
-                facts=replace(actual_eligibility.facts, check_published=False),
-            )
-            normalized_body = later_bodies[0].replace(
-                approval_eligibility_marker(actual_eligibility),
-                approval_eligibility_marker(normalized_eligibility),
-                1,
-            )
+            self.assertTrue(actual_eligibility.facts.check_published)
             for requests, _, _ in observed["projections"]:
-                self.assertEqual(requests[-1][2]["body"], normalized_body)
+                self.assertEqual(requests[-1][2]["body"], later_bodies[0])
             quote = observed["quote"]
             self.assertEqual(quote["conditional_calls"], 63)
             self.assertEqual(quote["reserved_tail_calls"], 28)
@@ -192,7 +178,9 @@ class OrdinaryDriftPreparationTests(unittest.TestCase):
                 if ob.thread_binding is not None
                 and ob.thread_binding.comment_id is not None
             )
-            self.assertEqual(len(threads), 5)
+            # Completed publication now binds all nine original findings; the
+            # pre-effect projections above still require exactly five PATCHes.
+            self.assertEqual(len(threads), 9)
             arguments = dict(
                 threads=threads,
                 repository_id=123,

@@ -1,4 +1,4 @@
-"""Pure negative read filters for a prospective stopped drift route.
+"""Pure negative read filters for a source-bound stopped drift route.
 
 This module issues no source receipt, budget, transport, or dispatch permission.
 The caller must authenticate and freeze the scope, original defining-module
@@ -297,3 +297,8 @@ def require_complete_read(target: DriftReadTarget, status: int, value: Any) -> N
         complete = False
     if not complete:
         raise ReviewInputError("ordinary drift bounded read is incomplete")
+
+
+from review_sensei.source_registry import seal_module as _seal_source_module  # noqa: E402
+
+_seal_source_module()

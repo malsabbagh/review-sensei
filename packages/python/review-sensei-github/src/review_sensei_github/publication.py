@@ -7638,6 +7638,16 @@ class ReviewPublisher:
                 + MAX_REVIEW_THREAD_PAGES
                 + following_native_calls
             )
+            from .ordinary_drift_execution import suffix_native_calls
+
+            selected_calls = suffix_native_calls(
+                getattr(self, "_ordinary_publication_observation", None),
+                planned=planned,
+                prepared=prepared,
+                requests=tuple(batch),
+            )
+            if selected_calls is not None:
+                native_calls = selected_calls
             journal.preflight_native_batch(tuple(batch), native_calls=native_calls)
             journal.preflight_native_tail(calls=native_calls)
         live = self._preflight_pr(
@@ -8087,6 +8097,9 @@ class ReviewPublisher:
         self, publication: PublicationResult
     ) -> PublicationResult:
         """Run optional work only after the caller's mandatory completion."""
+        from .ordinary_drift_execution import require_cleanup
+
+        require_cleanup(self)
         from .check_accounting import confirm_cleanup
 
         self._accounting_cleanup_result = None
@@ -8133,6 +8146,17 @@ class ReviewPublisher:
         review_id: int,
         threads: Sequence[tuple[str, str]] | None = None,
     ) -> None:
+        from .ordinary_drift_execution import empty_cleanup
+
+        if empty_cleanup(
+            getattr(self, "_ordinary_publication_observation", None),
+            threads=threads,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            replacements=replacements,
+        ):
+            return
         drift_state = self._drift_states.get((repository_id, pull_request))
         drift_has_resolved = (
             drift_state is not None
@@ -8149,6 +8173,7 @@ class ReviewPublisher:
         # None still means discover; do not erase a previously pending owner.
         if threads is not None and not threads and self._pending_thread_cleanup is None:
             return
+
         def cleanup() -> str | None:
             try:
                 candidates = threads
@@ -8768,13 +8793,35 @@ class ReviewPublisher:
                         )
                         and retained_eligibility is None
                     )
+                    closed_drift_route = (
+                        not closed_fresh_route
+                        and bool(result.comments)
+                        and result.transaction is not None
+                        and inventory is not None
+                        and bool(inventory.obligations)
+                        and any(
+                            item.thread_binding is not None
+                            for item in inventory.obligations
+                        )
+                        and getattr(lifecycle_journal.ledger, "caller", None)
+                        is not None
+                        and lifecycle_journal._record.quarantine_lineage is None
+                        and lifecycle_journal._record.historical_assessments is None
+                        and retained_eligibility is None
+                        and not uses_grouped_publication(self.http, result)
+                    )
+                    from .ordinary_drift_execution import finishing, stop
+
                     with (
                         lifecycle_journal.transports(),
                         (
                             select_publication_observation(
-                                self, lifecycle_journal, result=result
+                                self,
+                                lifecycle_journal,
+                                result=result,
+                                family="drift" if closed_drift_route else "fresh",
                             )
-                            if closed_fresh_route
+                            if closed_fresh_route or closed_drift_route
                             else nullcontext(None)
                         ) as observation,
                     ):
@@ -8785,8 +8832,10 @@ class ReviewPublisher:
                         try:
                             outcome = self._publish_impl(**arguments)
                         except BaseException as exc:
+                            stop(observation, exc)
                             try:
-                                lifecycle_journal.finish()
+                                with finishing(observation):
+                                    lifecycle_journal.finish()
                             except BaseException as checkpoint_error:
                                 exc.add_note(
                                     "finding lifecycle checkpoint retained pending intent: "
@@ -8797,7 +8846,8 @@ class ReviewPublisher:
                             self._ordinary_publication_observation = (
                                 previous_observation
                             )
-                        lifecycle_journal.finish()
+                        with finishing(observation):
+                            lifecycle_journal.finish()
                         return outcome
 
             publication = publish_impl(
@@ -12429,6 +12479,11 @@ from .ordinary_publication_reads import _install_publication_source  # noqa: E40
 
 _install_publication_source(ReviewPublisher)
 del _install_publication_source
+
+from .ordinary_drift_execution import _install_sources as _install_drift_sources  # noqa: E402
+
+_install_drift_sources(ReviewPublisher, _REVIEW_THREADS_QUERY)
+del _install_drift_sources
 
 from .quarantine_pr_observation import install_finalizer as _install_pr_finalizer  # noqa: E402
 
