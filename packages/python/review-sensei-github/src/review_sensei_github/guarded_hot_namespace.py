@@ -255,7 +255,7 @@ def _registry():
         entry["initial"].require_successor(state)
         if (
             tuple(b.block_id for b in state.blocks) != tuple(entry["tranches"])
-            or state.unallocated != entry["unallocated"]
+            or state.remaining != entry["remaining"]
             or state.prior_nonstartup_liability != entry["prior"]
         ):
             raise ReviewInputError("hot namespace frozen funding changed")
@@ -467,7 +467,7 @@ def _registry():
             terminal_entered=False,
             transaction=record.transaction.transaction_id,
             tranches={b.block_id: b for b in caller.accounting.blocks},
-            unallocated=caller.accounting.unallocated,
+            remaining=caller.accounting.remaining,
             prior=caller.accounting.prior_nonstartup_liability,
         )
         scope["entry"] = entry

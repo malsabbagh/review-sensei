@@ -15,6 +15,35 @@ from review_sensei.errors import ReviewInputError
 
 
 class GuardedHotNamespaceTests(unittest.TestCase):
+    def test_accounting_accesses_match_original_model_contract(self):
+        import ast
+        import dataclasses
+        import inspect
+        import textwrap
+
+        from review_sensei.api_work import ApiRunAccounting
+
+        require = inspect.getclosurevars(guarded_hot_namespace.begin).nonlocals[
+            "require"
+        ]
+        fields = {item.name for item in dataclasses.fields(ApiRunAccounting)}
+        for function in (guarded_hot_namespace.begin, require):
+            tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Attribute):
+                    continue
+                direct = (
+                    isinstance(node.value, ast.Attribute)
+                    and node.value.attr == "accounting"
+                )
+                local = isinstance(node.value, ast.Name) and node.value.id == "state"
+                if direct or local:
+                    self.assertTrue(
+                        node.attr in fields or hasattr(ApiRunAccounting, node.attr),
+                        node.attr,
+                    )
+        self.assertIsInstance(ApiRunAccounting.remaining, property)
+
     def caller(self, directory, sent):
         def physical(request, timeout):
             sent.append(request.full_url)
