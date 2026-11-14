@@ -304,7 +304,12 @@ def fetch_packed_comments(
 ):
     """One cold complete walk, including opening and closing membership."""
     from .quarantine_command_checkpoint import begin_census, completed_census
+    from .quarantine_command_execution import (
+        begin_receipt_census,
+        observe_receipt_census,
+    )
 
+    receipt_census = begin_receipt_census(ledger, identity, plan)
     cold_census = begin_census(ledger, identity, plan)
     requests = MAX_PAGINATION_PAGES if max_requests is None else max_requests
     if type(requests) is not int or not 2 <= requests <= MAX_PAGINATION_PAGES:
@@ -456,7 +461,9 @@ def fetch_packed_comments(
                     raise ReviewInputError(
                         "packed comment fresh closing membership changed"
                     )
-                return completed_census(cold_census, collected)
+                return completed_census(
+                    cold_census, observe_receipt_census(receipt_census, collected)
+                )
         except (KeyError, TypeError, ValueError) as error:
             raise ReviewInputError(
                 "packed comment complete body page is malformed"
@@ -464,7 +471,9 @@ def fetch_packed_comments(
     closing = _membership(read(METADATA_QUERY, scope), ledger, identity, plan)
     if closing != (order, metadata, original_scope):
         raise ReviewInputError("packed comment fresh closing membership changed")
-    return completed_census(cold_census, collected)
+    return completed_census(
+        cold_census, observe_receipt_census(receipt_census, collected)
+    )
 
 
 from .quarantine_command_checkpoint import install_source as _install_cold_source  # noqa: E402

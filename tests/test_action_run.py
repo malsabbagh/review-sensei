@@ -12,9 +12,10 @@ import hashlib
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -323,6 +324,8 @@ class CommandEntryFixture(EntryFixture):
         event_file.write_text(json.dumps(event))
         fixture = self
         original_bootstrap = action_run.bootstrap
+        original_code = getattr(original_bootstrap, "__code__", None)
+        original_globals = getattr(original_bootstrap, "__globals__", None)
 
         def caller_factory(**kwargs):
             caller = ApiRunRequestTransport(**kwargs)
@@ -340,13 +343,29 @@ class CommandEntryFixture(EntryFixture):
             fixture.http = http
             return http
 
-        def capture_run(*args, **kwargs):
-            run = original_bootstrap(*args, **kwargs)
-            fixture.selected = run
-            after_bootstrap = getattr(fixture, "after_action_bootstrap", None)
-            if after_bootstrap is not None:
-                after_bootstrap(run)
-            return run
+        @contextmanager
+        def capture_scope():
+            previous = sys.getprofile()
+
+            def observe(frame, event, arg):
+                if (
+                    event == "return"
+                    and frame.f_code is original_code
+                    and frame.f_globals is original_globals
+                    and isinstance(arg, review_run.ReviewRun)
+                ):
+                    fixture.selected = arg
+                    after_bootstrap = getattr(fixture, "after_action_bootstrap", None)
+                    if after_bootstrap is not None:
+                        after_bootstrap(arg)
+                if previous is not None:
+                    previous(frame, event, arg)
+
+            try:
+                sys.setprofile(observe)
+                yield
+            finally:
+                sys.setprofile(previous)
 
         environment = {
             **fixture_process_environment(),
@@ -381,7 +400,7 @@ class CommandEntryFixture(EntryFixture):
                         review_run, "BrokerClient", side_effect=broker_factory
                     ),
                     patch.object(review_run, "GitHubHttp", side_effect=http_factory),
-                    patch.object(action_run, "bootstrap", side_effect=capture_run),
+                    capture_scope(),
                     forbid_replacement_phase_budget(),
                     redirect_stdout(output),
                     redirect_stderr(errors),

@@ -381,6 +381,12 @@ def fetch_comments(
             before_read=before_read,
             observe_request=observe_request,
         )
+    from .quarantine_command_execution import (
+        begin_receipt_census,
+        observe_receipt_census,
+    )
+
+    receipt_census = begin_receipt_census(ledger, identity)
     owner, name = identity.repository.split("/", 1)
     profiles = getattr(ledger, "_quarantine_census_sizes", None)
     if profiles is None:
@@ -531,7 +537,7 @@ def fetch_comments(
                 or (not nodes and cursor is not None)
             ):
                 raise ReviewInputError("quarantine census terminal page is incomplete")
-            return collected
+            return observe_receipt_census(receipt_census, collected)
         if (
             len(nodes) != first
             or not _cursor(cursor)

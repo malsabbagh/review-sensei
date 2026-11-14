@@ -560,6 +560,9 @@ def prepare_quarantine_target(run, authority, command, app, permission):
 
     bind_target(target.lifecycle_transfer, target)
     _require_installed_command_tail(run, authenticated)
+    from .quarantine_command_execution import prepare_receipt_phase
+
+    prepare_receipt_phase(run, authority, target)
     return target
 
 
