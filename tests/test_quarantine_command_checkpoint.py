@@ -130,12 +130,16 @@ class CommandCheckpointTests(unittest.TestCase):
                         _require_installed_command_tail,
                     )
 
+                    supplied_observer = observer
+
                     def observe_tail(frame, event, arg):
                         if (
                             frame.f_code is _require_installed_command_tail.__code__
                             and event == "return"
                         ):
                             fixture.command_started = True
+                        if supplied_observer is not None:
+                            supplied_observer(frame, event, arg)
 
                     observer = observe_tail
                 previous = sys.getprofile()

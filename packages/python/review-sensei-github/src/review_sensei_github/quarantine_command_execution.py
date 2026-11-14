@@ -369,6 +369,9 @@ def _make_issuer():
             projection=projection,
             authority_bytes=canonical_bytes(authority.document),
         )
+        from .quarantine_command_successor import start
+
+        prepared[run.ledger]["successor_witness"] = start(run, target)
 
     def require_receipt_phase(run: Any, authority, *, text, marker):
         from . import action_receipt, action_run

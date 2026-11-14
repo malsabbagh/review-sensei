@@ -2394,6 +2394,9 @@ class ApiRunRequestTransport:
             raise ReviewInputError("caller checkpoint publication is unconfirmed")
         persisted = ApiRunAccounting.from_document(record.api_run_accounting)
         persisted.require_successor(self.accounting)
+        from .quarantine_command_successor import confirm_checkpoint
+
+        confirm_checkpoint(self, ledger, record, persisted)
         from .quarantine_checkpoint import expire
 
         expire(getattr(self, "_quarantine_checkpoint_snapshot", None))
