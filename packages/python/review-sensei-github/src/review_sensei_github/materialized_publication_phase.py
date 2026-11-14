@@ -32,6 +32,7 @@ def _build():
     port_instances: WeakSet[Any] = WeakSet()
     original_functions: list[tuple[Any, Any]] = []
     journal_checkpoint_sources: dict[type, Any] = {}
+    publication_sources: dict[type, Any] = {}
 
     def definition(name):
         frame = inspect.currentframe()
@@ -182,6 +183,8 @@ def _build():
                     "closed": False,
                     "censuses": 0,
                     "write_frames": [],
+                    "projection": None,
+                    "projection_error": None,
                 }
             token = active.set(entry)
             try:
@@ -661,6 +664,35 @@ def _build():
 
         cls.open = opened
 
+    def install_publisher(cls):
+        definition("review_sensei_github.publication")
+        original = cls._publish_impl
+        if hasattr(original, "__wrapped__"):
+            raise ReviewInputError("materialized publisher is not defining source")
+        publication_sources[cls] = original.__code__
+        original_functions.append((original, original.__code__))
+
+    def capture_projection(entry):
+        from review_sensei.source_registry import require_module_seal
+
+        from . import materialized_publication_projection as projection
+
+        require_module_seal(projection)
+        journal = entry["journal"]
+        publisher = journal.reviewer
+        code = publication_sources.get(type(publisher))
+        frame = inspect.currentframe()
+        found = None
+        while frame is not None:
+            if frame.f_code is code and frame.f_locals.get("self") is publisher:
+                if found is not None:
+                    raise ReviewInputError("materialized projection frame is nested")
+                found = frame
+            frame = frame.f_back
+        if found is None:
+            raise ReviewInputError("materialized projection executing source is absent")
+        entry["projection"] = projection.project(journal, found.f_locals)
+
     def install_census(namespace):
         definition("review_sensei_github.quarantine_census")
         original = namespace["lifecycle_capacity_plan"]
@@ -677,6 +709,13 @@ def _build():
                     raise ReviewInputError("materialized publication phase changed")
                 if qualified:
                     entry["closed"] = True
+                    if entry["censuses"] == 1:
+                        try:
+                            capture_projection(entry)
+                        except ReviewInputError as error:
+                            # A diagnostic miss cannot become an empty capacity
+                            # scope or change the unchanged full runtime quote.
+                            entry["projection_error"] = str(error)
             return original(ledger, identity, added_parts=added_parts)
 
         namespace["lifecycle_capacity_plan"] = census
@@ -692,6 +731,8 @@ def _build():
             "poisoned": entry["poisoned"],
             "closed": entry["closed"],
             "censuses": entry["censuses"],
+            "projection": entry["projection"],
+            "projection_error": entry["projection_error"],
         }
 
     return (
@@ -702,6 +743,7 @@ def _build():
         install_retention,
         install_caller,
         install_census,
+        install_publisher,
         observation,
     )
 
@@ -714,6 +756,7 @@ def _build():
     install_retention,
     install_caller,
     install_census,
+    install_publisher,
     phase_observation,
 ) = _build()
 del _build

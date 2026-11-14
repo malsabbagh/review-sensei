@@ -587,3 +587,15 @@ unknown outcomes, and terminal publication completion must all be proven within
 the original remaining allowance. Neither this arithmetic nor the hot source
 capture covers a cold successor's bootstrap discovery or authorizes dropping
 lifetime allocation promises.
+
+The inert hot-phase diagnostic also registers the original executing publication
+implementation before its wrappers are installed. At the first original census
+it can read that frame's resolved policy, eligibility, check outcome and assembly
+inputs, validate their original source/data graph, and project source-shaped
+pending, stopped and finish journal-document widths. Missing/early/unsupported
+frames report unavailable, never an empty scope. This does not activate the
+ordinary witness, which still excludes quarantine, and does not execute a native
+request, change a journal, issue a census quote or price the complete operation.
+The original untouched terminal block is reported separately from ordinary
+remaining work. Carrier growth, complete future membership and all finalizer/read
+liabilities still need independent qualification before any smaller quote.

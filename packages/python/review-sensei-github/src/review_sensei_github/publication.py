@@ -12468,6 +12468,14 @@ class ReviewPublisher:
         return self.http.request("GET", path, token=token)
 
 
+from .materialized_publication_phase import (  # noqa: E402
+    install_publisher as _install_materialized_publisher,
+)
+
+_install_materialized_publisher(ReviewPublisher)
+del _install_materialized_publisher
+
+
 # Install only after all actual source classes are defined. No first-caller registration.
 from .guarded_pending_publication import install_source as _install_guarded_pending  # noqa: E402
 

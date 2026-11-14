@@ -24,6 +24,7 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
             (phase.install_application, object),
             (phase.install_retention, {}),
             (phase.install_census, {}),
+            (phase.install_publisher, object),
         ):
             with (
                 self.subTest(install=install.__name__),
@@ -189,6 +190,24 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
             self.assertEqual(len(denied), 4)
             self.assertEqual(denied_replays, [True])
             self.assertTrue(observed)
+            captures = [item for item in observed if item["censuses"] == 1]
+            self.assertTrue(captures)
+            for item in captures:
+                self.assertIsNone(item["projection_error"], item)
+                self.assertIsNotNone(item["projection"], item)
+                self.assertFalse(item["projection"]["authority"])
+                self.assertFalse(item["projection"]["complete_funding_proof"])
+                self.assertFalse(item["projection"]["invocation_price_issued"])
+                self.assertEqual(item["projection"]["protected_terminal_remaining"], 50)
+                self.assertTrue(item["projection"]["branches"])
+                for branch in item["projection"]["branches"]:
+                    self.assertEqual(
+                        len(branch["pending_document_bytes"]), branch["effects"]
+                    )
+                    self.assertEqual(
+                        len(branch["stop_document_bytes"]), branch["effects"]
+                    )
+                    self.assertGreater(branch["maximum_finish_document_bytes"], 0)
             self.assertTrue(all(item["retained"] for item in observed), observed)
             self.assertTrue(all(item["closed"] for item in observed), observed)
             self.assertTrue(all(not item["poisoned"] for item in observed), observed)
