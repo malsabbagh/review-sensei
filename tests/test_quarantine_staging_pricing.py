@@ -1,9 +1,11 @@
 """Exact existing quarantine part writer honors its quoted remaining tail."""
 
 import copy
+import dis
+import sys
 import tempfile
+import types
 import unittest
-from contextlib import contextmanager
 from unittest.mock import patch
 
 from review_sensei_github import quarantine_census as census
@@ -66,36 +68,27 @@ class QuarantineStagingPricingTests(unittest.TestCase):
                     )
                     self.assertEqual(len(fixture.trace), before_pricing)
                 current_tail.append(kwargs.get("reserved_tail_calls", 0))
-                try:
-                    return stage(*args, **kwargs)
-                finally:
-                    current_tail.pop()
 
-            @contextmanager
-            def narrowed(scope):
-                with activate(scope):
-                    if selected or (scope.parts == 0) != inline:
-                        yield
-                        return
-                    budget = scope.caller.budget_view
-                    quoted = scope.plan.worst_read_calls() + 6 + 2 * scope.parts
-                    if inline:
-                        before_pricing = len(fixture.trace)
-                        measured = core._remote_inline_plan(scope.ledger, scope.record)
-                        self.assertEqual(measured["conditional_calls"], quoted)
-                        self.assertEqual(len(fixture.trace), before_pricing)
-                    tail = current_tail[-1]
-                    original_hold = budget._ordinary_hold
-                    remaining = budget.ordinary_remaining()
-                    self.assertGreaterEqual(remaining, quoted + tail)
-                    before = len(fixture.trace)
-                    selected.append((quoted, tail, before))
-                    budget._ordinary_hold += remaining - quoted - tail + int(one_short)
-                    try:
-                        yield
-                    finally:
-                        selected[0] += (len(fixture.trace),)
-                        budget._ordinary_hold = original_hold
+            holds = {}
+
+            def narrowed(scope, frame):
+                if selected or (scope.parts == 0) != inline:
+                    return
+                budget = scope.caller.budget_view
+                quoted = scope.plan.worst_read_calls() + 6 + 2 * scope.parts
+                if inline:
+                    before_pricing = len(fixture.trace)
+                    measured = core._remote_inline_plan(scope.ledger, scope.record)
+                    self.assertEqual(measured["conditional_calls"], quoted)
+                    self.assertEqual(len(fixture.trace), before_pricing)
+                tail = current_tail[-1]
+                original_hold = budget._ordinary_hold
+                remaining = budget.ordinary_remaining()
+                self.assertGreaterEqual(remaining, quoted + tail)
+                before = len(fixture.trace)
+                selected.append((quoted, tail, before))
+                budget._ordinary_hold += remaining - quoted - tail + int(one_short)
+                holds[id(frame)] = (budget, original_hold)
 
             def observe(proof, ledger, record, parts, **kwargs):
                 issued = core._CHECKPOINT_PRICING.get(proof)
@@ -172,15 +165,62 @@ class QuarantineStagingPricingTests(unittest.TestCase):
                         )
                         self.assertEqual(len(fixture.trace), before)
                     proofs.append(issued[5])
-                return consume(proof, ledger, record, parts, **kwargs)
 
-            with (
-                patch.object(core, "stage_finding_lifecycle", staging),
-                patch.object(census, "activate_lifecycle_capacity", narrowed),
-                patch.object(core, "_consume_checkpoint_pricing", observe),
-                registered_resource([registration]),
-            ):
-                result = fixture.invoke(human=not inline)
+            activation_code = next(
+                code
+                for code in activate.__code__.co_consts
+                if isinstance(code, types.CodeType) and code.co_name == "active"
+            )
+            yields = {
+                i.offset
+                for i in dis.get_instructions(activation_code)
+                if i.opname == "YIELD_VALUE"
+            }
+
+            def profile(frame, event, value):
+                if (
+                    frame.f_code is stage.__code__
+                    and frame.f_globals is stage.__globals__
+                ):
+                    if event == "call":
+                        values = dict(frame.f_locals)
+                        ledger, record = values.pop("ledger"), values.pop("record")
+                        staging(ledger, record, **values)
+                    elif event == "return":
+                        current_tail.pop()
+                elif (
+                    frame.f_code is activation_code
+                    and frame.f_globals is activate.__globals__
+                ):
+                    if event == "return" and frame.f_lasti in yields:
+                        narrowed(frame.f_locals["scope"], frame)
+                    elif event == "call" and id(frame) in holds:
+                        budget, original_hold = holds.pop(id(frame))
+                        selected[0] += (len(fixture.trace),)
+                        budget._ordinary_hold = original_hold
+                elif (
+                    event == "call"
+                    and frame.f_code is consume.__code__
+                    and frame.f_globals is consume.__globals__
+                ):
+                    values = frame.f_locals
+                    observe(
+                        values["proof"],
+                        values["ledger"],
+                        values["record"],
+                        values["checkpoint_parts"],
+                        staging_target=values["staging_target"],
+                    )
+
+            previous = sys.getprofile()
+            try:
+                sys.setprofile(profile)
+                with registered_resource([registration]):
+                    result = fixture.invoke(human=not inline)
+            finally:
+                sys.setprofile(previous)
+                for budget, original_hold in holds.values():
+                    budget._ordinary_hold = original_hold
             self.assertTrue(selected)
             if not one_short:
                 self.assertTrue(

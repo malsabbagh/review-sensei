@@ -1,5 +1,6 @@
 """Only actual source execution can issue refined checkpoint prices."""
 
+import sys
 import tempfile
 import types
 import unittest
@@ -85,7 +86,15 @@ class CheckpointPricingIssuerTests(unittest.TestCase):
         consume = core._consume_checkpoint_pricing
         prices = []
 
-        def observe(proof, ledger, record, parts, **kwargs):
+        def observe(frame, event, value):
+            if (
+                event != "call"
+                or frame.f_code is not consume.__code__
+                or frame.f_globals is not consume.__globals__
+            ):
+                return
+            proof = frame.f_locals["proof"]
+            parts = frame.f_locals["checkpoint_parts"]
             issued = core._CHECKPOINT_PRICING.get(proof)
             if issued is not None and issued[9] in {
                 "quarantine-complete-census-v1",
@@ -106,10 +115,13 @@ class CheckpointPricingIssuerTests(unittest.TestCase):
                     ),
                 )
                 prices.append(issued[5])
-            return consume(proof, ledger, record, parts, **kwargs)
 
-        with patch.object(core, "_consume_checkpoint_pricing", observe):
+        previous = sys.getprofile()
+        try:
+            sys.setprofile(observe)
             quarantine.QuarantineLifecycleCapacityTests().test_actual_partial_successor_preserves_two_roots_and_seals_capacity()
+        finally:
+            sys.setprofile(previous)
         self.assertTrue(
             prices, "actual route fell back instead of issuing source prices"
         )

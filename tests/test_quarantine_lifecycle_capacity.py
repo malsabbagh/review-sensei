@@ -1,6 +1,8 @@
 """Actual quarantine publication retains its original complete capacity promises."""
 
 import copy
+import dis
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -26,8 +28,7 @@ class QuarantineLifecycleCapacityTests(unittest.TestCase):
             registration["head_sha"] = fixture.live_head
             fixture.event_document = event(registration)
 
-            def inspect(ledger, identity, **kwargs):
-                scope = original(ledger, identity, **kwargs)
+            def inspect(scope, ledger, identity, **kwargs):
                 count = len(fixture.trace)
                 if "scope" not in checked:
                     checked.add("scope")
@@ -184,11 +185,35 @@ class QuarantineLifecycleCapacityTests(unittest.TestCase):
                 )
                 return scope
 
-            with (
-                patch.object(census, "lifecycle_capacity_plan", inspect),
-                registered_resource([registration]),
-            ):
-                self.assertEqual(fixture.invoke(), 0, fixture.error)
+            returns = {
+                item.offset
+                for item in dis.get_instructions(original)
+                if item.opname in {"RETURN_VALUE", "RETURN_CONST"}
+            }
+
+            def observe(frame, event, value):
+                if previous is not None:
+                    previous(frame, event, value)
+                if (
+                    event == "return"
+                    and frame.f_code is original.__code__
+                    and frame.f_globals is original.__globals__
+                    and frame.f_lasti in returns
+                ):
+                    inspect(
+                        value,
+                        frame.f_locals["ledger"],
+                        frame.f_locals["identity"],
+                        added_parts=frame.f_locals["added_parts"],
+                    )
+
+            previous = sys.getprofile()
+            try:
+                sys.setprofile(observe)
+                with registered_resource([registration]):
+                    self.assertEqual(fixture.invoke(), 0, fixture.error)
+            finally:
+                sys.setprofile(previous)
             self.assertEqual(checked, {"scope", "receipt"})
             self.assertIsNone(old.api_run_accounting["terminal_transaction"])
             self.assertFalse(
