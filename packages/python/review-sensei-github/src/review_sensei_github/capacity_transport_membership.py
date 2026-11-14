@@ -1,97 +1,304 @@
 """Negative optional-reader classification, never capacity or reader authority.
 
 Installation leaves a transport-lifetime tombstone independent of removable
-attributes and guard/ledger ownership. Only original constructor receipts permit
+attributes and guard/ledger ownership. A private C-owned root binds the current
+immutable membership epoch; Python indices cannot erase a live member. Dead
+weakrefs are compacted in batches, preserving every live row and irrevocably
+revoking the old epoch. Only original constructor receipts permit
 following the three supported wrapper links. No reset or removal API exists.
 """
 
 import sys
 import weakref
-from types import FunctionType
+from functools import lru_cache
+from types import CellType, FunctionType
 from typing import Any
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.source_registry import require_instance_source, require_module_seal
 
 
-def _registry():
-    installed: dict[int, Any] = {}
-    wrappers: dict[int, Any] = {}
-    tables = (installed, wrappers)
-    histories = [(), ()]
-    sizes = [0, 0]
-    weakref_module = weakref
-    reference = weakref.ref
+def _cache_statistics(hits, misses, maxsize, size):
+    return (hits, misses, maxsize, size)
 
-    def checked(which):
+
+def _registry():
+    reference = weakref.ref
+    weakref_module = weakref
+    cache_type: Any = type(lru_cache(maxsize=None)(lambda: None))
+    cache_call = cache_type.__call__
+    cache_info = cache_type.cache_info
+    cache_clear = cache_type.cache_clear
+    absent: type[Exception] = type("_AbsentCapacityMembership", (Exception,), {})
+    retired: set[tuple[int, int]] = set()
+    state: list[Any] = [None]
+    factory_code = sys._getframe().f_code
+    mint_code = None
+
+    def root_value():
+        origin = sys._getframe(1)
+        if origin.f_code is factory_code and state[0] is not None:
+            return state[0]
         if (
-            type(tables) is not tuple
-            or len(tables) != 2
-            or tables[0] is not installed
-            or tables[1] is not wrappers
-            or type(histories) is not list
-            or len(histories) != 2
-            or type(sizes) is not list
-            or len(sizes) != 2
+            origin.f_code is compact.__code__
+            and origin.f_globals is globals()
+            and origin.f_locals.get("epoch") is state[0]
+            and type(origin.f_locals.get("replacement")) is tuple
+        ):
+            return origin.f_locals["replacement"]
+        raise ReviewInputError("capacity membership root cannot be reminted")
+
+    root = cache_type(root_value, None, False, _cache_statistics)
+    root.__wrapped__ = root_value
+
+    def key_valid(key):
+        return type(key) is tuple and len(key) == 2 and all(type(n) is int for n in key)
+
+    def new_epoch(rows, previous=None):
+        nonlocal mint_code
+        frame = sys._getframe(1)
+        if previous is None:
+            if state[0] is not None or frame.f_code is not factory_code:
+                raise ReviewInputError("capacity membership defining epoch changed")
+        elif (
+            frame.f_code is not compact.__code__
+            or frame.f_locals.get("epoch") is not previous
+            or state[0] is not previous
+        ):
+            raise ReviewInputError("capacity membership cleanup producer changed")
+        marker = object()
+        index: dict[tuple[int, int], Any] = {}
+        handle: list[Any] = [None]
+
+        def mint(key):
+            if not key_valid(key):
+                raise ReviewInputError("capacity membership cache key changed")
+            origin = sys._getframe(1)
+            if (
+                origin.f_code is new_epoch.__code__
+                and origin.f_locals.get("handle") is handle
+            ):
+                if key == (-1, 0):
+                    return marker
+                if origin.f_locals.get("key") == key:
+                    return origin.f_locals["row"]
+            if (
+                origin.f_code is add.__code__
+                and origin.f_locals.get("epoch") is handle[0]
+                and state[0] is handle[0]
+                and origin.f_locals.get("key") == key
+                and row_valid(origin.f_locals.get("row"), key)
+            ):
+                return origin.f_locals["row"]
+            if (
+                key == (-2, 0)
+                and origin.f_code is compact.__code__
+                and origin.f_locals.get("epoch") is handle[0]
+                and state[0] is handle[0]
+            ):
+                return marker
+            # Queries cannot create entries, including after cache_clear.
+            raise absent()
+
+        cache = cache_type(mint, None, False, _cache_statistics)
+        cache.__wrapped__ = mint
+        if mint_code is None:
+            mint_code = mint.__code__
+        elif mint.__code__ is not mint_code:
+            raise ReviewInputError("capacity membership cache producer changed")
+        cache_call(cache, (-1, 0))
+        for row in rows:
+            key = row[:2]
+            index[key] = cache_call(cache, key)
+            if index[key] is not row:
+                raise ReviewInputError("capacity membership cleanup row changed")
+        bindings = tuple((cell, cell.cell_contents) for cell in mint.__closure__ or ())
+        epoch = (cache, index, marker, mint, handle, bindings)
+        handle[0] = epoch
+        return epoch
+
+    def quick():
+        if (
+            type(state) is not list
+            or len(state) != 1
+            or type(retired) is not set
             or weakref is not weakref_module
             or weakref.ref is not reference
         ):
             raise ReviewInputError("capacity transport membership storage changed")
-        table, history, size = tables[which], histories[which], sizes[which]
+        epoch = state[0]
         if (
-            type(table) is not dict
-            or type(history) is not tuple
-            or type(size) is not int
-            or len(table) != size
+            type(root) is not cache_type
+            or type(vars(root)) is not dict
+            or any(type(key) is not str for key in vars(root))
+            or vars(root).get("__wrapped__") is not root_value
         ):
-            raise ReviewInputError("capacity transport membership storage changed")
-        for key, row in table.items():
-            if (
-                type(key) is not int
-                or type(row) is not tuple
-                or len(row) != 4
-                or type(row[0]) is not int
-                or row[0] != key
-                or type(row[1]) is not reference
-                or type(row[2]) is not int
-                or not 0 <= row[2] < len(history)
-                or history[row[2]] is not row
-                or (which == 0 and row[3] is not None)
-                or (
-                    which == 1
-                    and (
-                        type(row[3]) is not tuple
-                        or len(row[3]) != 2
-                        or type(row[3][0]) is not reference
-                        or type(row[3][1]) is not type
+            raise ReviewInputError("capacity membership root source changed")
+        if cache_call(root) is not epoch:
+            raise ReviewInputError("capacity membership head is not the issued epoch")
+        if type(epoch) is not tuple or len(epoch) != 6:
+            raise ReviewInputError("capacity transport membership epoch changed")
+        cache, index, marker, mint, handle, bindings = epoch
+        if (
+            type(cache) is not cache_type
+            or type(index) is not dict
+            or type(mint) is not FunctionType
+            or mint.__code__ is not mint_code
+            or mint.__globals__ is not globals()
+            or mint.__defaults__ is not None
+            or mint.__kwdefaults__ is not None
+            or type(handle) is not list
+            or len(handle) != 1
+            or handle[0] is not epoch
+            or type(bindings) is not tuple
+            or any(
+                type(pair) is not tuple
+                or len(pair) != 2
+                or type(pair[0]) is not CellType
+                for pair in bindings
+            )
+            or any(cell.cell_contents is not original for cell, original in bindings)
+            or type(vars(cache)) is not dict
+            or any(type(key) is not str for key in vars(cache))
+            or vars(cache).get("__wrapped__") is not mint
+        ):
+            raise ReviewInputError("capacity transport membership cache source changed")
+        info = cache_info(cache)
+        if (
+            type(info) is not tuple
+            or len(info) != 4
+            or info[2] is not None
+            or type(info[3]) is not int
+            or info[3] != len(index) + 1
+        ):
+            raise ReviewInputError(
+                "capacity transport membership index coverage changed"
+            )
+        try:
+            if cache_call(cache, (-1, 0)) is not marker:
+                raise ReviewInputError("capacity membership defining marker changed")
+        except absent:
+            raise ReviewInputError("capacity membership cache was reset") from None
+        try:
+            cache_call(cache, (-2, 0))
+        except absent:
+            return epoch
+        raise ReviewInputError("capacity membership epoch was revoked")
+
+    def row_valid(row, key):
+        return (
+            type(row) is tuple
+            and len(row) == 5
+            and type(row[0]) is int
+            and type(row[1]) is int
+            and row[:2] == key
+            and type(row[2]) is reference
+            and row[2].__callback__ is None
+            and id(row[2]) == key[1]
+            and type(row[4]) is reference
+            and (
+                row[3] is None
+                if key[0] == 0
+                else type(row[3]) is tuple
+                and len(row[3]) == 2
+                and type(row[3][0]) is reference
+                and type(row[3][1]) is type
+            )
+        )
+
+    def compact():
+        origin = sys._getframe(1)
+        if (
+            origin.f_code not in (find.__code__, add.__code__)
+            or origin.f_globals is not globals()
+        ):
+            raise ReviewInputError(
+                "capacity cleanup requires original membership source"
+            )
+        epoch = quick()
+        cache, index = epoch[:2]
+        rows: list[Any] = []
+        # Cardinality plus exact cached identity for every distinct key proves
+        # complete index coverage. No caller-owned hash/equality is executed.
+        for key, row in index.items():
+            if not key_valid(key) or key[0] not in (0, 1) or not row_valid(row, key):
+                raise ReviewInputError("capacity membership cleanup index changed")
+            try:
+                if cache_call(cache, key) is not row:
+                    raise ReviewInputError(
+                        "capacity membership cleanup identity changed"
                     )
-                )
-            ):
-                raise ReviewInputError("capacity transport membership entry changed")
-        return table
+            except absent:
+                raise ReviewInputError(
+                    "capacity membership cleanup row is absent"
+                ) from None
+            value = reference.__call__(row[2])
+            if value is not None:
+                if reference(value) is not row[2]:
+                    raise ReviewInputError("capacity membership live identity changed")
+                rows.append(row)
+        replacement = new_epoch(tuple(rows), epoch)
+        # After revocation an exception can only leave a rejecting old head.
+        # Rewinding this head cannot erase the C-owned revocation entry.
+        cache_call(cache, (-2, 0))
+        cache_clear(root)
+        if cache_call(root) is not replacement:
+            raise ReviewInputError("capacity membership replacement was not issued")
+        state[0] = replacement
+        retired.clear()
+        return replacement
 
     def find(which, value):
-        table = checked(which)
-        row = table.get(id(value))
-        if row is None:
+        epoch = quick()
+        if len(retired) >= max(64, len(epoch[1]) // 2):
+            epoch = compact()
+        try:
+            canonical = reference(value)
+        except TypeError:
             return None
-        actual = reference.__call__(row[1])
-        if actual is None:  # An old lifetime is not a new object's identity.
+        key = (which, id(canonical))
+        try:
+            row = cache_call(epoch[0], key)
+        except absent:
+            return None
+        if not row_valid(row, key):
+            raise ReviewInputError("capacity membership cached row changed")
+        actual = reference.__call__(row[2])
+        if actual is None:
             return None
         if actual is not value:
             raise ReviewInputError("capacity transport membership identity changed")
         return row
 
     def add(which, value, details):
-        table = checked(which)
-        key = id(value)
-        if find(which, value) is not None:
+        frame = sys._getframe(1)
+        if (
+            frame.f_code not in (register_install.__code__, register_wrapper.__code__)
+            or frame.f_globals is not globals()
+        ):
+            raise ReviewInputError("capacity membership append lacks original producer")
+        epoch = quick()
+        if len(retired) >= max(64, len(epoch[1]) // 2):
+            epoch = compact()
+        canonical = reference(value)
+        key = (which, id(canonical))
+        try:
+            previous = cache_call(epoch[0], key)
+        except absent:
+            previous = None
+        if previous is not None:
             raise ReviewInputError("capacity transport membership cannot be replaced")
-        row = (key, reference(value), len(histories[which]), details)
-        histories[which] = (*histories[which], row)
-        if key not in table:
-            sizes[which] += 1
-        table[key] = row
+
+        def dead(_reference):
+            # A scheduling hint only. Cleanup separately proves every live row
+            # against the immutable C cache before dropping any dead reference.
+            retired.add(key)
+
+        row = (which, id(canonical), canonical, details, reference(value, dead))
+        retained = cache_call(epoch[0], key)
+        if retained is not row:
+            raise ReviewInputError("capacity membership append changed")
+        epoch[1][key] = row
 
     def register_install(transport, guard):
         _require_sources()
@@ -124,6 +331,9 @@ def _registry():
             return None
         if type(cls) is not type:
             raise ReviewInputError("capacity wrapper class changed")
+        raw = object.__getattribute__(value, "__dict__")
+        if type(raw) is not dict or any(type(key) is not str for key in raw):
+            raise ReviewInputError("capacity wrapper fields changed")
         require_instance_source(
             value, methods=("__init__", "request", "_paginate", "repository_path")
         )
@@ -170,6 +380,9 @@ def _registry():
                 return False
             cls = type(value)
             if cls is native_http.GitHubHttp:
+                raw = object.__getattribute__(value, "__dict__")
+                if type(raw) is not dict or any(type(key) is not str for key in raw):
+                    raise ReviewInputError("capacity transport fields changed")
                 require_instance_source(
                     value,
                     methods=("__init__", "request", "_paginate", "repository_path"),
@@ -204,8 +417,15 @@ def _registry():
         _require_sources()
         return find(0, value) is not None
 
+    state[0] = new_epoch(())
+    cache_call(root)
     functions = (
-        checked,
+        root_value,
+        key_valid,
+        new_epoch,
+        quick,
+        row_valid,
+        compact,
         find,
         add,
         wrapper_kind,
@@ -221,11 +441,7 @@ def _registry():
             fn.__globals__,
             fn.__defaults__,
             fn.__kwdefaults__,
-            tuple(
-                (cell, cell.cell_contents)
-                for cell in fn.__closure__ or ()
-                if type(cell.cell_contents) is FunctionType
-            ),
+            tuple((cell, cell.cell_contents) for cell in fn.__closure__ or ()),
         )
         for fn in functions
     )
