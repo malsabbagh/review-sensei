@@ -32,7 +32,7 @@ class PreentryCapacityTests(unittest.TestCase):
         for value in (True, "true"):
             with self.assertRaisesRegex(ReviewInputError, "requires opted v4"):
                 bootstrap(
-                    argparse.Namespace(),
+                    argparse.Namespace(diff=Path("unused.diff")),
                     run_directory=Path("unused"),
                     policy_commit="a" * 40,
                     observe_original_actor_role=value,

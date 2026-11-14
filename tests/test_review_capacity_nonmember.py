@@ -203,7 +203,12 @@ class ReviewCapacityNonmemberTests(unittest.TestCase):
         for row in (Bomb(), (1, id(wrapper), Bomb(), original[3])):
             table[key] = row
             saved_retired = set(retired)
-            retired.update((0, -n) for n in range(1, 100))
+            # The full suite can retain more than 200 live registry rows.
+            # Derive enough impossible weakref IDs to enter compaction at its
+            # current size, rather than depending on an isolated-process size.
+            threshold = max(64, len(table) // 2)
+            retired.update((0, -n) for n in range(1, threshold + 1))
+            self.assertGreaterEqual(len(retired), threshold)
             try:
                 with self.assertRaises(ReviewInputError):
                     membership.never_installed(wrapper)
