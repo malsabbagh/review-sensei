@@ -6301,6 +6301,12 @@ def _publication_round_flags(result: ReviewResult) -> dict[str, bool]:
     }
 
 
+from .guarded_hot_namespace import install_application as _install_hot_namespace  # noqa: E402
+
+_install_hot_namespace(GitHubApplication)
+del _install_hot_namespace
+
+
 from .empty_original_admission import install_application as _install_empty_original  # noqa: E402
 
 _install_empty_original(GitHubApplication)

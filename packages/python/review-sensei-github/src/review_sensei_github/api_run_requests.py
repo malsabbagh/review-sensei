@@ -863,6 +863,14 @@ class ApiRunRequestTransport:
         trust_verification = before_trust_request(self, request)
         deadline = int((self._clock() + timeout) * 1000)
         request_deadline = self._monotonic() + timeout
+        from review_sensei.source_registry import require_module_seal
+
+        from . import guarded_hot_namespace
+
+        require_module_seal(guarded_hot_namespace)
+        if _hot_before_sequence is not guarded_hot_namespace.before_sequence:
+            raise ReviewInputError("hot namespace dispatch alias changed")
+        _hot_before_sequence(self, deadline)
         from .quarantine_command_namespace import before_sequence
 
         before_sequence(self, deadline)
@@ -2489,6 +2497,12 @@ class ApiRunRequestTransport:
         current_quarantine_finalization.confirm_checkpoint(
             self, ledger, record, persisted
         )
+        from . import guarded_hot_namespace
+
+        require_module_seal(guarded_hot_namespace)
+        if _hot_confirm_checkpoint is not guarded_hot_namespace.confirm_checkpoint:
+            raise ReviewInputError("hot namespace checkpoint alias changed")
+        _hot_confirm_checkpoint(self, ledger, record, persisted)
         from .quarantine_checkpoint import expire
 
         expire(getattr(self, "_quarantine_checkpoint_snapshot", None))
@@ -3694,6 +3708,20 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
 _install_checkpoint_pricer(
     ApiRunSessionLedger.preflight_finding_lifecycle_checkpoint_pricing
 )
+
+
+from .guarded_hot_namespace import (  # noqa: E402
+    before_sequence as _hot_before_sequence,
+)
+from .guarded_hot_namespace import (  # noqa: E402
+    confirm_checkpoint as _hot_confirm_checkpoint,
+)
+from .guarded_hot_namespace import (  # noqa: E402
+    install_caller as _install_hot_namespace,
+)
+
+_install_hot_namespace(ApiRunRequestTransport)
+del _install_hot_namespace
 
 
 from .quarantine_command_namespace import (  # noqa: E402

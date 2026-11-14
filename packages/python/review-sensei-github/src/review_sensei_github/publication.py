@@ -10512,8 +10512,15 @@ class ReviewPublisher:
         )
         guarded_batch = False
         if not write_preflight.app_authored and grouped_publication:
+            from review_sensei.source_registry import require_module_seal
+
+            from . import guarded_hot_namespace
             from .guarded_publication_plan import require_grouped_durable_floor
 
+            require_module_seal(guarded_hot_namespace)
+            if _hot_namespace_begin is not guarded_hot_namespace.begin:
+                raise ReviewInputError("hot namespace producer alias changed")
+            _hot_namespace_begin(self, lifecycle_journal, native_host)
             require_grouped_durable_floor(
                 self,
                 lifecycle_journal,
@@ -12754,5 +12761,7 @@ del _install_adjacent_preflight
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+from .guarded_hot_namespace import begin as _hot_namespace_begin  # noqa: E402
 
 _seal_original_source()
