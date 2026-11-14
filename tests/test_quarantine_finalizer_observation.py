@@ -187,6 +187,8 @@ class QuarantineFinalizerObservationTests(unittest.TestCase):
                                 "remaining_unallocated": run.caller.accounting.remaining,
                                 "ordinary_remaining": run.caller.budget_view.ordinary_remaining(),
                                 "ordinary_hold": run.caller.budget_view._ordinary_hold,
+                                "sizing_observation_requests": len(fixture.trace)
+                                - before,
                                 "blocks": [
                                     {
                                         "role": "ordinary"
@@ -305,6 +307,21 @@ class QuarantineFinalizerObservationTests(unittest.TestCase):
                                 require_observation(plan)
                         finally:
                             object.__setattr__(authenticated, "archive_bytes", archive)
+                        original_frontier = prepared["target"].native_frontier_bytes
+                        try:
+                            object.__setattr__(
+                                prepared["target"], "native_frontier_bytes", b"[]"
+                            )
+                            with self.assertRaisesRegex(
+                                ReviewInputError, "custody changed"
+                            ):
+                                require_observation(plan)
+                        finally:
+                            object.__setattr__(
+                                prepared["target"],
+                                "native_frontier_bytes",
+                                original_frontier,
+                            )
                         original_command = prepared["target"].command
                         try:
                             object.__setattr__(prepared["target"], "command", None)

@@ -4541,6 +4541,13 @@ class ReviewApprovalFinalizer:
         pull_request: int,
     ) -> list[Any]:
         self._plain_review_frontier = None
+        if (
+            self._command_capacity_requested
+            and self._quarantine_capacity_preparation is not None
+        ):
+            from .quarantine_command_finalization import sizing_reviews
+
+            return sizing_reviews(self._quarantine_capacity_preparation, self)
         try:
             from .controlled_restart import effect_guard, owns_target
             from .finding_lifecycle import FindingLifecycleJournal

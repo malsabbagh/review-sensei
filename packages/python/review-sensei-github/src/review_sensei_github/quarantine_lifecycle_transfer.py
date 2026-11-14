@@ -157,6 +157,7 @@ def _target_binding(target):
         authenticated.state_bytes,
         authenticated.source_documents_bytes,
         target.native_review_bytes,
+        target.native_frontier_bytes,
         canonical_bytes(vars(target.command)),
     )
 

@@ -365,6 +365,8 @@ def prepare(run, authority, target, app):
         or app.session_ledger is not run.ledger
         or authority.run is not run
         or not isinstance(target.native_review_bytes, bytes)
+        or not isinstance(target.native_frontier_bytes, bytes)
+        or getattr(run.caller, "_controlled_restart_admission", None) is not None
     ):
         raise ReviewInputError("quarantine finalizer preparation source changed")
     command = target.command
@@ -399,6 +401,7 @@ def prepare(run, authority, target, app):
         "document": canonical_bytes(document),
         "projection": projected,
         "native": target.native_review_bytes,
+        "frontier": target.native_frontier_bytes,
         "guard": guard,
     }
     return token
@@ -424,6 +427,7 @@ def require(token, *, finalizer=None):
         or canonical_bytes(record.to_dict()) != saved["root"]
         or canonical_bytes(document) != saved["document"]
         or target.native_review_bytes != saved["native"]
+        or target.native_frontier_bytes != saved["frontier"]
         or target.capacity_projection != saved["projection"]
         or saved["app"].session_ledger is not run.ledger
         or saved["authority"].run is not run
@@ -484,6 +488,22 @@ def projected_eligibility(token, finalizer, eligibility):
             ),
         ),
     )
+
+
+def sizing_reviews(token, finalizer):
+    """Decode the already paid complete frontier only for nonexecuting sizing."""
+    from review_sensei.source_registry import require_instance_source
+
+    saved = require(token, finalizer=finalizer)
+    require_instance_source(saved["run"].http, methods=("paginate", "request"))
+    rows = json.loads(saved["frontier"])
+    if (
+        not isinstance(rows, list)
+        or not all(isinstance(row, dict) for row in rows)
+        or sum(canonical_bytes(row) == saved["native"] for row in rows) != 1
+    ):
+        raise ReviewInputError("quarantine sizing native frontier changed")
+    return rows
 
 
 def original_frontier(token, finalizer, *, eligibility, index, reviews):

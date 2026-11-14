@@ -105,6 +105,7 @@ class QuarantineTarget:
     capacity_projection: object | None = None
     native_review_bytes: bytes | None = None
     command: QuarantineCommand | None = None
+    native_frontier_bytes: bytes | None = None
 
 
 def decision_authority(run, authority):
@@ -438,6 +439,9 @@ def prepare_quarantine_target(run, authority, command, app, permission):
         raise QuarantineTargetRefusal(
             "quarantine assessment target is missing or ambiguous"
         )
+    from review_sensei.source_registry import require_instance_source
+
+    require_instance_source(run.http, methods=("paginate", "request"))
     rows = run.http.paginate(
         path=run.http.repository_path(
             run.identity.repository, f"/pulls/{run.identity.pull_request}/reviews"
@@ -548,6 +552,7 @@ def prepare_quarantine_target(run, authority, command, app, permission):
         projected,
         canonical_bytes(selected),
         command,
+        canonical_bytes(rows),
     )
     from .quarantine_lifecycle_transfer import bind_target
 
