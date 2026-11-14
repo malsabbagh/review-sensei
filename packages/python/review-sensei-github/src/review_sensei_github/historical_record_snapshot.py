@@ -92,9 +92,9 @@ def _record_snapshot(record):
         if id(item) in ancestors:
             raise ReviewInputError("hot checkpoint graph is cyclic")
         ancestors = ancestors | {id(item)}
-        if kind in (tuple, list):
+        if kind is tuple or kind is list:
             return [visit(value, ancestors, depth + 1) for value in item]
-        if kind in (session.SessionRecord, models.ReviewTransaction):
+        if kind is session.SessionRecord or kind is models.ReviewTransaction:
             if kind is not model_allowed:
                 raise ReviewInputError("hot checkpoint model placement changed")
             fields = (
