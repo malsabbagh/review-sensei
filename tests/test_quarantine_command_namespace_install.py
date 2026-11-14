@@ -6,6 +6,19 @@ import unittest
 
 
 class NamespaceInstallerTests(unittest.TestCase):
+    def test_current_registration_rejects_unissued_callback_and_counter(self):
+        from review_sensei_github import quarantine_command_namespace as hooks
+
+        from review_sensei.errors import ReviewInputError
+
+        def validate_namespace_request(caller, deadline):
+            return False
+
+        with self.assertRaisesRegex(ReviewInputError, "original defining source"):
+            hooks.install_current_validator(validate_namespace_request)
+        with self.assertRaisesRegex(ReviewInputError, "source is unavailable"):
+            hooks.observed_sequence(object())
+
     def test_forged_loader_code_and_separate_globals_are_rejected(self):
         source = """
 import importlib.util

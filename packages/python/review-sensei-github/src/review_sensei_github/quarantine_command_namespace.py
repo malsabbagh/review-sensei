@@ -69,6 +69,8 @@ def _registry():
     issued: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
     active: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
     observed: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
+    current: dict[str, Any] = {}
+    definition_file = cast(Any, inspect.currentframe()).f_code.co_filename
 
     def install(caller_type):
         module = sys.modules.get("review_sensei_github.api_run_requests")
@@ -92,6 +94,91 @@ def _registry():
             close=_function(caller_type.close_action),
             ledger=_function(caller_type._require_ledger),
         )
+
+    def install_current_validator(function):
+        from importlib.machinery import SourceFileLoader
+        from pathlib import Path
+        from types import FunctionType
+
+        require_module_seal(sys.modules[__name__])
+        name = "review_sensei_github.current_quarantine_finalization"
+        module = sys.modules.get(name)
+        frame = cast(Any, inspect.currentframe()).f_back
+        spec = getattr(module, "__spec__", None)
+        loader = getattr(spec, "loader", None)
+        expected = str(
+            Path(definition_file).with_name("current_quarantine_finalization.py")
+        )
+        if (
+            current
+            or module is None
+            or type(function) is not FunctionType
+            or frame.f_globals is not vars(module)
+            or frame.f_locals is not frame.f_globals
+            or not getattr(spec, "_initializing", False)
+            or type(loader) is not SourceFileLoader
+            or getattr(spec, "origin", None) != expected
+            or getattr(module, "__file__", None) != expected
+            or loader.path != expected
+            or function.__module__ != name
+            or function.__qualname__ != "validate_namespace_request"
+            or id(getattr(module, "validate_namespace_request", None)) != id(function)
+            or function.__globals__ is not vars(module)
+            or function.__defaults__ is not None
+            or function.__kwdefaults__ is not None
+            or function.__closure__ is not None
+            or hasattr(function, "__wrapped__")
+        ):
+            raise ReviewInputError(
+                "current namespace requires original defining source"
+            )
+        try:
+            original_code = loader.get_code(name)
+        except (OSError, ImportError) as error:
+            raise ReviewInputError(
+                "current namespace defining source is unavailable"
+            ) from error
+        if original_code != frame.f_code:
+            raise ReviewInputError(
+                "current namespace requires original defining source"
+            )
+        current.update(module=module, function=_function(function))
+
+    def observed_sequence(caller):
+        require_module_seal(sys.modules[__name__])
+        if type(caller) is not source.get("caller_type"):
+            raise ReviewInputError("physical sequence source is unavailable")
+        require_instance_source(
+            caller, methods=("open", "close_action", "_require_ledger")
+        )
+        sequence = observed.get(caller)
+        if (
+            type(sequence) is not int
+            or type(caller._sequence) is not int
+            or sequence != caller._sequence
+            or _function(source["open"][0]) != source["open"]
+        ):
+            raise ReviewInputError("physical sequence history is missing or changed")
+        return sequence
+
+    def validate_current(caller, deadline):
+        if not current:
+            return False
+        module, saved = current["module"], current["function"]
+        function = saved[0]
+        require_module_seal(module)
+        if (
+            sys.modules.get(module.__name__) is not module
+            or id(getattr(module, "validate_namespace_request", None)) != id(function)
+            or _function(function) != saved
+            or function.__closure__ is not None
+            or hasattr(function, "__wrapped__")
+        ):
+            raise ReviewInputError("current namespace validator source changed")
+        result = function(caller, deadline)
+        if type(result) is not bool:
+            raise ReviewInputError("current namespace validator result is invalid")
+        return result
 
     def original(kind, frame):
         require_module_seal(sys.modules[__name__])
@@ -303,19 +390,22 @@ def _registry():
     def before_sequence(caller, deadline):
         token = active.get(caller)
         frame = cast(Any, inspect.currentframe()).f_back
+        saved = source.get("open")
+        genuine = (
+            saved is not None
+            and type(caller) is source["caller_type"]
+            and frame.f_code is saved[1]
+            and frame.f_globals is saved[2]
+            and frame.f_locals.get("self") is caller
+            and frame.f_locals.get("deadline") is deadline
+            and _function(saved[0]) == saved
+        )
+        if genuine and validate_current(caller, deadline) and token is not None:
+            raise ReviewInputError("current and historical namespaces cannot coexist")
         if token is None:
             # Observation is not authority. An incomplete or altered original
             # sequence history can never seed a later namespace projection.
-            saved = source.get("open")
-            if (
-                saved is None
-                or type(caller) is not source["caller_type"]
-                or frame.f_code is not saved[1]
-                or frame.f_globals is not saved[2]
-                or frame.f_locals.get("self") is not caller
-                or frame.f_locals.get("deadline") is not deadline
-                or _function(saved[0]) != saved
-            ):
+            if not genuine:
                 return
             previous = observed.get(caller, 0)
             sequence = caller._sequence
@@ -364,10 +454,28 @@ def _registry():
     def project_current(caller):
         return project(active.get(caller), caller)
 
-    return install, prepare, before_sequence, project, project_current, require
+    return (
+        install,
+        prepare,
+        before_sequence,
+        project,
+        project_current,
+        require,
+        observed_sequence,
+        install_current_validator,
+    )
 
 
-install, prepare, before_sequence, project, project_current, require = _registry()
+(
+    install,
+    prepare,
+    before_sequence,
+    project,
+    project_current,
+    require,
+    observed_sequence,
+    install_current_validator,
+) = _registry()
 del _registry
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

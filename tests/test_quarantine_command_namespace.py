@@ -47,8 +47,17 @@ class CommandNamespaceTests(unittest.TestCase):
                 finally:
                     caller._block = ordinary
                 sequence = caller._sequence
+                self.assertEqual(namespace.observed_sequence(caller), sequence)
+                with self.assertRaisesRegex(
+                    ReviewInputError, "history is missing or changed"
+                ):
+                    namespace.observed_sequence(copy.copy(caller))
                 try:
                     caller._sequence = sequence + 1
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "history is missing or changed"
+                    ):
+                        namespace.observed_sequence(caller)
                     with self.assertRaisesRegex(
                         ReviewInputError, "physical sequence changed"
                     ):
