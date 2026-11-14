@@ -58,10 +58,50 @@ class CommandCheckpointFixture(JourneyFixture):
         return response
 
 
+class AllCheckpointLossFixture(CommandCheckpointFixture):
+    def __init__(self, directory, fault=None):
+        super().__init__(directory, fault)
+        self.command_started = False
+        self.all_writes = {}
+        self.all_final_reads = {}
+        self.all_lost = set()
+        self.root_phases = {}
+
+    def external(self, request, timeout):
+        snapshot = getattr(
+            getattr(self, "accounted", None), "_quarantine_checkpoint_snapshot", None
+        )
+        selected = (
+            self.command_started
+            and snapshot is not None
+            and urlsplit(request.full_url).path
+            == f"/repos/owner/repo/issues/comments/{snapshot.comment_id}"
+        )
+        root = snapshot.root if selected else None
+        method = request.get_method()
+        if selected and method == "PATCH":
+            self.root_phases[root] = self.accounted._terminal_reason
+            self.all_writes[root] = self.all_writes.get(root, 0) + 1
+        response = super().external(request, timeout)
+        if selected and method == "GET" and snapshot.operation.write_attempted:
+            self.all_final_reads[root] = self.all_final_reads.get(root, 0) + 1
+            if root not in self.all_lost:
+                self.all_lost.add(root)
+                raise TimeoutError("synthetic final GET loss at every command root")
+        return response
+
+
 class CommandCheckpointTests(unittest.TestCase):
-    def exercise(self, fault=None, observer=None, tracer=None):
+    def exercise(
+        self,
+        fault=None,
+        observer=None,
+        tracer=None,
+        *,
+        fixture_type=CommandCheckpointFixture,
+    ):
         with tempfile.TemporaryDirectory() as directory:
-            fixture = CommandCheckpointFixture(directory, fault)
+            fixture = fixture_type(directory, fault)
             _old, registration = fixture.original_origins(
                 failed_count=1, published_count=1
             )
@@ -84,6 +124,19 @@ class CommandCheckpointTests(unittest.TestCase):
                     + ' Exact source disproves this historical concern."',
                     new_run=True,
                 )
+                if isinstance(fixture, AllCheckpointLossFixture):
+                    from review_sensei_github.quarantine_action import (
+                        _require_installed_command_tail,
+                    )
+
+                    def observe_tail(frame, event, arg):
+                        if (
+                            frame.f_code is _require_installed_command_tail.__code__
+                            and event == "return"
+                        ):
+                            fixture.command_started = True
+
+                    observer = observe_tail
                 previous = sys.getprofile()
                 previous_trace = sys.gettrace()
                 try:
@@ -91,6 +144,8 @@ class CommandCheckpointTests(unittest.TestCase):
                         sys.setprofile(observer)
                     if tracer is not None:
                         sys.settrace(tracer)
+                    if not isinstance(fixture, AllCheckpointLossFixture):
+                        fixture.command_started = True
                     result = fixture.invoke_command()
                 finally:
                     sys.setprofile(previous)
@@ -107,6 +162,17 @@ class CommandCheckpointTests(unittest.TestCase):
                 self.assertFalse(
                     any(row.get("state") == "APPROVED" for row in fixture.reviews)
                 )
+                if isinstance(fixture, AllCheckpointLossFixture):
+                    self.assertEqual(len(fixture.all_writes), 5)
+                    self.assertEqual(
+                        sum(phase is None for phase in fixture.root_phases.values()), 4
+                    )
+                    self.assertEqual(set(fixture.all_writes), fixture.all_lost)
+                    self.assertTrue(all(n == 1 for n in fixture.all_writes.values()))
+                    self.assertTrue(
+                        all(n == 2 for n in fixture.all_final_reads.values())
+                    )
+                    self.assertGreaterEqual(fixture.accounted.accounting.uncertain, 5)
                 if fault == "intervening":
                     self.assertEqual(fixture.writes, {})
                 if fault == "two-losses":
@@ -156,6 +222,9 @@ class CommandCheckpointTests(unittest.TestCase):
             rejected, ["cold census first-root receipt is stale or foreign"]
         )
         self.assertEqual(injected, [True])
+
+    def test_all_four_command_checkpoint_losses_reconcile_without_repeated_patch(self):
+        self.exercise(fixture_type=AllCheckpointLossFixture)
 
     def test_original_second_get_and_one_patch_survive_each_lost_final_read(self):
         self.exercise("one-loss")
