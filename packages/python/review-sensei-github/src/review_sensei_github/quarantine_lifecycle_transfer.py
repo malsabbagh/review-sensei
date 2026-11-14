@@ -13,7 +13,6 @@ from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
 
 _ISSUED: WeakKeyDictionary = WeakKeyDictionary()
-_INSTALLED = False
 
 
 @dataclass(frozen=True, eq=False)
@@ -21,90 +20,143 @@ class _Transfer:
     pass
 
 
-def install_source(producer):
-    """Return the issuer to the module's actual native-read producer only."""
-    global _INSTALLED
-    if _INSTALLED:
-        raise ReviewInputError("quarantine lifecycle source already installed")
-    _INSTALLED = True
-    from review_sensei.source_registry import require_instance_source
+def _make_installer():
+    installed = False
 
-    from .api_run_requests import ApiRunRequestTransport
-    from .command_finalization_plan import _underlying_http
-    from .review_run import ActionRunLedger
+    def install_source(producer):
+        """Return the issuer to the module's actual native-read producer only."""
+        nonlocal installed
+        if installed:
+            raise ReviewInputError("quarantine lifecycle source already installed")
+        import inspect
+        import sys
 
-    def intact(ledger):
-        if type(ledger) is not ActionRunLedger:
-            return False
-        try:
-            require_instance_source(
-                ledger,
-                methods=("load", "read_evidence", "replace", "evidence_producer"),
-            )
-        except ReviewInputError:
-            return False
-        return True
-
-    def issue(ledger, record, document):
-        from . import quarantine_action
-
-        caller = getattr(ledger, "caller", None)
+        current = inspect.currentframe()
+        frame = current.f_back if current is not None else None
+        module = sys.modules.get("review_sensei_github.quarantine_action")
+        spec = getattr(module, "__spec__", None)
+        loader = getattr(spec, "loader", None)
+        get_code = getattr(loader, "get_code", None)
         if (
-            record is None
-            or quarantine_action._current_publication_digest is not wrapped
-            or not intact(ledger)
-            or type(caller) is not ApiRunRequestTransport
-            or caller._effect_record is None
-            or record is not caller._effect_record
-            or record.record_sha256 != caller._root
-            or caller._checkpoint is not None
-            or record.finding_lifecycle is None
+            module is None
+            or frame is None
+            or frame.f_globals is not vars(module)
+            or frame.f_locals is not frame.f_globals
+            or frame.f_code.co_name != "<module>"
+            or not getattr(spec, "_initializing", False)
+            or not callable(get_code)
+            or get_code(module.__name__) != frame.f_code
+            or getattr(module, "_current_publication_digest", None) is not producer
+            or not callable(producer)
         ):
-            return None
-        try:
-            http = _underlying_http(ledger.http, budget=ledger.evidence_budget)
-        except ReviewInputError:
-            return None
-        token = _Transfer()
-        _ISSUED[token] = dict(
-            ledger=ledger,
-            caller=caller,
-            record=record,
-            original=canonical_bytes(record.to_dict()),
-            reference=canonical_bytes(record.finding_lifecycle),
-            document=canonical_bytes(document),
-            http=http,
-            budget=ledger.evidence_budget,
-            token=ledger.token,
-            run=caller.run,
-            intact=intact,
-            producer=wrapped,
-            target=None,
-            confirmed=None,
-            before=None,
-        )
-        return token
+            raise ReviewInputError(
+                "quarantine lifecycle issuer requires its defining module"
+            )
+        installed = True
+        from review_sensei.source_registry import require_instance_source
 
-    @wraps(producer)
-    def wrapped(ledger, record, *, _collision_pairs=None, _capture=None, **kwargs):
-        if kwargs:
-            raise ReviewInputError("quarantine lifecycle capture is source-owned")
-        retained = []
+        from .api_run_requests import ApiRunRequestTransport
+        from .command_finalization_plan import _underlying_http
+        from .review_run import ActionRunLedger
 
-        def capture(document):
-            retained.append(issue(ledger, record, document))
+        def intact(ledger):
+            if type(ledger) is not ActionRunLedger:
+                return False
+            try:
+                require_instance_source(
+                    ledger,
+                    methods=("load", "read_evidence", "replace", "evidence_producer"),
+                )
+            except ReviewInputError:
+                return False
+            return True
 
-        result = producer(
-            ledger,
-            record,
-            _collision_pairs=_collision_pairs,
-            _transfer_capture=capture,
-        )
-        if _capture is not None:
-            _capture.extend(retained)
-        return result
+        def issue(ledger, record, document):
+            from . import quarantine_action
 
-    return wrapped
+            caller = getattr(ledger, "caller", None)
+            if (
+                record is None
+                or quarantine_action._current_publication_digest is not wrapped
+                or not intact(ledger)
+                or type(caller) is not ApiRunRequestTransport
+                or caller._effect_record is None
+                or record is not caller._effect_record
+                or record.record_sha256 != caller._root
+                or caller._checkpoint is not None
+                or record.finding_lifecycle is None
+            ):
+                return None
+            try:
+                http = _underlying_http(ledger.http, budget=ledger.evidence_budget)
+            except ReviewInputError:
+                return None
+            token = _Transfer()
+            _ISSUED[token] = dict(
+                ledger=ledger,
+                caller=caller,
+                record=record,
+                original=canonical_bytes(record.to_dict()),
+                reference=canonical_bytes(record.finding_lifecycle),
+                document=canonical_bytes(document),
+                http=http,
+                budget=ledger.evidence_budget,
+                token=ledger.token,
+                run=caller.run,
+                intact=intact,
+                producer=wrapped,
+                target=None,
+                confirmed=None,
+                before=None,
+            )
+            return token
+
+        @wraps(producer)
+        def wrapped(ledger, record, *, _collision_pairs=None, _capture=None, **kwargs):
+            if kwargs:
+                raise ReviewInputError("quarantine lifecycle capture is source-owned")
+            retained = []
+
+            def capture(document):
+                retained.append(issue(ledger, record, document))
+
+            result = producer(
+                ledger,
+                record,
+                _collision_pairs=_collision_pairs,
+                _transfer_capture=capture,
+            )
+            if _capture is not None:
+                _capture.extend(retained)
+            return result
+
+        return wrapped
+
+    return install_source
+
+
+install_source = _make_installer()
+del _make_installer
+
+
+def _target_binding(target):
+    from .quarantine_action import QuarantineCommand
+
+    if type(target.command) is not QuarantineCommand:
+        raise ReviewInputError("quarantine sizing target command changed")
+    authenticated = target.authenticated
+    return (
+        target.instance,
+        target.permission,
+        authenticated.record_sha256,
+        authenticated.lineage_bytes,
+        authenticated.archive_bytes,
+        authenticated.inventories_bytes,
+        authenticated.state_bytes,
+        authenticated.source_documents_bytes,
+        target.native_review_bytes,
+        canonical_bytes(vars(target.command)),
+    )
 
 
 def bind_target(token, target):
@@ -114,6 +166,7 @@ def bind_target(token, target):
     if saved is None or saved["target"] is not None:
         raise ReviewInputError("quarantine lifecycle target custody changed")
     saved["target"] = target
+    saved["target_bytes"] = _target_binding(target)
 
 
 def sizing_snapshot(target, run):
@@ -127,6 +180,7 @@ def sizing_snapshot(target, run):
     if (
         saved is None
         or saved["target"] is not target
+        or saved["target_bytes"] != _target_binding(target)
         or saved["confirmed"] is not None
         or saved["ledger"] is not run.ledger
         or saved["caller"] is not run.caller
@@ -241,3 +295,8 @@ def consume(token, ledger, identity):
         raise ReviewInputError("quarantine lifecycle transfer current root changed")
     _require_unchanged(saved, record)
     return record, json.loads(saved["document"])
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

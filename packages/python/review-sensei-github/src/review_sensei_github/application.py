@@ -4746,6 +4746,76 @@ class GitHubApplication:
             parts=parts,
         )
 
+    def _observe_quarantine_command_finalization(self, run, authority, target):
+        """Read-only hypothetical finalizer work; not a completed capacity plan.
+
+        The distinct observation contract is deliberately rejected by ordinary
+        admission and execution. A guarded command still needs its complete
+        physical/checkpoint/terminal proof before its first business effect.
+        """
+        from copy import copy
+
+        from review_sensei.disposition import session_dispositions
+
+        from .finding_lifecycle import FindingLifecycleJournal
+        from .quarantine_command_finalization import prepare
+        from .quarantine_lifecycle_transfer import sizing_snapshot
+
+        preparation = prepare(run, authority, target, self)
+        record, document = sizing_snapshot(target, run)
+        finalizer = getattr(self.reviewer, "finalizer", None)
+        budget = run.caller.budget_view
+        if (
+            type(finalizer) is not ReviewApprovalFinalizer
+            or not isinstance(self.broker, BrokerClient)
+            or self.broker.control is None
+            or self.broker.control.budget is not budget
+            or record.finding_lifecycle is None
+        ):
+            raise ReviewInputError("quarantine finalizer sizing source is unavailable")
+        existing = finalizer.evidence_budget or finalizer._operation_budget
+        if existing is not None and existing is not budget:
+            raise ReviewInputError("quarantine finalizer sizing budget changed")
+        finalizer = copy(finalizer)
+        finalizer.evidence_budget = budget
+        reference = record.finding_lifecycle
+        binding = reference["manifest"]["binding"]
+        journal = FindingLifecycleJournal(
+            self.reviewer,
+            run.ledger,
+            record.identity(),
+            operation_id=reference["operation_id"],
+            base_sha=binding["base_sha"],
+            head_sha=binding["head_sha"],
+            policy_digest=binding["policy_digest"],
+            configuration_digest=binding["configuration_digest"],
+            app_slug="reviewsensei[bot]",
+            record=record,
+            document=document,
+            review_token=run.ledger.token,
+            native_budget=budget,
+        )
+        budget.check()
+        check_token = self.broker.exchange(run.oidc, capability="check_publish")
+        budget.check()
+        with journal.transports(finalizer=finalizer):
+            plan = finalizer.prepare_quarantine_command_capacity(
+                preparation,
+                token=run.ledger.token,
+                check_token=check_token,
+                repository=run.identity.repository,
+                repository_id=run.identity.repository_id,
+                pull_request=run.identity.pull_request,
+                head_sha=run.head_sha,
+                app_slug="reviewsensei[bot]",
+                actor=authority.document["actor"]["login"],
+                finding_ids=(),
+                dispositions=session_dispositions(record, ledger=run.ledger),
+                policy_digest=run.caller.accounting.configuration.digest,
+                command_finalization_reserve=7,
+            )
+        return plan
+
     def _preflight_command_finalization(
         self,
         *,

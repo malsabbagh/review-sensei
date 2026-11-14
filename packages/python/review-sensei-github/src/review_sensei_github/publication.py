@@ -2179,6 +2179,7 @@ class ReviewApprovalFinalizer:
         self._last_review_scan: tuple[int, int, int] | None = None
         self._plain_review_frontier: tuple[Any, ...] | None = None
         self._command_capacity_requested = False
+        self._quarantine_capacity_preparation: Any = None
         self._closed_command_reads = False
         self._execution_capacity_plan: Any = None
         self._human_inventory_scope: tuple[str, int, str, str, str] | None = None
@@ -2344,7 +2345,14 @@ class ReviewApprovalFinalizer:
                     "quarantine assessment source reader is unavailable"
                 )
             return eligibility
-        return reader.attach(eligibility, head_sha=head_sha)
+        actual = reader.attach(eligibility, head_sha=head_sha)
+        if self._quarantine_capacity_preparation is not None:
+            from .quarantine_command_finalization import projected_eligibility
+
+            return projected_eligibility(
+                self._quarantine_capacity_preparation, self, actual
+            )
+        return actual
 
     def historical_reader(self, *, token, repository, pull_request, head_sha):
         factory = self.historical_assessment_reader_factory
@@ -3164,6 +3172,21 @@ class ReviewApprovalFinalizer:
         from .finding_lifecycle import FindingLifecycleJournal
 
         journal = getattr(self, "_finding_lifecycle_journal", None)
+        quarantine = self._quarantine_capacity_preparation
+        if quarantine is not None:
+            from .quarantine_command_finalization import require
+
+            saved = require(quarantine)
+            factory = self.quarantine_reader_factory
+            if (
+                getattr(factory, "__func__", None)
+                is not GitHubApplication._quarantine_hold_reader
+                or getattr(factory, "__self__", None) is not saved["app"]
+                or journal is None
+                or journal.ledger is not saved["run"].ledger
+                or journal._record is not saved["record"]
+            ):
+                raise ReviewInputError("quarantine capacity finalizer factory changed")
         if (
             type(self) is not ReviewApprovalFinalizer
             or type(journal) is not FindingLifecycleJournal
@@ -3182,6 +3205,7 @@ class ReviewApprovalFinalizer:
             )
             or any(
                 getattr(self, name) is not None
+                and not (name == "quarantine_reader_factory" and quarantine is not None)
                 for name in (
                     "human_inventory_reader",
                     "prior_publication_reader_factory",
@@ -3195,6 +3219,8 @@ class ReviewApprovalFinalizer:
                 getattr(getattr(self, name), "__func__", getattr(self, name))
                 is not getattr(ReviewApprovalFinalizer, name)
                 for name in (
+                    "prepare_quarantine_command_capacity",
+                    "prepare_command_capacity",
                     "_refinalize_with_dispositions_impl",
                     "_load_head_reviews",
                     "_review_pages",
@@ -3219,6 +3245,17 @@ class ReviewApprovalFinalizer:
             )
         ):
             raise ReviewInputError("command finalizer capacity source is unsupported")
+
+    def prepare_quarantine_command_capacity(self, preparation, **arguments):
+        """Observe hypothetical native work, without issuing physical admission."""
+        from copy import copy
+
+        from .quarantine_command_finalization import require
+
+        require(preparation)
+        operation = copy(self)
+        operation._quarantine_capacity_preparation = preparation
+        return operation.prepare_command_capacity(**arguments)
 
     def prepare_command_capacity(self, **arguments):
         """Prepare only closed source-owned readers; never grant write authority."""
@@ -3874,15 +3911,30 @@ class ReviewApprovalFinalizer:
                 head_sha=head_sha,
                 honored_instances=honored_instances,
             )
-            plain = self._plain_cleanup_frontier(
-                eligibility=eligibility,
-                index=index,
-                reviews=reviews,
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
-            )
+            if self._quarantine_capacity_preparation is not None:
+                from .quarantine_command_finalization import original_frontier
+
+                plain = original_frontier(
+                    self._quarantine_capacity_preparation,
+                    self,
+                    eligibility=eligibility,
+                    index=index,
+                    reviews=reviews,
+                )
+                if cleanup_instances:
+                    raise ReviewInputError(
+                        "quarantine finalizer cleanup sizing remains unqualified"
+                    )
+            else:
+                plain = self._plain_cleanup_frontier(
+                    eligibility=eligibility,
+                    index=index,
+                    reviews=reviews,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
             if plain is None:
                 raise ReviewInputError(
                     "command finalization planning source tail is unqualified"
@@ -3972,8 +4024,13 @@ class ReviewApprovalFinalizer:
                 if possible_approval.approved
                 else None
             )
+            plan_factory = issue_plan
+            if self._quarantine_capacity_preparation is not None:
+                from .quarantine_command_finalization import observe_plan
+
+                plan_factory = observe_plan
             raise CapacityPrepared(
-                issue_plan(
+                plan_factory(
                     self,
                     payload={
                         "repository": repository,
@@ -4000,7 +4057,9 @@ class ReviewApprovalFinalizer:
                         "check_request": check_request,
                         "conditional_approval": approval_request,
                         "frontier": json.loads(plain),
-                        "execution_read_tail": {
+                        "execution_read_tail": None
+                        if self._quarantine_capacity_preparation is not None
+                        else {
                             "preparation": 3,
                             "post_review_update": 1 if new_body != body else 0,
                             "cleanup_discovery": 1 if cleanup_instances else 0,
@@ -4009,8 +4068,14 @@ class ReviewApprovalFinalizer:
                             if approval_request is not None
                             else 0,
                         },
-                        "execution_capability_tail": {"review_publish": 1, "check": 0},
-                        "read_contract": "closed-plain-single-complete-page-v1",
+                        "execution_capability_tail": None
+                        if self._quarantine_capacity_preparation is not None
+                        else {"review_publish": 1, "check": 0},
+                        "read_contract": (
+                            "quarantine-sizing-observation-only-v1"
+                            if self._quarantine_capacity_preparation is not None
+                            else "closed-plain-single-complete-page-v1"
+                        ),
                     },
                     states=update_capacity_states,
                     check_token=check_token,

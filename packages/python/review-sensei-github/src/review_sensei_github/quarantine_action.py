@@ -103,6 +103,8 @@ class QuarantineTarget:
     permission: str
     lifecycle_transfer: object | None = None
     capacity_projection: object | None = None
+    native_review_bytes: bytes | None = None
+    command: QuarantineCommand | None = None
 
 
 def decision_authority(run, authority):
@@ -544,6 +546,8 @@ def prepare_quarantine_target(run, authority, command, app, permission):
         actual_permission,
         lifecycle_capture[0] if lifecycle_capture else None,
         projected,
+        canonical_bytes(selected),
+        command,
     )
     from .quarantine_lifecycle_transfer import bind_target
 
