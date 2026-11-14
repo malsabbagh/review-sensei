@@ -474,3 +474,37 @@ layout. These upper envelopes are sizing-only and cannot decode as lifecycle
 authority. Ordinary carriers, original limits and cold logical validation remain
 unchanged. Genuine plain isolation and nonmatching producer shapes retain the
 original publication path before any deferral is issued.
+
+### Detached assessment-event envelope experiment (not activated)
+
+The existing one-part decision writer has a narrower lossless byte envelope
+than an arbitrary evidence part. Its closed event contains one decision, one
+previous one-part manifest, and a sequence at most 200. A 4096-byte printable
+UTF-8 reason expands to at most 12288 bytes inside the existing ASCII canonical
+JSON encoding. The pure `quarantine_event_envelope` calculation preserves the
+maximum repository, producer, generic storage-ID and numeric widths, then uses
+zlib compressBound and exact base64/part/comment/JSON framing. It yields 19205
+body-JSON bytes per event. This value is not an admission or provenance proof;
+no runtime census or writer consumes it. Generic cursors may name multi-part
+manifests, so an eventual consumer must authenticate the actual source-owned
+one-part chain and enforce the same bound at both creation and every writer.
+
+For 52 obligations, the allocation count remains 109: 52 events, 52 complete
+terminal-run archives and five existing extras. Full archives keep their prior
+32768-byte carrier allowance and framing. Replacing only event widths saves
+731900 prospective body bytes, without releasing any allocation, history,
+reason, obligation or request reservation. The existing complete-census planner
+still rejects even a hypothetical empty retained frontier combined with these
+typed slots and the full review tail: its result is 11, outside the unchanged
+ten-request ceiling. This experiment therefore does not qualify the 80-raw /
+52-obligation journey or justify enabling the smaller runtime quote.
+
+The full review tail is installed during source bootstrap, before the provider
+result exists. It reserves a maximum accepted-result carrier plus independent
+lossless checkpoint/inventory projections, not three duplicate full-result
+copies. Later lifecycle planning currently adds that same generic tail alongside
+already-observed bodies. Any future narrowing must bind the actual accepted
+operation/result and every remaining permitted renderer/fallback branch, prove
+which promised allocations have already materialized, and enforce that scope
+before affected writes. A cached body is not fresh census evidence; all current
+membership/body checks and cold source dependencies remain required.
