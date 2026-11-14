@@ -2207,6 +2207,7 @@ class ReviewApprovalFinalizer:
         self._plain_review_frontier: tuple[Any, ...] | None = None
         self._command_capacity_requested = False
         self._quarantine_capacity_preparation: Any = None
+        self._current_quarantine_preparation: Any = None
         self._closed_command_reads = False
         self._execution_capacity_plan: Any = None
         self._human_inventory_scope: tuple[str, int, str, str, str] | None = None
@@ -3200,6 +3201,11 @@ class ReviewApprovalFinalizer:
 
         journal = getattr(self, "_finding_lifecycle_journal", None)
         quarantine = self._quarantine_capacity_preparation
+        current = getattr(self, "_current_quarantine_preparation", None)
+        if current is not None:
+            from .current_quarantine_finalization import require as require_current
+
+            require_current(current, self)
         if quarantine is not None:
             from .quarantine_command_finalization import require
 
@@ -3232,7 +3238,10 @@ class ReviewApprovalFinalizer:
             )
             or any(
                 getattr(self, name) is not None
-                and not (name == "quarantine_reader_factory" and quarantine is not None)
+                and not (
+                    name == "quarantine_reader_factory"
+                    and (quarantine is not None or current is not None)
+                )
                 for name in (
                     "human_inventory_reader",
                     "prior_publication_reader_factory",
@@ -3289,6 +3298,18 @@ class ReviewApprovalFinalizer:
         from .quarantine_command_finalization import hydrate_sizing_states
 
         hydrate_sizing_states(preparation, operation)
+        return operation.prepare_command_capacity(**arguments)
+
+    def prepare_current_command_capacity(self, preparation, **arguments):
+        from copy import copy
+
+        from .current_quarantine_finalization import require
+        from .quarantine_command_finalization import require_finalizer_copy_source
+
+        require_finalizer_copy_source(self)
+        require(preparation)
+        operation = copy(self)
+        operation._current_quarantine_preparation = preparation
         return operation.prepare_command_capacity(**arguments)
 
     def prepare_command_capacity(self, **arguments):
@@ -3949,6 +3970,12 @@ class ReviewApprovalFinalizer:
                     raise ReviewInputError(
                         "quarantine finalizer cleanup sizing remains unqualified"
                     )
+            elif getattr(self, "_current_quarantine_preparation", None) is not None:
+                from .current_quarantine_finalization import frontier
+
+                plain = frontier(
+                    self, eligibility=eligibility, index=index, reviews=reviews
+                )
             else:
                 plain = self._plain_cleanup_frontier(
                     eligibility=eligibility,
@@ -4049,6 +4076,10 @@ class ReviewApprovalFinalizer:
                 else None
             )
             plan_factory = issue_plan
+            if getattr(self, "_current_quarantine_preparation", None) is not None:
+                from .current_quarantine_finalization import issue_plan as current_issue
+
+                plan_factory = current_issue
             if self._quarantine_capacity_preparation is not None:
                 from .quarantine_command_finalization import observe_plan
 

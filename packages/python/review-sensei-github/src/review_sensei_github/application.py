@@ -4945,7 +4945,19 @@ class GitHubApplication:
                 self.broker, oidc_token, evidence_budget, check_token
             )
             with journal.transports(finalizer=finalizer):
-                plan = finalizer.prepare_command_capacity(
+                prepare_capacity = finalizer.prepare_command_capacity
+                if record.quarantine_lineage is not None:
+                    from functools import partial
+
+                    from .current_quarantine_finalization import prepare
+
+                    current_preparation = prepare(
+                        self, journal, preview_record=preview_record, details=details
+                    )
+                    prepare_capacity = partial(
+                        finalizer.prepare_current_command_capacity, current_preparation
+                    )
+                plan = prepare_capacity(
                     token=read_token,
                     check_token=check_token,
                     repository=repository,
@@ -4974,6 +4986,9 @@ class GitHubApplication:
                     http=finalizer.http,
                     budget=evidence_budget,
                 )
+                from .current_quarantine_finalization import require_execution_grant
+
+                require_execution_grant(plan)
         except Exception as error:
             # No dispositions, review-body update, cleanup, check or approval
             # has been attempted. Existing action audit/terminal obligations

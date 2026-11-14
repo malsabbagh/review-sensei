@@ -1830,10 +1830,19 @@ class FindingLifecycleJournal:
         from .review_run import ActionRunLedger
 
         payload = json.loads(plan.payload)
+        from .current_quarantine_finalization import CONTRACT, require_plan
+
+        current_contract = payload.get("read_contract") == CONTRACT
+        if current_contract:
+            require_plan(plan, self, preview_record, capacity_details)
         reads = payload.get("execution_read_tail")
         capabilities = payload.get("execution_capability_tail")
         if (
-            payload.get("read_contract") != "closed-plain-single-complete-page-v1"
+            (
+                not current_contract
+                and payload.get("read_contract")
+                != "closed-plain-single-complete-page-v1"
+            )
             or not isinstance(reads, dict)
             or not isinstance(capabilities, dict)
             or any(
@@ -1942,6 +1951,18 @@ class FindingLifecycleJournal:
         plan.bind_preview_capacity(
             preview_record, capacity_details, pending_documents=pending_commitments
         )
+        if current_contract:
+            from .current_quarantine_finalization import capture_completed_preview
+
+            capture_completed_preview(
+                plan,
+                self,
+                preview_record=preview_record,
+                details=capacity_details,
+                alternatives=alternatives,
+                item_count=item_count,
+                quote=result,
+            )
         return result
 
     @_sizing_producer

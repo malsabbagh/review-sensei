@@ -311,6 +311,16 @@ def guard_current_command_representability(
             capacity_preview.update(
                 result=_preview_res, record=_preview_rec, details=details
             )
+            if (
+                current_record is not None
+                and current_record.quarantine_lineage is not None
+                and current_record.finding_lifecycle is not None
+            ):
+                from .current_quarantine_finalization import capture_terminal_preview
+
+                capacity_preview["current_terminal_preview"] = capture_terminal_preview(
+                    ledger, current_record, _preview_rec, details, report
+                )
         return None
 
     refusal_result = MaintainerCommandResult(

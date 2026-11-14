@@ -542,7 +542,11 @@ def attach_execution_reads(plan, finalizer, journal, *, dispositions, check_toke
         is not ReviewApprovalFinalizer._require_closed_capacity_source
     ):
         raise ReviewInputError("command capacity execution source changed")
-    finalizer._require_closed_capacity_source()
+    from .current_quarantine_finalization import is_current_plan, transfer
+
+    current_contract = is_current_plan(plan)
+    if not current_contract:
+        finalizer._require_closed_capacity_source()
     plan.require(plan.journal, http=plan.http, budget=plan.budget)
 
     from review_sensei.terminal_representability import action_intent_sha256
@@ -571,6 +575,10 @@ def attach_execution_reads(plan, finalizer, journal, *, dispositions, check_toke
         actual.pop(field, None)
     if canonical_bytes(expected) != canonical_bytes(actual):
         raise ReviewInputError("command execution changed an unplanned business field")
+    if current_contract:
+        finalizer = transfer(plan, finalizer, journal)
+        finalizer._require_closed_capacity_source()
+
     from types import MappingProxyType
 
     pending = _PENDING.get(plan)
