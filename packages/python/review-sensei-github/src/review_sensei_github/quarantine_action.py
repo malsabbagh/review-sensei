@@ -425,89 +425,98 @@ def prepare_quarantine_target(run, authority, command, app, permission):
         raise ReviewInputError(
             "current review publishes no quarantine assessment target"
         )
-    authenticated = reader.read(head_sha=run.head_sha)
-    origins = authenticated.archive["assessment_origins"]
-    if command.scope not in {o["scope_sha256"] for o in origins["origins"]}:
-        raise QuarantineTargetRefusal(
-            "quarantine origin scope differs from the current publication"
-        )
-    instance = command.reference[3:].lower()
-    members = [
-        item
-        for item in authenticated.inventories[command.scope]["assessments"]
-        if item["instance"] == instance
-    ]
-    if len(members) != 1:
-        raise QuarantineTargetRefusal(
-            "quarantine assessment target is missing or ambiguous"
-        )
-    from review_sensei.source_registry import require_instance_source
+    from review_sensei.source_registry import require_module_seal
 
-    require_instance_source(run.http, methods=("paginate", "request"))
-    rows = run.http.paginate(
-        path=run.http.repository_path(
-            run.identity.repository, f"/pulls/{run.identity.pull_request}/reviews"
-        ),
-        token=run.ledger.token,
-    )
-    from .quarantine_native_scope import filter_reviews
+    from . import body_census_hint
 
-    rows = filter_reviews(
-        run.http, rows, repository=run.identity.repository, head_sha=run.head_sha
-    )
-    candidates = [
-        r
-        for r in rows
-        if isinstance(r, dict)
-        and r.get("commit_id") == run.head_sha
-        and isinstance(r.get("user"), dict)
-        and r["user"].get("id") == run.ledger._evidence_author_id
-        and r["user"].get("type") == "Bot"
-        and type(r.get("id")) is int
-        and isinstance(r.get("body"), str)
-    ]
-    if not candidates:
-        raise ReviewInputError(
-            "current quarantine assessment publication is unavailable"
+    require_module_seal(body_census_hint)
+    with body_census_hint.window():
+        authenticated = reader.read(head_sha=run.head_sha)
+        archive = authenticated.archive
+        require_module_seal(body_census_hint)
+        body_census_hint.enable(archive)
+        origins = archive["assessment_origins"]
+        if command.scope not in {o["scope_sha256"] for o in origins["origins"]}:
+            raise QuarantineTargetRefusal(
+                "quarantine origin scope differs from the current publication"
+            )
+        instance = command.reference[3:].lower()
+        members = [
+            item
+            for item in authenticated.inventories[command.scope]["assessments"]
+            if item["instance"] == instance
+        ]
+        if len(members) != 1:
+            raise QuarantineTargetRefusal(
+                "quarantine assessment target is missing or ambiguous"
+            )
+        from review_sensei.source_registry import require_instance_source
+
+        require_instance_source(run.http, methods=("paginate", "request"))
+        rows = run.http.paginate(
+            path=run.http.repository_path(
+                run.identity.repository, f"/pulls/{run.identity.pull_request}/reviews"
+            ),
+            token=run.ledger.token,
         )
-    selected = max(candidates, key=lambda r: r["id"])
-    human_reader = app._human_inventory_reader(
-        token=run.ledger.token,
-        repository=run.identity.repository,
-        pull_request=run.identity.pull_request,
-        head_sha=run.head_sha,
-        app_slug="reviewsensei[bot]",
-        budget=run.caller.budget_view,
-    )
-    eligibility = approval_eligibility_from_body(
-        selected["body"],
-        human_inventory_reader=human_reader,
-        native_union_reader=human_reader.native_union_reader(selected),
-    )
-    if (
-        not isinstance(eligibility, ReviewApprovalEligibility)
-        or eligibility.quarantine_assessments is None
-    ):
-        raise ReviewInputError(
-            "current review has no explicit quarantine assessment marker"
+        from .quarantine_native_scope import filter_reviews
+
+        rows = filter_reviews(
+            run.http, rows, repository=run.identity.repository, head_sha=run.head_sha
         )
-    reader.require(eligibility, head_sha=run.head_sha)
-    record = reader.record_after_read()
-    collision_pairs: list[tuple[str, str | None]] = []
-    lifecycle_capture: list[Any] = []
-    if (
-        record.transaction is None
-        or eligibility.result_digest
-        != _current_publication_digest(
-            run.ledger,
-            record,
-            _collision_pairs=collision_pairs,
-            _capture=lifecycle_capture,
+        candidates = [
+            r
+            for r in rows
+            if isinstance(r, dict)
+            and r.get("commit_id") == run.head_sha
+            and isinstance(r.get("user"), dict)
+            and r["user"].get("id") == run.ledger._evidence_author_id
+            and r["user"].get("type") == "Bot"
+            and type(r.get("id")) is int
+            and isinstance(r.get("body"), str)
+        ]
+        if not candidates:
+            raise ReviewInputError(
+                "current quarantine assessment publication is unavailable"
+            )
+        selected = max(candidates, key=lambda r: r["id"])
+        human_reader = app._human_inventory_reader(
+            token=run.ledger.token,
+            repository=run.identity.repository,
+            pull_request=run.identity.pull_request,
+            head_sha=run.head_sha,
+            app_slug="reviewsensei[bot]",
+            budget=run.caller.budget_view,
         )
-    ):
-        raise ReviewInputError(
-            "current quarantine assessment publication transaction conflicts"
+        eligibility = approval_eligibility_from_body(
+            selected["body"],
+            human_inventory_reader=human_reader,
+            native_union_reader=human_reader.native_union_reader(selected),
         )
+        if (
+            not isinstance(eligibility, ReviewApprovalEligibility)
+            or eligibility.quarantine_assessments is None
+        ):
+            raise ReviewInputError(
+                "current review has no explicit quarantine assessment marker"
+            )
+        reader.require(eligibility, head_sha=run.head_sha)
+        record = reader.record_after_read()
+        collision_pairs: list[tuple[str, str | None]] = []
+        lifecycle_capture: list[Any] = []
+        if (
+            record.transaction is None
+            or eligibility.result_digest
+            != _current_publication_digest(
+                run.ledger,
+                record,
+                _collision_pairs=collision_pairs,
+                _capture=lifecycle_capture,
+            )
+        ):
+            raise ReviewInputError(
+                "current quarantine assessment publication transaction conflicts"
+            )
     index = parse_finding_index(
         selected["body"],
         repository_id=run.identity.repository_id,

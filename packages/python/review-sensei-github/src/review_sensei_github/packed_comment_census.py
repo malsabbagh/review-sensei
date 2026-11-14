@@ -292,6 +292,129 @@ def _membership(payload: Any, ledger: Any, identity: Any, plan: CommentAllocatio
         raise ReviewInputError("packed comment metadata is malformed") from error
 
 
+def _single_plain(value, depth=0):
+    if depth > 20:
+        raise ReviewInputError("packed single census data is too deep")
+    kind = type(value)
+    if value is None or kind is str or kind is int or kind is bool:
+        return
+    if kind is dict:
+        if any(type(key) is not str for key in value):
+            raise ReviewInputError("packed single census keys are not plain")
+        children = value.values()
+    elif kind is list:
+        children = value
+    else:
+        raise ReviewInputError("packed single census data is not plain")
+    if len(value) > 1000:
+        raise ReviewInputError("packed single census data exceeds its bound")
+    for child in children:
+        _single_plain(child, depth + 1)
+
+
+def _single_plan_snapshot(plan):
+    import gc
+
+    if type(plan) is not CommentAllocationPlan:
+        raise ReviewInputError("packed single census plan is not original")
+    fields = vars(plan)
+    if any(type(key) is not str for key in fields) or set(fields) != {
+        "known",
+        "unknown",
+        "metadata_known",
+        "metadata_unknown",
+    }:
+        raise ReviewInputError("packed single census plan fields changed")
+    maps = []
+    for name in ("known", "metadata_known"):
+        mapping = fields[name]
+        if type(mapping) is not MappingProxyType:
+            raise ReviewInputError("packed single census plan mapping changed")
+        backing = gc.get_referents(mapping)
+        if len(backing) != 1 or type(backing[0]) is not dict:
+            raise ReviewInputError("packed single census plan backing changed")
+        if any(type(k) is not int or type(v) is not int for k, v in backing[0].items()):
+            raise ReviewInputError("packed single census plan values changed")
+        maps.append(tuple(backing[0].items()))
+    if (
+        type(fields["unknown"]) is not tuple
+        or any(type(n) is not int for n in fields["unknown"])
+        or type(fields["metadata_unknown"]) is not int
+    ):
+        raise ReviewInputError("packed single census plan slots changed")
+    # Reuse the original plan constructor's complete capacity-domain checks.
+    CommentAllocationPlan(
+        dict(maps[0]), fields["unknown"], dict(maps[1]), fields["metadata_unknown"]
+    )
+    return (*maps, fields["unknown"], fields["metadata_unknown"])
+
+
+def _complete_single_response(response, ledger, identity, plan, first):
+    """Fresh complete evidence; the scheduling hint supplies no bound/identity."""
+    _single_plain(response)
+    try:
+        repository = response["data"]["repository"]
+        _repository(repository, identity)
+        pr = repository["pullRequest"]
+        connection = pr["comments"]
+        nodes, info = connection["nodes"], connection["pageInfo"]
+        if (
+            type(first) is not int
+            or not 2 <= first <= 100
+            or type(pr["number"]) is not int
+            or pr["number"] != identity.pull_request
+            or type(nodes) is not list
+            or not len(nodes) < first
+            or type(connection["totalCount"]) is not int
+            or connection["totalCount"] != len(nodes)
+            or info["hasNextPage"] is not False
+            or (nodes and not _cursor(info["endCursor"]))
+            or wire(response) > MAX_GITHUB_RESPONSE_BYTES
+            or wire(response) - sum(wire(node) for node in nodes) > OUTER_BYTES
+        ):
+            raise ReviewInputError("packed single census is not complete")
+        collected, order, unknown = [], [], sorted(plan.unknown)
+        for node in nodes:
+            normalized = _comment(node, ledger, identity)
+            identifier = normalized["id"]
+            if identifier in order:
+                raise ReviewInputError("packed single census duplicates an identity")
+            order.append(identifier)
+            metadata = {key: value for key, value in node.items() if key != "body"}
+            bound = (
+                plan.metadata_known.get(identifier, NODE_METADATA_BYTES)
+                if identifier in plan.known
+                else plan.metadata_unknown
+            )
+            if wire(metadata) > bound:
+                raise ReviewInputError(
+                    "packed single census metadata exceeds its bound"
+                )
+            body_wire = wire({"body": node["body"]})
+            if identifier in plan.known:
+                if body_wire > plan.known[identifier]:
+                    raise ReviewInputError(
+                        "packed single census body exceeds its reserve"
+                    )
+            else:
+                match = next(
+                    (i for i, limit in enumerate(unknown) if body_wire <= limit), None
+                )
+                if match is None:
+                    raise ReviewInputError(
+                        "packed single census allocation exceeds its reserve"
+                    )
+                unknown.pop(match)
+            collected.append(normalized)
+        if tuple(i for i in order if i in plan.known) != tuple(plan.known):
+            raise ReviewInputError("packed single census retained identities changed")
+        return collected
+    except ReviewInputError:
+        raise
+    except (KeyError, TypeError, ValueError) as error:
+        raise ReviewInputError("packed single census response is malformed") from error
+
+
 def fetch_packed_comments(
     ledger,
     identity,
@@ -340,6 +463,9 @@ def fetch_packed_comments(
             body={"query": query, "variables": variables},
             timeout_seconds=remaining,
         )
+        if hinted_first is not None:
+            require_module_seal(sys.modules[__name__])
+            _single_plain(response)
         if (
             status != 200
             or not isinstance(response, dict)
@@ -350,6 +476,33 @@ def fetch_packed_comments(
         ):
             raise ReviewInputError("packed comment complete response is unavailable")
         return response
+
+    import sys
+
+    from review_sensei.source_registry import require_module_seal
+
+    from . import body_census_hint
+
+    require_module_seal(body_census_hint)
+    hinted_first = body_census_hint.first()
+    if hinted_first is not None:
+        require_module_seal(sys.modules[__name__])
+        plan_snapshot = _single_plan_snapshot(plan)
+        variables = {**scope, "first": hinted_first, "after": None}
+        if wire({"query": QUERY, "variables": variables}) > 8192:
+            raise ReviewInputError("packed single census query exceeds its bound")
+        response = read(QUERY, variables)
+        require_module_seal(sys.modules[__name__])
+        if _single_plan_snapshot(plan) != plan_snapshot:
+            raise ReviewInputError(
+                "packed single census original plan changed during read"
+            )
+        collected = _complete_single_response(
+            response, ledger, identity, plan, hinted_first
+        )
+        return completed_census(
+            cold_census, observe_receipt_census(receipt_census, collected)
+        )
 
     opening = read(METADATA_QUERY, scope)
     order, metadata, original_scope = _membership(opening, ledger, identity, plan)
@@ -461,8 +614,12 @@ def fetch_packed_comments(
                     raise ReviewInputError(
                         "packed comment fresh closing membership changed"
                     )
+                require_module_seal(body_census_hint)
                 return completed_census(
-                    cold_census, observe_receipt_census(receipt_census, collected)
+                    cold_census,
+                    observe_receipt_census(
+                        receipt_census, body_census_hint.observed(collected)
+                    ),
                 )
         except (KeyError, TypeError, ValueError) as error:
             raise ReviewInputError(
@@ -471,8 +628,10 @@ def fetch_packed_comments(
     closing = _membership(read(METADATA_QUERY, scope), ledger, identity, plan)
     if closing != (order, metadata, original_scope):
         raise ReviewInputError("packed comment fresh closing membership changed")
+    require_module_seal(body_census_hint)
     return completed_census(
-        cold_census, observe_receipt_census(receipt_census, collected)
+        cold_census,
+        observe_receipt_census(receipt_census, body_census_hint.observed(collected)),
     )
 
 
