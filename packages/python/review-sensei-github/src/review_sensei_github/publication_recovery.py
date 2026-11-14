@@ -1184,6 +1184,12 @@ _install_materialized_phase(globals())
 del _install_materialized_phase
 
 
+from .empty_original_admission import install_recovery as _install_empty_recovery  # noqa: E402
+
+recover_retained_review_result = _install_empty_recovery(recover_retained_review_result)
+del _install_empty_recovery
+
+
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
 
 _seal_original_source()

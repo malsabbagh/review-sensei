@@ -2213,10 +2213,20 @@ class GitHubApplication:
                 transaction_record = load_transaction(ledger)
                 if transaction_record.transaction is not None:
                     result = replace(result, transaction=transaction_record.transaction)
+            from review_sensei.source_registry import require_module_seal
+
+            from . import empty_original_admission as empty_original_source
+
+            try:
+                require_module_seal(empty_original_source)
+                empty_original_source_intact = True
+            except ReviewInputError:
+                empty_original_source_intact = False
             from .empty_original_admission import consume as empty_original_admission
 
             omit_empty_original = (
-                validated_transaction_recovery
+                empty_original_source_intact
+                and validated_transaction_recovery
                 and result_retained
                 and empty_original_admission(self, ledger, transaction_record, result)
             )

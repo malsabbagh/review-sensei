@@ -231,3 +231,13 @@ class CheckpointResultStore(ResultPartStore):
             event_key=event_key, result=descriptor, _check_existing=_check_existing
         )
         return hashlib.sha256(result).hexdigest()
+
+
+from .empty_original_admission import install_reader as _install_empty_reader  # noqa: E402
+
+_install_empty_reader(CheckpointResultStore)
+del _install_empty_reader
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

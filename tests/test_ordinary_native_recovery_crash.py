@@ -20,8 +20,7 @@ class SimulatedProcessCrash(BaseException):
 
 
 class OrdinaryNativeRecoveryCrashTests(unittest.TestCase):
-    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
-    def test_crash_after_confirmed_receipt_before_terminal_keeps_cold_liability(self):
+    def _crash_recovery(self, fault=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source"
@@ -48,7 +47,8 @@ class OrdinaryNativeRecoveryCrashTests(unittest.TestCase):
             packet.write_text(
                 json.dumps(
                     {
-                        "resume_expected": True,
+                        "resume_expected": fault is None,
+                        "admission_fault": fault,
                         "root": str(fixture.root),
                         "policy": fixture.policy,
                         "config_hex": fixture.config_bytes.hex(),
@@ -75,7 +75,7 @@ class OrdinaryNativeRecoveryCrashTests(unittest.TestCase):
                 [
                     sys.executable,
                     "-c",
-                    cold.OrdinaryNativeRecoveryColdTests.CHILD,
+                    self._admission_child(),
                     str(packet),
                     str(child),
                 ],
@@ -86,29 +86,181 @@ class OrdinaryNativeRecoveryCrashTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             result = json.loads(completed.stdout)
-            self.assertEqual(result["provider_calls"], 0)
-            self.assertGreater(result["restored_unknown_charges"], 0)
-            self.assertTrue(result["states"], result)
-            self.assertEqual(set(result["states"]), {"confirmed"})
-            # The source-confirmed journal is revalidated on the fresh attempt;
-            # the original physical unknown charge is never refunded.
-            self.assertEqual(result["code"], 0, result)
-            self.assertIsNotNone(result["terminal"])
-            self.assertEqual(result["review_states"], ["COMMENTED", "APPROVED"])
-            self.assertEqual(result["check_ids"], [fixture.check_runs[0]["id"]])
-            self.assertEqual(result["check_statuses"], ["completed"])
-            self.assertEqual(
-                result["native_writes"],
+            return result, fixture.check_runs[0]["id"]
+
+    @staticmethod
+    def _admission_child():
+        fault_observer = r"""
+original_observe=observe
+from review_sensei_github import checkpoint_result_store as checkpoint
+from review_sensei_github import empty_original_admission as empty
+wrapper_code=lifecycle.restore_finding_lifecycle.__code__
+from review_sensei_github.application import GitHubApplication
+publish_code=GitHubApplication.publish_review.__code__
+decoder_code=inspect.unwrap(checkpoint.CheckpointResultStore._decode).__code__
+last_reader=[]
+omission_grants=[]
+def observe(frame,event,result):
+    fault=packet.get("admission_fault")
+    if event == "return" and frame.f_code is decoder_code:
+        last_reader[:]=[frame.f_locals["self"],frame.f_locals["payload"],frame.f_locals.get("store")]
+    if event == "return" and frame.f_code is empty.consume.__code__:
+        omission_grants.append(result)
+    if event == "call" and frame.f_code is publish_code:
+        kwargs=frame.f_locals["kwargs"]
+        if fault == "copied_return": kwargs["result"]=copy.copy(kwargs["result"])
+        elif fault == "direct_decode":
+            reader,payload,store=last_reader
+            decoded=copy.copy(reader)._decode(payload,store)
+            from review_sensei.models import ReviewResult
+            kwargs["result"]=ReviewResult.from_dict(json.loads(decoded))
+        elif fault == "old_return":
+            from review_sensei_github.errors import GitHubPublicationError
+            try: frame.f_locals["app"].publish_review(**{**kwargs,"result":copy.copy(kwargs["result"])})
+            except GitHubPublicationError: pass
+    if event == "return" and frame.f_code is restore_code and isinstance(result,tuple) and result[1] is not None:
+        document=result[1]
+        if fault == "unknown": document["unknown_trust_effect"]=True
+        elif fault == "review": document["effects"][0]["path"]="/repos/owner/repo/pulls/7/reviews"
+        elif fault == "pending":
+            document["effects"][0]["status"]="pending"
+            document["effects"][0]["response"]=None
+        elif fault == "foreign_app": document["effects"][0]["response"][1]["app_id"]+=1
+        elif fault == "foreign_head": document["effects"][0]["request"]["head_sha"]="c"*40
+        elif fault == "native": document["native_receipts"].append({"schema_version":"native-finding-receipt-v1","repository_id":123,"pull_request":7,"head_sha":"b"*40,"base_sha":"a"*40,"producer_id":1,"review_id":1234,"instance":"a"*64,"body_sha256":"a"*64,"thread_id":None,"comment_id":None,"native_head_sha":None})
+        elif fault == "loader": checkpoint.__spec__.loader=object()
+        elif fault == "reader_source": checkpoint.read_accepted_result=lambda *a,**k: b"{}"
+        elif fault == "consumer_source": empty.consume=lambda *a,**k: True
+        elif fault == "foreign_external": document["effects"][0]["request"]["external_id"]="reviewsensei-review-v1:quarantine:foreign"
+        if fault in {"review","foreign_head","foreign_external"}:
+            effect=document["effects"][0]
+            effect["request_sha256"]=lifecycle._digest({key:effect[key] for key in ("method","path","request")})
+    if event == "return" and frame.f_code is wrapper_code and isinstance(result,tuple) and result[1] is not None and fault == "changed_document":
+        result[1]["effects"][0]["response"][1]["id"]+=1
+    original_observe(frame,event,result)
+"""
+        return cold.OrdinaryNativeRecoveryColdTests.CHILD.replace(
+            '"code":code,"error":f.error',
+            '"code":code,"omission_grants":omission_grants,"error":f.error',
+        ).replace(
+            "previous_profile=sys.getprofile()",
+            fault_observer + "\nprevious_profile=sys.getprofile()",
+        )
+
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_crash_after_confirmed_receipt_before_terminal_keeps_cold_liability(self):
+        result, check_id = self._crash_recovery()
+        self.assertEqual(result["provider_calls"], 0)
+        self.assertGreater(result["restored_unknown_charges"], 0)
+        self.assertTrue(result["states"], result)
+        self.assertEqual(set(result["states"]), {"confirmed"})
+        # The source-confirmed journal is revalidated on the fresh attempt;
+        # the original physical unknown charge is never refunded.
+        self.assertEqual(result["code"], 0, result)
+        self.assertIsNotNone(result["terminal"])
+        self.assertEqual(result["review_states"], ["COMMENTED", "APPROVED"])
+        self.assertEqual(result["check_ids"], [check_id])
+        self.assertEqual(result["check_statuses"], ["completed"])
+        self.assertEqual(
+            result["native_writes"],
+            [
                 [
-                    [
-                        "PATCH",
-                        f"/repos/owner/repo/check-runs/{fixture.check_runs[0]['id']}",
-                    ],
-                    ["POST", "/repos/owner/repo/pulls/7/reviews"],
-                    ["POST", "/repos/owner/repo/pulls/7/reviews"],
+                    "PATCH",
+                    f"/repos/owner/repo/check-runs/{check_id}",
                 ],
-            )
-            self.assertTrue(result["no_process_authority"])
+                ["POST", "/repos/owner/repo/pulls/7/reviews"],
+                ["POST", "/repos/owner/repo/pulls/7/reviews"],
+            ],
+        )
+        self.assertTrue(result["no_process_authority"])
+
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_empty_original_omission_rejects_changed_scope_effects_and_source(self):
+        for fault in (
+            "unknown",
+            "review",
+            "pending",
+            "foreign_app",
+            "foreign_head",
+            "native",
+            "loader",
+            "reader_source",
+            "changed_document",
+            "copied_return",
+            "direct_decode",
+            "old_return",
+        ):
+            with self.subTest(fault=fault):
+                result, _ = self._crash_recovery(fault)
+                self.assertEqual(result["code"], 1, result)
+                self.assertNotIn(True, result["omission_grants"])
+                self.assertEqual(result["provider_calls"], 0)
+                self.assertEqual(result["native_writes"], [])
+                self.assertIsNone(result["terminal"])
+                self.assertGreater(result["restored_unknown_charges"], 0)
+
+    @unittest.skipUnless(os.name == "posix", "private recovery storage requires POSIX")
+    def test_empty_original_consumer_and_namespace_cannot_grant(self):
+        for fault in ("consumer_source", "foreign_external"):
+            with self.subTest(fault=fault):
+                result, _ = self._crash_recovery(fault)
+                self.assertEqual(result["code"], 1, result)
+                self.assertNotIn(True, result["omission_grants"])
+                self.assertEqual(result["native_writes"], [])
+                self.assertEqual(result["provider_calls"], 0)
+                self.assertIsNone(result["terminal"])
+                self.assertGreater(result["restored_unknown_charges"], 0)
+
+    def test_empty_original_installers_reject_nondefining_callers(self):
+        from review_sensei_github import (
+            checkpoint_result_store,
+            empty_original_admission,
+            publication_recovery,
+        )
+
+        from review_sensei.errors import ReviewInputError
+
+        cls = checkpoint_result_store.CheckpointResultStore
+        original = (
+            cls._source,
+            cls._decode,
+            publication_recovery.recover_retained_review_result,
+        )
+        with self.assertRaisesRegex(ReviewInputError, "defining installer"):
+            empty_original_admission.install_reader(cls)
+        with self.assertRaisesRegex(ReviewInputError, "defining installer"):
+            empty_original_admission.install_recovery(original[2])
+        self.assertEqual(
+            (
+                cls._source,
+                cls._decode,
+                publication_recovery.recover_retained_review_result,
+            ),
+            original,
+        )
+
+    def test_projected_empty_cannot_replace_nonempty_original(self):
+        from dataclasses import replace
+
+        from review_sensei_github.retention_projection import checkpoint_projection
+
+        from review_sensei.errors import ReviewInputError
+        from tests.test_retention_projection import fixture
+
+        original, bound, raw, *_ = fixture(1)
+        self.assertTrue(original.comments)
+        empty = replace(original, comments=())
+        empty = replace(
+            empty,
+            transaction=replace(
+                bound.transaction, result_sha256=empty.content_digest()
+            ),
+        )
+        self.assertNotEqual(empty.content_digest(), original.content_digest())
+        with self.assertRaisesRegex(
+            ReviewInputError, "review transaction result digest does not match"
+        ):
+            checkpoint_projection(raw, empty, {"source": "original"})
 
     def test_receipt_checkpoint_crash_never_settles_before_durable_return(self):
         from urllib.parse import urlsplit
