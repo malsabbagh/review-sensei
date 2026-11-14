@@ -155,7 +155,7 @@ def require_grouped_durable_floor(publisher, journal, host, *, checks_enabled):
         frame is None
         or frame.f_code is not original.__code__
         or frame.f_globals is not vars(publication)
-        or not {"self", "lifecycle_journal", "native_host"} <= frame.f_locals.keys()
+        or not {"self", "lifecycle_journal", "native_host"}.issubset(frame.f_locals)
         or frame.f_locals["self"] is not publisher
         or frame.f_locals["lifecycle_journal"] is not journal
         or frame.f_locals["native_host"] is not host

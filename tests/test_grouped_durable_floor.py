@@ -2,7 +2,6 @@
 
 import copy
 import io
-import json
 import sys
 import tempfile
 import unittest
@@ -10,6 +9,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
+from hot_original_entry import invoke_original
 from review_sensei_github.api_run_budget import CallerRunBudget
 from review_sensei_github.guarded_publication_plan import require_grouped_durable_floor
 from review_sensei_github.quarantine_published_tail import BROKER_QUALIFICATIONS
@@ -50,6 +50,7 @@ class GroupedDurableFloorTests(unittest.TestCase):
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             fixture = NativePublishedTailJourneyFixture(directory)
+            fixture.api_url = "https://api.github.com"
             old, registration = fixture.original_origins()
             old_document = copy.deepcopy(old.api_run_accounting)
             old_reviews = copy.deepcopy(fixture.reviews)
@@ -66,31 +67,29 @@ class GroupedDurableFloorTests(unittest.TestCase):
                 }
             ]
             if not checks_enabled:
-                original_external = fixture.external
+                original_broker = fixture.broker_response
                 original_provider_calls = fixture.provider_calls
 
-                def deny_check(request, timeout):
-                    payload = json.loads(request.data) if request.data else {}
+                def deny_check(payload):
                     if (
                         payload.get("capability") == "check_publish"
                         and fixture.provider_calls > original_provider_calls
                     ):
-                        fixture._meter(request)
                         raise HTTPError(
-                            request.full_url,
+                            "https://github.reviewsensei.dev/github/token",
                             403,
                             "synthetic denied",
                             {},
                             io.BytesIO(b"{}"),
                         )
-                    return original_external(request, timeout)
+                    return original_broker(payload)
 
-                fixture.external = deny_check
+                fixture.broker_response = deny_check
             with registered_resource([registration]):
                 previous = sys.getprofile()
                 try:
                     sys.setprofile(observe)
-                    result = fixture.invoke()
+                    result, _wire = invoke_original(fixture)
                 finally:
                     sys.setprofile(previous)
             self.assertEqual(result, 1, fixture.error)
