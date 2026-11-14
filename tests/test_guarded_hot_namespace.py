@@ -70,6 +70,101 @@ class GuardedHotNamespaceTests(unittest.TestCase):
                 guarded_hot_namespace._checkpoint_generation_matches(original, changed)
             )
 
+    def test_same_generation_snapshot_rejects_shadows_and_impostors_without_callbacks(
+        self,
+    ):
+        import copy
+
+        from test_session_ledger import FIXED_NOW, IDENTITY
+
+        from review_sensei.session import SessionRecord
+
+        calls = []
+
+        class Bomb:
+            def __getattr__(self, name):
+                calls.append(name)
+                raise AssertionError("unexpected callback")
+
+            def __eq__(self, other):
+                calls.append("equality")
+                raise AssertionError("unexpected callback")
+
+        original = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        for name, value in (
+            ("to_dict", Bomb()),
+            ("_payload", Bomb()),
+            ("_legacy_payload", Bomb()),
+            ("transaction", Bomb()),
+            ("finding_lifecycle", {"nested": Bomb()}),
+        ):
+            with self.subTest(name=name):
+                changed = copy.copy(original)
+                object.__setattr__(changed, name, value)
+                with self.assertRaises(ReviewInputError):
+                    guarded_hot_namespace._checkpoint_generation_matches(
+                        original, changed
+                    )
+                self.assertEqual(calls, [])
+
+    def test_same_generation_real_accounting_successor_keeps_old_unknown(self):
+        from datetime import timedelta
+
+        from test_api_work import accounting
+        from test_api_work_persistence import IDENTITY
+        from test_session_ledger import FIXED_NOW
+
+        from review_sensei.api_work import PendingApiRequest
+        from review_sensei.session import SessionRecord
+
+        old_unknown = PendingApiRequest("old-unknown", 1000)
+        fresh = PendingApiRequest("new-confirmed", 2000)
+        state = accounting().reserve("work", 10).dispatch("work", old_unknown)
+        original = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, api_run_accounting=state.to_document()
+        )
+        successor = state.dispatch("work", fresh).confirm(fresh)
+        candidate = original.evolve(
+            now=FIXED_NOW + timedelta(seconds=1),
+            api_run_accounting=successor.to_document(),
+        )
+        self.assertTrue(
+            guarded_hot_namespace._checkpoint_generation_matches(original, candidate)
+        )
+        self.assertEqual(candidate.generation, original.generation)
+        self.assertNotEqual(candidate.record_sha256, original.record_sha256)
+        self.assertIn(old_unknown, successor.blocks[0].pending)
+        self.assertEqual(successor.remaining, state.remaining)
+
+    def test_nested_original_transaction_method_shadow_is_not_called(self):
+        import copy
+
+        from test_session_ledger import FIXED_NOW, IDENTITY
+
+        from review_sensei.models import ReviewTransaction
+        from review_sensei.session import SessionRecord
+
+        transaction = ReviewTransaction(
+            transaction_id="a" * 64,
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="b" * 40,
+            head_sha="c" * 40,
+            policy_digest="d" * 64,
+            configuration_digest="e" * 64,
+            evidence_digest="f" * 64,
+            reservation_id="a" * 64,
+            generation=1,
+        )
+        original = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        candidate = copy.copy(original)
+        calls = []
+        object.__setattr__(transaction, "to_dict", lambda: calls.append("serializer"))
+        object.__setattr__(candidate, "transaction", transaction)
+        with self.assertRaises(ReviewInputError):
+            guarded_hot_namespace._checkpoint_generation_matches(original, candidate)
+        self.assertEqual(calls, [])
+
     def caller(self, directory, sent):
         def physical(request, timeout):
             sent.append(request.full_url)
