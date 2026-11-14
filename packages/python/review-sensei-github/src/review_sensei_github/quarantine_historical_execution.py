@@ -75,7 +75,9 @@ def _registry():
             or canonical_bytes(entry["authority"].document) != entry["authority_bytes"]
             or _target_binding(entry["target"]) != entry["target_binding"]
             or tuple(entry["guard"].comment_plan.unknown) != entry["initial_unknown"]
-            or entry["guard"].comment_plan.worst_read_calls() > 4
+            or entry["guard"].complete_tail
+            or entry["guard"].comment_plan.worst_read_calls()
+            > json.loads(entry["recipe"])["comment_reads"]
         ):
             raise ReviewInputError("historical closed invocation owner changed")
         if caller._terminal_reason is not None:
@@ -95,6 +97,14 @@ def _registry():
                 raise ReviewInputError(
                     "historical terminal entry lacks original settled proof"
                 )
+        review_certificate = entry["guard"].certificates.get("reviews", {})
+        review_calls = review_certificate.get("physical_reads_upper_bound")
+        if (
+            review_certificate.get("reader") != "bounded-cold-reviews"
+            or type(review_calls) is not int
+            or not 1 <= review_calls <= json.loads(entry["recipe"])["review_reads"]
+        ):
+            raise ReviewInputError("historical complete review reader changed")
         pending = frozenset(
             (b.block_id, p.request_id, p.deadline_unix_ms)
             for b in caller.accounting.blocks
@@ -134,7 +144,12 @@ def _registry():
                 for row in measured["growth_roots"]
             )
             or recipe["combined_loss_calls"] != 105
-            or recipe["comment_reads"] != 4
+            or (recipe.get("contract"), recipe["comment_reads"])
+            not in {
+                ("closed-inline-c4-reserved-verification-v1", 4),
+                ("closed-inline-c5-original-no-verification-v1", 5),
+            }
+            or (recipe["comment_reads"] == 5 and not recipe.get("local_headroom"))
             or recipe["review_reads"] != 3
             or run.caller.budget_view.ordinary_remaining() < 105
             or any(block.pending for block in run.caller.accounting.blocks)
@@ -532,7 +547,8 @@ def _registry():
             or entry["caller"]._root != root
             or tuple(known.items()) != expected
             or added_parts != parts
-            or proof.plan.worst_read_calls() > 4
+            or proof.plan.worst_read_calls()
+            > json.loads(entry["recipe"])["comment_reads"]
             or tuple(proof.plan.unknown) != entry["initial_unknown"]
             or operation is not entry["caller"]._active_operation
         ):

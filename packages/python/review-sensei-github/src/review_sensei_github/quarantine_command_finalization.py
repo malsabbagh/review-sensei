@@ -524,6 +524,47 @@ def _require_no_body_readback(journal, review_id):
         )
 
 
+def _default_c5_prefix_headroom(stages, *, terminal_comments):
+    """Local reservation liquidity under all four ordinary root read losses."""
+    from . import api_run_plan
+
+    require_module_seal(api_run_plan)
+    overhead = (
+        api_run_plan.QUARANTINE_CHECKPOINT_REQUESTS
+        - api_run_plan.READ_OPERATION_REQUESTS
+    )
+    if overhead != 6 or api_run_plan.READ_OPERATION_REQUESTS != 10:
+        raise ReviewInputError("guarded C5 checkpoint source constants changed")
+    C = 5
+    checkpoint = 4 + C + overhead
+    minima = {
+        "entry-checkpoint": C + overhead,
+        "own-cas-authority-and-checkpoint": checkpoint,
+        "pending-journal": checkpoint + checkpoint + 6,
+        "review-update": 1 + api_run_plan.NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS,
+        "finish-journal": checkpoint,
+        "receipt": 8,
+    }
+    losses = {
+        "entry-checkpoint",
+        "own-cas-authority-and-checkpoint",
+        "pending-journal",
+        "finish-journal",
+    }
+    remaining = 105
+    rows = []
+    for name, calls in stages:
+        if name in minima:
+            required = minima[name]
+            rows.append({"phase": name, "available": remaining, "minimum": required})
+            if remaining < required:
+                raise ReviewInputError("guarded C5 local reservation is unfunded")
+        remaining -= calls + int(name in losses) + (3 if name == "receipt" else 0)
+    if remaining != 0 or terminal_comments + overhead > 50:
+        raise ReviewInputError("guarded C5 complete prefix accounting changed")
+    return rows
+
+
 def intermediate_suffix_recipe(observation, *, comment_rows):
     """Derive the closed intermediate recipe; data, not an execution lease."""
     from copy import copy, deepcopy
@@ -735,8 +776,21 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
     if quarantine_capacity._guard_state(guard) != original:
         raise ReviewInputError("guarded suffix sizing changed installed capacity")
     C, R = max(value[0] for value in prefixes), max(value[1] for value in prefixes)
-    if C > 4 or R > 3:
+    if C not in (4, 5) or not 1 <= R <= 3:
         raise ReviewInputError("guarded suffix complete physical reader exceeds recipe")
+    source_review_reads = R
+    contract = "closed-inline-c4-reserved-verification-v1"
+    trust_calls = 7
+    if C == 5:
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        quarantine_historical_execution._require_default_profile(run.caller)
+        contract = "closed-inline-c5-original-no-verification-v1"
+        trust_calls = 0
+        # The authentic body route currently needs two pages. Keep the larger
+        # three-page source ceiling paid at every walk; this is not a refund.
+        R = 3
     # Original source branches: coalescence saves only two pre-mutation GETs.
     # Four post-mutation lost GETs and receipt's one complete fresh reconciliation
     # remain paid. These quantities alone cannot authorize any dispatch.
@@ -758,10 +812,17 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
         ("final-hold", C + 1),
         ("finish-journal", 4 + C + 4),
         ("receipt", 5),
-        ("trust-verifications", 7),
+        ("trust-verifications", trust_calls),
     )
     normal = sum(count for _, count in stages)
+    local_headroom = (
+        _default_c5_prefix_headroom(stages, terminal_comments=terminal_comments)
+        if C == 5
+        else None
+    )
     return {
+        "contract": contract,
+        "local_headroom": local_headroom,
         "stages": stages,
         "normal_calls": normal,
         "combined_loss_calls": normal + 3 + 4,
@@ -769,6 +830,7 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
         "cache_prefix_known": len(cache_plan.known),
         "cache_prefix_unknown": len(cache_plan.unknown),
         "review_reads": R,
+        "source_review_reads": source_review_reads,
         "root_measurement": measured,
         "review": json.loads(canonical_bytes(review)),
         "check": json.loads(canonical_bytes(check)),
