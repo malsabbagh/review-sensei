@@ -291,6 +291,53 @@ def approve_plan(journal):
         entry.approved = journal
 
 
+def _checkpoint_source_binding():
+    selected: tuple[Any, ...] | None = None
+
+    def install_journal(cls):
+        nonlocal selected
+        frame = inspect.currentframe()
+        _definition(frame.f_back if frame else None, cls.__module__)
+        method = cls.checkpoint
+        if (
+            selected is not None
+            or cls.__module__ != "review_sensei_github.finding_lifecycle"
+            or cls.__name__ != "FindingLifecycleJournal"
+            or method.__module__ != cls.__module__
+            or method.__qualname__ != "FindingLifecycleJournal.checkpoint"
+            or hasattr(method, "__wrapped__")
+        ):
+            raise ReviewInputError("publication fusion journal source is unsupported")
+        selected = (
+            cls,
+            method,
+            method.__code__,
+            method.__globals__,
+            method.__defaults__,
+            dict(method.__kwdefaults__ or {}),
+        )
+
+    def require(journal, frame):
+        if (
+            selected is None
+            or type(journal) is not selected[0]
+            or selected[1].__code__ is not selected[2]
+            or frame is None
+            or frame.f_code is not selected[2]
+            or frame.f_globals is not selected[3]
+            or selected[1].__defaults__ != selected[4]
+            or (selected[1].__kwdefaults__ or {}) != selected[5]
+            or frame.f_locals.get("self") is not journal
+        ):
+            raise ReviewInputError("publication fusion checkpoint source changed")
+
+    return install_journal, require
+
+
+install_journal, _require_checkpoint_source = _checkpoint_source_binding()
+del _checkpoint_source_binding
+
+
 def begin_checkpoint(journal, packed):
     entry = _ACTIVE.get()
     if entry is None or entry.receipt is None or entry.committed is not None:
@@ -298,8 +345,7 @@ def begin_checkpoint(journal, packed):
     require_instance_source(journal, methods=("checkpoint",))
     frame = inspect.currentframe()
     frame = frame.f_back if frame else None
-    if frame is None or frame.f_code is not type(journal).checkpoint.__code__:
-        raise ReviewInputError("publication fusion checkpoint source changed")
+    _require_checkpoint_source(journal, frame)
     _receipt(journal.ledger, journal._record)
     if entry.approved is not journal or entry.attempted:
         raise ReviewInputError("publication fusion checkpoint is unapproved or reused")

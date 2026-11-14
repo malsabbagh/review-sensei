@@ -3595,6 +3595,16 @@ _install_checkpoint_pricer(
 )
 
 
+# Capture guarded/trust transport identities only after the source-owned
+# materialized phase wrapper is installed. No late wrapper is silently trusted.
+from .materialized_publication_phase import (  # noqa: E402
+    install_caller as _install_materialized_phase,
+)
+
+_install_materialized_phase(ApiRunRequestTransport)
+del _install_materialized_phase
+
+
 _install_guarded_lifecycle_writer(ApiRunSessionLedger, ApiRunRequestTransport)
 
 
@@ -3619,14 +3629,6 @@ from .trust_effects import after_response as _validate_trust_return  # noqa: E40
 
 _install_capability_transport(ApiRunRequestTransport)
 del _install_capability_transport
-
-
-from .materialized_publication_phase import (  # noqa: E402
-    install_caller as _install_materialized_phase,
-)
-
-_install_materialized_phase(ApiRunRequestTransport)
-del _install_materialized_phase
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

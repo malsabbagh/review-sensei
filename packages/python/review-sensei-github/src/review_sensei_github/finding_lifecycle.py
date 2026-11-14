@@ -3992,6 +3992,14 @@ class FindingLifecycleJournal:
                 owner.http = http
 
 
+from review_sensei.publication_intent_fusion import (  # noqa: E402
+    install_journal as _install_fusion_checkpoint_source,
+)
+
+_install_fusion_checkpoint_source(FindingLifecycleJournal)
+del _install_fusion_checkpoint_source
+
+
 from .materialized_publication_phase import (  # noqa: E402
     install_journal as _install_materialized_phase,
 )
