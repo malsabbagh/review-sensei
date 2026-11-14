@@ -73,6 +73,30 @@ class BodyCensusHintTests(unittest.TestCase):
                     fetch_packed_comments(backend.ledger(), IDENTITY, plan=plan)
                 self.assertEqual(len(backend.physical), 1)
 
+    def test_published_tail_hint_keeps_full_membership_and_exact_contract_opt_in(self):
+        for contract, enabled in (
+            ("published-tail-reply-isolation-v1", True),
+            ("failed-published-tail-isolation-v1", False),
+            ("body-limit-execution-isolation-v1", False),
+            ("published-tail-reply-isolation-v2", False),
+        ):
+            with self.subTest(contract=contract), hint.window():
+                backend, plan = self.prepare()
+                snapshot = (tuple(plan.known.items()), plan.unknown)
+                original = fetch_packed_comments(backend.ledger(), IDENTITY, plan=plan)
+                before = len(backend.physical)
+                hint.enable({"target_isolation": {"contract": contract}})
+                self.assertEqual(
+                    fetch_packed_comments(backend.ledger(), IDENTITY, plan=plan),
+                    original,
+                )
+                actual = len(backend.physical) - before
+                if enabled:
+                    self.assertEqual(actual, 1)
+                else:
+                    self.assertGreater(actual, 1)
+                self.assertEqual((tuple(plan.known.items()), plan.unknown), snapshot)
+
     def test_unknown_slots_are_matched_without_consuming_original_promises(self):
         backend, original = self.prepare()
         plan = CommentAllocationPlan({next(iter(original.known)): 1011}, (2011, 32768))

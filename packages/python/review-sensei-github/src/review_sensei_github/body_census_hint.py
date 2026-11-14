@@ -29,7 +29,8 @@ def enable(archive):
     if (
         type(isolation) is dict
         and type(isolation.get("contract")) is str
-        and isolation["contract"] == "body-limit-prepublication-v1"
+        and isolation["contract"]
+        in {"body-limit-prepublication-v1", "published-tail-reply-isolation-v1"}
     ):
         _HINT.set((True, value[1]))
 
