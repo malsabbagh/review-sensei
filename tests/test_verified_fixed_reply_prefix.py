@@ -1,9 +1,13 @@
 """Real reassessment produces verified fixes; uncertainty never grants a new run."""
 
 import copy
+import dis
+import inspect
 import json
+import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
@@ -15,6 +19,40 @@ from tests.fake_github_http import json_response
 from tests.test_action_reply_entry import ReplyEntryFixture
 from tests.test_api_work_persistence import HEAD
 from tests.test_review_run import EntryFixture
+
+
+@contextmanager
+def observed_checkpoint_documents():
+    """Observe successful original returns, without replacing sealed methods."""
+    original = inspect.unwrap(FindingLifecycleJournal.checkpoint)
+    code, globals_ = original.__code__, original.__globals__
+    returns = {
+        instruction.offset
+        for instruction in dis.get_instructions(original)
+        if instruction.opname in {"RETURN_VALUE", "RETURN_CONST"}
+    }
+    documents = []
+    previous = sys.getprofile()
+
+    def observe(frame, event, value):
+        if previous is not None:
+            previous(frame, event, value)
+        if (
+            event == "return"
+            and frame.f_code is code
+            and frame.f_globals is globals_
+            and frame.f_lasti in returns
+        ):
+            # This is the original complete document passed to staging. An
+            # exceptional return (also reported as None by profiling) is not
+            # a successful checkpoint and must not contribute a snapshot.
+            documents.append(copy.deepcopy(frame.f_locals["document"]))
+
+    try:
+        sys.setprofile(observe)
+        yield documents
+    finally:
+        sys.setprofile(previous)
 
 
 def obligations(document):
@@ -94,15 +132,7 @@ class VerifiedFixedReplyPrefixTests(unittest.TestCase):
                 self.subTest(fail_at=fail_at),
                 tempfile.TemporaryDirectory() as directory,
             ):
-                documents = []
-                checkpoint = FindingLifecycleJournal.checkpoint
-
-                def capture(journal, **kwargs):
-                    result = checkpoint(journal, **kwargs)
-                    documents.append(copy.deepcopy(journal._document()))
-                    return result
-
-                with patch.object(FindingLifecycleJournal, "checkpoint", capture):
+                with observed_checkpoint_documents() as documents:
                     fixture = self.fixture(directory)
                     original = obligations(documents[-1])
                     attempts = []
@@ -290,11 +320,9 @@ class VerifiedFixedReplyPrefixTests(unittest.TestCase):
                 self.assertEqual((fixture.reviews, fixture.check_runs), before)
 
     def test_preconfirmed_group_and_unexpected_resolved_suffix_are_not_conflated(self):
-        checkpoint = FindingLifecycleJournal.checkpoint
         for late in (False, True):
             with self.subTest(late=late), tempfile.TemporaryDirectory() as directory:
                 fixture = self.fixture(directory)
-                documents = []
                 external = fixture.external
                 if not late:
                     fixture.thread_rows[-1]["isResolved"] = True
@@ -309,13 +337,8 @@ class VerifiedFixedReplyPrefixTests(unittest.TestCase):
                         fixture.thread_rows[-1]["isResolved"] = True
                     return external(request, timeout)
 
-                def capture(journal, **kwargs):
-                    result = checkpoint(journal, **kwargs)
-                    documents.append(copy.deepcopy(journal._document()))
-                    return result
-
                 fixture.external = observe
-                with patch.object(FindingLifecycleJournal, "checkpoint", capture):
+                with observed_checkpoint_documents() as documents:
                     self.assertEqual(fixture.invoke_reply(), 0, fixture.error)
                 self.assertEqual(len(fixture.resolved_threads), 1)
                 current = obligations(documents[-1])
