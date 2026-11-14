@@ -116,6 +116,32 @@ def bind_target(token, target):
     saved["target"] = target
 
 
+def sizing_snapshot(target, run):
+    """Expose original authenticated bytes before effects, never confirm a CAS.
+
+    The result is only input to pure finalizer sizing. Runtime restore still
+    requires the separately issued, consumed own-decision permit below.
+    """
+    token = target.lifecycle_transfer
+    saved = _ISSUED.get(token) if type(token) is _Transfer else None
+    if (
+        saved is None
+        or saved["target"] is not target
+        or saved["confirmed"] is not None
+        or saved["ledger"] is not run.ledger
+        or saved["caller"] is not run.caller
+        or saved["record"] is not run.caller._effect_record
+        or saved["record"].record_sha256 != run.caller._root
+        or run.caller._checkpoint is not None
+        or run.caller._action_effect_boundary is not None
+        or run.caller.accounting.action is None
+        or run.caller.accounting.action.get("execution_started") is not False
+    ):
+        raise ReviewInputError("quarantine sizing lifecycle custody changed")
+    _require_unchanged(saved, saved["record"])
+    return saved["record"], json.loads(saved["document"])
+
+
 def confirmed_transfer(target, run, confirmed, *, decision_permit):
     token = target.lifecycle_transfer
     if token is None:

@@ -71,9 +71,34 @@ class ColdCommandPreflightTests(unittest.TestCase):
                                 _publication_transport,
                             )
 
-                            transport = _publication_transport(
-                                frame.f_locals["run"].ledger.http
+                            run = frame.f_locals["run"]
+                            target = frame.f_back.f_locals["target"]
+                            from review_sensei_github.quarantine_lifecycle_transfer import (
+                                confirmed_transfer,
+                                sizing_snapshot,
                             )
+
+                            from review_sensei.errors import ReviewInputError
+
+                            before_reads = len(fixture.trace)
+                            record, document = sizing_snapshot(target, run)
+                            self.assertIs(record, run.caller._effect_record)
+                            self.assertIsNotNone(record.finding_lifecycle)
+                            self.assertIsInstance(document, dict)
+                            with self.assertRaisesRegex(
+                                ReviewInputError, "custody changed"
+                            ):
+                                sizing_snapshot(copy.copy(target), run)
+                            with self.assertRaisesRegex(
+                                ReviewInputError, "not confirmed"
+                            ):
+                                confirmed_transfer(
+                                    target, run, record, decision_permit=None
+                                )
+                            document.clear()
+                            self.assertTrue(sizing_snapshot(target, run)[1])
+                            self.assertEqual(len(fixture.trace), before_reads)
+                            transport = _publication_transport(run.ledger.http)
                             original = transport._quarantine_capacity_guard
                             touched.append((transport, original))
                             if fault == "removed":
