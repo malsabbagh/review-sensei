@@ -663,6 +663,12 @@ def execute_command(run: ReviewRun, args: Any) -> int:
         outcome=outcome,
         result_document=asdict(result),
     )
+    from review_sensei.source_registry import require_module_seal
+
+    from . import current_quarantine_finalization
+
+    require_module_seal(current_quarantine_finalization)
+    current_quarantine_finalization.before_terminal(caller, run, proof)
     caller.begin_terminal("action-completion")
     caller.close_action(run.ledger, run.identity, proof)
     print(result.summary)

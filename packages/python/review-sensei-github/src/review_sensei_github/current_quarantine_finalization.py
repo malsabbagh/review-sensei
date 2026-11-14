@@ -748,8 +748,38 @@ def capture_completed_preview(
     )
 
 
+def _execution_module():
+    from . import current_command_execution
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(current_command_execution)
+    return current_command_execution
+
+
+def lifecycle_execution_context(ledger, identity, known, added_parts):
+    return _execution_module().lifecycle_context(ledger, identity, known, added_parts)
+
+
+def consume_lifecycle_execution_context(token, proof, operation, known, added_parts):
+    return _execution_module().consume_context(
+        token, proof, operation, known, added_parts
+    )
+
+
+def validate_namespace_request(caller, deadline):
+    return _execution_module().namespace(caller, deadline)
+
+
+def before_terminal(caller, run, proof):
+    return _execution_module().before_terminal(caller, run, proof)
+
+
+def confirm_checkpoint(caller, ledger, record, persisted):
+    return _execution_module().confirm(caller, ledger, record, persisted)
+
+
 def require_execution_grant(plan):
-    """No current sizing proposal proves the complete execution/terminal lease."""
+    """Issue a distinct source invocation lease, never promote a sizing token."""
     require_module_seal(sys.modules[__name__])
     from .command_finalization_plan import CommandFinalizationPlan
 
@@ -757,9 +787,7 @@ def require_execution_grant(plan):
         raise ReviewInputError("current execution grant requires a source-issued plan")
     if is_current_plan(plan):
         require_plan(plan, plan.journal)
-        raise ReviewInputError(
-            "current quarantine complete execution and terminal lease is unqualified"
-        )
+        return _execution_module().issue(plan)
 
 
 def transfer(plan, finalizer, journal):
@@ -772,7 +800,7 @@ def transfer(plan, finalizer, journal):
             "current held execution transfer is unissued or consumed"
         )
     saved = require_plan(plan, plan.journal)
-    require_execution_grant(plan)
+    _execution_module().require_plan_lease(plan)
     require_finalizer_copy_source(finalizer)
     if (
         journal.ledger is not saved["ledger"]
@@ -790,7 +818,16 @@ def transfer(plan, finalizer, journal):
     operation._current_quarantine_preparation = proof
     require(proof, operation)
     _EXECUTED[plan] = proof
+    _execution_module().attach(plan, journal)
     return operation
+
+
+from .quarantine_command_namespace import (  # noqa: E402
+    install_current_validator as _install_current_validator,
+)
+
+_install_current_validator(validate_namespace_request)
+del _install_current_validator
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

@@ -2396,10 +2396,14 @@ class ApiRunRequestTransport:
         persisted.require_successor(self.accounting)
         from review_sensei.source_registry import require_module_seal
 
-        from . import quarantine_command_successor
+        from . import current_quarantine_finalization, quarantine_command_successor
 
         require_module_seal(quarantine_command_successor)
         quarantine_command_successor.confirm_checkpoint(self, ledger, record, persisted)
+        require_module_seal(current_quarantine_finalization)
+        current_quarantine_finalization.confirm_checkpoint(
+            self, ledger, record, persisted
+        )
         from .quarantine_checkpoint import expire
 
         expire(getattr(self, "_quarantine_checkpoint_snapshot", None))

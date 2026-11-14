@@ -1050,6 +1050,7 @@ class _LifecycleExtension:
     historical_execution: tuple[Any, Any, tuple[tuple[int, int], ...], int] | None = (
         None
     )
+    current_execution: tuple[Any, Any, tuple[tuple[int, int], ...], int] | None = None
 
 
 def _current_lifecycle_sizing(ledger, identity, known, added_parts):
@@ -1089,6 +1090,26 @@ def _historical_lifecycle_execution(ledger, identity, known, added_parts):
     return None if token is None else (issuer, token, tuple(known.items()), added_parts)
 
 
+def _current_lifecycle_execution(ledger, identity, known, added_parts):
+    """A separate current invocation context, never a promoted sizing token."""
+    import importlib
+
+    from review_sensei.source_registry import require_module_seal
+
+    name = "review_sensei_github.current_quarantine_finalization"
+    try:
+        issuer = importlib.import_module(name)
+    except ModuleNotFoundError as error:
+        if error.name != name:
+            raise
+        return None
+    require_module_seal(issuer)
+    token = issuer.lifecycle_execution_context(
+        ledger, identity, known=known, added_parts=added_parts
+    )
+    return None if token is None else (issuer, token, tuple(known.items()), added_parts)
+
+
 def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
     """Pure append-only capacity proposal; retain every original unknown slot."""
     from review_sensei.bounded_evidence import MAX_STORED_PART_BYTES, MAX_STORED_PARTS
@@ -1106,13 +1127,23 @@ def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
         raise ReviewInputError("quarantine lifecycle installed tail is unsupported")
     sizing = None
     historical_execution = None
+    current_execution = None
     if not guard.complete_tail:
         sizing = _current_lifecycle_sizing(ledger, identity, known, added_parts)
         if sizing is None:
             historical_execution = _historical_lifecycle_execution(
                 ledger, identity, known, added_parts
             )
-        if sizing is None and historical_execution is None:
+            current_execution = _current_lifecycle_execution(
+                ledger, identity, known, added_parts
+            )
+        if historical_execution is not None and current_execution is not None:
+            raise ReviewInputError("quarantine lifecycle execution scopes overlap")
+        if (
+            sizing is None
+            and historical_execution is None
+            and current_execution is None
+        ):
             raise ReviewInputError("quarantine lifecycle installed tail is unsupported")
     bounds = (MAX_PART_BYTES + 512,) * added_parts
     if set(old.known) - set(known):
@@ -1154,6 +1185,7 @@ def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
         bounds,
         sizing,
         historical_execution,
+        current_execution,
     )
     _CAPACITY_EXTENSIONS[proof] = _extension_seal(proof)
     if (
@@ -1221,6 +1253,14 @@ def _extension_seal(proof):
             id(proof.historical_execution[1]),
             proof.historical_execution[2],
             proof.historical_execution[3],
+        ),
+        None
+        if proof.current_execution is None
+        else (
+            id(proof.current_execution[0]),
+            id(proof.current_execution[1]),
+            proof.current_execution[2],
+            proof.current_execution[3],
         ),
     )
 
@@ -1420,6 +1460,8 @@ def activate_lifecycle_extension(proof, *, capability=None, operation=None):
         proof
     ) != _extension_seal(proof):
         raise ReviewInputError("quarantine lifecycle capacity extension is unissued")
+    if proof.current_execution is not None and proof.historical_execution is not None:
+        raise ReviewInputError("quarantine lifecycle execution scopes overlap")
     if proof.sizing is not None:
         raise ReviewInputError(
             "quarantine lifecycle sizing proposal cannot authorize execution"
@@ -1432,6 +1474,14 @@ def activate_lifecycle_extension(proof, *, capability=None, operation=None):
         from review_sensei.source_registry import require_module_seal
 
         issuer, token, known, parts = proof.historical_execution
+        require_module_seal(issuer)
+        issuer.consume_lifecycle_execution_context(
+            token, proof, operation, known=dict(known), added_parts=parts
+        )
+    if proof.current_execution is not None:
+        from review_sensei.source_registry import require_module_seal
+
+        issuer, token, known, parts = proof.current_execution
         require_module_seal(issuer)
         issuer.consume_lifecycle_execution_context(
             token, proof, operation, known=dict(known), added_parts=parts
