@@ -36,21 +36,28 @@ class OrdinaryBodyReadTests(unittest.TestCase):
 
         from review_sensei.errors import ReviewInputError
 
-        publisher, journal, _ = (
+        publisher, journal, http = (
             read_fixtures.OrdinaryPublicationReadCustodyTests().fixture()
         )
+        attempts = []
 
-        class NoTransport:
-            def request(self, *args, **kwargs):
-                raise AssertionError("unfunded optional role dispatched")
+        def no_network(request, timeout):
+            attempts.append(request)
+            raise AssertionError("unfunded optional role dispatched")
 
+        # Configure the genuine transport before the original source observer
+        # captures it. A foreign transport would test custody, not exhaustion.
+        http.opener = no_network
         with reads.observe_publication(publisher, journal) as observation:
-            # Negative-only budget model: no source capability is manufactured.
+            # Component-level negative only: this adds no role or capability.
             reads._REMAINING[observation] = dict(reads._ROLES)
+            before = dict(reads._REMAINING[observation])
             with self.assertRaisesRegex(ReviewInputError, "exceeds source tail"):
-                observation.read(
-                    NoTransport(), "GET", "/repos/owner/repo/pulls/1/reviews/17", {}
+                publisher.http.request(
+                    "GET", "/repos/owner/repo/pulls/1/reviews/17", token="test"
                 )
+            self.assertEqual(reads._REMAINING[observation], before)
+        self.assertEqual(attempts, [])
 
     def test_normal_body_source_derived_one_short_has_zero_native_effects(self):
         case = populated.OrdinaryPopulatedPublicationTests()
