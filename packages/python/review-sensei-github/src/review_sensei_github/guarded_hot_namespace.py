@@ -657,7 +657,7 @@ def _registry():
         if (
             frame.f_code is not begin.__code__
             or frame.f_globals is not globals()
-            or frame.f_locals.get("entry") is not entry
+            or id(frame.f_locals.get("entry")) != id(entry)
             or frame.f_locals.get("caller") is not caller
             or frame.f_locals.get("record") is not record
             or record is not entry["record"]
