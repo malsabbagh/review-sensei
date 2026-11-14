@@ -139,7 +139,7 @@ class CheckoutRunnerTests(CheckoutAccountingChecks, unittest.TestCase):
                 "--controller-module",
                 "test_provider_common_flow",
                 "--costs",
-                "tests/fixtures/checkout-class-seconds-macos.json",
+                "tests/fixtures/checkout-class-seconds-linux.json",
                 "--report",
                 "${{ runner.temp }}/checkout-timings.json",
             ],

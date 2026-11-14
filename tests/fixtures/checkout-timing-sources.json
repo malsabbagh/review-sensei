@@ -1,0 +1,112 @@
+{
+  "source_at_refresh": "c021eeb205d0ca3c5293d572ef2c2dc45c4b087b",
+  "inventory_at_refresh": "ebaa9e18f11de31d660505e1e0f684c453479867f73288f44c6047e7bc92977a",
+  "sources": [
+    {
+      "cost_fixture": "tests/fixtures/checkout-class-seconds-macos.json",
+      "run_url": "https://github.com/malsabbagh/review-sensei/actions/runs/43602325609",
+      "artifact_id": 14121768243,
+      "platform": "macos-latest Python 3.13 arm64",
+      "timing_json_sha256": "f4c888a5a4090fe71e538f1febb54845f382bacca14e6d4d464dc1f51eb0c5fc",
+      "inventory_sha256": "289266f1465064086bde3354d41ca04bc9bdffd80662bbd1ec9f4ef6e3e39928",
+      "discovered": 6813,
+      "execution_complete": true,
+      "worker_exits": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "tests_passed": false,
+      "coverage_ok": null,
+      "elapsed_seconds": 9561.497,
+      "measured_classes": 802,
+      "obsolete_hints": [
+        "test_writer_epoch_contention.WriterEpochContentionTests"
+      ],
+      "caveat": "Scheduling hints only. Failed paths may understate passing runtime; source differs from current candidate.",
+      "workflow_head_sha": "7003da31e81999cc641a5a9bfb1813719a9fc5e4",
+      "checkout_merge_sha": "08d2f787d2f00e709a08506348731e903747a563",
+      "unmeasured_class_count_after_audit": 32,
+      "unmeasured_class_count_at_base_refresh": 31
+    },
+    {
+      "cost_fixture": "tests/fixtures/checkout-class-seconds-linux.json",
+      "run_url": "https://github.com/malsabbagh/review-sensei/actions/runs/43602325609",
+      "artifact_id": 14122445830,
+      "platform": "ubuntu-latest Python 3.14",
+      "timing_json_sha256": "c6a20760c0b1847a4a15162a80c14c3e56facfc128c77fbaf7c3e2d79c3bed9b",
+      "inventory_sha256": "289266f1465064086bde3354d41ca04bc9bdffd80662bbd1ec9f4ef6e3e39928",
+      "discovered": 6813,
+      "execution_complete": true,
+      "worker_exits": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "tests_passed": false,
+      "coverage_ok": null,
+      "elapsed_seconds": 8988.009,
+      "measured_classes": 802,
+      "obsolete_hints": [
+        "test_writer_epoch_contention.WriterEpochContentionTests"
+      ],
+      "caveat": "Scheduling hints only. Failed paths may understate passing runtime; source differs from current candidate.",
+      "workflow_head_sha": "7003da31e81999cc641a5a9bfb1813719a9fc5e4",
+      "checkout_merge_sha": "08d2f787d2f00e709a08506348731e903747a563",
+      "unmeasured_class_count_after_audit": 32,
+      "unmeasured_class_count_at_base_refresh": 31
+    },
+    {
+      "cost_fixture": "tests/fixtures/checkout-class-seconds-coverage.json",
+      "run_url": "https://github.com/malsabbagh/review-sensei/actions/runs/43468107061",
+      "artifact_id": 14068628792,
+      "platform": "ubuntu-latest Python 3.11 branch coverage",
+      "timing_json_sha256": "695ba2f4110cacdfe5f9a1c4a383fbc5ca953396eb4fbc555c83785c16396aa7",
+      "inventory_sha256": "f711a3ba0659cf99ff44c6055bfb673a6b4933ad551e381a4630e95a1328aea5",
+      "discovered": 6352,
+      "execution_complete": true,
+      "worker_exits": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "tests_passed": false,
+      "coverage_ok": true,
+      "elapsed_seconds": 8632.589,
+      "measured_classes": 681,
+      "obsolete_hints": [],
+      "caveat": "Scheduling hints only. Failed paths may understate passing runtime; source differs from current candidate.",
+      "workflow_head_sha": "6bed6568f102c122070884ff84ff229ed8af6687",
+      "unmeasured_class_count_after_audit": 153,
+      "unmeasured_class_count_at_base_refresh": 152
+    },
+    {
+      "cost_fixture": "tests/fixtures/checkout-class-seconds-windows.json",
+      "run_url": "https://github.com/malsabbagh/review-sensei/actions/runs/43468107061",
+      "artifact_id": 14062660968,
+      "platform": "windows-latest Python 3.12",
+      "timing_json_sha256": "4b840c3ae5deb933422b4dd62b340fdaf0974dd7cb010483ac731325beec5c4a",
+      "inventory_sha256": "f711a3ba0659cf99ff44c6055bfb673a6b4933ad551e381a4630e95a1328aea5",
+      "discovered": 6352,
+      "execution_complete": true,
+      "worker_exits": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "tests_passed": false,
+      "coverage_ok": null,
+      "elapsed_seconds": 2444.625,
+      "measured_classes": 681,
+      "obsolete_hints": [],
+      "caveat": "Scheduling hints only. Failed paths may understate passing runtime; source differs from current candidate.",
+      "workflow_head_sha": "6bed6568f102c122070884ff84ff229ed8af6687",
+      "unmeasured_class_count_after_audit": 153,
+      "unmeasured_class_count_at_base_refresh": 152
+    }
+  ]
+}

@@ -1,0 +1,230 @@
+# ReviewSensei test and CI runtime audit, November 14, 2026
+
+## Result and limits
+
+**The under-30-minute goal is not achieved or verified.** This change makes a
+bounded first improvement: refreshed complete historical scheduling hints,
+a Linux-specific seed instead of macOS weights, and removal of two proven,
+negligible-cost duplicate assertions. It does not remove a platform, a recovery
+scenario, a process boundary, an accounting assertion, or any safety limit.
+
+The audit baseline is `c021eeb205d0ca3c5293d572ef2c2dc45c4b087b`. Discovery-only
+inspection found **6,969 test IDs in 833 classes**. After removing two duplicates
+and adding eight timing-import regressions, discovery finds **6,975 IDs in 834
+classes**. Every other original ID is retained. This is discovery evidence,
+not evidence that the complete candidate passed.
+
+The complete per-class matrix is
+[`ci-runtime-class-matrix-2026-11-14.csv`](ci-runtime-class-matrix-2026-11-14.csv).
+It lists every final discovered class, source file, all method/scenario names,
+declared contract, cross-platform lanes, installed-helper status, available
+historical timings, and proposed action. Blank timing cells mean unmeasured,
+not zero. Declaration descriptions are orientation; actual assertions remain
+in the referenced source. Installed-helper status does not imply that every
+method is selected by every installed wrapper.
+
+## Historical evidence
+
+| Receipt | Inventory | Measured elapsed | Result |
+| --- | ---: | ---: | --- |
+| [macOS Python 3.13, run 43602325609/job 132469545939](https://github.com/malsabbagh/review-sensei/actions/runs/43602325609/job/132469545939), artifact 14121768243 | 6,813 | 9,561.497 s / 159.36 min | All IDs accounted; all four workers exited 1 |
+| [Linux Python 3.14, run 43602325609/job 132469545764](https://github.com/malsabbagh/review-sensei/actions/runs/43602325609/job/132469545764), artifact 14122445830 | 6,813 | 8,988.009 s / 149.80 min | All IDs accounted; all four workers exited 1 |
+| [Linux Python 3.11 coverage, run 43468107061](https://github.com/malsabbagh/review-sensei/actions/runs/43468107061), artifact 14068628792 | 6,352 | 8,632.589 s / 143.88 min | All IDs accounted; coverage combined; all four workers exited 1 |
+| [Windows Python 3.12, run 43468107061](https://github.com/malsabbagh/review-sensei/actions/runs/43468107061), artifact 14062660968 | 6,352 | 2,444.625 s / 40.74 min | All IDs accounted; all four workers exited 1 |
+| [Installed suite, run 43626273898/job 132542807638](https://github.com/malsabbagh/review-sensei/actions/runs/43626273898/job/132542807638), artifact 14131367317 | 1,139 | 8,207.605 s / 136.79 min | All 1,139 started; each worker execution-complete; all four exited 1 |
+
+A checkout receipt's `complete: true` records inventory/coverage completeness;
+it is **not** a passing-test declaration. These failed historical paths can cost
+less than their eventual passing paths. Neither a combined coverage file nor
+`coverage_ok: true` proves the required 80% report floor was reached. Current
+branch coverage is unmeasured by this audit.
+
+The macOS job used Python 3.13.17 arm64 and checked out merge
+`08d2f787d2f00e709a08506348731e903747a563`, merging head `7003da31e81999cc641a5a9bfb1813719a9fc5e4`
+into base `71272181fd3dde301ad304c6ba88d150b5238a0a`. Bare-head discovery has
+6,810 IDs; three `WriterEpochContentionTests` identities from the archived job
+account for the difference. The reconstructed 6,813-ID inventory matches the
+receipt's SHA-256 exactly:
+`289266f1465064086bde3354d41ca04bc9bdffd80662bbd1ec9f4ef6e3e39928`.
+This distinction prevents treating a different checkout as the measured source.
+The older 6,352-ID discovery likewise reproduces its recorded inventory hash.
+
+Provenance for the refreshed seeds, including artifact IDs, source heads,
+receipt hashes and failing exits, is retained in
+[`checkout-timing-sources.json`](../tests/fixtures/checkout-timing-sources.json).
+The three merge-only writer-epoch tests are not removed by this change. Their
+cost hint is absent from the branch-only inventory, so future merged discovery
+still runs them using normal fallback scheduling.
+
+### Where the time goes
+
+The macOS receipt's workers executed 1,724 / 1,689 / 1,555 / 1,729 methods,
+respectively, in 7,428.111 / 8,339.631 / 9,558.290 / 7,677.649 seconds. The
+controller executed 116 methods in 3.101 seconds. The imbalance is real, but
+measured worker-class time totals **32,972.183 seconds**. Even perfect scheduling
+on four equal workers needs approximately **137.38 minutes**, before startup
+and other CI gates.
+
+| Historical class | macOS seconds | Contract that must remain |
+| --- | ---: | --- |
+| `test_quarantine_checkpoint.QuarantineCheckpointTests` | 1,157.773 | Changed/foreign/wrong-owner roots at both fences; stored, absent and failed confirmations; no extra writes or cleared uncertainty |
+| `test_materialized_checkpoint_coalescing.MaterializedCheckpointCoalescingTests` | 1,102.303 | Fresh census adjacency, changed receipt ownership/deadline/block, single PATCH and original confirmation liability |
+| `test_hosted_cold_dictionary_mutations.HostedColdDictionaryMutationTests` | 1,080.227 | Deleted, edited and foreign-producer mutations for both dictionary and outer lifecycle; real fresh-process reader; no repost |
+| `test_action_run.CurrentCommandEntryTests` | 995.731 | Ordinary authenticated command entry and native-effect boundaries |
+| `test_verified_fixed_command_prefix.VerifiedFixedCommandPrefixTests` | 949.605 | Complete command-prefix funding, including contingent fixed-target outcomes |
+| `test_review_run.ConsecutiveReviewRunTests` | 947.955 | Multiple actual review entries, original retained state and accounting |
+| `test_quarantine_command_preflight.ColdCommandPreflightTests` | 930.409 | Cold complete command admission before effects |
+| `test_quarantine_checkpoint.QuarantineRolloverTests` | 921.097 | Startup rollover fence and lost-response matrix, original predecessor held |
+| `test_override_metadata_integration.HostedOverrideMetadataTests` | 735.091 | Hosted metadata and disposition integration |
+| `test_quarantine_checkpoint.QuarantineCarrierPlanningTests` | 693.868 | Funded/unfunded staging; human/wrong-bot/association variants |
+
+The installed receipt presents a separate bottleneck: the indivisible scheduling
+unit `test_quarantine_contract.py::test_quarantine_checkpoint` alone consumed
+**7,478.681 seconds (124.64 minutes)**. `test_current_run_contract.py` consumed
+4,683.103 seconds; the quarantine journey unit consumed 2,711.911 seconds.
+The reported final shard's 282 methods were not the whole suite. All four shards
+together started 1,139 methods. More workers alone cannot reduce an indivisible
+124-minute unit to under 30 minutes.
+
+## Changes implemented
+
+1. **Refresh all measured class hints, not only the old top 100.** macOS and Linux
+   now have 802 applicable class costs each; coverage and Windows have 681 each.
+   Previously the platform top-100 seeds covered only about 35.5% of the newer
+   macOS measured work. Unknown classes remain discovered and executable.
+2. **Use actual Linux measurements for Linux scheduling.** Linux 3.14 timings
+   seed both Linux interpreter lanes; they are not represented as measured Linux
+   3.11 times. Windows and coverage retain their own separate inputs.
+3. **Add an offline, failure-explicit refresh helper.**
+   `scripts/refresh_checkout_costs.py` checks complete phase accounting, finite
+   timings, duplicate class ownership and total inventory counts before writing
+   a cost file. Failed-test receipts require `--allow-failing-tests` and report
+   `tests_passed: false`. The helper never imports or executes tests, changes
+   scope, launches CI, or supplies qualification evidence.
+4. **Remove exactly two redundant methods.** See the proof table below. No
+   runtime production module changes, generic budget changes, fixture caches,
+   response-limit changes, or source-verification bypasses were made.
+5. **Keep the four-worker runner and every gate unchanged.** The new regression
+   module is explicitly checkout-only in the distribution contract. No installed
+   helper, wheel import guard, or reusable release-workflow bytes changed.
+
+### Scheduling result: modeled, not a new full-run measurement
+
+The original historical inventories reproduce every archived worker-assignment
+hash using the original cost seeds. Repartitioning the same IDs with refreshed
+weights leaves every identity exactly once and every class intact. Holding each
+historical class duration fixed gives:
+
+| Lane | Original modeled critical worker | Refreshed modeled critical worker | Modeled reduction |
+| --- | ---: | ---: | ---: |
+| macOS | 9,552.802 s | 8,243.600 s | 1,309.202 s / 13.70% |
+| Linux 3.14 | 8,982.469 s | 7,763.760 s | 1,218.709 s / 13.57% |
+| Coverage | 8,620.932 s | 7,480.671 s | 1,140.261 s / 13.23% |
+| Windows | 2,384.125 s | 2,283.221 s | 100.904 s / 4.23% |
+
+These exclude subprocess/fixture overhead and do not predict changed contention,
+changed source, new tests, or passing-path costs. They must not be described as
+observed wall-time improvements. The full per-worker counterfactual is recorded
+in [`ci-runtime-scheduling-model-2026-11-14.json`](ci-runtime-scheduling-model-2026-11-14.json).
+
+### Exact duplicate proof
+
+| Removed method | Canonical retained method | Evidence |
+| --- | --- | --- |
+| `test_context.ReviewContextSelectionTests.test_enabled_policy_rejects_head_snapshot_kind` | `test_context_lifecycle.ContextLifecycleTests.test_context_snapshot_rejects_untrusted_head_kind` | Identical `ContextSnapshot("a" * 40, kind="head")` construction and `ContextLoadError` assertion; identical symbol origins; neither class has a setup affecting this method |
+| `test_outcomes_verifier_manifest.ContractsTests.test_manifest_rejects_mismatched_release_versions` | `test_promotion_release.PromotionAndReleaseTests.test_manifest_rejects_mismatched_release_versions` | Identical document, `SHA = "a" * 64`, validator and `ReviewInputError`; no relevant setup; return annotation is the only non-behavioral method difference |
+
+All four original methods passed together in **0.001 seconds** before removal.
+The removals are cleanup, not an explanation for hours of saved runtime.
+
+Other similar cases were deliberately retained: trigger-command tests use
+different pull fixtures; checkout and installed local-CLI tests exercise different
+import/distribution boundaries. Expensive quarantine fence, rollover and
+coalescing scenarios vary effect location, fault type, ownership, cold state or
+liability and are not demonstrated duplicates. No high-cost redundant scenario
+was established.
+
+## Preserved platform and gate matrix
+
+| Gate | Required platforms/runtime | Distinct contract |
+| --- | --- | --- |
+| Checkout compatibility | Linux 3.11 and 3.14, Windows 3.12, macOS 3.13 | Complete discovered checkout inventory, controller hook once, four disjoint workers |
+| Quality | Linux 3.11 | Complete branch coverage, **80% floor**, Ruff, mypy, compile and quarantine-registry continuity |
+| Schemas/Action pins | Linux 3.11 | Public JSON, immutable legacy readers, corpus, site, protection policy, seeded CodeQL and fixture evaluation |
+| Package | Linux 3.11 | Built wheel/sdist, clean core-only/hosted installs, dist-safe and downstream suites, installed publication and launcher qualification |
+| npm contracts | Linux Node 22 / Python 3.11 | Launcher/package contracts and lifecycle-disabled packing |
+| Linux native | x64 and ARM64 | Debian 12 build/smoke and exact source-bound archive |
+| Intel native | Intel macOS, Python 3.11.9 | ABI, frozen engine boundary and CLI parity |
+| Other native | Apple Silicon macOS and Windows x64 | Native build/smoke and exact archive |
+| Candidate assembly | Linux | Requires all five native bundles, preserves exact provenance |
+| Installed candidate consumers | Both Linux architectures, both macOS architectures, Windows x64 | Offline installation and actual installed launcher/native bytes |
+| Cloudflare Worker | Linux Node 22 / Python 3.11 | Production broker IPC, accounting, media, caller/command/quarantine/body/tail composition, TypeScript checks and dry-run bundle |
+| CodeQL | Python and JavaScript/TypeScript | Actual analysis plus findings gate |
+| Required checks | Aggregate | Every dependency succeeds; skipped/failed/cancelled gates are not accepted |
+
+The separate path-filtered major-tag-validation workflow preserves Linux/macOS
+Python 3.14 historical released-wheel regression. Manually dispatched downstream,
+local-contract and readback workflows remain unchanged. Native build → assembly →
+installed-consumer dependencies matter to total elapsed time; their individual
+30/15/15-minute timeouts are not an aggregate 30-minute guarantee.
+
+## Verification and execution holds
+
+- Baseline and final discovery were read-only, without executing test bodies.
+- Four duplicate candidates: 4 passed in 0.001 seconds before cleanup.
+- A first targeted audit command ran 167 tests in 27.346 seconds and terminated
+  successfully. It included the checkout-runner regression module and the four
+  small duplicate-test modules, not the full product suite.
+- **Execution-scope correction:** an exact member of a pre-existing unreconciled
+  historical selection was supplied after that command: the runner method
+  `test_real_workers_report_success_for_the_complete_inventory`. The first audit
+  command had repeated it. This was a coordination error, not reconciliation of
+  the original selection. Its original hold remains in force, and no repeat of
+  that method or broad runner selection is used to clear it.
+- After receiving the complete held manifest, the final targeted selection
+  explicitly excluded that one held method and passed **166 tests in 7.456
+  seconds**. The runtime difference is due to a different selection and is not
+  claimed as a speed improvement. No other known held selection overlaps it.
+- Full checkout/coverage/installed-suite executions remain held until the original
+  selections are reconciled. Targeted success is not a full-candidate pass. No
+  replacement CI run was started.
+- Whole-repository Ruff format/check passed for 1,032 Python files; Action pin
+  validation passed for 19 workflows; JSON contracts, public schemas, helper
+  compilation and `git diff --check` passed. Validation initially used an
+  interpreter without editable imports, then passed with the documented source
+  paths and pinned test environment. No source-package changes require a new
+  full mypy or release build in this scheduling-only slice. No merge, deployment, live recovery,
+  native approval, protection change or access expansion was performed.
+
+## Credible path to under 30 minutes
+
+1. **First reconcile the held executions and fix correctness failures.** A faster
+   failed run is not the objective. Refresh timings from a complete passing
+   exact-candidate run when existing owners permit it; retain all original
+   accounting/effect evidence.
+2. **Profile the dominant setup/source-verification paths.** Begin with quarantine
+   checkpoint, coalescing, dictionary producer and ordinary command entry. Separate
+   fixture generation, source verification, serialization and subprocess time.
+   Reusing an immutable fixture seed is a candidate only after proving independent
+   mutable state, unchanged source-freshness guarantees and the same actual crash
+   and cold-reader boundaries. Do not cache authority or disable authenticity.
+3. **Make installed scheduling units safely divisible where possible.** The
+   7,478-second checkpoint unit needs fixture-ownership analysis before splitting;
+   preserve module/class setup, wrapper load hooks, import guards and exact total
+   accounting. Merely raising the worker count cannot repair that floor.
+4. **Then consider additional independent CI shards while preserving every OS.**
+   At fixed historical macOS costs, 16 equal workers still need at least 34.35
+   minutes of class work. Twenty equal independent workers model approximately
+   27.48 minutes before overhead; twenty-four model 22.90 minutes. Those are
+   resource estimates, not tested runner settings or approved compute expansion.
+   Existing runner bounds remain 1–16, and CI remains at four workers. Actual
+   runner CPU/IO capacity, GitHub concurrency and total spend must be measured.
+5. **Acceptance is complete exact-head green CI under 30 minutes**, with the same
+   platform matrix, original inventory minus only documented true duplicates,
+   at least 80% branch coverage, every installed/native/Worker gate, and timing
+   receipts showing no missing or duplicated execution. Record end-to-end workflow
+   duration as well as each lane; include the build/assembly dependency chain.
+
+This is an isolated test/tooling scheduling change, not a durable production
+contract change; no new ADR is required. The unchanged safety and runtime
+contracts remain the authority.

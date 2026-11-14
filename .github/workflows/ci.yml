@@ -49,17 +49,18 @@ jobs:
           python -m pip install -e packages/python/review-sensei-github --no-deps
       - name: Compile sources
         run: python -m compileall -q src
-      # The 100 slowest measured classes from complete macOS CI run
-      # 41457607346; these hints affect scheduling, not discovery or scope.
+      # Complete-inventory macOS timings: run 43602325609, artifact 14121768243.
+      # Its tests failed; these are scheduling hints, never passing evidence.
       - name: Run every macOS test in isolated processes
         if: runner.os == 'macOS'
         run: python scripts/run_checkout_tests.py --workers 4 --controller-module test_provider_common_flow --costs tests/fixtures/checkout-class-seconds-macos.json --report "${{ runner.temp }}/checkout-timings.json"
-      # Reuse the macOS measurements above as scheduling seeds, not Linux timings.
+      # Linux 3.14 measurements from the same run (artifact 14122445830).
+      # Reuse as hints for Linux 3.11, not as its measured duration or a pass.
       - name: Run every Linux test in isolated processes
         if: runner.os == 'Linux'
-        run: python scripts/run_checkout_tests.py --workers 4 --controller-module test_provider_common_flow --costs tests/fixtures/checkout-class-seconds-macos.json --report "${{ runner.temp }}/checkout-timings.json"
-      # The 100 slowest measured classes from complete Windows CI run
-      # 41456441033; these hints affect scheduling, not discovery or scope.
+        run: python scripts/run_checkout_tests.py --workers 4 --controller-module test_provider_common_flow --costs tests/fixtures/checkout-class-seconds-linux.json --report "${{ runner.temp }}/checkout-timings.json"
+      # Complete-inventory Windows timings: run 43468107061, artifact 14062660968.
+      # Its tests failed; preserve all tests and use timings only for scheduling.
       - name: Run every Windows test in isolated processes
         if: runner.os == 'Windows'
         run: python scripts/run_checkout_tests.py --workers 4 --controller-module test_provider_common_flow --costs tests/fixtures/checkout-class-seconds-windows.json --report "${{ runner.temp }}/checkout-timings.json"
@@ -104,8 +105,8 @@ jobs:
         run: python -m mypy src packages/python/review-sensei-github/src
       - name: Compile sources
         run: python -m compileall -q src
-      # The 100 slowest measured classes from complete coverage CI run
-      # 41390172802; this affects scheduling, not discovery or test scope.
+      # Complete-inventory coverage timings: run 43468107061, artifact 14068628792.
+      # Its tests failed; this changes scheduling, not test or coverage scope.
       - name: Branch coverage
         run: |
           python scripts/run_checkout_tests.py --workers 4 --controller-module test_provider_common_flow --coverage --costs tests/fixtures/checkout-class-seconds-coverage.json --report "$RUNNER_TEMP/checkout-timings.json"

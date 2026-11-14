@@ -148,6 +148,17 @@ valid zero count remains distinguishable and cannot match a nonempty assignment.
 Combined checkout coverage is saved as `.coverage` in the runner working
 directory, the public handoff consumed by the next `coverage report` command.
 
+Use `scripts/refresh_checkout_costs.py` to refresh scheduling hints from a complete
+checkout timing receipt and a JSON list of currently discovered class names.
+It does not discover or run tests. The helper rejects damaged or incomplete
+accounting; failed-but-fully-executed receipts require `--allow-failing-tests`
+and are explicitly reported as failures. Such timings can understate successful
+paths and never qualify a candidate. Obsolete cost hints are reported and omitted;
+unmeasured classes remain in normal discovery with the runner's fallback estimate.
+Keep the artifact, source, platform and inventory provenance with a refresh.
+See [the November 14 runtime audit](docs/ci-runtime-audit-2026-11-14.md) for the
+current measurement limits and preserved CI contracts.
+
 CI's Python jobs cache public pip downloads using all pinned requirements
 and both package manifests as cache inputs; they reinstall the current checkout and
 run every gate. Compatibility, schemas, npm and Worker IPC lanes install
