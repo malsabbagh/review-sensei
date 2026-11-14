@@ -3259,6 +3259,9 @@ class ReviewApprovalFinalizer:
         require(preparation)
         operation = copy(self)
         operation._quarantine_capacity_preparation = preparation
+        from .quarantine_command_finalization import hydrate_sizing_states
+
+        hydrate_sizing_states(preparation, operation)
         return operation.prepare_command_capacity(**arguments)
 
     def prepare_command_capacity(self, **arguments):

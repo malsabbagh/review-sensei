@@ -20,6 +20,7 @@ from .quarantine_lifecycle_transfer import sizing_snapshot
 
 _PREPARED: WeakKeyDictionary = WeakKeyDictionary()
 _OBSERVATIONS: WeakKeyDictionary = WeakKeyDictionary()
+_NATIVE_PLANS: WeakKeyDictionary = WeakKeyDictionary()
 
 
 @dataclass(frozen=True, eq=False)
@@ -55,6 +56,19 @@ def observe_plan(finalizer, *, payload, states, check_token, cleanup_instances=N
         finalizer._quarantine_capacity_preparation,
         observed.payload,
         observed.state_bytes,
+    )
+    # This private source plan is only an input to the existing pure branch
+    # generator. Its nonadmitting contract still cannot enter ordinary execution.
+    from . import command_finalization_plan
+
+    require_module_seal(command_finalization_plan)
+    sizing_finalizer = _detached_sizing_finalizer(finalizer)
+    _NATIVE_PLANS[observed] = command_finalization_plan.issue_plan(
+        sizing_finalizer,
+        payload=payload,
+        states=states,
+        check_token=check_token,
+        cleanup_instances=cleanup_instances,
     )
     return observed
 
@@ -105,6 +119,230 @@ def require_finalizer_copy_source(finalizer):
         if not name.startswith("__") and callable(getattr(type(finalizer), name))
     )
     require_instance_source(finalizer, methods=methods)
+
+
+def hydrate_sizing_states(preparation, finalizer):
+    """Install retained state only in the already detached observation finalizer."""
+    from review_sensei.active_finding_window import ActiveWindowRoundState
+    from review_sensei.finding_lifecycle import decode_lifecycle_state
+
+    saved = require(preparation)
+    require_finalizer_copy_source(finalizer)
+    if finalizer is saved["app"].reviewer.finalizer:
+        raise ReviewInputError("quarantine sizing cannot hydrate the live finalizer")
+    document = json.loads(saved["document"])
+    state = decode_lifecycle_state(document["lifecycle"]).state
+    binding = saved["record"].finding_lifecycle["manifest"]["binding"]
+    if state.head_sha != binding["head_sha"] or state.base_sha != binding["base_sha"]:
+        raise ReviewInputError("quarantine sizing retained snapshot changed")
+    key = (saved["run"].identity.repository_id, saved["run"].identity.pull_request)
+    finalizer._active_window_states = dict(finalizer._active_window_states)
+    finalizer._drift_states = dict(finalizer._drift_states)
+    if isinstance(state, ActiveWindowRoundState):
+        finalizer._active_window_states[key] = state
+        finalizer._drift_states.pop(key, None)
+    else:
+        finalizer._drift_states[key] = state
+        finalizer._active_window_states.pop(key, None)
+    finalizer._unknown_effect_holds = set(finalizer._unknown_effect_holds)
+    if document["unknown_trust_effect"]:
+        finalizer._unknown_effect_holds.add(key)
+
+
+def _detached_sizing_finalizer(finalizer):
+    """Hydrate only detached sizing objects from the authenticated original bytes."""
+    from copy import copy
+
+    from review_sensei.finding_lifecycle import decode_lifecycle_state
+    from review_sensei.source_registry import require_instance_source
+
+    saved = require(finalizer._quarantine_capacity_preparation, finalizer=finalizer)
+    require_finalizer_copy_source(finalizer)
+    original = finalizer._finding_lifecycle_journal
+    for owner in (original, original.reviewer):
+        require_instance_source(owner, methods=())
+        if any(
+            name in owner.__dict__
+            for name in (
+                "__copy__",
+                "__deepcopy__",
+                "__reduce__",
+                "__reduce_ex__",
+                "__getstate__",
+                "__setstate__",
+            )
+        ):
+            raise ReviewInputError("quarantine detached sizing copy source changed")
+        require_instance_source(
+            owner,
+            methods=tuple(
+                name
+                for name in dir(type(owner))
+                if not name.startswith("__") and callable(getattr(type(owner), name))
+            ),
+        )
+    document = json.loads(saved["document"])
+    restored = decode_lifecycle_state(document["lifecycle"])
+    if (
+        restored.state.head_sha != original.head_sha
+        or restored.state.base_sha != original.base_sha
+    ):
+        raise ReviewInputError("quarantine detached sizing snapshot changed")
+    journal = copy(original)
+    reviewer = copy(original.reviewer)
+    journal.reviewer = reviewer
+    journal._planned = restored.state
+    journal._input_identity = restored.input_identity
+    key = (journal.identity.repository_id, journal.identity.pull_request)
+    reviewer._drift_concern_history = {
+        (*key, obligation): concerns
+        for obligation, concerns in restored.concern_history.items()
+    }
+    reviewer._native_finding_receipt_records = {
+        key: {receipt["instance"]: receipt for receipt in document["native_receipts"]}
+    }
+    reviewer._unknown_effect_holds = (
+        {key} if document["unknown_trust_effect"] else set()
+    )
+    if canonical_bytes(journal._document()) != saved["document"]:
+        raise ReviewInputError("quarantine detached sizing lost retained evidence")
+    detached = copy(finalizer)
+    detached._finding_lifecycle_journal = journal
+    return detached
+
+
+def measure_inline_branches(observation):
+    """Keep the original caller's width witness unchanged after pure sizing."""
+    saved = require_observation(observation)
+    caller = saved["run"].caller
+    missing = object()
+    previous = getattr(caller, "_accepted_semantic_capacity", missing)
+    try:
+        return _measure_inline_branches(observation)
+    finally:
+        if previous is missing:
+            caller.__dict__.pop("_accepted_semantic_capacity", None)
+        else:
+            caller._accepted_semantic_capacity = previous
+
+
+def _measure_inline_branches(observation):
+    """Measure all reached prefixes under the original inline/root/history caps.
+
+    No reader price, part allocation or permission is inferred from this value.
+    A single non-inline branch refuses the proposed inline-only route.
+    """
+    from review_sensei import finding_lifecycle_store
+    from review_sensei.source_registry import require_instance_source
+
+    from . import accepted_semantic_history, finding_lifecycle, quarantine_action
+    from .publication import ReviewPublisher
+
+    saved = require_observation(observation)
+    plan = _NATIVE_PLANS.get(observation)
+    if plan is None:
+        raise ReviewInputError("quarantine native branch source is unavailable")
+    require_module_seal(finding_lifecycle_store)
+    require_module_seal(finding_lifecycle)
+    require_module_seal(accepted_semantic_history)
+    journal = plan.journal
+    if type(journal.reviewer) is not ReviewPublisher:
+        raise ReviewInputError("quarantine branch reviewer source is unsupported")
+    for owner in (journal, journal.reviewer):
+        require_instance_source(owner, methods=())
+        if any(
+            name in owner.__dict__
+            for name in (
+                "__copy__",
+                "__deepcopy__",
+                "__reduce__",
+                "__reduce_ex__",
+                "__getstate__",
+                "__setstate__",
+            )
+        ):
+            raise ReviewInputError("quarantine branch copy protocol changed")
+        require_instance_source(
+            owner,
+            methods=tuple(
+                name
+                for name in dir(type(owner))
+                if not name.startswith("__") and callable(getattr(type(owner), name))
+            ),
+        )
+    run, target, record = saved["run"], saved["target"], saved["record"]
+    action = run.caller.accounting.action
+    if action is None or action.get("execution_started") is not False:
+        raise ReviewInputError("quarantine branch measurement is not pre-effect")
+    accepted_semantic_history.preflight_history_capacity(
+        run.caller, run.identity, action["intent"]
+    )
+    alternatives, _pending, item_count, requests, _dictionary = (
+        journal._command_branch_documents(plan, http=plan.http, budget=plan.budget)
+    )
+    generation = record.generation + (2 if saved["projection"].creates_event else 1)
+    fields = {}
+    if saved["projection"].creates_event:
+        projected = project_decision(
+            target.authenticated,
+            record,
+            quarantine_action._decision_value(
+                run,
+                saved["authority"],
+                target.command,
+                target.instance,
+                target.permission,
+            ),
+            binding={
+                **quarantine_action._decision_binding(record, run),
+                "generation": generation,
+            },
+        )
+        fields["quarantine_lineage"] = {
+            **record.quarantine_lineage,
+            "assessment_state_manifest": json.loads(projected.cursor_manifest_bytes),
+        }
+    prospective = record.evolve(generation=generation, **fields)
+    branches = []
+    for documents, _exact in alternatives:
+        current = prospective
+        checkpoints = []
+        for document in documents:
+            _reference, envelope, _parts, _allowance, candidate = (
+                finding_lifecycle_store._prepare_lifecycle(
+                    run.ledger,
+                    current,
+                    document=document,
+                    operation_id=journal.operation_id,
+                    base_sha=journal.base_sha,
+                    head_sha=journal.head_sha,
+                    policy_digest=journal.policy_digest,
+                    configuration_digest=journal.configuration_digest,
+                    item_count=item_count,
+                )
+            )
+            if candidate.finding_lifecycle["manifest"]["encoding"] != "inline-json-v1":
+                raise ReviewInputError(
+                    "quarantine complete command requires a non-inline checkpoint"
+                )
+            checkpoints.append(
+                {
+                    "root_bytes": len(canonical_bytes(candidate.to_dict())),
+                    "reference_bytes": len(
+                        canonical_bytes(candidate.finding_lifecycle)
+                    ),
+                    "envelope_bytes": len(canonical_bytes(envelope)),
+                }
+            )
+            current = candidate
+        branches.append(tuple(checkpoints))
+    require_observation(observation)
+    return {
+        "branches": tuple(branches),
+        "max_checkpoints": max(len(branch) for branch in branches),
+        "native_requests": requests,
+        "prospective_root_bytes": len(canonical_bytes(prospective.to_dict())),
+    }
 
 
 def prepare(run, authority, target, app):

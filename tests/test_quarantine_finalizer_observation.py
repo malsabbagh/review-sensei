@@ -27,7 +27,23 @@ class QuarantineFinalizerObservationTests(unittest.TestCase):
             with self.subTest(action=action):
                 self.exercise(published_count=1, approval=False, repeated_action=action)
 
-    def exercise(self, *, published_count, approval, repeated_action=None):
+    def test_last_decision_all_inline_prefixes_fit_original_root_and_history_caps(self):
+        self.exercise(published_count=0, approval=True, measure_inline=True)
+
+    def test_intermediate_and_repeated_decision_inline_prefixes_preserve_holds(self):
+        self.exercise(published_count=1, approval=False, measure_inline=True)
+        for action in ("dismiss", "accept-risk"):
+            with self.subTest(action=action):
+                self.exercise(
+                    published_count=1,
+                    approval=False,
+                    repeated_action=action,
+                    measure_inline=True,
+                )
+
+    def exercise(
+        self, *, published_count, approval, repeated_action=None, measure_inline=False
+    ):
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
@@ -62,6 +78,10 @@ class QuarantineFinalizerObservationTests(unittest.TestCase):
                 )
                 if repeated_action is not None:
                     self.assertEqual(fixture.invoke_command(), 0, fixture.error)
+                    if measure_inline:
+                        # A new source comment repeats the settlement, not an
+                        # invalid second semantic-history row for the same event.
+                        fixture.SOURCE_ID += 1
                     fixture.select_command(
                         "@reviewsensei "
                         + repeated_action
@@ -141,6 +161,33 @@ class QuarantineFinalizerObservationTests(unittest.TestCase):
                         self.assertIs(type(plan), QuarantineFinalizerObservation)
                         self.assertNotIsInstance(plan, CommandFinalizationPlan)
                         observed_source = require_observation(plan)
+                        if measure_inline:
+                            from review_sensei_github.quarantine_command_finalization import (
+                                measure_inline_branches,
+                            )
+
+                            from review_sensei.session import MAX_SESSION_RECORD_BYTES
+
+                            prior_witness = getattr(
+                                run.caller, "_accepted_semantic_capacity", None
+                            )
+                            measurements = measure_inline_branches(plan)
+                            self.assertIs(
+                                getattr(
+                                    run.caller, "_accepted_semantic_capacity", None
+                                ),
+                                prior_witness,
+                            )
+                            self.assertGreater(measurements["max_checkpoints"], 0)
+                            for branch in measurements["branches"]:
+                                for checkpoint in branch:
+                                    self.assertLessEqual(
+                                        checkpoint["root_bytes"],
+                                        MAX_SESSION_RECORD_BYTES,
+                                    )
+                                    self.assertLessEqual(
+                                        checkpoint["reference_bytes"], 8192
+                                    )
                         with self.assertRaisesRegex(ReviewInputError, "unissued"):
                             require_observation(copy.copy(plan))
                         original_payload = plan.payload
