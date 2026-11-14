@@ -677,7 +677,7 @@ class ActiveDraftCloseG23Tests(unittest.TestCase):
 
                     ufx = UncertainDispatchFixture(Path(tmp_u))
                     code_u, out_u = ufx.run_and_read(human=False)
-                    self.assertEqual(code_u, 1)
+                    self.assertEqual(code_u, 1, f"{out_u!r}\n{ufx.error}")
                     self.assertEqual(ufx.provider_calls, 1)
                     lifecycle_u = _extract_lifecycle_event(ufx.error)
                     self.assertIsNone(
