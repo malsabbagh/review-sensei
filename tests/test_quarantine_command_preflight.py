@@ -29,6 +29,9 @@ class ColdCommandPreflightTests(unittest.TestCase):
     ):
         self.exercise_guard("plain-positive")
 
+    def test_actual_decision_permit_fields_cannot_be_replaced_before_cursor_write(self):
+        self.exercise_guard("plain-permit-seal")
+
     def exercise_guard(self, fault):
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -61,10 +64,50 @@ class ColdCommandPreflightTests(unittest.TestCase):
                 )
                 entered = []
                 touched = []
+                sealed = []
                 helper_code = quarantine_action._require_installed_command_tail.__code__
                 stage_code = quarantine_action._stage_decision_event.__code__
 
                 def observe(frame, event, arg):
+                    if (
+                        fault == "plain-permit-seal"
+                        and event == "call"
+                        and frame.f_code
+                        is quarantine_action.require_native_decision.__code__
+                        and frame.f_locals["before"].quarantine_lineage[
+                            "assessment_state_manifest"
+                        ]
+                        != frame.f_locals["after"].quarantine_lineage[
+                            "assessment_state_manifest"
+                        ]
+                    ):
+                        from review_sensei.errors import ReviewInputError
+
+                        ledger = frame.f_locals["ledger"]
+                        permit = ledger._quarantine_decision_permit
+                        before_reads = len(fixture.trace)
+                        for field, replacement in (
+                            ("tail", b"{}"),
+                            ("before_state", b"{}"),
+                            ("scope", "0" * 64),
+                            ("head_sha", "0" * 40),
+                            ("run_id", permit.run_id + 1),
+                        ):
+                            original_value = getattr(permit, field)
+                            try:
+                                object.__setattr__(permit, field, replacement)
+                                with self.assertRaisesRegex(
+                                    ReviewInputError, "issued exact"
+                                ):
+                                    quarantine_action.require_native_decision(
+                                        ledger,
+                                        frame.f_locals["before"],
+                                        frame.f_locals["after"],
+                                    )
+                            finally:
+                                object.__setattr__(permit, field, original_value)
+                        self.assertEqual(len(fixture.trace), before_reads)
+                        sealed.append(permit)
                     if frame.f_code is helper_code:
                         if event == "call":
                             from review_sensei_github.publication_recovery import (
@@ -128,7 +171,7 @@ class ColdCommandPreflightTests(unittest.TestCase):
                 try:
                     sys.setprofile(observe)
                     status = fixture.invoke_command()
-                    if fault == "plain-positive":
+                    if fault in {"plain-positive", "plain-permit-seal"}:
                         self.assertEqual(status, 0, fixture.error)
                     else:
                         self.assertNotEqual(status, 0)
@@ -141,7 +184,7 @@ class ColdCommandPreflightTests(unittest.TestCase):
                     if fault == "unsupported"
                     else "installed capacity source changed"
                 )
-                if fault == "plain-positive":
+                if fault in {"plain-positive", "plain-permit-seal"}:
                     self.assertEqual(
                         entered, ["begin_action_effect", "_stage_decision_event"]
                     )
@@ -156,6 +199,9 @@ class ColdCommandPreflightTests(unittest.TestCase):
                 else:
                     self.assertIn(expected, fixture.error)
                     self.assertEqual(entered, [])
+                if fault == "plain-permit-seal":
+                    self.assertEqual(len(sealed), 1)
+                    self.assertIn(sealed[0], quarantine_action._DECISION_CANDIDATES)
                 self.assertEqual(len(touched), 1)
                 self.assertEqual(old.to_dict(), original_history)
 

@@ -835,6 +835,25 @@ def apply_quarantine_target(run, authority, command, target, app):
 # A document, hash, carrier or arbitrary mutator cannot authorize a state change.
 # Only this process's exact authenticated action can issue one native transition.
 _ISSUED_DECISIONS: weakref.WeakSet[_DecisionPermit] = weakref.WeakSet()
+_DECISION_BINDINGS: weakref.WeakKeyDictionary[Any, tuple[Any, ...]] = (
+    weakref.WeakKeyDictionary()
+)
+_DECISION_CANDIDATES: weakref.WeakKeyDictionary[Any, bytes] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _decision_permit_binding(permit):
+    return (
+        permit.ledger,
+        permit.authority,
+        permit.run_id,
+        permit.head_sha,
+        permit.scope,
+        permit.before_state,
+        permit.decision,
+        permit.tail,
+    )
 
 
 @dataclass(frozen=True, eq=False)
@@ -884,6 +903,7 @@ def _issue_decision_permit(run, authority, before, decision, tail):
         canonical_bytes(tail),
     )
     _ISSUED_DECISIONS.add(permit)
+    _DECISION_BINDINGS[permit] = _decision_permit_binding(permit)
     run.ledger._quarantine_decision_permit = permit
 
 
@@ -904,6 +924,7 @@ def require_native_decision(ledger, before, after):
     if (
         type(permit) is not _DecisionPermit
         or permit not in _ISSUED_DECISIONS
+        or _DECISION_BINDINGS.get(permit) != _decision_permit_binding(permit)
         or permit.consumed
         or permit.ledger is not ledger
         or caller is None
@@ -926,6 +947,9 @@ def require_native_decision(ledger, before, after):
         tail_manifest=json.loads(permit.tail),
     ):
         raise ReviewInputError("quarantine individual decision reference conflicts")
+    # This is an exact proposed candidate, not a native confirmation receipt.
+    # No caller may promote it to own-CAS authority before actual echo readback.
+    _DECISION_CANDIDATES[permit] = canonical_bytes(after.to_dict())
     object.__setattr__(permit, "consumed", True)
 
 
