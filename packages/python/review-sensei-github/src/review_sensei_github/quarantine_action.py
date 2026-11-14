@@ -559,6 +559,9 @@ def prepare_quarantine_target(run, authority, command, app, permission):
     from .quarantine_lifecycle_transfer import bind_target
 
     bind_target(target.lifecycle_transfer, target)
+    from .quarantine_command_namespace import prepare as prepare_namespace
+
+    prepare_namespace(run, authority, target)
     _require_installed_command_tail(run, authenticated)
     from .quarantine_command_execution import prepare_receipt_phase
 

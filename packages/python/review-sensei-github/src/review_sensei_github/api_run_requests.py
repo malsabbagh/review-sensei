@@ -863,6 +863,9 @@ class ApiRunRequestTransport:
         trust_verification = before_trust_request(self, request)
         deadline = int((self._clock() + timeout) * 1000)
         request_deadline = self._monotonic() + timeout
+        from .quarantine_command_namespace import before_sequence
+
+        before_sequence(self, deadline)
         self._sequence += 1
         from .quarantine_census import is_readonly_census
         from .trust_effects import verification_profile
@@ -3596,6 +3599,12 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
 _install_checkpoint_pricer(
     ApiRunSessionLedger.preflight_finding_lifecycle_checkpoint_pricing
 )
+
+
+from .quarantine_command_namespace import install as _install_cold_namespace  # noqa: E402
+
+_install_cold_namespace(ApiRunRequestTransport)
+del _install_cold_namespace
 
 
 from .quarantine_command_checkpoint import install_source as _install_cold_source  # noqa: E402

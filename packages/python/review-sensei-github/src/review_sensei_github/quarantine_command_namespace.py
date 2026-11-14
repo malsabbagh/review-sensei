@@ -1,0 +1,375 @@
+"""Negative-only original caller namespace fencing; never effect admission.
+
+The fence protects a detached accounting size bound through the already issued
+ordinary and terminal tranches. It neither issues funding nor admits a command.
+"""
+
+import hashlib
+import inspect
+import sys
+from dataclasses import dataclass
+from typing import Any, cast
+from weakref import WeakKeyDictionary
+
+from review_sensei.api_work import MAX_API_REQUEST_LIMIT, PendingApiRequest
+from review_sensei.bounded_evidence import canonical_bytes
+from review_sensei.errors import ReviewInputError
+from review_sensei.source_registry import require_instance_source, require_module_seal
+
+
+def _owner(value):
+    if (
+        type(value.run_attempt) is not int
+        or type(value.job) is not str
+        or type(value.generation) is not int
+    ):
+        raise ReviewInputError("cold namespace owner scalar changed")
+    return value.run_attempt, value.job, value.generation
+
+
+def _configuration(value):
+    if (
+        type(value.commit) is not str
+        or type(value.digest) is not str
+        or type(value.limit) is not int
+    ):
+        raise ReviewInputError("cold namespace configuration scalar changed")
+    return value.commit, value.digest, value.limit
+
+
+def _function(value):
+    return (
+        value,
+        value.__code__,
+        value.__globals__,
+        value.__defaults__,
+        value.__kwdefaults__,
+    )
+
+
+def _next_sequence(sequence, ceiling, deadline):
+    if (
+        type(sequence) is not int
+        or type(ceiling) is not int
+        or not 0 <= sequence < ceiling <= MAX_API_REQUEST_LIMIT
+        or type(deadline) is not int
+        or not 0 <= deadline <= MAX_API_REQUEST_LIMIT
+    ):
+        raise ReviewInputError("cold namespace sequence or deadline ceiling exceeded")
+    return sequence + 1
+
+
+@dataclass(frozen=True, eq=False)
+class _Namespace:
+    pass
+
+
+def _registry():
+    source: dict[str, Any] = {}
+    issued: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
+    active: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
+    observed: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
+
+    def install(caller_type):
+        module = sys.modules.get("review_sensei_github.api_run_requests")
+        frame = cast(Any, inspect.currentframe()).f_back
+        spec = getattr(module, "__spec__", None)
+        loader = getattr(spec, "loader", None)
+        if (
+            source
+            or module is None
+            or frame.f_globals is not vars(module)
+            or frame.f_locals is not frame.f_globals
+            or not getattr(spec, "_initializing", False)
+            or not callable(getattr(loader, "get_code", None))
+            or cast(Any, loader).get_code(module.__name__) != frame.f_code
+            or caller_type is not module.ApiRunRequestTransport
+        ):
+            raise ReviewInputError("cold namespace requires original defining source")
+        source.update(
+            caller_type=caller_type,
+            open=_function(caller_type.open),
+            close=_function(caller_type.close_action),
+            ledger=_function(caller_type._require_ledger),
+        )
+
+    def original(kind, frame):
+        require_module_seal(sys.modules[__name__])
+        saved = source[kind]
+        if (
+            _function(saved[0]) != saved
+            or frame is None
+            or frame.f_code is not saved[1]
+            or frame.f_globals is not saved[2]
+        ):
+            raise ReviewInputError("cold namespace original source changed")
+
+    def expire(token):
+        entry = issued.pop(token, None)
+        if entry is not None and active.get(entry["caller"]) is token:
+            active.pop(entry["caller"], None)
+
+    def _require(token, caller):
+        require_module_seal(sys.modules[__name__])
+        entry = issued.get(token) if type(token) is _Namespace else None
+        if (
+            entry is None
+            or active.get(caller) is not token
+            or entry["caller"] is not caller
+        ):
+            raise ReviewInputError("cold namespace is copied or expired")
+        from review_sensei import api_work
+
+        from .guarded_pending_publication import _original_accounting_graph
+
+        require_module_seal(api_work)
+        require_instance_source(
+            caller, methods=("open", "close_action", "_require_ledger")
+        )
+        state = caller.accounting
+        _original_accounting_graph(state, models=True)
+        record = caller._effect_record
+        persisted = None if record is None else record.api_run_accounting.get("action")
+        if (
+            persisted is not None
+            and persisted.get("phase") == "terminal"
+            and caller._checkpoint is None
+        ):
+            expire(token)
+            raise ReviewInputError("cold namespace is copied or expired")
+        if (
+            type(caller) is not source["caller_type"]
+            or _function(source["open"][0]) != source["open"]
+            or _function(source["close"][0]) != source["close"]
+            or getattr(caller._require_ledger, "__func__", None)
+            is not source["ledger"][0]
+            or _owner(state.owner) != entry["owner"]
+            or _configuration(state.configuration) != entry["configuration"]
+            or state.identity != entry["identity"]
+            or state.remaining != entry["unallocated"]
+            or state.prior_nonstartup_liability != entry["prior"]
+            or state.action is None
+            or canonical_bytes(state.action["intent"]) != entry["intent"]
+            or caller._terminal_block != entry["terminal"]
+            or tuple(b.block_id for b in state.blocks) != tuple(entry["blocks"])
+        ):
+            raise ReviewInputError("cold namespace owner or funding changed")
+        caller._require_ledger(entry["ledger"], entry["session_identity"])
+        for block in state.blocks:
+            owner, remaining, pending = entry["blocks"][block.block_id]
+            current_pending = {
+                (p.request_id, p.deadline_unix_ms) for p in block.pending
+            }
+            if (
+                _owner(block.issued_by) != owner
+                or not pending.issubset(current_pending)
+                or block.undispatched > remaining
+                or block.undispatched > entry["remaining"][block.block_id]
+            ):
+                raise ReviewInputError("cold namespace block or unknown debit changed")
+            if block.block_id not in (entry["ordinary"], entry["terminal"]) and (
+                block.undispatched != remaining or current_pending != pending
+            ):
+                raise ReviewInputError("cold namespace borrowed another tranche")
+        if caller._terminal_reason is None:
+            if caller._block != entry["ordinary"]:
+                raise ReviewInputError("cold namespace ordinary block changed")
+            terminal = next(b for b in state.blocks if b.block_id == entry["terminal"])
+            if terminal.undispatched != entry["blocks"][entry["terminal"]][1]:
+                raise ReviewInputError("cold namespace terminal reservation changed")
+        elif caller._terminal_reason == "action-completion":
+            if caller._block != entry["terminal"]:
+                raise ReviewInputError("cold namespace terminal block changed")
+            frame = inspect.currentframe()
+            while frame is not None and frame.f_code is not source["close"][1]:
+                frame = frame.f_back
+            original("close", frame)
+            assert frame is not None
+            proof = frame.f_locals.get("proof")
+            if (
+                frame.f_locals.get("self") is not caller
+                or proof is not cast(Any, caller)._action_result_proof
+                or proof.boundary is not cast(Any, caller)._action_effect_boundary
+                or hashlib.sha256(
+                    canonical_bytes(
+                        {"manifest": proof.manifest, "outcome": proof.outcome}
+                    )
+                ).hexdigest()
+                != cast(Any, caller)._action_result_fingerprint
+            ):
+                raise ReviewInputError(
+                    "cold namespace terminal completion source changed"
+                )
+        else:
+            raise ReviewInputError("cold namespace terminal purpose changed")
+        if (
+            type(caller._sequence) is not int
+            or caller._sequence != entry["last"]
+            or observed.get(caller) != caller._sequence
+        ):
+            raise ReviewInputError("cold namespace physical sequence changed")
+        return entry
+
+    def prepare(run, authority, target):
+        from . import quarantine_action
+        from .guarded_pending_publication import _original_accounting_graph
+        from .quarantine_origin import require_authenticated_read_owner
+
+        require_module_seal(quarantine_action)
+        frame = cast(Any, inspect.currentframe()).f_back
+        if (
+            frame.f_code is not quarantine_action.prepare_quarantine_target.__code__
+            or frame.f_globals is not vars(quarantine_action)
+            or any(
+                frame.f_locals.get(name) is not value
+                for name, value in (
+                    ("run", run),
+                    ("authority", authority),
+                    ("target", target),
+                )
+            )
+        ):
+            raise ReviewInputError(
+                "cold namespace requires original target preparation"
+            )
+        caller = run.caller
+        require_instance_source(
+            caller, methods=("open", "close_action", "_require_ledger")
+        )
+        state = caller.accounting
+        _original_accounting_graph(state, models=True)
+        require_authenticated_read_owner(
+            target.authenticated, run.ledger, caller, run.identity
+        )
+        ordinary, terminal = caller._block, caller._terminal_block
+        blocks = {b.block_id: b for b in state.blocks}
+        if (
+            active.get(caller) is not None
+            or type(caller) is not source["caller_type"]
+            or state.action is None
+            or state.action["phase"] != "pending"
+            or state.action["execution_started"] is not False
+            or authority.run is not run
+            or _owner(authority.owner) != _owner(state.owner)
+            or ordinary == terminal
+            or ordinary not in blocks
+            or terminal not in blocks
+            or any(blocks[key].issued_by != state.owner for key in (ordinary, terminal))
+            or caller._terminal_reason is not None
+            or type(caller._sequence) is not int
+            or not 0 <= caller._sequence <= MAX_API_REQUEST_LIMIT
+            or observed.get(caller) != caller._sequence
+        ):
+            raise ReviewInputError("cold namespace preparation scope changed")
+        counts = tuple(blocks[key].undispatched for key in (ordinary, terminal))
+        ceiling = caller._sequence + sum(counts)
+        if ceiling > MAX_API_REQUEST_LIMIT:
+            raise ReviewInputError(
+                "cold namespace sequence ceiling exceeds representation"
+            )
+        token = _Namespace()
+        issued[token] = dict(
+            caller=caller,
+            ledger=run.ledger,
+            session_identity=run.identity,
+            owner=_owner(state.owner),
+            configuration=_configuration(state.configuration),
+            identity=state.identity,
+            intent=canonical_bytes(state.action["intent"]),
+            ordinary=ordinary,
+            terminal=terminal,
+            unallocated=state.remaining,
+            prior=state.prior_nonstartup_liability,
+            blocks={
+                b.block_id: (
+                    _owner(b.issued_by),
+                    b.undispatched,
+                    frozenset((p.request_id, p.deadline_unix_ms) for p in b.pending),
+                )
+                for b in state.blocks
+            },
+            remaining={b.block_id: b.undispatched for b in state.blocks},
+            start=caller._sequence,
+            last=caller._sequence,
+            ceiling=ceiling,
+            counts=counts,
+            state=state,
+            state_bytes=canonical_bytes(state.to_document()),
+        )
+        active[caller] = token
+        _require(token, caller)
+        return token
+
+    def before_sequence(caller, deadline):
+        token = active.get(caller)
+        frame = cast(Any, inspect.currentframe()).f_back
+        if token is None:
+            # Observation is not authority. An incomplete or altered original
+            # sequence history can never seed a later namespace projection.
+            saved = source.get("open")
+            if (
+                saved is None
+                or type(caller) is not source["caller_type"]
+                or frame.f_code is not saved[1]
+                or frame.f_globals is not saved[2]
+                or frame.f_locals.get("self") is not caller
+                or frame.f_locals.get("deadline") is not deadline
+                or _function(saved[0]) != saved
+            ):
+                return
+            previous = observed.get(caller, 0)
+            sequence = caller._sequence
+            if (
+                type(previous) is not int
+                or type(sequence) is not int
+                or sequence != previous
+                or not 0 <= sequence < MAX_API_REQUEST_LIMIT
+            ):
+                observed[caller] = None
+            else:
+                observed[caller] = sequence + 1
+            return
+        original("open", frame)
+        entry = _require(token, caller)
+        entry["last"] = _next_sequence(caller._sequence, entry["ceiling"], deadline)
+        observed[caller] = entry["last"]
+        entry["remaining"] = {
+            b.block_id: b.undispatched for b in caller.accounting.blocks
+        }
+
+    def project(token, caller):
+        entry = _require(token, caller)
+        state = entry["state"]
+        if canonical_bytes(state.to_document()) != entry["state_bytes"]:
+            raise ReviewInputError("cold namespace original accounting changed")
+        projected = state
+        sequence = entry["start"]
+        for key, count in zip(
+            (entry["ordinary"], entry["terminal"]), entry["counts"], strict=True
+        ):
+            for _ in range(count):
+                sequence += 1
+                projected = projected.dispatch(
+                    key,
+                    PendingApiRequest(
+                        f"c-{state.owner.generation:x}-{sequence:x}",
+                        MAX_API_REQUEST_LIMIT,
+                    ),
+                )
+        return projected.to_document()
+
+    def require(token, caller):
+        _require(token, caller)
+
+    def project_current(caller):
+        return project(active.get(caller), caller)
+
+    return install, prepare, before_sequence, project, project_current, require
+
+
+install, prepare, before_sequence, project, project_current, require = _registry()
+del _registry
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()
