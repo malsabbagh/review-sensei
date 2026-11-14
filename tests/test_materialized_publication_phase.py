@@ -25,6 +25,8 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
             (phase.install_retention, {}),
             (phase.install_census, {}),
             (phase.install_publisher, object),
+            (phase.install_packed, {}),
+            (phase.install_checkpoint, object),
         ):
             with (
                 self.subTest(install=install.__name__),
@@ -37,6 +39,7 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
         denied = []
         denied_replays = []
         wrapped_attributes = []
+        denied_intervening_reads = []
         code = lifecycle_capacity_plan.__code__
 
         def trace(frame, event, _arg):
@@ -44,6 +47,29 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                 frame.f_code.co_name == "require_journal_write"
                 and frame.f_globals is vars(phase)
             )
+            own_get = frame.f_code.co_name == "get" and frame.f_globals is vars(phase)
+            if own_get and event == "return" and not denied_intervening_reads:
+                entry = frame.f_locals.get("entry")
+                snapshot = frame.f_locals.get("snapshot")
+                if (
+                    entry is not None
+                    and entry["coalesced"] is not None
+                    and entry["coalesced"][1] == "await-post-mutate"
+                ):
+                    caller = entry["caller"]
+                    before = caller.accounting.to_document()
+                    request = Request(
+                        snapshot.ledger.http.api_url
+                        + snapshot.ledger.http.repository_path(
+                            snapshot.identity.repository,
+                            f"/issues/comments/{snapshot.comment_id}",
+                        ),
+                        method="GET",
+                    )
+                    with self.assertRaisesRegex(ReviewInputError, "intervening I/O"):
+                        caller.open(request, timeout=1)
+                    self.assertEqual(caller.accounting.to_document(), before)
+                    denied_intervening_reads.append(True)
             if own_write and event == "return" and not denied_replays:
                 entry = frame.f_locals.get("entry")
                 source = frame.f_locals.get("source")
@@ -171,7 +197,7 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                             accepted_row["body"] = original_body
                         self.assertEqual(port.requests, 0)
                         self.assertEqual(ledger.caller.accounting.to_document(), before)
-            return trace if frame.f_code is code or own_write else None
+            return trace if frame.f_code is code or own_write or own_get else None
 
         with tempfile.TemporaryDirectory() as directory:
             fixture = JourneyFixture(directory)
@@ -189,7 +215,11 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                     del function.__wrapped__
             self.assertEqual(len(denied), 4)
             self.assertEqual(denied_replays, [True])
+            self.assertEqual(denied_intervening_reads, [True])
             self.assertTrue(observed)
+            self.assertTrue(
+                any(item["coalesced_reads"] > 0 for item in observed), observed
+            )
             captures = [item for item in observed if item["censuses"] == 1]
             self.assertTrue(captures)
             for item in captures:

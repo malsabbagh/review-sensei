@@ -462,3 +462,15 @@ def fetch_packed_comments(
     if closing != (order, metadata, original_scope):
         raise ReviewInputError("packed comment fresh closing membership changed")
     return collected
+
+
+from .materialized_publication_phase import (  # noqa: E402
+    install_packed as _install_materialized_packed,
+)
+
+_install_materialized_packed(globals())
+del _install_materialized_packed
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

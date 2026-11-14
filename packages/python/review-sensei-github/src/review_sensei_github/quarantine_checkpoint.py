@@ -385,6 +385,14 @@ def reconcile_quarantine_checkpoint(caller, ledger, identity):
     return _remember_confirmation(snapshot, snapshot.get(candidate=True))
 
 
+from .materialized_publication_phase import (  # noqa: E402
+    install_checkpoint as _install_materialized_checkpoint,
+)
+
+_install_materialized_checkpoint(_CheckpointSnapshot)
+del _install_materialized_checkpoint
+
+
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
 
 _seal_original_source()

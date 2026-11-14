@@ -2,8 +2,9 @@
 
 The installed source wrappers record original completed computation/retention.
 Once a qualifying census opens, operation-comment writes are forbidden, including
-identical-payload retries to fresh IDs. Readback and the original journal/root
-writers remain unchanged. No public receipt or observation can enter the phase.
+identical-payload retries to fresh IDs. An adjacent complete census can supply
+only the first inline checkpoint root read; independent post-mutate and final
+owned readback fences remain. No public observation can enter the phase.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ def _build():
     original_functions: list[tuple[Any, Any]] = []
     journal_checkpoint_sources: dict[type, Any] = {}
     publication_sources: dict[type, Any] = {}
+    checkpoint_get_source = None
 
     def definition(name):
         frame = inspect.currentframe()
@@ -185,6 +187,10 @@ def _build():
                     "write_frames": [],
                     "projection": None,
                     "projection_error": None,
+                    "census_receipt": None,
+                    "coalesced": None,
+                    "coalesced_reads": 0,
+                    "read_losses": [],
                 }
             token = active.set(entry)
             try:
@@ -193,6 +199,8 @@ def _build():
                 active.reset(token)
                 if entry is not None:
                     entry["write_frames"].clear()
+                    entry["read_losses"].clear()
+                    entry["census_receipt"] = entry["coalesced"] = None
                 if key is not None:
                     accepted.pop(key, None)
 
@@ -361,6 +369,72 @@ def _build():
 
         namespace["retain_review_result"] = retain
 
+    def read_loss_seal(loss):
+        try:
+            binding = canonical_bytes(
+                {
+                    name: vars(loss[name])
+                    for name in ("identity", "owner", "configuration")
+                }
+            )
+        except (TypeError, ValueError):
+            return None
+        return (
+            id(loss["caller"]),
+            id(loss["ledger"]),
+            id(loss["operation"]),
+            id(loss["observation"]),
+            loss["document"],
+            loss["block"],
+            binding,
+            loss["root"],
+            loss["candidate"],
+            loss["comment_id"],
+        )
+
+    def only_captured_read_losses(entry, caller):
+        from .guarded_pending_publication import _original_accounting_graph
+
+        state = caller.accounting
+        _original_accounting_graph(state, models=True)
+        pending = {
+            (block.block_id, request.request_id, request.deadline_unix_ms)
+            for block in state.blocks
+            for request in block.pending
+        }
+        captured = set()
+        for loss in entry["read_losses"]:
+            observation, document, block = (
+                loss["observation"],
+                loss["document"],
+                loss["block"],
+            )
+            operation = loss["operation"]
+            if (
+                read_loss_seal(loss) != loss["seal"]
+                or loss["caller"] is not caller
+                or loss["ledger"] is not entry["ledger"]
+                or loss["identity"] != state.identity
+                or loss["owner"] != state.owner
+                or loss["configuration"] != state.configuration
+                or not operation.confirmed
+                or loss["reconciled"] != loss["seal"]
+                or not any(
+                    issued is operation and issued_block == block
+                    for issued, issued_block in caller._issued_operations
+                )
+                or not any(item is observation for item in caller.observations)
+                or canonical_bytes(observation) != document
+                or observation.get("mutation") is not False
+                or observation.get("outcome") != "unknown"
+            ):
+                entry["poisoned"] = True
+                raise ReviewInputError("materialized readonly loss receipt changed")
+            captured.add(
+                (block, observation["request_id"], observation["deadline_unix_ms"])
+            )
+        return pending <= captured
+
     def require_closed_source(entry, ledger, identity):
         import hashlib
         import json
@@ -394,7 +468,10 @@ def _build():
             or record is None
             or caller._root != record.record_sha256
             or caller._checkpoint is not None
-            or caller.accounting.uncertain
+            or (
+                caller.accounting.uncertain
+                and not only_captured_read_losses(entry, caller)
+            )
             or record.transaction is None
             or record.transaction.phase != "publication_failed"
         ):
@@ -556,6 +633,7 @@ def _build():
             or journal._record is not record
             or record is None
             or record.record_sha256 != caller._root
+            or snapshot is None
             or type(snapshot) is not _CheckpointSnapshot
             or snapshot.ledger is not ledger
             or snapshot.caller is not caller
@@ -633,12 +711,15 @@ def _build():
                     RESULT_COMMENT_MARKER,
                 )
 
+                if entry["poisoned"]:
+                    raise ReviewInputError("materialized publication phase is poisoned")
                 _original_methods(caller)
                 ports_intact()
                 if type(request) is not Request:
                     raise ReviewInputError(
                         "materialized publication request source changed"
                     )
+                require_adjacent_read(entry, request)
                 if request.get_method() not in {"GET", "HEAD"}:
                     path = urlsplit(request.full_url).path
                     if "/issues/" in path and "/comments" in path:
@@ -663,6 +744,283 @@ def _build():
             return original(caller, request, timeout=timeout)
 
         cls.open = opened
+
+    def install_packed(namespace):
+        definition("review_sensei_github.packed_comment_census")
+        original = namespace["fetch_packed_comments"]
+        original_functions.append((original, original.__code__))
+
+        @wraps(original)
+        def walked(ledger, identity, **kwargs):
+            entry = active.get()
+            scope = getattr(ledger, "_quarantine_lifecycle_capacity", None)
+            if (
+                entry is None
+                or not entry["closed"]
+                or entry["ledger"] is not ledger
+                or scope is None
+                or scope.parts != 0
+            ):
+                return original(ledger, identity, **kwargs)
+            from review_sensei.source_registry import require_module_seal
+
+            from . import packed_comment_census, quarantine_census, session_ledger
+            from .guarded_pending_publication import _original_methods
+
+            for module in (packed_comment_census, quarantine_census, session_ledger):
+                require_module_seal(module)
+            ports_intact()
+            _original_methods(ledger)
+            quarantine_census._LifecycleCapacity._require_scope(scope, ledger, identity)
+            if kwargs.get("plan") is not scope.plan:
+                raise ReviewInputError("materialized census allocation source changed")
+            frame = inspect.currentframe()
+            discovery = False
+            while frame is not None:
+                if (
+                    frame.f_code
+                    is session_ledger.GitHubIssueCommentSessionLedger._discover.__code__
+                    and frame.f_locals.get("self") is ledger
+                ):
+                    discovery = True
+                frame = frame.f_back
+            if not discovery:
+                raise ReviewInputError("materialized census discovery source is absent")
+            caller = entry["caller"]
+            operation = caller._checkpoint_operation
+            before = len(caller.observations)
+            rows = original(ledger, identity, **kwargs)
+            quarantine_census._LifecycleCapacity._require_scope(scope, ledger, identity)
+            if (
+                operation is None
+                or caller._active_operation is not operation
+                or caller._checkpoint_operation is not operation
+                or not 2 <= len(caller.observations) - before <= 10
+            ):
+                raise ReviewInputError("materialized census physical scope changed")
+            selected = []
+            for row in rows:
+                record = session_ledger.parse_session_comment(
+                    row["body"], identity=identity
+                )
+                if record is not None and record.record_sha256 == scope.root:
+                    ledger._part_owner(row, identity)
+                    if canonical_bytes(record.to_dict()) != scope.record_bytes:
+                        raise ReviewInputError(
+                            "materialized census current root changed"
+                        )
+                    selected.append(row)
+            if len(selected) != 1:
+                raise ReviewInputError("materialized census current root is not unique")
+            row = selected[0]
+            entry["census_receipt"] = (
+                scope,
+                operation,
+                scope.root,
+                row["id"],
+                row["body"],
+                row["user"]["id"],
+                len(caller.observations),
+                caller.usable,
+            )
+            return rows
+
+        namespace["fetch_packed_comments"] = walked
+
+    def install_checkpoint(cls):
+        nonlocal checkpoint_get_source
+        definition("review_sensei_github.quarantine_checkpoint")
+        original = cls.get
+        checkpoint_get_source = original.__code__
+        original_functions.append((original, original.__code__))
+
+        @wraps(original)
+        def get(snapshot, *, candidate=False):
+            entry = active.get()
+            if (
+                entry is None
+                or not entry["closed"]
+                or snapshot.ledger is not entry["ledger"]
+            ):
+                return original(snapshot, candidate=candidate)
+            ports_intact()
+            state = entry["coalesced"]
+            receipt = entry["census_receipt"]
+            if not candidate and snapshot.candidate is None and receipt is not None:
+                from .guarded_pending_publication import _original_methods
+                from .quarantine_census import _LIFECYCLE_ACTIVE, _LifecycleCapacity
+                from .quarantine_origin import require_authenticated_read_owner
+
+                entry["census_receipt"] = None
+                entry["poisoned"] = True
+                (
+                    scope,
+                    operation,
+                    root,
+                    identifier,
+                    body,
+                    owner,
+                    observations,
+                    usable,
+                ) = receipt
+                caller, ledger, journal = (
+                    entry["caller"],
+                    entry["ledger"],
+                    entry["journal"],
+                )
+                for source in (snapshot, ledger, caller, journal):
+                    _original_methods(source)
+                issued = _LIFECYCLE_ACTIVE.get(scope)
+                authenticated = ledger._quarantine_authenticated
+                require_authenticated_read_owner(
+                    authenticated, ledger, caller, snapshot.identity
+                )
+                snapshot.require()
+                if (
+                    issued is None
+                    or issued[0] != _LifecycleCapacity._seal(scope)
+                    or issued[1] is not operation
+                    or ledger._quarantine_lifecycle_capacity is not scope
+                    or scope.ledger is not ledger
+                    or scope.caller is not caller
+                    or scope.identity != snapshot.identity
+                    or authenticated.record_sha256 != root
+                    or canonical_bytes(authenticated.lineage)
+                    != canonical_bytes(snapshot.record.quarantine_lineage)
+                    or scope.parts != 0
+                    or snapshot.operation is not operation
+                    or caller._active_operation is not operation
+                    or snapshot.root != root
+                    or caller._root != root
+                    or snapshot.comment_id != identifier
+                    or snapshot.body != body
+                    or snapshot.owner_id != owner
+                    or snapshot.caller is not caller
+                    or journal.ledger is not ledger
+                    or journal._record is not caller._effect_record
+                    or canonical_bytes(snapshot.record.to_dict()) != scope.record_bytes
+                    or len(caller.observations) != observations
+                    or caller.usable != usable
+                ):
+                    raise ReviewInputError(
+                        "materialized census root receipt is stale or foreign"
+                    )
+                entry["poisoned"] = False
+                entry["coalesced"] = [snapshot, "await-post-mutate"]
+                entry["coalesced_reads"] += 1
+                return snapshot.record
+            if (
+                state is not None
+                and state[0] is snapshot
+                and state[1] == "await-post-mutate"
+            ):
+                if (
+                    candidate
+                    or snapshot.candidate is None
+                    or snapshot.candidate_body is None
+                ):
+                    raise ReviewInputError(
+                        "materialized post-mutate root fence is absent"
+                    )
+                result = original(snapshot, candidate=False)
+                if state[1] != "post-dispatched":
+                    raise ReviewInputError(
+                        "materialized post-mutate root read was not dispatched"
+                    )
+                snapshot.require()
+                state[1] = "post-verified"
+                return result
+            if candidate and snapshot.operation.write_attempted:
+                from .errors import GitHubPublicationTransientError
+
+                caller = entry["caller"]
+                before = len(caller.observations)
+                block = caller._block
+                try:
+                    result = original(snapshot, candidate=True)
+                    for loss in entry["read_losses"]:
+                        if loss["operation"] is snapshot.operation:
+                            if (
+                                loss["root"] != snapshot.root
+                                or loss["candidate"]
+                                != canonical_bytes(result.to_dict())
+                                or loss["comment_id"] != snapshot.comment_id
+                                or loss["caller"] is not caller
+                                or loss["ledger"] is not snapshot.ledger
+                            ):
+                                raise ReviewInputError(
+                                    "materialized readonly reconciliation changed"
+                                )
+                            if read_loss_seal(loss) != loss["seal"]:
+                                entry["poisoned"] = True
+                                raise ReviewInputError(
+                                    "materialized readonly loss receipt changed"
+                                )
+                            loss["reconciled"] = loss["seal"]
+                    return result
+                except GitHubPublicationTransientError:
+                    if len(caller.observations) == before + 1:
+                        observation = caller.observations[-1]
+                        if (
+                            observation.get("mutation") is False
+                            and observation.get("outcome") == "unknown"
+                        ):
+                            loss = {
+                                "observation": observation,
+                                "document": canonical_bytes(observation),
+                                "block": block,
+                                "caller": caller,
+                                "ledger": snapshot.ledger,
+                                "identity": caller.accounting.identity,
+                                "owner": caller.accounting.owner,
+                                "configuration": caller.accounting.configuration,
+                                "operation": snapshot.operation,
+                                "root": snapshot.root,
+                                "candidate": canonical_bytes(
+                                    snapshot.candidate.to_dict()
+                                ),
+                                "comment_id": snapshot.comment_id,
+                                "reconciled": None,
+                            }
+                            loss["seal"] = read_loss_seal(loss)
+                            entry["read_losses"].append(loss)
+                    raise
+            return original(snapshot, candidate=candidate)
+
+        cls.get = get
+
+    def require_adjacent_read(entry, request):
+        state = entry["coalesced"]
+        if state is None or state[1] == "post-verified":
+            return
+        from urllib.parse import urlsplit
+
+        snapshot = state[0]
+        frame = inspect.currentframe()
+        source = False
+        while frame is not None:
+            if (
+                frame.f_code is checkpoint_get_source
+                and frame.f_locals.get("self") is snapshot
+                and frame.f_locals.get("candidate") is False
+            ):
+                source = True
+            frame = frame.f_back
+        if (
+            state[1] != "await-post-mutate"
+            or not source
+            or request.get_method() != "GET"
+            or snapshot.candidate is None
+            or urlsplit(request.full_url).path
+            != snapshot.ledger.http.repository_path(
+                snapshot.identity.repository, f"/issues/comments/{snapshot.comment_id}"
+            )
+        ):
+            raise ReviewInputError(
+                "materialized inline mutation attempted intervening I/O"
+            )
+        snapshot.require()
+        state[1] = "post-dispatched"
 
     def install_publisher(cls):
         definition("review_sensei_github.publication")
@@ -733,6 +1091,7 @@ def _build():
             "censuses": entry["censuses"],
             "projection": entry["projection"],
             "projection_error": entry["projection_error"],
+            "coalesced_reads": entry["coalesced_reads"],
         }
 
     return (
@@ -744,6 +1103,8 @@ def _build():
         install_caller,
         install_census,
         install_publisher,
+        install_packed,
+        install_checkpoint,
         observation,
     )
 
@@ -757,6 +1118,8 @@ def _build():
     install_caller,
     install_census,
     install_publisher,
+    install_packed,
+    install_checkpoint,
     phase_observation,
 ) = _build()
 del _build
