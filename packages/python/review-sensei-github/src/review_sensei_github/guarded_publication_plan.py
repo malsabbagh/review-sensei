@@ -107,6 +107,7 @@ def require_grouped_durable_floor(publisher, journal, host, *, checks_enabled):
     """
     import inspect
 
+    from review_sensei import publication_staging
     from review_sensei.source_registry import (
         require_instance_source,
         require_module_seal,
@@ -208,6 +209,21 @@ def require_grouped_durable_floor(publisher, journal, host, *, checks_enabled):
     # the final union walk and trust fences. Passing it is never admission.
     effects = groups + 1 + (2 if checks_enabled else 0)
     minimum_native_reads = 4 * groups + 3
+    minimum_staging_calls = 0
+    if host.manifest_store is not None:
+        require_module_seal(publication_staging)
+        require_instance_source(journal.ledger, methods=("replace",))
+        require_instance_source(journal.ledger.caller, methods=("replace_checkpoint",))
+        # Fresh original manifest-backed staging has one initial part claim,
+        # one receipt/next-claim per group, one manifest/final claim, and one
+        # final receipt. These g+3 CASes are separate from journal checkpoints.
+        # Charge only their unavoidable PATCH plus independent confirming GET,
+        # not their complete reservation. This is still NOT admission, and a
+        # future joint protocol needs its own complete source-bound grant.
+        minimum_staging_calls = 2 * (groups + 3)
     journal.ledger.caller.budget_view.preflight(
-        (effects + 1) * checkpoint + effects + minimum_native_reads
+        (effects + 1) * checkpoint
+        + effects
+        + minimum_native_reads
+        + minimum_staging_calls
     )

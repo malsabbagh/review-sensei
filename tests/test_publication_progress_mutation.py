@@ -127,3 +127,55 @@ class PublicationProgressMutationTests(unittest.TestCase):
                         now=NOW, generation=before.generation + 1, transaction=None
                     )
                 )
+
+    def test_copied_progress_receipts_have_no_producer_or_consumer_authority(self):
+        from review_sensei import publication_intent_fusion as fusion
+
+        entry = fusion._Entry(object(), grouped_progress=True)
+        token = fusion._ACTIVE.set(entry)
+        try:
+            with self.assertRaises(ReviewInputError):
+                fusion._record_grouped_progress(entry, object(), IDENTITY, object(), {})
+            marker = object()
+            entry.committed = marker
+            entry.grouped_confirmed = True
+            with self.assertRaises(ReviewInputError):
+                fusion.confirmed_grouped_progress(marker)
+        finally:
+            fusion._ACTIVE.reset(token)
+
+    def test_application_frame_cannot_be_supplied_in_entry_metadata(self):
+        import inspect
+
+        from review_sensei import publication_intent_fusion as fusion
+
+        entry = fusion._Entry(object())
+        entry.application_code = inspect.currentframe().f_code
+        with self.assertRaises(ReviewInputError):
+            fusion._require_application_frame(entry, inspect.currentframe())
+        with self.assertRaises(ReviewInputError):
+            fusion._capture_application_source(
+                self.test_application_frame_cannot_be_supplied_in_entry_metadata
+            )
+
+    def test_source_substitution_is_rejected_before_eager_or_fused_progress(self):
+        from review_sensei_github import quarantine_capacity
+
+        from review_sensei import publication_intent_fusion as fusion
+        from review_sensei import publication_staging
+        from review_sensei.source_registry import require_module_seal
+
+        for module, name in (
+            (fusion, "_record_grouped_progress"),
+            (publication_staging, "prepare_publication_staging"),
+            (quarantine_capacity, "installed_capacity"),
+        ):
+            with self.subTest(name=name):
+                original = getattr(module, name)
+                setattr(module, name, lambda *args, **kwargs: None)
+                try:
+                    with self.assertRaises(ReviewInputError):
+                        require_module_seal(module)
+                finally:
+                    setattr(module, name, original)
+                require_module_seal(module)

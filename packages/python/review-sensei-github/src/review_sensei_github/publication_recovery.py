@@ -1045,7 +1045,11 @@ def retain_review_result(
         assert validated.transaction is not None
         if already_retained:
             if validated.transaction.phase == "publication_pending":
-                from review_sensei.publication_intent_fusion import defer_current
+                from review_sensei import publication_intent_fusion
+                from review_sensei.source_registry import require_module_seal
+
+                require_module_seal(publication_intent_fusion)
+                defer_current = publication_intent_fusion.defer_current
 
                 if not defer_current():
                     mark_review_publication_unconfirmed(
@@ -1158,7 +1162,11 @@ def retain_review_result(
                 loaded=_loaded if primed_comments is not None else None,
             )
             if validated.transaction.phase == "publication_pending":
-                from review_sensei.publication_intent_fusion import defer_current
+                from review_sensei import publication_intent_fusion
+                from review_sensei.source_registry import require_module_seal
+
+                require_module_seal(publication_intent_fusion)
+                defer_current = publication_intent_fusion.defer_current
 
                 if not defer_current():
                     mark_review_publication_unconfirmed(

@@ -31,6 +31,8 @@ class _Entry:
     attempted: bool = False
     committed: Any = None
     application_code: Any = None
+    grouped_progress: bool = False
+    grouped_confirmed: bool = False
 
 
 _ACTIVE: ContextVar[Any] = ContextVar("publication_intent_fusion", default=None)
@@ -56,6 +58,54 @@ def _definition(frame, name):
     _INSTALLED.add(name)
 
 
+def _application_source_binding():
+    source = None
+
+    def capture(body):
+        nonlocal source
+        frame = inspect.currentframe()
+        caller = frame.f_back if frame else None
+        if (
+            source is not None
+            or caller is None
+            or caller.f_code is not install_application.__code__
+        ):
+            raise ReviewInputError(
+                "publication fusion application registration changed"
+            )
+        source = (
+            body,
+            body.__code__,
+            body.__globals__,
+            body.__defaults__,
+            dict(body.__kwdefaults__ or {}),
+        )
+
+    def require(entry, frame):
+        if (
+            source is None
+            or frame is None
+            or frame.f_code is not source[1]
+            or frame.f_globals is not source[2]
+            or frame.f_locals.get("self") is not entry.app
+            or source[0].__code__ is not source[1]
+            or source[0].__globals__ is not source[2]
+            or source[0].__defaults__ != source[3]
+            or (source[0].__kwdefaults__ or {}) != source[4]
+        ):
+            raise ReviewInputError(
+                "publication fusion requires original application frame"
+            )
+        require_module_seal(sys.modules["review_sensei_github.application"])
+        require_instance_source(entry.app, methods=("publish_review",))
+
+    return capture, require
+
+
+_capture_application_source, _require_application_frame = _application_source_binding()
+del _application_source_binding
+
+
 def install_application(cls):
     frame = inspect.currentframe()
     _definition(frame.f_back if frame else None, cls.__module__)
@@ -68,6 +118,7 @@ def install_application(cls):
     body = original
     while hasattr(body, "__wrapped__"):
         body = body.__wrapped__
+    _capture_application_source(body)
 
     @wraps(original)
     def invoke(owner, **kwargs):
@@ -147,7 +198,6 @@ def defer_current():
         caller is None
         or entry.receipt is not None
         or entry.app.session_ledger is not ledger
-        or result.comments
         or record is None
         or record.quarantine_lineage is None
         or record.transaction is None
@@ -180,7 +230,11 @@ def defer_current():
     if isolation.get("schema_version") == "quarantine-target-isolation-v1":
         return False
     capacity = sys.modules["review_sensei_github.quarantine_capacity"]
-    capacity.installed_capacity(ledger, identity)
+    require_module_seal(capacity)
+    guard = capacity.installed_capacity(ledger, identity)
+    if result.comments and not guard.native_grouped:
+        return False
+    entry.grouped_progress = bool(result.comments)
     entry.receipt = (
         ledger,
         caller,
@@ -410,6 +464,7 @@ def record_progress(ledger, identity, transaction, **kwargs):
     """Run the original progress CAS and transfer only its exact owned delta."""
     from . import session
 
+    require_module_seal(sys.modules[__name__])
     entry = _ACTIVE.get()
     if entry is None or entry.receipt is None:
         return session.record_admitted_blocker_progress(
@@ -417,14 +472,12 @@ def record_progress(ledger, identity, transaction, **kwargs):
         )
     frame = inspect.currentframe()
     frame = frame.f_back if frame else None
-    if frame is None or frame.f_code is not entry.application_code:
-        raise ReviewInputError(
-            "publication fusion progress requires original invocation"
-        )
-    require_instance_source(entry.app, methods=("publish_review",))
+    _require_application_frame(entry, frame)
     require_module_seal(session)
     before = entry.receipt[2]
     _receipt(ledger, before)
+    if entry.grouped_progress:
+        return _record_grouped_progress(entry, ledger, identity, transaction, kwargs)
     if (
         transaction != before.transaction
         or kwargs.get("suppress_publication") is not False
@@ -494,3 +547,138 @@ def record_progress(ledger, identity, transaction, **kwargs):
         *entry.receipt[4:],
     )
     return after
+
+
+def _record_grouped_progress(entry, ledger, identity, transaction, kwargs):
+    """Consume original retained source at original admitted progress only.
+
+    No business effect is authorized here. The original failure-phase mutation
+    and original progress mutation run against the same owned parent; only the
+    two root writes coalesce. Unknown CAS never yields a usable candidate.
+    """
+    from . import session
+
+    frame = inspect.currentframe()
+    caller = frame.f_back if frame else None
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(session)
+    if (
+        caller is None
+        or caller.f_code is not record_progress.__code__
+        or caller.f_globals is not globals()
+        or caller.f_locals["entry"] is not entry
+        or caller.f_locals["ledger"] is not ledger
+        or caller.f_locals["transaction"] is not transaction
+        or caller.f_locals["kwargs"] is not kwargs
+        or _ACTIVE.get() is not entry
+        or not entry.grouped_progress
+        or transaction != entry.receipt[2].transaction
+        or identity != entry.receipt[2].identity()
+        or entry.attempted
+        or set(kwargs)
+        - {"suppress_publication", "blocker_count", "blocker_set_sha256", "now"}
+    ):
+        raise ReviewInputError("grouped progress fusion requires original admission")
+    before = entry.receipt[2]
+    _receipt(ledger, before)
+    if kwargs.get("suppress_publication") is not False:
+        # Suppression is not this two-transition publication path. Preserve
+        # both original eager writers and their no-progress recovery rules.
+        session.mark_review_publication_unconfirmed(ledger, identity, transaction)
+        entry.receipt = entry.original_receipt = None
+        entry.grouped_progress = False
+        return session.record_admitted_blocker_progress(
+            ledger, identity, transaction, **kwargs
+        )
+    now = kwargs.get("now")
+    failure = session._publication_state_mutation(transaction, published=False, now=now)
+    progress = session._admitted_blocker_progress_mutation(
+        ledger, identity, transaction, **kwargs
+    )
+    entry.attempted = True
+
+    def mutate(record):
+        require_module_seal(sys.modules[__name__])
+        require_module_seal(session)
+        require_module_seal(sys.modules["review_sensei.models"])
+        _receipt(ledger, record)
+        failed = failure(record)
+        after = progress(failed)
+        if (
+            failed.generation != record.generation + 1
+            or after.generation != failed.generation + 1
+            or after.transaction is None
+            or after.transaction != failed.transaction
+            or after.transaction.phase != "publication_failed"
+        ):
+            raise ReviewInputError("grouped progress transitions cannot coalesce")
+        # Reconstruct from the exact owned parent. Never install a two-step
+        # descendant as a one-step CAS or rewrite transaction generations.
+        joint = record.evolve(
+            now=now,
+            generation=record.generation + 1,
+            transaction=after.transaction,
+            convergence_history=after.convergence_history,
+        )
+        expected = after.to_dict()
+        actual = joint.to_dict()
+        for key in ("generation", "record_sha256", "updated_at"):
+            expected.pop(key, None)
+            actual.pop(key, None)
+        if canonical_bytes(expected) != canonical_bytes(actual):
+            raise ReviewInputError("grouped progress changed unrelated state")
+        return joint
+
+    after = ledger.replace(identity, mutate, now=now)
+    owner = ledger.caller
+    if (
+        after is not owner._effect_record
+        or after.record_sha256 != owner._root
+        or owner._checkpoint is not None
+    ):
+        raise ReviewInputError("grouped progress lacks confirmed own checkpoint")
+    source = sys.modules.get("review_sensei_github.quarantine_checkpoint")
+    if source is None:
+        raise ReviewInputError("grouped progress confirmation source unavailable")
+    require_module_seal(source)
+    proof = source.confirmed_checkpoint_capacity(owner, ledger, identity)
+    if proof.record is not after:
+        raise ReviewInputError("grouped progress confirmation changed")
+    entry.receipt = entry.original_receipt = None
+    entry.grouped_progress = False
+    entry.committed = after
+    entry.grouped_confirmed = True
+    return after
+
+
+def confirmed_grouped_progress(record):
+    """Original application may transfer only its positively confirmed metadata."""
+    require_module_seal(sys.modules[__name__])
+    entry = _ACTIVE.get()
+    if entry is None or entry.committed is None or not entry.grouped_confirmed:
+        return False
+    frame = inspect.currentframe()
+    caller = frame.f_back if frame else None
+    _require_application_frame(entry, caller)
+    if (
+        caller is None
+        or caller.f_locals["admitted_record"] is not record
+        or record is not entry.committed
+    ):
+        raise ReviewInputError("grouped progress metadata requires original consumer")
+    ledger = entry.app.session_ledger
+    require_instance_source(entry.app, methods=("publish_review",))
+    require_instance_source(
+        ledger, methods=("load", "replace", "read_evidence", "evidence_producer")
+    )
+    if (
+        record is not ledger.caller._effect_record
+        or record.record_sha256 != ledger.caller._root
+    ):
+        raise ReviewInputError("grouped progress metadata lost current custody")
+    return True
+
+
+from .source_registry import seal_module as _seal_fusion_source  # noqa: E402
+
+_seal_fusion_source()

@@ -2486,7 +2486,11 @@ class GitHubApplication:
                     # empty set is progress, but retaining it in the bounded
                     # window is what lets a later A -> empty -> A regression be
                     # classified as oscillation.
-                    from review_sensei.publication_intent_fusion import record_progress
+                    from review_sensei import publication_intent_fusion
+                    from review_sensei.source_registry import require_module_seal
+
+                    require_module_seal(publication_intent_fusion)
+                    record_progress = publication_intent_fusion.record_progress
 
                     admitted_record = record_progress(
                         ledger,
@@ -2496,6 +2500,21 @@ class GitHubApplication:
                         blocker_count=current_blockers[1],
                         suppress_publication=no_progress,
                     )
+                    require_module_seal(publication_intent_fusion)
+                    if publication_intent_fusion.confirmed_grouped_progress(
+                        admitted_record
+                    ):
+                        transaction_record = admitted_record
+                        result = replace(
+                            result, transaction=admitted_record.transaction
+                        )
+                        prepared_publishable = replace(
+                            prepared_publishable,
+                            result=replace(
+                                prepared_publishable.result,
+                                transaction=admitted_record.transaction,
+                            ),
+                        )
                     if (
                         admitted_record.transaction is not None
                         and admitted_record.transaction.phase == "publication_succeeded"
