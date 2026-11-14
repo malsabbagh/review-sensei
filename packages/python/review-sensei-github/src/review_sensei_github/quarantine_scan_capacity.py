@@ -177,15 +177,24 @@ def capacity_review_walk(http, path):
     known and unknown native allocations remain in the guard's original totals.
     An uninstalled preview, arbitrary path or alternate query cannot issue it.
     """
-    from .publication import _BudgetedReviewPagination
-    from .publication_recovery import _publication_transport
+    from . import publication, publication_recovery
     from .quarantine_capacity import review_walk_owner
 
+    require_module_seal(publication)
+    require_module_seal(publication_recovery)
+    _BudgetedReviewPagination = publication._BudgetedReviewPagination
+    _publication_transport = publication_recovery._publication_transport
     base = http.transport if type(http) is _BudgetedReviewPagination else http
     transport = _publication_transport(base)
+    from . import historical_review_census
+
+    require_module_seal(historical_review_census)
+    resolved = historical_review_census.resolve_journal(base)
     guard = getattr(transport, "_quarantine_capacity_guard", None)
     reader = getattr(guard, "comment_reader", None)
-    if guard is None or type(reader) is not CapacityCommentReader:
+    if resolved is not None:
+        ledger, guard, transport = resolved
+    elif guard is None or type(reader) is not CapacityCommentReader:
         return None
     expected = transport.repository_path(
         guard.identity.repository, f"/pulls/{guard.identity.pull_request}/reviews"
@@ -194,7 +203,16 @@ def capacity_review_walk(http, path):
         return None
     if guard.certificates["reviews"]["reader"] != "bounded-cold-reviews":
         return None
-    ledger, guard = review_walk_owner(transport)
+    if resolved is None:
+        ledger, guard = review_walk_owner(transport)
+    else:
+        owner, installed = review_walk_owner(transport)
+        if owner is not ledger or installed is not guard:
+            raise ReviewInputError("historical review installed owner changed")
+    require_module_seal(historical_review_census)
+    invocation = historical_review_census.choose(ledger, guard)
+    if invocation is not None:
+        return invocation
     certificate = dict(guard.certificates["reviews"])
     width, requests = bounded_review_page(
         certificate["count_upper_bound"], certificate["largest_upper_bound"]

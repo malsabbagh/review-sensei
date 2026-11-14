@@ -200,6 +200,10 @@ def _registry():
 
             require_module_seal(historical_invocation_census)
             historical_invocation_census.issue(lease, saved)
+            from . import historical_review_census
+
+            require_module_seal(historical_review_census)
+            historical_review_census.issue(lease, saved)
         except BaseException:
             active.pop(run.caller, None)
             leases.pop(lease, None)

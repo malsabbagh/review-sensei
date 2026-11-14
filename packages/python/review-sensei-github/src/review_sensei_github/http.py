@@ -453,9 +453,12 @@ class GitHubHttp:
                 before_read=before_read,
                 expected_items=expected_items,
             )
-        from .quarantine_scan_capacity import capacity_review_walk
+        from review_sensei.source_registry import require_module_seal
 
-        review_walk = capacity_review_walk(self, path)
+        from . import quarantine_scan_capacity
+
+        require_module_seal(quarantine_scan_capacity)
+        review_walk = quarantine_scan_capacity.capacity_review_walk(self, path)
         if review_walk is not None:
             # No adaptive probes/retries: the installed lifetime frontier pays
             # for this exact safe width, including the final empty/short page.
@@ -558,6 +561,17 @@ class GitHubHttp:
                     raise GitHubHTTPResponseTooLargeError(
                         "quarantine review page exceeds response bound"
                     )
+                from review_sensei.source_registry import (
+                    require_instance_source,
+                    require_module_seal,
+                )
+
+                from . import historical_review_census, quarantine_scan_capacity
+
+                # Response code must not replace the selected completion seam.
+                require_module_seal(quarantine_scan_capacity)
+                require_module_seal(historical_review_census)
+                require_instance_source(review_walk, methods=("validate",))
                 review_walk.validate([*collected, *body])
             collected.extend(body)
             if len(body) < page_size:
