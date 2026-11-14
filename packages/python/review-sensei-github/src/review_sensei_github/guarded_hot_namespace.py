@@ -94,8 +94,16 @@ def _registry():
         }
         # Authenticate loader family/code BEFORE asking it for source code or
         # touching its supplied state; a forged loader must never run a callback.
+        # Reject foreign families and substituted descriptors without reading
+        # any descriptor metadata: even __getattr__ can execute supplied code.
         if (
-            loader_binding(loader) != loader_source
+            type(loader) is not loader_source[0]
+            or type(defining_loader) is not loader_source[0]
+            or inspect.getattr_static(type(loader), "get_code", None)
+            is not loader_source[1]
+            or inspect.getattr_static(type(defining_loader), "get_code", None)
+            is not loader_source[1]
+            or loader_binding(loader) != loader_source
             or loader_binding(defining_loader) != loader_source
         ):
             raise ReviewInputError("hot namespace defining loader changed")
@@ -354,11 +362,14 @@ def _registry():
             raise ReviewInputError("hot namespace requires original grouped producer")
         # Classify the authentic source domain before requiring an application
         # or outer hosted extent. Generic grouped callers retain prior behavior.
-        from .finding_lifecycle import FindingLifecycleJournal
+        from . import finding_lifecycle
 
-        if type(journal) is not FindingLifecycleJournal or journal.effects:
+        require_module_seal(finding_lifecycle)
+        if type(journal) is not finding_lifecycle.FindingLifecycleJournal:
             return
         require_instance_source(journal, methods=("request", "checkpoint", "finish"))
+        if journal.effects:
+            return
         ledger, record = journal.ledger, journal._record
         if (
             record is None

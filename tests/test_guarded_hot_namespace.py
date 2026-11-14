@@ -160,12 +160,15 @@ spec.loader.exec_module(fresh)
 target = "review_sensei_github.api_run_requests"
 expected = str(Path(path).with_name("api_run_requests.py"))
 original_api = sys.modules[target]
-class FakeLoader:
-    def get_code(self, name):
+class DescriptorBomb:
+    def __getattr__(self, name):
         calls.append(name)
-        return None
+        raise AssertionError("descriptor callback")
+class FakeLoader:
+    get_code = DescriptorBomb()
 for hooks in (fresh, original):
-    for kind in ("foreign", "shadow", "wrong-path"):
+    for kind in ("foreign", "shadow", "wrong-path", "descriptor"):
+        original_descriptor = SourceFileLoader.get_code
         loader = FakeLoader() if kind == "foreign" else SourceFileLoader(target, expected)
         if kind == "shadow":
             loader.get_code = lambda name: calls.append(name)
@@ -175,6 +178,8 @@ for hooks in (fresh, original):
         forged.__file__ = expected
         forged.__spec__ = importlib.util.spec_from_file_location(target, expected, loader=loader)
         forged.__spec__._initializing = True
+        if kind == "descriptor":
+            SourceFileLoader.get_code = DescriptorBomb()
         forged.install = hooks.install_caller
         forged.ApiRunRequestTransport = api_run_requests.ApiRunRequestTransport
         sys.modules[target] = forged
@@ -185,6 +190,8 @@ for hooks in (fresh, original):
         else:
             raise AssertionError("forged source registered")
         finally:
+            if kind == "descriptor":
+                del SourceFileLoader.get_code
             sys.modules[target] = original_api
         assert calls == [], calls
 sys.modules[name] = original
@@ -193,3 +200,72 @@ sys.modules[name] = original
             [sys.executable, "-c", script], capture_output=True, text=True
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class GuardedHotNamespaceEligibleTests(unittest.TestCase):
+    def test_genuine_eligible_journal_export_substitution_refuses_before_effects(self):
+        import copy
+        import sys
+
+        from review_sensei_github import finding_lifecycle
+        from review_sensei_github.quarantine_published_tail import BROKER_QUALIFICATIONS
+        from test_quarantine_activation import registered_resource
+        from test_quarantine_published_tail_journey import (
+            NativePublishedTailJourneyFixture,
+        )
+
+        original = finding_lifecycle.FindingLifecycleJournal
+        observed = []
+        replacement = object()
+
+        def observe(frame, event, value):
+            if frame.f_code is not guarded_hot_namespace.begin.__code__:
+                return
+            if event == "call":
+                journal = frame.f_locals["journal"]
+                self.assertIs(type(journal), original)
+                self.assertEqual(journal.effects, [])
+                self.assertTrue(journal.ledger._quarantine_required)
+                self.assertIsNotNone(journal._record.quarantine_lineage)
+                self.assertEqual(
+                    journal.ledger.caller.accounting.configuration.limit, 512
+                )
+                observed.append(True)
+                finding_lifecycle.FindingLifecycleJournal = replacement
+            elif event == "return":
+                finding_lifecycle.FindingLifecycleJournal = original
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
+        ):
+            fixture = NativePublishedTailJourneyFixture(directory)
+            old, registration = fixture.original_origins()
+            old_accounting = copy.deepcopy(old.api_run_accounting)
+            reviews = copy.deepcopy(fixture.reviews)
+            checks = copy.deepcopy(fixture.check_runs)
+            fixture.provider_comments = [
+                {
+                    "path": "src/app.py",
+                    "line": 3,
+                    "side": "RIGHT",
+                    "body": "Current published assessment requires human judgment.",
+                    "severity": "high",
+                    "blocking": False,
+                    "needs_human": True,
+                }
+            ]
+            previous = sys.getprofile()
+            try:
+                with registered_resource([registration]):
+                    sys.setprofile(observe)
+                    result = fixture.invoke()
+            finally:
+                sys.setprofile(previous)
+                finding_lifecycle.FindingLifecycleJournal = original
+            self.assertEqual(observed, [True])
+            self.assertEqual(result, 1)
+            self.assertIn("source", fixture.error)
+            self.assertEqual(fixture.reviews, reviews)
+            self.assertEqual(fixture.check_runs, checks)
+            self.assertEqual(old.api_run_accounting, old_accounting)
