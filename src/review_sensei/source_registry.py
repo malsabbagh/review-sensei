@@ -243,10 +243,12 @@ def _build_registry():
             raise ReviewInputError("original source class is unavailable")
         module, name, namespace, executable, bindings, _methods, slots = original
         slot_values = slots[0]
+        if type(module) is not ModuleType:
+            raise ReviewInputError("original class source changed")
+        module_name = vars(module).get("__name__")
         if (
-            type(module) is not ModuleType
-            or type(vars(module).get("__name__")) is not str
-            or sys.modules.get(vars(module).get("__name__")) is not module
+            type(module_name) is not str
+            or sys.modules.get(module_name) is not module
             or vars(module).get(name) is not cls
             or frozenset(vars(cls)) != namespace
             or vars(cls).get("__slotnames__") is not slots[0]
@@ -277,10 +279,11 @@ def _build_registry():
         if type(module) is not ModuleType:
             raise ReviewInputError("original source module seal is unavailable")
         bindings = registered.get(module)
+        module_name = vars(module).get("__name__")
         if (
             bindings is None
-            or type(vars(module).get("__name__")) is not str
-            or sys.modules.get(vars(module).get("__name__")) is not module
+            or type(module_name) is not str
+            or sys.modules.get(module_name) is not module
         ):
             raise ReviewInputError("original source module seal is unavailable")
         require_bindings(bindings)
