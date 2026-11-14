@@ -117,11 +117,18 @@ class ReceiptMembership:
 
 
 def _receipt_scope(identity):
-    from review_sensei.session import SessionIdentity
+    from review_sensei import session
 
-    if type(identity) is not SessionIdentity:
+    require_module_seal(session)
+    if type(identity) is not session.SessionIdentity:
         raise ReviewInputError("receipt GraphQL identity is unavailable")
     values = vars(identity)
+    if (
+        type(values) is not dict
+        or any(type(key) is not str for key in values)
+        or set(values) != {"repository", "pull_request", "repository_id"}
+    ):
+        raise ReviewInputError("receipt GraphQL identity fields are invalid")
     repository, number, identifier = (
         values.get("repository"),
         values.get("pull_request"),
@@ -155,7 +162,7 @@ def _protocol_fields(value):
     ):
         raise ReviewInputError("receipt protocol fields are invalid")
     if protocol == "rest":
-        if scope != () or first != 100:
+        if len(scope) != 0 or first != 100:
             raise ReviewInputError("receipt REST protocol changed")
     elif protocol == "graphql":
         if (
@@ -163,6 +170,10 @@ def _protocol_fields(value):
             or type(scope[0]) is not str
             or type(scope[1]) is not int
             or type(scope[2]) is not int
+            or len(scope[0]) > 513
+            or scope[0].count("/") != 1
+            or scope[1] <= 0
+            or scope[2] <= 0
             or not 2 <= first <= 100
         ):
             raise ReviewInputError("receipt GraphQL protocol changed")
@@ -172,8 +183,17 @@ def _protocol_fields(value):
 
 
 def _projection_binding(value):
+    require_module_seal(sys.modules[__name__])
     if type(value) is not ReceiptPageProjection:
         raise ReviewInputError("receipt projection is unavailable")
+    fields = vars(value)
+    if (
+        type(fields) is not dict
+        or any(type(key) is not str for key in fields)
+        or set(fields)
+        != {"known", "future", "maximum_bytes", "protocol", "scope", "first"}
+    ):
+        raise ReviewInputError("receipt projection fields are invalid")
     _protocol_fields(value)
     if (
         type(value.known) is not tuple
@@ -284,7 +304,7 @@ def read_receipt_page(
     """Perform exactly one fresh charged read, or refuse without a retry."""
     if type(membership) is not ReceiptMembership or type(reconcile) is not bool:
         raise ReviewInputError("receipt census input is invalid")
-    _protocol_fields(membership)
+    binding = _membership_binding(membership)
     if not isinstance(path, str) or "?" in path or not path.endswith("/comments"):
         raise ReviewInputError("receipt census path is invalid")
     if membership.protocol == "graphql":
@@ -295,6 +315,9 @@ def read_receipt_page(
         and membership.first == 100
     ):
         status, rows = http.request("GET", path + "?per_page=100&page=1", token=token)
+        require_module_seal(sys.modules[__name__])
+        if _membership_binding(membership) != binding:
+            raise ReviewInputError("receipt membership changed during read")
         if status != 200 or not isinstance(rows, list) or len(rows) >= 100:
             raise ReviewInputError("receipt census lacks one complete page")
         if _wire(rows) > min(membership.maximum_bytes, MAX_GITHUB_RESPONSE_BYTES):
@@ -432,19 +455,103 @@ def _read_graphql_receipt(http, path, token, membership, ledger, identity):
 
 
 def _membership_binding(value):
+    # Every comparison consumer receives only this finite primitive snapshot.
+    # Seal before resolving the class export or traversing mutable instances.
+    require_module_seal(sys.modules[__name__])
     if type(value) is not ReceiptMembership:
         raise ReviewInputError("receipt phase membership is unavailable")
+    fields = vars(value)
+    required = {
+        "bodies",
+        "owners",
+        "receipt_text",
+        "receipt_update_id",
+        "app_id",
+        "maximum_bytes",
+        "protocol",
+        "scope",
+        "first",
+    }
+    if (
+        type(fields) is not dict
+        or any(type(key) is not str for key in fields)
+        or set(fields) != required
+    ):
+        raise ReviewInputError("receipt membership fields are invalid")
     _protocol_fields(value)
+    bodies, owners = fields["bodies"], fields["owners"]
+    if (
+        type(bodies) is not tuple
+        or type(owners) is not tuple
+        or len(bodies) >= 100
+        or len(owners) != len(bodies)
+    ):
+        raise ReviewInputError("receipt membership inventory is invalid")
+    identifiers = set()
+    for pair in bodies:
+        if (
+            type(pair) is not tuple
+            or len(pair) != 2
+            or type(pair[0]) is not int
+            or pair[0] <= 0
+            or type(pair[1]) is not str
+            or len(pair[1]) != 64
+            or any(char not in "0123456789abcdef" for char in pair[1])
+        ):
+            raise ReviewInputError("receipt membership body commitment is invalid")
+        if pair[0] in identifiers:
+            raise ReviewInputError("receipt membership body identity is duplicated")
+        identifiers.add(pair[0])
+    owner_ids = set()
+    for pair in owners:
+        if (
+            type(pair) is not tuple
+            or len(pair) != 2
+            or type(pair[0]) is not int
+            or pair[0] <= 0
+            or type(pair[1]) is not tuple
+            or len(pair[1]) != 3
+        ):
+            raise ReviewInputError("receipt membership owner commitment is invalid")
+        identifier, kind, login = pair[1]
+        if identifier is not None and (type(identifier) is not int or identifier <= 0):
+            raise ReviewInputError("receipt membership owner ID is invalid")
+        if any(
+            part is not None and (type(part) is not str or len(part) > METADATA_BYTES)
+            for part in (kind, login)
+        ):
+            raise ReviewInputError("receipt membership owner text is invalid")
+        if pair[0] in owner_ids:
+            raise ReviewInputError("receipt membership owner identity is duplicated")
+        owner_ids.add(pair[0])
+    text, update, app = (
+        fields["receipt_text"],
+        fields["receipt_update_id"],
+        fields["app_id"],
+    )
+    if (
+        owner_ids != identifiers
+        or type(text) is not str
+        or len(text) > MAX_GITHUB_RESPONSE_BYTES
+        or _wire({"body": text}) > MAX_GITHUB_RESPONSE_BYTES
+        or type(app) is not int
+        or app <= 0
+        or (
+            update is not None
+            and (type(update) is not int or update <= 0 or update not in identifiers)
+        )
+    ):
+        raise ReviewInputError("receipt membership writer fields are invalid")
     return (
-        value.bodies,
-        value.owners,
-        value.receipt_text,
-        value.receipt_update_id,
-        value.app_id,
-        value.maximum_bytes,
-        value.protocol,
-        value.scope,
-        value.first,
+        bodies,
+        owners,
+        text,
+        update,
+        app,
+        fields["maximum_bytes"],
+        fields["protocol"],
+        fields["scope"],
+        fields["first"],
     )
 
 

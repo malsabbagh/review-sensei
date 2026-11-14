@@ -167,3 +167,140 @@ class ReceiptGraphQLTests(unittest.TestCase):
             project_receipt_page(
                 rows, future_bounds=(1,) * 99, allow_graphql=True, identity=IDENTITY
             )
+
+    def test_late_nested_membership_poison_never_calls_equality_or_hash(self):
+        callbacks = []
+
+        class Poison:
+            def __eq__(self, other):
+                callbacks.append("eq")
+                return True
+
+            def __hash__(self):
+                callbacks.append("hash")
+                return 0
+
+            def __len__(self):
+                callbacks.append("len")
+                return 1
+
+        for field in (
+            "bodies-id",
+            "bodies-digest",
+            "owners-id",
+            "owners-login",
+            "receipt_text",
+            "scope",
+        ):
+            backend, ledger, _, membership = self.prepare()
+            poison = Poison()
+
+            def change(response, connection, count):
+                if field == "bodies-id":
+                    object.__setattr__(
+                        membership,
+                        "bodies",
+                        ((poison, membership.bodies[0][1]),) + membership.bodies[1:],
+                    )
+                elif field == "bodies-digest":
+                    object.__setattr__(
+                        membership,
+                        "bodies",
+                        ((membership.bodies[0][0], poison),) + membership.bodies[1:],
+                    )
+                elif field == "owners-id":
+                    object.__setattr__(
+                        membership,
+                        "owners",
+                        ((membership.owners[0][0], (poison, "Bot", None)),)
+                        + membership.owners[1:],
+                    )
+                elif field == "owners-login":
+                    object.__setattr__(
+                        membership,
+                        "owners",
+                        ((membership.owners[0][0], (317764649, "Bot", poison)),)
+                        + membership.owners[1:],
+                    )
+                elif field == "scope":
+                    object.__setattr__(membership, "scope", (poison, 7, 123))
+                else:
+                    object.__setattr__(membership, field, poison)
+
+            backend.change = change
+            with self.subTest(field=field), self.assertRaises(ReviewInputError):
+                self.read(backend, ledger, membership)
+            self.assertEqual(callbacks, [])
+            self.assertEqual(len(backend.calls), 1)
+
+    def test_identity_keys_and_export_refuse_without_callbacks(self):
+        from review_sensei_github.quarantine_command_receipt import _receipt_scope
+
+        from review_sensei import session
+
+        callbacks = []
+
+        class Key:
+            def __hash__(self):
+                return hash("repository")
+
+            def __eq__(self, other):
+                callbacks.append("key-eq")
+                return False
+
+        identity = session.SessionIdentity("owner/repo", 7, 123)
+        vars(identity)[Key()] = 42
+        callbacks.clear()
+        with self.assertRaisesRegex(ReviewInputError, "identity fields"):
+            _receipt_scope(identity)
+        self.assertEqual(callbacks, [])
+
+        class Export:
+            def __getattribute__(self, name):
+                callbacks.append("export-get")
+                return object.__getattribute__(self, name)
+
+        original = session.SessionIdentity
+        session.SessionIdentity = Export()
+        try:
+            with self.assertRaises(ReviewInputError):
+                _receipt_scope(IDENTITY)
+            self.assertEqual(callbacks, [])
+        finally:
+            session.SessionIdentity = original
+        self.assertEqual(_receipt_scope(IDENTITY), ("owner/repo", 7, 123))
+
+    def test_original_rest_nullable_owner_shapes_remain_valid(self):
+        from types import SimpleNamespace
+
+        rows = [
+            {"id": 1, "body": "retained deleted author", "user": None},
+            {"id": 2, "body": "retained bot", "user": {"id": 999, "type": "Bot"}},
+        ]
+        projection = project_receipt_page(rows, future_bounds=(65536,))
+        membership = freeze_receipt_membership(
+            rows,
+            projection=projection,
+            receipt_text="own receipt",
+            update_id=None,
+            app_id=999,
+        )
+        calls = []
+
+        def request(method, path, **kwargs):
+            calls.append((method, path))
+            return 200, copy.deepcopy(rows)
+
+        http = SimpleNamespace(request=request)
+        self.assertEqual(
+            read_receipt_page(
+                http,
+                path="/repos/owner/repo/issues/7/comments",
+                token="synthetic",
+                membership=membership,
+            ),
+            rows,
+        )
+        self.assertEqual(
+            calls, [("GET", "/repos/owner/repo/issues/7/comments?per_page=100&page=1")]
+        )
