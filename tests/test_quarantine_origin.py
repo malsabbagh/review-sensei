@@ -304,6 +304,7 @@ class QuarantineOriginTests(unittest.TestCase):
                             reader.read(native, old.identity(), record)
                     self.assertEqual(reader._authenticated_sources, {})
                     authenticated = reader.read(native, old.identity(), record)
+                    self.assertTrue(reader._authenticated_sources)
                     self.assertEqual(
                         authenticated.pending,
                         (
