@@ -47,6 +47,59 @@ class PreentryCapacityTests(unittest.TestCase):
     def test_nested_state_virtual_method_is_not_invoked(self):
         self._exercise_source_capacity(original_role=True, tamper_plan="nested")
 
+    def test_closed_unknown_effect_holds_rejects_callbacks_before_sizing(self):
+        self._exercise_source_capacity(
+            original_role=True, tamper_plan="_unknown_effect_holds"
+        )
+
+    def test_closed_native_finding_context_rejects_callbacks_before_sizing(self):
+        self._exercise_source_capacity(
+            original_role=True, tamper_plan="_native_finding_context"
+        )
+
+    def test_closed_input_identity_rejects_callbacks_before_sizing(self):
+        self._exercise_source_capacity(
+            original_role=True, tamper_plan="_input_identity"
+        )
+
+    def test_closed_accepted_semantic_history_rejects_callbacks_before_sizing(self):
+        self._exercise_source_capacity(
+            original_role=True, tamper_plan="_accepted_semantic_history"
+        )
+
+    def test_closed_review_update_capacity_states_rejects_callbacks_before_sizing(self):
+        self._exercise_source_capacity(
+            original_role=True, tamper_plan="_review_update_capacity_states"
+        )
+
+    def test_closed_batch_body_updates_rejects_callbacks_before_sizing(self):
+        self._exercise_source_capacity(
+            original_role=True, tamper_plan="_batch_body_updates"
+        )
+
+    def test_copy_protocol__reduce_ex___rejects_callback_before_sizing(self):
+        self._exercise_source_capacity(original_role=True, tamper_plan="__reduce_ex__")
+
+    def test_copy_protocol__reduce___rejects_callback_before_sizing(self):
+        self._exercise_source_capacity(original_role=True, tamper_plan="__reduce__")
+
+    def test_copy_protocol__getstate___rejects_callback_before_sizing(self):
+        self._exercise_source_capacity(original_role=True, tamper_plan="__getstate__")
+
+    def test_copy_protocol__setstate___rejects_callback_before_sizing(self):
+        self._exercise_source_capacity(original_role=True, tamper_plan="__setstate__")
+
+    def test_copy_protocol__copy___rejects_callback_before_sizing(self):
+        self._exercise_source_capacity(original_role=True, tamper_plan="__copy__")
+
+    def test_copy_protocol__deepcopy___rejects_callback_before_sizing(self):
+        self._exercise_source_capacity(original_role=True, tamper_plan="__deepcopy__")
+
+    def test_reviewer_copy_reduce_callback_is_not_invoked(self):
+        self._exercise_source_capacity(
+            original_role=True, tamper_plan="_reviewer_reduce_ex"
+        )
+
     def _exercise_source_capacity(
         self, *, original_role, remaining=None, tamper_plan=False
     ):
@@ -295,6 +348,7 @@ class PreentryCapacityTests(unittest.TestCase):
             if tamper_plan:
                 import json
 
+                missing = object()
                 callbacks = []
                 if tamper_plan == "payload":
                     target, attribute, previous = plan, "payload", plan.payload
@@ -303,6 +357,41 @@ class PreentryCapacityTests(unittest.TestCase):
                         key: 0 for key in value["execution_read_tail"]
                     }
                     replacement = json.dumps(value).encode()
+                elif tamper_plan.startswith("_"):
+                    target = (
+                        plan.journal.reviewer
+                        if tamper_plan
+                        in (
+                            "_unknown_effect_holds",
+                            "_native_finding_context",
+                            "_reviewer_reduce_ex",
+                        )
+                        else plan.journal
+                    )
+                    attribute = (
+                        "__reduce_ex__"
+                        if tamper_plan == "_reviewer_reduce_ex"
+                        else tamper_plan
+                    )
+                    previous = getattr(target, attribute, missing)
+
+                    class HostileValue:
+                        def __contains__(self, key):
+                            callbacks.append(True)
+                            return False
+
+                        def __iter__(self):
+                            callbacks.append(True)
+                            return iter(())
+
+                    if attribute.startswith("__"):
+                        previous = vars(target).get(attribute, missing)
+
+                        def replacement(*a, **kw):
+                            callbacks.append(True)
+                            return None
+                    else:
+                        replacement = HostileValue()
                 else:
                     target = (
                         plan.record
@@ -321,7 +410,9 @@ class PreentryCapacityTests(unittest.TestCase):
                     with self.assertRaises(ReviewInputError):
                         plan.journal._preflight_preentry_command_branches(plan)
                 finally:
-                    if previous is None:
+                    if previous is missing or (
+                        previous is None and attribute == "to_dict"
+                    ):
                         object.__delattr__(target, attribute)
                     else:
                         object.__setattr__(target, attribute, previous)

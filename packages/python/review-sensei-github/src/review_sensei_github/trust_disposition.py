@@ -39,6 +39,19 @@ def _build_preparation():
         from review_sensei.source_registry import require_instance_source
 
         require_instance_source(instance, methods=())
+        namespace = getattr(instance, "__dict__", {})
+        if any(
+            name in namespace
+            for name in (
+                "__reduce_ex__",
+                "__reduce__",
+                "__getstate__",
+                "__setstate__",
+                "__copy__",
+                "__deepcopy__",
+            )
+        ):
+            raise ReviewInputError("trust disposition instance copy protocol changed")
         names = tuple(
             name
             for name in dir(type(instance))
@@ -337,6 +350,10 @@ def _build_preparation():
             journal.identity,
             plan.states,
             journal._planned,
+            journal._input_identity,
+            journal._accepted_semantic_history,
+            getattr(journal, "_review_update_capacity_states", ()),
+            journal._batch_body_updates,
             getattr(journal, "_finalizer_capacity_states", ()),
             journal.effects,
             getattr(journal, "_observed_check_reads", {}),
@@ -350,6 +367,8 @@ def _build_preparation():
             "_native_finding_receipt_records",
             "_drift_inputs",
             "_active_window_inputs",
+            "_unknown_effect_holds",
+            "_native_finding_context",
         ):
             require_value(getattr(journal.reviewer, name, {}))
         plan.require(journal, http=plan.http, budget=plan.budget)
