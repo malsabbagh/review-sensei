@@ -20,11 +20,40 @@ from tests.test_quarantine_published_tail_journey import (
 
 
 class GuardedPublicationBatchTests(unittest.TestCase):
-    def run_source(self, *, fault=None):
-        documents, entries = [], []
+    def run_source(self, *, fault=None, limit=512):
+        documents, entries, path_bounds, quotes = [], [], [], []
+        from review_sensei_github.api_run_budget import CallerRunBudget
+
+        budget_code = CallerRunBudget.preflight.__code__
+        from review_sensei_github.finding_lifecycle import _closed_pair_path_bound
+
+        path_code = _closed_pair_path_bound.__code__
         checkpoint_code = FindingLifecycleJournal.checkpoint.__code__
 
         def observe(frame, event, value):
+            if (
+                event == "call"
+                and frame.f_code is budget_code
+                and frame.f_locals["calls"] >= 60
+            ):
+                budget = frame.f_locals["self"]
+                quotes.append(
+                    (
+                        frame.f_locals["calls"],
+                        budget.ordinary_remaining(),
+                        budget.caller.accounting.configuration.limit,
+                    )
+                )
+            if frame.f_code is path_code:
+                if event == "return" and value:
+                    path_bounds.append(
+                        (
+                            copy.deepcopy(frame.f_locals["packed"]),
+                            dict(value),
+                            frame.f_locals["journal"],
+                        )
+                    )
+                return observe
             if event == "call" and frame.f_code is intercept_request.__code__:
                 entries.append((frame.f_locals["method"], frame.f_locals["path"]))
             if event == "return" and frame.f_code is checkpoint_code:
@@ -37,12 +66,23 @@ class GuardedPublicationBatchTests(unittest.TestCase):
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             fixture = PublishedTailJourneyFixture(directory)
+            if limit != 512:
+                from tests.test_quarantine_evidence import git
+
+                fixture.config_bytes = fixture.config_bytes.replace(
+                    b"api_request_limit: 512", f"api_request_limit: {limit}".encode()
+                )
+                (fixture.root / ".reviewsensei.yml").write_bytes(fixture.config_bytes)
+                git(fixture.root, "add", ".reviewsensei.yml")
+                git(fixture.root, "commit", "-m", "bounded original request allocation")
             _, registration = fixture.original_origins(
                 failed_count=1, published_count=1
             )
             old_reviews = copy.deepcopy(fixture.reviews)
+            old_checks = copy.deepcopy(fixture.check_runs)
             external = fixture.external
             attempted = []
+            review_attempts = []
 
             def service(request, timeout):
                 body = json.loads(request.data) if request.data else {}
@@ -64,6 +104,14 @@ class GuardedPublicationBatchTests(unittest.TestCase):
                         value = json.loads(response.read(524288))
                         value["id"] += 1
                         return json_response(value)
+                if request.get_method() == "POST" and path.endswith("/reviews"):
+                    review_attempts.append(path)
+                    if fault == "review_stored_loss":
+                        external(request, timeout)
+                        raise TimeoutError("main review response lost")
+                    if fault == "review_absent_loss":
+                        fixture._meter(request)
+                        raise TimeoutError("main review was not stored")
                 return external(request, timeout)
 
             fixture.external = service
@@ -75,12 +123,17 @@ class GuardedPublicationBatchTests(unittest.TestCase):
             finally:
                 sys.settrace(previous_trace)
             return {
+                "quotes": quotes,
+                "path_bounds": path_bounds,
                 "code": result,
                 "error": fixture.error,
                 "documents": documents,
                 "entries": entries,
                 "attempted": attempted,
+                "review_attempts": review_attempts,
                 "old_reviews": old_reviews,
+                "old_checks": old_checks,
+                "checks": copy.deepcopy(fixture.check_runs),
                 "reviews": copy.deepcopy(fixture.reviews),
             }
 
@@ -101,6 +154,40 @@ class GuardedPublicationBatchTests(unittest.TestCase):
         )
         self.assertEqual(nonempty[1]["effects"][0], nonempty[-1]["effects"][0])
         self.assertEqual(len(result["reviews"]), len(result["old_reviews"]) + 1)
+        from review_sensei_github.finding_lifecycle import _maximum_native_allocation
+
+        from review_sensei.bounded_evidence import canonical_bytes
+        from review_sensei.errors import ReviewInputError
+
+        self.assertTrue(result["path_bounds"])
+        for packed, bounds, journal in result["path_bounds"]:
+            quoted = _maximum_native_allocation(packed)
+            for index, maximum in bounds.items():
+                quoted["native_atoms"][index][1] = maximum
+            self.assertLessEqual(
+                len(canonical_bytes(packed)), len(canonical_bytes(quoted))
+            )
+            # Equal data or a copied journal cannot manufacture the original
+            # source callsite needed for the narrower allocation.
+            for source in (journal, copy.copy(journal)):
+                with self.assertRaises(ReviewInputError):
+                    _maximum_native_allocation(
+                        copy.deepcopy(packed), _pair_source=source
+                    )
+
+    def test_original_total_exact_fit_and_one_short_before_business(self):
+        for limit, remaining in ((506, 70), (504, 69)):
+            with self.subTest(limit=limit):
+                result = self.run_source(limit=limit)
+                self.assertIn((70, remaining, limit), result["quotes"])
+                if remaining == 70:
+                    self.assertEqual(result["code"], 0, result["error"])
+                else:
+                    self.assertNotEqual(result["code"], 0)
+                    self.assertIn("fund", result["error"])
+                    self.assertEqual(result["entries"], [])
+                    self.assertEqual(result["reviews"], result["old_reviews"])
+                    self.assertEqual(result["checks"], result["old_checks"])
 
     def test_completed_check_failure_never_dispatches_precommitted_review(self):
         for fault in ("rejected", "lost", "mismatch"):
@@ -115,6 +202,31 @@ class GuardedPublicationBatchTests(unittest.TestCase):
                 self.assertEqual(effects[-1]["status"], "pending")
                 self.assertIsNone(effects[-1]["response"])
                 self.assertEqual(effects[-1]["request"]["comments"], [])
+
+    def test_main_review_loss_preserves_pair_without_native_retry(self):
+        for fault in ("review_stored_loss", "review_absent_loss"):
+            with self.subTest(fault=fault):
+                result = self.run_source(fault=fault)
+                self.assertNotEqual(result["code"], 0, result["error"])
+                self.assertEqual(len(result["review_attempts"]), 1)
+                self.assertEqual(len(result["attempted"]), 1)
+                self.assertEqual(
+                    len(result["reviews"]),
+                    len(result["old_reviews"]) + (fault == "review_stored_loss"),
+                )
+                self.assertTrue(result["documents"])
+                effects = result["documents"][-1]["effects"]
+                self.assertEqual(len(effects), 3)
+                self.assertEqual(effects[0]["status"], "confirmed")
+                # A stored lost response may prevent the later confirmation
+                # checkpoint. The earlier pair retains both liabilities rather
+                # than inventing durable confirmation from physical success.
+                self.assertIn(effects[1]["status"], ("confirmed", "pending"))
+                if effects[1]["status"] == "pending":
+                    self.assertEqual(effects[2]["status"], "pending")
+                self.assertIn(effects[2]["status"], ("confirmed", "pending"))
+                self.assertIn("native outcome is unconfirmed", result["error"])
+                self.assertIn("guarded_publication_pair", result["documents"][-1])
 
 
 class GuardedPairSchemaTests(unittest.TestCase):
@@ -184,6 +296,157 @@ class GuardedPairSchemaTests(unittest.TestCase):
             guarded_publication_pair=describe_pair(value["effects"]),
         )
         return value
+
+    def test_pair_unknown_scalars_do_not_change_compressed_skeleton(self):
+        from review_sensei_github.finding_lifecycle import (
+            _digest,
+            _maximum_native_allocation,
+            _pack_journal,
+            _unpack_journal,
+        )
+        from review_sensei_github.guarded_publication_batch import describe_pair
+
+        from review_sensei.bounded_evidence import canonical_bytes
+
+        original = self.pair()
+        packed = _pack_journal(original)
+        maximum = _maximum_native_allocation(packed)
+        for identifier, app, status in (
+            (1, 1, 200),
+            (42, 42, 201),
+            (9223372036854775807, 9, 200),
+        ):
+            candidate = copy.deepcopy(original)
+            start, complete, _ = candidate["effects"]
+            start["response"][0] = status
+            start["response"][1]["id"] = identifier
+            start["response"][1]["app_id"] = app
+            complete["path"] = f"/repos/o/r/check-runs/{identifier}"
+            complete["check_update_precondition"]["check_run_id"] = identifier
+            complete["check_update_precondition"]["app_id"] = app
+            complete["request_sha256"] = _digest(
+                {
+                    "method": complete["method"],
+                    "path": complete["path"],
+                    "request": complete["request"],
+                }
+            )
+            candidate["guarded_publication_pair"] = describe_pair(candidate["effects"])
+            actual = _pack_journal(candidate)
+            self.assertEqual(actual["journal"], packed["journal"])
+            self.assertEqual(_unpack_journal(actual), candidate)
+            self.assertLessEqual(
+                len(canonical_bytes(actual)), len(canonical_bytes(maximum))
+            )
+
+    def test_initial_inner_bound_covers_target_entropy_without_decoded_authority(self):
+        from review_sensei_github.finding_lifecycle import (
+            _digest,
+            _pack_journal,
+            _unpack_journal,
+        )
+        from review_sensei_github.guarded_pending_publication import (
+            _initial_carrier_bound,
+        )
+
+        from review_sensei.bounded_evidence import canonical_bytes
+        from review_sensei.errors import ReviewInputError
+
+        def initial(identifier, status):
+            value = self.pair(existing=True)
+            value.pop("guarded_publication_pair")
+            value["schema_version"] = "finding-lifecycle-journal-v2"
+            value["effects"] = value["effects"][:1]
+            effect = value["effects"][0]
+            effect["path"] = f"/repos/o/r/check-runs/{identifier}"
+            effect["check_update_precondition"]["check_run_id"] = identifier
+            effect["request_sha256"] = _digest(
+                {
+                    "method": effect["method"],
+                    "path": effect["path"],
+                    "request": effect["request"],
+                }
+            )
+            if status is None:
+                effect["status"], effect["response"] = "pending", None
+            elif status >= 400:
+                effect["status"], effect["response"] = "rejected", [status, None]
+            else:
+                effect["response"][0] = status
+                effect["response"][1]["id"] = identifier
+            return value
+
+        for status in (None, 200, 201, 400, 401, 403, 404, 405, 410):
+            upper = _initial_carrier_bound(
+                _pack_journal(initial(9223372036854775807, status))
+            )
+            with self.assertRaises(ReviewInputError):
+                _unpack_journal(upper)
+            for identifier in (1, 42, 1000000007, 9223372036854775807):
+                actual = _pack_journal(initial(identifier, status))
+                self.assertLessEqual(
+                    len(canonical_bytes(actual)), len(canonical_bytes(upper))
+                )
+
+    def test_pair_path_scope_and_alias_mutations_cannot_refine_capacity(self):
+        from review_sensei_github.finding_lifecycle import (
+            _digest,
+            _pack_journal,
+            _unpack_journal,
+            _validate,
+        )
+        from review_sensei_github.guarded_publication_batch import _shape
+
+        from review_sensei.bounded_evidence import decode_evidence, encode_evidence
+        from review_sensei.errors import ReviewInputError
+
+        for path in (
+            "/repos/foreign/r/check-runs/42",
+            "/repos/o/r/check-runs/42?x=1",
+            "/repos/o/r/check-runs/42#x",
+            "/repos/o/r/check-runs/not-a-number",
+            "/repos/o/r/check-runs/9223372036854775808",
+        ):
+            value = self.pair()
+            complete = value["effects"][1]
+            complete["path"] = path
+            complete["request_sha256"] = _digest(
+                {
+                    "method": complete["method"],
+                    "path": path,
+                    "request": complete["request"],
+                }
+            )
+            with self.assertRaises(ReviewInputError):
+                _validate(value)
+        with self.assertRaisesRegex(ReviewInputError, "numeric domain"):
+            _shape("PATCH", "/repos/o/r/check-runs/9223372036854775808", {})
+
+        packed = _pack_journal(self.pair(existing=True))
+        skeleton = decode_evidence(
+            packed["journal"], max_encoded_bytes=1048576, max_decoded_bytes=1048576
+        )
+        first = skeleton["effects"][0]["path"]["$native"]
+        second = skeleton["effects"][1]["path"]["$native"]
+        self.assertNotEqual(first, second)
+        skeleton["effects"][1]["path"]["$native"] = first
+
+        def renumber(value):
+            if isinstance(value, dict):
+                if set(value) == {"$native"} and value["$native"] > second:
+                    value["$native"] -= 1
+                else:
+                    for child in value.values():
+                        renumber(child)
+            elif isinstance(value, list):
+                for child in value:
+                    renumber(child)
+
+        renumber(skeleton)
+        del packed["native_atoms"][second]
+        packed["journal"] = encode_evidence(skeleton, max_decoded_bytes=1048576)
+        with self.assertRaises(ReviewInputError):
+            _unpack_journal(packed)
 
     def test_closed_v3_roundtrip_and_legacy_remains_single_pending(self):
         from review_sensei_github.finding_lifecycle import (

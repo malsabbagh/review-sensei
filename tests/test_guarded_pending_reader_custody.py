@@ -94,6 +94,40 @@ class GuardedPendingReaderCustodyTests(unittest.TestCase):
             with patch.object(journal.ledger, "_terminal_claimed", True):
                 with self.assertRaisesRegex(ReviewInputError, "terminal reservation"):
                     _terminal_reservation(journal)
+            from dataclasses import replace
+
+            original_state = caller._state
+            try:
+                terminal = next(
+                    b for b in original_state.blocks if b.block_id == original
+                )
+                for altered in (
+                    replace(terminal, undispatched=terminal.undispatched - 1),
+                    replace(
+                        terminal,
+                        issued_by=replace(
+                            terminal.issued_by,
+                            generation=terminal.issued_by.generation + 1,
+                        ),
+                    ),
+                ):
+                    # Deliberately corrupt a copied runtime snapshot without
+                    # issuing a new accounting state. This is a custody negative,
+                    # not permission to relax the original conservation rules.
+                    changed_state = copy.copy(original_state)
+                    object.__setattr__(
+                        changed_state,
+                        "blocks",
+                        tuple(
+                            altered if b is terminal else b
+                            for b in original_state.blocks
+                        ),
+                    )
+                    caller._state = changed_state
+                    with self.assertRaises(ReviewInputError):
+                        _terminal_reservation(journal)
+            finally:
+                caller._state = original_state
             visited.append(True)
             return None
 
@@ -112,6 +146,54 @@ class GuardedPendingReaderCustodyTests(unittest.TestCase):
                     code = fixture.invoke()
             finally:
                 sys.settrace(previous)
+            self.assertEqual(code, 0, fixture.error)
             self.assertEqual(visited, [True])
             self.assertEqual(callbacks, [])
-            self.assertEqual(code, 0, fixture.error)
+
+    def test_nonmatching_shapes_decline_before_specialized_source_or_price(self):
+        from types import SimpleNamespace
+
+        from review_sensei_github import guarded_pending_publication as plan
+
+        base = dict(
+            publisher=object(),
+            journal=SimpleNamespace(_record=SimpleNamespace(quarantine_lineage={})),
+            result=SimpleNamespace(comments=()),
+            assembled=SimpleNamespace(inline_comments=(), index_entries=()),
+            eligibility=SimpleNamespace(
+                historical_assessments=None,
+                quarantine_assessments={"pending": [1]},
+                facts=SimpleNamespace(has_human_adjudication_findings=True),
+            ),
+            marker="",
+            outcome=SimpleNamespace(conclusion="neutral"),
+            policy=None,
+            complete_inventory=True,
+            checks_enabled=True,
+            grouped=False,
+            planned_window=None,
+            planned_drift=None,
+            continuation=None,
+            retained_eligibility=None,
+            superseded_threads=(),
+            convergence_policy=None,
+        )
+        for changed in (
+            {"result": SimpleNamespace(comments=[object()])},
+            {"checks_enabled": False},
+            {"grouped": True},
+            {"complete_inventory": False},
+            {"continuation": object()},
+            {"retained_eligibility": object()},
+            {"superseded_threads": (object(),)},
+        ):
+            with (
+                self.subTest(changed=tuple(changed)),
+                patch.object(
+                    plan,
+                    "_source",
+                    side_effect=AssertionError("specialized source invoked"),
+                ) as source,
+            ):
+                self.assertFalse(plan.admit(**{**base, **changed}))
+                source.assert_not_called()

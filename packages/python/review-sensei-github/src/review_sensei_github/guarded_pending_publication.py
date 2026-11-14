@@ -471,8 +471,28 @@ def batch_context(journal):
     return context
 
 
+def _initial_carrier_bound(packed):
+    """Sizing-only inner zlib bound for an unobserved initial check target.
+
+    The source supplies a maximum-width numeric path and fixed-width request
+    digests. No encoded placeholder is ever staged or decoded as authority.
+    """
+    from .finding_lifecycle import _maximum_native_allocation
+
+    result = _maximum_native_allocation(packed)
+    size = result["journal"]["decoded_bytes"]
+    # zlib compressBound for its standard wrapper, followed by base64 framing.
+    compressed = size + (size >> 12) + (size >> 14) + (size >> 25) + 13
+    result["journal"]["data"] = "x" * (4 * ((compressed + 2) // 3))
+    return result
+
+
 def _three_checkpoints(journal, branch):
-    from .finding_lifecycle import _digest, _pack_journal
+    from .finding_lifecycle import (
+        _digest,
+        _maximum_native_allocation,
+        _pack_journal,
+    )
     from .guarded_publication_batch import describe_pair
     from .ordinary_publication_plan import _capacity_request_identity
 
@@ -494,6 +514,7 @@ def _three_checkpoints(journal, branch):
     shadow = copy.copy(journal)
     shadow.effects = [effect(branch[0])]
     first, first_stop, confirmed_start = shadow._preflight_effect(capacity_only=True)
+    first = _initial_carrier_bound(first)
     shadow.effects = copy.deepcopy(confirmed_start) + [effect(branch[1])]
     _, complete_stop, confirmed_complete = shadow._preflight_effect(capacity_only=True)
     shadow.effects = copy.deepcopy(confirmed_start) + [
@@ -501,12 +522,34 @@ def _three_checkpoints(journal, branch):
         effect(branch[2]),
     ]
     shadow._guarded_publication_pair = describe_pair(shadow.effects)
-    batch = _pack_journal(shadow._document())
+    batch = _maximum_native_allocation(
+        _pack_journal(shadow._document()), _pair_source=journal
+    )
     shadow.effects = copy.deepcopy(confirmed_complete) + [effect(branch[2])]
     _, review_stop, confirmed_review = shadow._preflight_effect(capacity_only=True)
     # Every stop keeps all precommitted liabilities. Include incomplete batch
     # layouts, not just the two successful endpoints.
-    stops = [first_stop, complete_stop, review_stop, batch]
+    stops = [_initial_carrier_bound(first_stop), complete_stop, review_stop, batch]
+    # Every initial stop remains legacy-packed. Its unobserved PATCH path and
+    # digest entropy are bounded by compressBound, not placeholder compression.
+    outcomes = [("pending", None)]
+    outcomes.extend(
+        ("rejected", [status, None]) for status in (400, 401, 403, 404, 405, 410)
+    )
+    for status in (200, 201):
+        response = copy.deepcopy(confirmed_start[0]["response"])
+        response[0] = status
+        outcomes.append(("confirmed", response))
+    for effect_status, response in outcomes:
+        for unknown in (False, True):
+            initial_shadow = copy.copy(shadow)
+            initial_shadow._guarded_publication_pair = None
+            initial_effects = copy.deepcopy(confirmed_start)
+            initial_effects[0]["status"] = effect_status
+            initial_effects[0]["response"] = response
+            initial = initial_shadow._document(effects=initial_effects)
+            initial["unknown_trust_effect"] = unknown
+            stops.append(_initial_carrier_bound(_pack_journal(initial)))
     for complete_status in ("pending", "rejected", "confirmed"):
         for review_status in ("pending", "rejected", "confirmed"):
             if complete_status != "confirmed" and review_status != "pending":
@@ -528,7 +571,11 @@ def _three_checkpoints(journal, branch):
                 stops.append(maximum)
             document = candidate._document()
             document["unknown_trust_effect"] = True
-            stops.append(_pack_journal(document))
+            stops.append(
+                _maximum_native_allocation(
+                    _pack_journal(document), _pair_source=journal
+                )
+            )
     final = max(stops, key=lambda item: len(canonical_bytes(item)))
     return first, batch, final
 
@@ -561,11 +608,37 @@ def admit(
     scope = _ACTIVE.get()
     if journal is None or journal._record.quarantine_lineage is None:
         return False
+    from review_sensei.publication_intent_fusion import outstanding
+
     from .quarantine_capacity import installed_capacity
 
+    # Ordinary nonempty/grouped/continuation producers keep the original route.
+    # Once retention has deferred, however, no unsupported shape can fall back.
+    applicable = (
+        checks_enabled
+        and not grouped
+        and complete_inventory
+        and not result.comments
+        and not assembled.inline_comments
+        and not assembled.index_entries
+        and not superseded_threads
+        and continuation is None
+        and retained_eligibility is None
+        and eligibility.historical_assessments is None
+        and bool(eligibility.quarantine_assessments)
+        and bool(eligibility.quarantine_assessments.get("pending"))
+        and eligibility.facts.has_human_adjudication_findings
+        and outcome.conclusion != "success"
+    )
+    if not applicable:
+        if outstanding():
+            raise ReviewInputError("guarded deferred publication shape changed")
+        return False
     try:
         installed_capacity(journal.ledger, journal.identity)
     except ReviewInputError:
+        if outstanding():
+            raise
         return False
     authenticated, guard, reader, key, expected = _source(journal)
     if (

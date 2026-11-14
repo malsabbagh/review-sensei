@@ -51,41 +51,92 @@ def _pack_journal(document):
         raise ReviewInputError("finding lifecycle complete byte capacity exceeded")
     atoms: list[list[Any]] = []
     aliases: dict[tuple[str, Any], int] = {}
+    # A closed pair includes hashes and a PATCH path derived from a future
+    # native ID. Independent slots keep their entropy AND equality relationships
+    # outside the compressed skeleton. Existing v3 readers already support it.
+    paired = document.get("schema_version") == "finding-lifecycle-journal-v3"
+
+    variable_digests = {
+        "request_sha256",
+        "start_receipt_sha256",
+        "complete_request_sha256",
+        "start_request_sha256",
+    }
 
     def visit(value, field=None):
         kind = None
-        if value is not None and field in _ATOM_FIELDS and isinstance(value, str):
+        independent = paired and (
+            field in variable_digests or field in {"path", "$response_status"}
+        )
+        if (
+            value is not None
+            and (
+                field in _ATOM_FIELDS
+                or (
+                    paired
+                    and field == "path"
+                    and isinstance(value, str)
+                    and re.fullmatch(r"/repos/[^/]+/[^/]+/check-runs/[0-9]+", value)
+                )
+            )
+            and isinstance(value, str)
+        ):
             if not value or not value.isprintable() or len(value.encode("utf-8")) > 256:
                 raise ReviewInputError(
                     "finding lifecycle native identity exceeds supported wire bounds"
                 )
             kind = "native"
-        elif value is not None and field in _NUMERIC_FIELDS and type(value) is int:
+        elif (
+            value is not None
+            and (
+                field in _NUMERIC_FIELDS
+                or (
+                    paired
+                    and (
+                        field == "$response_status"
+                        or (isinstance(field, str) and field.endswith("_id"))
+                    )
+                )
+            )
+            and type(value) is int
+        ):
             if not 0 < value <= 9_223_372_036_854_775_807:
                 raise ReviewInputError(
                     "finding lifecycle numeric identity exceeds supported wire bounds"
                 )
             kind = "integer"
         elif (
-            field in {"proof_sha256", "target_proof_sha256", "body_sha256"}
+            (
+                field in {"proof_sha256", "target_proof_sha256", "body_sha256"}
+                or (paired and field in variable_digests)
+            )
             and isinstance(value, str)
             and re.fullmatch(r"[a-f0-9]{64}", value)
         ):
             kind = "digest"
         if kind is not None:
             alias = (kind, value)
-            if kind != "integer" and alias in aliases:
+            if not independent and kind != "integer" and alias in aliases:
                 return {"$native": aliases[alias]}
             index = len(atoms)
             atoms.append([kind, value])
-            aliases[alias] = index
+            if not independent:
+                aliases[alias] = index
             return {"$native": index}
         if isinstance(value, dict):
             if "$native" in value:
                 raise ReviewInputError("finding lifecycle reserved representation key")
             return {key: visit(value[key], key) for key in sorted(value)}
         if isinstance(value, (tuple, list)):
-            return [visit(item) for item in value]
+            return [
+                visit(
+                    item,
+                    "$response_status"
+                    if paired and field == "response" and index == 0
+                    else None,
+                )
+                for index, item in enumerate(value)
+            ]
         return value
 
     skeleton = visit(document)
@@ -153,13 +204,90 @@ def _confirmed_thread_response_matches(effect):
     )
 
 
-def _maximum_native_allocation(packed, *, preserve_observed=False):
+def _closed_pair_path_bound(packed, journal):
+    """One source-generated numeric PATCH path, never an arbitrary native ID."""
+    import inspect
+
+    from review_sensei.source_registry import (
+        require_instance_source,
+        require_module_seal,
+    )
+
+    from . import guarded_pending_publication
+
+    frame = inspect.currentframe()
+    source = frame.f_back.f_back if frame and frame.f_back else None
+    if source is None:
+        raise ReviewInputError("guarded path sizing source is unavailable")
+    require_instance_source(journal, methods=("_preflight_effect",))
+    if source.f_code is FindingLifecycleJournal._preflight_effect.__code__:
+        valid = source.f_locals.get("self") is journal
+    else:
+        require_module_seal(guarded_pending_publication)
+        valid = (
+            source.f_code is guarded_pending_publication._three_checkpoints.__code__
+            and source.f_locals.get("journal") is journal
+        )
+    if not valid:
+        raise ReviewInputError("guarded path sizing source changed")
+    document = _unpack_journal(packed)
+    if document.get("schema_version") != "finding-lifecycle-journal-v3":
+        return {}
+    _require_effect_scope(document, journal.identity, journal.head_sha)
+    from .guarded_publication_batch import validate_pair
+
+    validate_pair(document["effects"], document["guarded_publication_pair"])
+    complete_index = document["guarded_publication_pair"]["complete_index"]
+    identifier = document["effects"][0]["response"][1]["id"]
+    prefix = f"/repos/{journal.identity.repository}/check-runs/"
+    if type(identifier) is not int or not 0 < identifier <= 9_223_372_036_854_775_807:
+        raise ReviewInputError("guarded check ID exceeds its source domain")
+    if document["effects"][complete_index]["path"] != prefix + str(identifier):
+        raise ReviewInputError("guarded check path changed")
+    skeleton = decode_evidence(
+        packed["journal"], max_encoded_bytes=1_048_576, max_decoded_bytes=1_048_576
+    )
+    if not isinstance(skeleton, dict):
+        raise ReviewInputError("guarded pair skeleton is not an object")
+    reference = skeleton["effects"][complete_index]["path"]
+    if not isinstance(reference, dict) or set(reference) != {"$native"}:
+        return {}
+    index = reference["$native"]
+    count = 0
+
+    def census(value):
+        nonlocal count
+        if isinstance(value, dict):
+            if value == {"$native": index}:
+                count += 1
+            for child in value.values():
+                census(child)
+        elif isinstance(value, list):
+            for child in value:
+                census(child)
+
+    census(skeleton)
+    if count != 1 or packed["native_atoms"][index] != [
+        "native",
+        prefix + str(identifier),
+    ]:
+        raise ReviewInputError("guarded check path slot is aliased or changed")
+    return {index: prefix + "9223372036854775807"}
+
+
+def _maximum_native_allocation(packed, *, preserve_observed=False, _pair_source=None):
     """A sizing-only value, never passed to stage or installed as authority."""
     import copy
 
+    path_bounds = (
+        {} if _pair_source is None else _closed_pair_path_bound(packed, _pair_source)
+    )
     result = copy.deepcopy(packed)
     seen: dict[tuple[str, Any], Any] = {}
     for index, atom in enumerate(result["native_atoms"]):
+        if index in path_bounds:
+            atom[1] = path_bounds[index]
+            continue
         key = (atom[0], atom[1])
         if key not in seen:
             if atom[0] == "native" and (
@@ -2250,7 +2378,7 @@ class FindingLifecycleJournal:
                             outcome["effects"][-1]["response"] = effect_response
                             candidates.append(
                                 _maximum_native_allocation(
-                                    _pack_journal(outcome), preserve_observed=True
+                                    _pack_journal(outcome), _pair_source=self if outcome.get("schema_version") == "finding-lifecycle-journal-v3" else None, preserve_observed=True
                                 )
                             )
         future = max(candidates, key=lambda v: len(canonical_bytes(v)))

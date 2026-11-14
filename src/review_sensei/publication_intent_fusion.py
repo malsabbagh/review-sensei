@@ -165,6 +165,22 @@ def defer_current():
         ledger, methods=("load", "replace", "read_evidence", "evidence_producer")
     )
     caller._require_ledger(ledger, identity)
+    # Plain target isolation has no installed native-capacity contract. Keep its
+    # original mark transition; only an authenticated guarded producer may defer.
+    origin = sys.modules["review_sensei_github.quarantine_origin"]
+    require_module_seal(origin)
+    authenticated = getattr(ledger, "_quarantine_authenticated", None)
+    if authenticated is None:
+        raise ReviewInputError("publication fusion origin custody is unavailable")
+    origin.require_authenticated_read_owner(authenticated, ledger, caller, identity)
+    if canonical_bytes(record.quarantine_lineage) != authenticated.lineage_bytes:
+        raise ReviewInputError("publication fusion origin manifest changed")
+    isolation = authenticated.archive["target_isolation"]
+    isolation = isolation.get("execution_isolation", isolation)
+    if isolation.get("schema_version") == "quarantine-target-isolation-v1":
+        return False
+    capacity = sys.modules["review_sensei_github.quarantine_capacity"]
+    capacity.installed_capacity(ledger, identity)
     entry.receipt = (
         ledger,
         caller,

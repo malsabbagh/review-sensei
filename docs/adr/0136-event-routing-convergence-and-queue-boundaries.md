@@ -462,3 +462,15 @@ tail remains unchanged outside this qualified route. The actual one-plus-one
 crash paths and the full failure matrix remain qualification obligations, not
 implied closure. Historical assessment reads and all current authority fences
 remain required.
+
+The pair's not-yet-observed request/receipt digests, status codes, numeric
+preconditions and numeric check paths occupy independent existing packed-v3 atom
+slots. Their equality cannot change the compressed skeleton through aliasing.
+Only the source-bound, uniquely referenced completed-check path may retain its
+exact repository prefix and price the maximum int63 suffix; unrelated native
+atoms keep the original UTF-8 bound. The first, still-unpaired carrier uses the
+codec's inner zlib compressBound plus base64 framing across every supported stop
+layout. These upper envelopes are sizing-only and cannot decode as lifecycle
+authority. Ordinary carriers, original limits and cold logical validation remain
+unchanged. Genuine plain isolation and nonmatching producer shapes retain the
+original publication path before any deferral is issued.

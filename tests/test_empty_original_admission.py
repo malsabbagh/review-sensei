@@ -71,3 +71,41 @@ class EmptyOriginalAdmissionTests(unittest.TestCase):
             # complete route admission and joint intent confirmation.
             self.assertEqual(fixture.check_runs, checks)
             self.assertFalse(consume(object(), object(), object(), object()))
+
+    def test_actual_plain_isolation_retains_original_mark_without_deferral(self):
+        import sys
+        import tempfile
+        from unittest.mock import patch
+
+        from review_sensei.publication_intent_fusion import defer_current
+        from tests.test_quarantine_activation import registered_resource
+        from tests.test_quarantine_journey import JourneyFixture
+        from tests.test_quarantine_published_tail_journey import BROKER_QUALIFICATIONS
+
+        observed = []
+
+        def observe(frame, event, value):
+            if frame.f_code is defer_current.__code__:
+                if event == "return":
+                    observed.append(value)
+                return observe
+            return None
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
+        ):
+            fixture = JourneyFixture(directory)
+            _, registration = fixture.original_origins(
+                failed_count=1, published_count=1
+            )
+            previous = sys.gettrace()
+            try:
+                sys.settrace(observe)
+                with registered_resource([registration]):
+                    code = fixture.invoke()
+            finally:
+                sys.settrace(previous)
+            self.assertEqual(code, 0, fixture.error)
+            self.assertTrue(observed)
+            self.assertFalse(any(observed))

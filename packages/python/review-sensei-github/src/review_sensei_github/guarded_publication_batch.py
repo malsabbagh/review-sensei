@@ -14,6 +14,11 @@ _EXECUTIONS: WeakKeyDictionary = WeakKeyDictionary()
 
 
 def _shape(method, path, body):
+    numeric = re.search(r"/check-runs/([1-9][0-9]*)$", path)
+    if numeric is not None and (
+        len(numeric[1]) > 19 or int(numeric[1]) > 9_223_372_036_854_775_807
+    ):
+        raise ReviewInputError("guarded check target exceeds its priced numeric domain")
     return canonical_bytes(
         [method, re.sub(r"/check-runs/[1-9][0-9]*$", "/check-runs/{id}", path), body]
     )
