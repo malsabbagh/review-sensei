@@ -507,3 +507,8 @@ def checkpoint_publication_staging(
 
     retained = ledger.replace(identity, mutate, now=now)
     return PublicationStaging.from_document(retained.publication_staging)
+
+
+from .source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()
