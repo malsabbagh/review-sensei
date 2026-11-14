@@ -1045,6 +1045,33 @@ def _disposition_frame_reserve(
     return growth + len(provenance.encode("utf-8")) + 2
 
 
+def _command_review_confirmation(caller, *, key, native_union):
+    """Fund one original prewrite verification without shrinking native readback.
+
+    This local allocation is not trust-route or whole-command admission.
+    Unsupported trust profiles still fail at the original effect gate.
+    """
+    from .api_run_plan import (
+        COMMAND_UPDATE_CONFIRMATION_REQUESTS,
+        NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS,
+    )
+    from .trust_effects import verification_calls
+
+    tail = 1 + (
+        NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS
+        if native_union
+        else COMMAND_UPDATE_CONFIRMATION_REQUESTS
+    )
+    verification = verification_calls(caller)
+    caller.budget_view.preflight(tail + verification)
+    return caller._operation(
+        key,
+        tail + verification,
+        write_tail=tail,
+        prewrite_reads=verification,
+    )
+
+
 def _published_summary_byte_limit(result: ReviewResult) -> int:
     """Account for finding prose separately from the validated input summary.
 
@@ -3843,28 +3870,18 @@ class ReviewApprovalFinalizer:
                 status="gate_reevaluation_failed",
                 diagnostic="command_body_capacity_exceeded",
             )
-        from .api_run_plan import (
-            COMMAND_UPDATE_CONFIRMATION_REQUESTS,
-            NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS,
-        )
         from .caller_operation import caller_for_http
 
         caller = caller_for_http(self.http)
         confirmation = nullcontext()
         if caller is not None and new_body != body:
-            capacity = 1 + (
-                NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS
-                if eligibility.native_union is not None
-                else COMMAND_UPDATE_CONFIRMATION_REQUESTS
-            )
-            caller.budget_view.preflight(capacity)
-            confirmation = caller._operation(
-                "command-review-update:"
+            confirmation = _command_review_confirmation(
+                caller,
+                key="command-review-update:"
                 + str(chosen["id"])
                 + ":"
                 + hashlib.sha256(new_body.encode()).hexdigest(),
-                capacity,
-                write_tail=capacity,
+                native_union=eligibility.native_union is not None,
             )
         journal = getattr(self, "_finding_lifecycle_journal", None)
         update_capacity_states: list[
