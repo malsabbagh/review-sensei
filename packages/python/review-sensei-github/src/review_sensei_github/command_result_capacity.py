@@ -196,8 +196,13 @@ def command_result_capacity_bound(
     )
 
 
-def raw_result_manifest_bound(*, envelope_bytes, binding, reference_history):
-    """Worst zlib/base64 wire, not favorable placeholder compression or authority."""
+def raw_result_manifest_upper(*, envelope_bytes, binding, reference_history):
+    """Inert maximum-width manifest shape, not decodable evidence or authority.
+
+    The payload uses raw codec width, not favorable placeholder compression.
+    This object is only for original root/comment renderer size checks. Never
+    read it as a retained result, stage it, or pass it to an execution grant.
+    """
     from review_sensei import action_result_codec, bounded_evidence
 
     require_module_seal(sys.modules[__name__])
@@ -233,7 +238,20 @@ def raw_result_manifest_bound(*, envelope_bytes, binding, reference_history):
         raise ReviewInputError(
             "current result raw carrier exceeds the original inline bound"
         )
-    return len(canonical_bytes(manifest))
+    return manifest
+
+
+def raw_result_manifest_bound(*, envelope_bytes, binding, reference_history):
+    """Worst zlib/base64 wire, not favorable placeholder compression or authority."""
+    return len(
+        canonical_bytes(
+            raw_result_manifest_upper(
+                envelope_bytes=envelope_bytes,
+                binding=binding,
+                reference_history=reference_history,
+            )
+        )
+    )
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

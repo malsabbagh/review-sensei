@@ -34,6 +34,28 @@ BINDING = {
 
 
 class CommandResultWireBoundTests(unittest.TestCase):
+    def test_raw_upper_is_only_an_inert_outer_manifest(self):
+        from review_sensei.action_result_codec import decode_action_result_carrier
+        from review_sensei.bounded_evidence import read_inline_evidence
+
+        for raw in (1, 1024, 4096):
+            with self.subTest(raw=raw):
+                manifest = bound.raw_result_manifest_upper(
+                    envelope_bytes=raw, binding=BINDING, reference_history=True
+                )
+                self.assertEqual(
+                    len(canonical_bytes(manifest)),
+                    bound.raw_result_manifest_bound(
+                        envelope_bytes=raw, binding=BINDING, reference_history=True
+                    ),
+                )
+                # The genuine root/accounting validator may size its outer
+                # inline shape. No reader can mistake the synthetic payload for
+                # a decodable, authenticated terminal result.
+                carrier = read_inline_evidence(manifest, expected_binding=BINDING)
+                with self.assertRaises(ReviewInputError):
+                    decode_action_result_carrier(carrier, history={})
+
     def test_original_formatter_and_codec_fit_raw_bound(self):
         base = MaintainerCommandResult("dismiss", True, False, "decision recorded")
         outcome = {"kind": "applied", "reason": None}
