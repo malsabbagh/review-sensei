@@ -147,6 +147,10 @@ def _registry():
         )
 
     def confirm_checkpoint(caller, ledger, record, persisted):
+        from . import historical_terminal_fence
+
+        require_module_seal(historical_terminal_fence)
+        historical_terminal_fence.confirm_checkpoint(caller, ledger, record, persisted)
         token = active.get(caller)
         if token is None:
             return

@@ -488,6 +488,11 @@ def _registry():
         if genuine and validate_current(caller, deadline) and token is not None:
             raise ReviewInputError("current and historical namespaces cannot coexist")
         if token is None:
+            if genuine:
+                from . import historical_terminal_fence
+
+                require_module_seal(historical_terminal_fence)
+                historical_terminal_fence.before_request(caller)
             # Observation is not authority. An incomplete or altered original
             # sequence history can never seed a later namespace projection.
             if not genuine:
@@ -506,6 +511,10 @@ def _registry():
             return
         original("open", frame)
         entry = _require(token, caller)
+        from . import historical_terminal_fence
+
+        require_module_seal(historical_terminal_fence)
+        historical_terminal_fence.before_request(caller)
         from . import quarantine_command_successor
 
         require_module_seal(quarantine_command_successor)

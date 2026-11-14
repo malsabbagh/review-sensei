@@ -204,6 +204,10 @@ def _registry():
 
             require_module_seal(historical_review_census)
             historical_review_census.issue(lease, saved)
+            from . import historical_terminal_fence
+
+            require_module_seal(historical_terminal_fence)
+            historical_terminal_fence.start(run, lease)
         except BaseException:
             active.pop(run.caller, None)
             leases.pop(lease, None)

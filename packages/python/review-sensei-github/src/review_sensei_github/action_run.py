@@ -665,10 +665,12 @@ def execute_command(run: ReviewRun, args: Any) -> int:
     )
     from review_sensei.source_registry import require_module_seal
 
-    from . import current_quarantine_finalization
+    from . import current_quarantine_finalization, historical_terminal_fence
 
     require_module_seal(current_quarantine_finalization)
     current_quarantine_finalization.before_terminal(caller, run, proof)
+    require_module_seal(historical_terminal_fence)
+    historical_terminal_fence.before_terminal(caller, run, proof)
     caller.begin_terminal("action-completion")
     caller.close_action(run.ledger, run.identity, proof)
     print(result.summary)
