@@ -569,13 +569,14 @@ def _three_checkpoints(journal, branch):
             else:
                 _, maximum, _ = candidate._preflight_effect(capacity_only=True)
                 stops.append(maximum)
-            document = candidate._document()
-            document["unknown_trust_effect"] = True
-            stops.append(
-                _maximum_native_allocation(
-                    _pack_journal(document), _pair_source=journal
+            for unknown in (False, True):
+                document = candidate._document()
+                document["unknown_trust_effect"] = unknown
+                stops.append(
+                    _maximum_native_allocation(
+                        _pack_journal(document), _pair_source=journal
+                    )
                 )
-            )
     final = max(stops, key=lambda item: len(canonical_bytes(item)))
     return first, batch, final
 

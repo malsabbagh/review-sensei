@@ -26,8 +26,8 @@ class EmptyOriginalAdmissionTests(unittest.TestCase):
         import tempfile
         from unittest.mock import patch
 
-        from test_quarantine_activation import registered_resource
-        from test_quarantine_published_tail_journey import (
+        from tests.test_quarantine_activation import registered_resource
+        from tests.test_quarantine_published_tail_journey import (
             BROKER_QUALIFICATIONS,
             PublishedTailJourneyFixture,
         )

@@ -21,7 +21,7 @@ from tests.test_quarantine_published_tail_journey import (
 
 class GuardedPublicationBatchTests(unittest.TestCase):
     def run_source(self, *, fault=None, limit=512):
-        documents, entries, path_bounds, quotes = [], [], [], []
+        documents, entries, path_bounds, quotes, widths = [], [], [], [], []
         from review_sensei_github.api_run_budget import CallerRunBudget
 
         budget_code = CallerRunBudget.preflight.__code__
@@ -58,7 +58,23 @@ class GuardedPublicationBatchTests(unittest.TestCase):
                 entries.append((frame.f_locals["method"], frame.f_locals["path"]))
             if event == "return" and frame.f_code is checkpoint_code:
                 journal = frame.f_locals["self"]
-                documents.append(copy.deepcopy(journal._document()))
+                current = journal._document()
+                documents.append(copy.deepcopy(current))
+                from review_sensei_github.finding_lifecycle import _pack_journal
+                from review_sensei_github.guarded_pending_publication import _ISSUED
+
+                from review_sensei.bounded_evidence import canonical_bytes
+
+                issued = _ISSUED.get(journal)
+                if issued is not None:
+                    bound = json.loads(issued[0].payload)["future_wire_bound"]
+                    widths.append(
+                        (
+                            len(canonical_bytes(_pack_journal(current))),
+                            bound,
+                            current["unknown_trust_effect"],
+                        )
+                    )
             return observe if frame.f_code is checkpoint_code else None
 
         with (
@@ -123,6 +139,7 @@ class GuardedPublicationBatchTests(unittest.TestCase):
             finally:
                 sys.settrace(previous_trace)
             return {
+                "widths": widths,
                 "quotes": quotes,
                 "path_bounds": path_bounds,
                 "code": result,
@@ -202,6 +219,11 @@ class GuardedPublicationBatchTests(unittest.TestCase):
                 self.assertEqual(effects[-1]["status"], "pending")
                 self.assertIsNone(effects[-1]["response"])
                 self.assertEqual(effects[-1]["request"]["comments"], [])
+                self.assertTrue(result["widths"])
+                for actual, bound, unknown in result["widths"]:
+                    self.assertLessEqual(actual, bound)
+                if fault == "rejected":
+                    self.assertFalse(result["widths"][-1][2])
 
     def test_main_review_loss_preserves_pair_without_native_retry(self):
         for fault in ("review_stored_loss", "review_absent_loss"):

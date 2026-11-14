@@ -50,7 +50,7 @@ class GuardedPendingReaderCustodyTests(unittest.TestCase):
             finally:
                 sys.settrace(previous)
             self.assertNotEqual(code, 0)
-            self.assertEqual(visited, [True])
+            self.assertEqual(visited, [True], fixture.error)
             self.assertEqual(callbacks, [])
             self.assertEqual(fixture.reviews, reviews)
             self.assertEqual(fixture.check_runs, checks)
