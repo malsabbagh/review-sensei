@@ -326,6 +326,41 @@ def register_journal_transport(transport, journal, delegate):
     )
 
 
+def registered_journal_delegate(http):
+    """Return only this original adapter's registered delegate for identity lookup.
+
+    This is NOT command capacity or a budget substitution. Command execution
+    continues to use _underlying_http with its independent budget checks.
+    """
+    from review_sensei.source_registry import require_instance_source
+
+    from .finding_lifecycle import FindingLifecycleJournal, _JournalTransport
+
+    if type(http) is not _JournalTransport:
+        raise ReviewInputError("journal identity adapter source is unsupported")
+    registered = _JOURNAL_TRANSPORTS.get(http)
+    if registered is None:
+        raise ReviewInputError("journal identity adapter is unregistered")
+    require_instance_source(
+        http, methods=("request", "preflight_native_batch", "__getattr__")
+    )
+    journal: Any = registered[0]
+    require_instance_source(journal, methods=("request", "preflight_native_batch"))
+    if (
+        type(journal) is not FindingLifecycleJournal
+        or vars(http).get("delegate") is not registered[1]
+        or vars(http).get("journal") is not journal
+        or getattr(getattr(journal, "request", None), "__func__", None)
+        is not registered[4]
+        or getattr(getattr(journal, "preflight_native_batch", None), "__func__", None)
+        is not registered[5]
+        or getattr(http.request, "__func__", None) is not registered[2]
+        or getattr(http.preflight_native_batch, "__func__", None) is not registered[3]
+    ):
+        raise ReviewInputError("journal identity adapter custody changed")
+    return registered[1]
+
+
 def _underlying_http(http, *, budget):
     from .publication_recovery import PublicationBudgetHttp, _PaginationObservationHttp
 

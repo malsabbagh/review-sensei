@@ -27,6 +27,38 @@ from .retention_projection import (
 _READ_FORMATS: WeakKeyDictionary = WeakKeyDictionary()
 
 
+def _format_transport(http):
+    """Resolve descriptor identity, never publication or budget authority.
+
+    Only registered original journal adapters and the existing audited wrapper
+    classes participate. All command budget validation remains independent.
+    """
+    from review_sensei.source_registry import require_module_seal
+
+    from . import command_finalization_plan, finding_lifecycle
+    from .human_assessment import FeedbackBudgetHttp
+    from .publication_recovery import PublicationBudgetHttp, _PaginationObservationHttp
+
+    seen = set()
+    for _ in range(16):
+        if id(http) in seen:
+            break
+        seen.add(id(http))
+        if type(http) is finding_lifecycle._JournalTransport:
+            require_module_seal(command_finalization_plan)
+            require_module_seal(finding_lifecycle)
+            http = command_finalization_plan.registered_journal_delegate(http)
+        elif type(http) in {
+            PublicationBudgetHttp,
+            _PaginationObservationHttp,
+            FeedbackBudgetHttp,
+        }:
+            http = http.transport
+        else:
+            return http
+    raise ReviewInputError("checkpoint format transport chain is unqualified")
+
+
 def publication_format(http, result):
     """A successfully authenticated descriptor selects its exact native format.
 
@@ -36,9 +68,7 @@ def publication_format(http, result):
     transaction = result.transaction
     if http is None or transaction is None:
         return None
-    from .publication_recovery import _publication_transport
-
-    return _READ_FORMATS.get(_publication_transport(http), {}).get(
+    return _READ_FORMATS.get(_format_transport(http), {}).get(
         (transaction.transaction_id, transaction.result_sha256)
     )
 
@@ -108,19 +138,15 @@ class CheckpointResultStore(ResultPartStore):
                 payload, self.transaction, lambda ref: self._source(ref, store)
             )
             self._last_read_was_projection = True
-            from .publication_recovery import _publication_transport
-
-            selected = _READ_FORMATS.setdefault(_publication_transport(self.http), {})
+            selected = _READ_FORMATS.setdefault(_format_transport(self.http), {})
             selected[
                 self.transaction.transaction_id, self.transaction.result_sha256
             ] = value["native_render_format"]
             return restored
         # A raw legacy read must not inherit another descriptor's renderer in
         # this process, including when the logical transaction identity agrees.
-        from .publication_recovery import _publication_transport
-
         if self.transaction is not None:
-            _READ_FORMATS.get(_publication_transport(self.http), {}).pop(
+            _READ_FORMATS.get(_format_transport(self.http), {}).pop(
                 (self.transaction.transaction_id, self.transaction.result_sha256), None
             )
         return payload
