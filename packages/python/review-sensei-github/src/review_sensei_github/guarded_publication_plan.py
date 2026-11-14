@@ -117,7 +117,7 @@ def require_grouped_durable_floor(publisher, journal, host, *, checks_enabled):
     from .quarantine_capacity import installed_capacity
     from .quarantine_census import lifecycle_checkpoint_pricing
 
-    if journal is None or not checks_enabled or journal.effects:
+    if journal is None or journal.effects:
         return
     if journal._record.quarantine_lineage is None:
         return
@@ -188,7 +188,10 @@ def require_grouped_durable_floor(publisher, journal, host, *, checks_enabled):
     if checkpoint is None:
         return  # No source quote can manufacture admission.
     groups = len(host.plan.groups)
-    # Two check effects, one POST per group and one final union POST. Every
+    # Checks may be unavailable while review publication still proceeds.
+    # Count only their actual branch, never skip the review-only floor.
+    # One POST per group and one final union POST are mandatory. Every
     # pending intent needs a checkpoint; finish needs one final checkpoint.
     # This omits staging CAS, manifest writes, complete reads and trust fences.
-    journal.ledger.caller.budget_view.preflight((groups + 4) * checkpoint + groups + 3)
+    effects = groups + 1 + (2 if checks_enabled else 0)
+    journal.ledger.caller.budget_view.preflight((effects + 1) * checkpoint + effects)

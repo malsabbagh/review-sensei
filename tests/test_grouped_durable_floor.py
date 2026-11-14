@@ -1,10 +1,13 @@
 """Original grouped publication refuses an unfunded tail before check effects."""
 
 import copy
+import io
+import json
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
 from review_sensei_github.api_run_budget import CallerRunBudget
@@ -16,6 +19,12 @@ from test_quarantine_published_tail_journey import NativePublishedTailJourneyFix
 
 class GroupedDurableFloorTests(unittest.TestCase):
     def test_original_512_grouped_route_holds_before_first_native_effect(self):
+        self._original_route(checks_enabled=True)
+
+    def test_denied_checks_still_hold_before_first_grouped_native_effect(self):
+        self._original_route(checks_enabled=False)
+
+    def _original_route(self, *, checks_enabled):
         quotes, native_writes = [], []
 
         def observe(frame, event, value):
@@ -56,6 +65,27 @@ class GroupedDurableFloorTests(unittest.TestCase):
                     "needs_human": True,
                 }
             ]
+            if not checks_enabled:
+                original_external = fixture.external
+                original_provider_calls = fixture.provider_calls
+
+                def deny_check(request, timeout):
+                    payload = json.loads(request.data) if request.data else {}
+                    if (
+                        payload.get("capability") == "check_publish"
+                        and fixture.provider_calls > original_provider_calls
+                    ):
+                        fixture._meter(request)
+                        raise HTTPError(
+                            request.full_url,
+                            403,
+                            "synthetic denied",
+                            {},
+                            io.BytesIO(b"{}"),
+                        )
+                    return original_external(request, timeout)
+
+                fixture.external = deny_check
             with registered_resource([registration]):
                 previous = sys.getprofile()
                 try:
@@ -65,7 +95,7 @@ class GroupedDurableFloorTests(unittest.TestCase):
                     sys.setprofile(previous)
             self.assertEqual(result, 1, fixture.error)
             self.assertIn("cannot fund the complete operation", fixture.error)
-            self.assertEqual(quotes, [84])
+            self.assertEqual(quotes, [84 if checks_enabled else 50])
             self.assertEqual(native_writes, [])
             self.assertEqual(fixture.reviews, old_reviews)
             self.assertEqual(fixture.check_runs, old_checks)
