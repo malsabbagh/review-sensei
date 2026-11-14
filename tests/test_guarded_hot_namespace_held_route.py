@@ -21,7 +21,14 @@ from review_sensei.errors import ReviewInputError
 class GuardedHotNamespaceHeldRouteTests(unittest.TestCase):
     def test_original_held512_confirms_root_and_preserves_namespace_until_cleanup(self):
         require = inspect.getclosurevars(namespace.begin).nonlocals["require"]
-        entries, guards, accepted, failures, refused = [], [], [], [], []
+        entries, initial_roots, guards, accepted, failures, refused = (
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
         returns = {
             function.__code__: {
                 instruction.offset
@@ -49,6 +56,7 @@ class GuardedHotNamespaceHeldRouteTests(unittest.TestCase):
                     entry, "original eligible producer must issue custody"
                 )
                 entries.append(entry)
+                initial_roots.append(entry["root"])
                 caller = entry["caller"]
                 require(entry, caller)
                 reject("copied", dict(entry), caller)
@@ -121,12 +129,7 @@ class GuardedHotNamespaceHeldRouteTests(unittest.TestCase):
             entry = entries[0]
             caller = entry["caller"]
             self.assertTrue(accepted)
-            self.assertNotEqual(
-                entry["root"],
-                entry["initial_root_for_test"]
-                if "initial_root_for_test" in entry
-                else accepted[0],
-            )
+            self.assertNotEqual(entry["root"], initial_roots[0])
             self.assertEqual(caller._root, entry["root"])
             self.assertIsNone(caller._checkpoint)
             self.assertEqual(failures, [])
