@@ -25,6 +25,7 @@ class MutationDescription:
     path: str
     body_sha256: str
     root: str
+    checkpoint_phase: str | None = None
 
 
 def _optional_frame(module, function):
@@ -97,6 +98,7 @@ def classify_original_mutation(caller):
     except (TypeError, ValueError) as error:
         raise ReviewInputError("cold native mutation body is unsupported") from error
     kind, api_url = None, None
+    checkpoint_phase = None
     checkpoint = _optional_frame(
         quarantine_checkpoint, quarantine_checkpoint.replace_quarantine_checkpoint
     )
@@ -126,6 +128,45 @@ def classify_original_mutation(caller):
             raise ReviewInputError("cold terminal root source changed")
         api_url = snapshot.ledger.http.api_url
         kind = "terminal-root" if caller._terminal_reason is not None else "root"
+        from . import finding_lifecycle
+
+        journal_frame = _optional_frame(
+            finding_lifecycle, finding_lifecycle.FindingLifecycleJournal.checkpoint
+        )
+        if kind == "terminal-root":
+            checkpoint_phase = "terminal"
+        elif (
+            _optional_frame(
+                api_run_requests,
+                api_run_requests.ApiRunRequestTransport.begin_action_effect,
+            )
+            is not None
+        ):
+            checkpoint_phase = "entry"
+        elif journal_frame is not None:
+            journal = journal_frame.f_locals.get("self")
+            if journal is None or journal.ledger.caller is not caller:
+                raise ReviewInputError("cold journal checkpoint owner changed")
+            if journal_frame.f_locals.get("pending_intent") is True:
+                checkpoint_phase = "journal-pending"
+            elif (
+                _optional_frame(
+                    finding_lifecycle, finding_lifecycle.FindingLifecycleJournal.finish
+                )
+                is not None
+            ):
+                checkpoint_phase = "journal-finish"
+            else:
+                checkpoint_phase = "journal-other"
+        elif (
+            _optional_frame(
+                quarantine_action, quarantine_action.apply_quarantine_target
+            )
+            is not None
+        ):
+            checkpoint_phase = "decision-cursor"
+        else:
+            checkpoint_phase = "root-other"
     event = _optional_frame(quarantine_action, quarantine_action._stage_decision_event)
     if kind is None and event is not None:
         run = event.f_locals.get("run")
@@ -189,6 +230,7 @@ def classify_original_mutation(caller):
         parsed.path,
         hashlib.sha256(canonical_bytes(body)).hexdigest(),
         root,
+        checkpoint_phase,
     )
 
 

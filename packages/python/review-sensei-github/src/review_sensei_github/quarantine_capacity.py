@@ -1047,6 +1047,9 @@ class _LifecycleExtension:
     plan: Any
     bounds: tuple[int, ...]
     sizing: tuple[Any, Any, tuple[tuple[int, int], ...], int] | None = None
+    historical_execution: tuple[Any, Any, tuple[tuple[int, int], ...], int] | None = (
+        None
+    )
 
 
 def _current_lifecycle_sizing(ledger, identity, known, added_parts):
@@ -1074,6 +1077,18 @@ def _current_lifecycle_sizing(ledger, identity, known, added_parts):
     return issuer, token, tuple(known.items()), added_parts
 
 
+def _historical_lifecycle_execution(ledger, identity, known, added_parts):
+    from review_sensei.source_registry import require_module_seal
+
+    from . import quarantine_historical_execution as issuer
+
+    require_module_seal(issuer)
+    token = issuer.lifecycle_execution_context(
+        ledger, identity, known=known, added_parts=added_parts
+    )
+    return None if token is None else (issuer, token, tuple(known.items()), added_parts)
+
+
 def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
     """Pure append-only capacity proposal; retain every original unknown slot."""
     from review_sensei.bounded_evidence import MAX_STORED_PART_BYTES, MAX_STORED_PARTS
@@ -1090,9 +1105,14 @@ def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
     ):
         raise ReviewInputError("quarantine lifecycle installed tail is unsupported")
     sizing = None
+    historical_execution = None
     if not guard.complete_tail:
         sizing = _current_lifecycle_sizing(ledger, identity, known, added_parts)
         if sizing is None:
+            historical_execution = _historical_lifecycle_execution(
+                ledger, identity, known, added_parts
+            )
+        if sizing is None and historical_execution is None:
             raise ReviewInputError("quarantine lifecycle installed tail is unsupported")
     bounds = (MAX_PART_BYTES + 512,) * added_parts
     if set(old.known) - set(known):
@@ -1126,7 +1146,14 @@ def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
     preview.certificates = deepcopy(guard.certificates)
     NativeCapacityGuard.require(preview, preview.stats)
     proof = _LifecycleExtension(
-        guard, ledger, identity, _guard_state(guard), plan, bounds, sizing
+        guard,
+        ledger,
+        identity,
+        _guard_state(guard),
+        plan,
+        bounds,
+        sizing,
+        historical_execution,
     )
     _CAPACITY_EXTENSIONS[proof] = _extension_seal(proof)
     return proof
@@ -1178,6 +1205,14 @@ def _extension_seal(proof):
             id(proof.sizing[1]),
             proof.sizing[2],
             proof.sizing[3],
+        ),
+        None
+        if proof.historical_execution is None
+        else (
+            id(proof.historical_execution[0]),
+            id(proof.historical_execution[1]),
+            proof.historical_execution[2],
+            proof.historical_execution[3],
         ),
     )
 
@@ -1385,6 +1420,14 @@ def activate_lifecycle_extension(proof, *, capability=None, operation=None):
     guard = installed_capacity(proof.ledger, proof.identity)
     if guard is not proof.guard or _guard_state(guard) != proof.state:
         raise ReviewInputError("quarantine lifecycle capacity extension is stale")
+    if proof.historical_execution is not None:
+        from review_sensei.source_registry import require_module_seal
+
+        issuer, token, known, parts = proof.historical_execution
+        require_module_seal(issuer)
+        issuer.consume_lifecycle_execution_context(
+            token, proof, operation, known=dict(known), added_parts=parts
+        )
     _WRITER_ACTIVATIONS.pop(capability)
     _CAPACITY_EXTENSIONS.pop(proof)
     guard.comment_plan = proof.plan

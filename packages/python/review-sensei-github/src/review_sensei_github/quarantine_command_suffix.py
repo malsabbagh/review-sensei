@@ -98,6 +98,10 @@ def _registry():
             stop=len(caller.observations),
             observations=tuple((item, canonical_bytes(item)) for item in observations),
         )
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        quarantine_historical_execution.observe_census(ledger, completed[ledger])
         return rows
 
     def prepare(run, authority, target):
@@ -282,9 +286,24 @@ def _registry():
 
     def require_execution(token, run):
         require_proposal(token, run)
-        raise ReviewInputError(
-            "guarded suffix lacks complete root/result and physical execution proof"
-        )
+        entry = proposals[token]
+        from . import quarantine_action, quarantine_historical_execution
+
+        require_module_seal(quarantine_action)
+        frame = sys._getframe(1)
+        if (
+            frame.f_code is not quarantine_action.prepare_quarantine_target.__code__
+            or frame.f_globals is not vars(quarantine_action)
+            or frame.f_locals.get("suffix") is not token
+            or frame.f_locals.get("run") is not run
+            or frame.f_locals.get("target") is not entry["target"]
+        ):
+            raise ReviewInputError(
+                "guarded execution requires original target preparation"
+            )
+
+        require_module_seal(quarantine_historical_execution)
+        return quarantine_historical_execution.activate(token, run, entry)
 
     return (
         begin_census,

@@ -75,9 +75,13 @@ def _registry():
         identity = journal.identity
         caller = getattr(ledger, "caller", None)
         authenticated = getattr(ledger, "_quarantine_authenticated", None)
-        if (
-            authenticated is None
-            or native_reserve(authenticated.archive["target_isolation"]) is not None
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        closed = quarantine_historical_execution.bind_journal(journal)
+        if authenticated is None or (
+            native_reserve(authenticated.archive["target_isolation"]) is not None
+            and not closed
         ):
             yield
             return
@@ -100,10 +104,15 @@ def _registry():
             or caller is None
             or record is not caller._effect_record
             or active.get() is not None
-            or getattr(
-                _publication_transport(ledger.http), "_quarantine_capacity_guard", None
+            or (
+                getattr(
+                    _publication_transport(ledger.http),
+                    "_quarantine_capacity_guard",
+                    None,
+                )
+                is not None
+                and not closed
             )
-            is not None
         ):
             raise ReviewInputError(
                 "cold inline checkpoint requires original command phase"

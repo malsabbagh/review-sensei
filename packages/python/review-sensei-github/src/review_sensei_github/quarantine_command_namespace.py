@@ -495,6 +495,10 @@ def _registry():
 
         require_module_seal(quarantine_command_successor)
         quarantine_command_successor.before_request(caller)
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        quarantine_historical_execution.before_request(caller)
         entry["last"] = _next_sequence(caller._sequence, entry["ceiling"], deadline)
         observed[caller] = entry["last"]
         entry["remaining"] = {

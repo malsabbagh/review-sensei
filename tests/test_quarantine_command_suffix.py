@@ -192,7 +192,7 @@ class GuardedSuffixTests(unittest.TestCase):
                     finally:
                         run.caller._root = root
                     with self.assertRaisesRegex(
-                        ReviewInputError, "complete root/result"
+                        ReviewInputError, "original target preparation"
                     ):
                         suffix.require_execution(token, run)
                     self.assertEqual(_guard_state(guard), before)
@@ -204,7 +204,7 @@ class GuardedSuffixTests(unittest.TestCase):
                     code = fixture.invoke_command()
                 finally:
                     sys.setprofile(previous)
-                self.assertEqual(code, 1, fixture.error)
+                self.assertEqual(code, 0, fixture.error)
                 self.assertEqual(
                     len(captured), 1, str(preparation_counts) + fixture.error
                 )
@@ -229,10 +229,10 @@ class GuardedSuffixTests(unittest.TestCase):
                     ),
                 }
                 caller, count, root = captured[0]
-                self.assertEqual(len(caller.observations), count)
-                self.assertEqual(caller._root, root)
-                self.assertEqual(caller.accounting.action["phase"], "pending")
-                self.assertFalse(caller.accounting.action["execution_started"])
+                self.assertGreater(len(caller.observations), count)
+                self.assertNotEqual(caller._root, root)
+                self.assertEqual(caller.accounting.action["phase"], "terminal")
+                self.assertTrue(caller.accounting.action["execution_started"])
                 self.assertEqual(caller.accounting.remaining, 190)
 
                 self.assertTrue(replay_refusals)
@@ -252,4 +252,4 @@ class GuardedSuffixTests(unittest.TestCase):
                         self.assertIn("size limit", str(error))
                         overflow_refusals += 1
                 self.assertGreater(overflow_refusals, 0)
-                self.assertEqual(len(caller.observations), count)
+                self.assertGreater(len(caller.observations), count)

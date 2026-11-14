@@ -55,5 +55,15 @@ class CommandPhaseTests(unittest.TestCase):
             Counter(item.kind for item in mutations),
             {"root": 4, "event": 1, "review": 1, "receipt": 1, "terminal-root": 1},
         )
+        self.assertEqual(
+            [item.checkpoint_phase for item in mutations if item.checkpoint_phase],
+            [
+                "entry",
+                "decision-cursor",
+                "journal-pending",
+                "journal-finish",
+                "terminal",
+            ],
+        )
         with self.assertRaisesRegex(ReviewInputError, "original source frame"):
             classify_original_mutation(next(iter(started)))

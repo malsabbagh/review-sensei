@@ -42,6 +42,25 @@ def _registry():
             or run.ledger not in values["prepared"]
         ):
             raise ReviewInputError("historical successor requires original preparation")
+        return issue(run, target)
+
+    def start_guarded(run, target, lease):
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        frame = sys._getframe(1)
+        if (
+            frame.f_code is not quarantine_historical_execution.activate.__code__
+            or frame.f_globals is not vars(quarantine_historical_execution)
+            or frame.f_locals.get("run") is not run
+            or frame.f_locals.get("lease") is not lease
+            or frame.f_locals["entry"]["target"] is not target
+        ):
+            raise ReviewInputError("guarded successor lacks original closed lease")
+        quarantine_historical_execution.require_closed(lease, run)
+        return issue(run, target)
+
+    def issue(run, target):
         caller = run.caller
         record = caller._effect_record
         if (
@@ -63,6 +82,7 @@ def _registry():
             count=0,
             terminal=False,
             attempted=None,
+            phase=None,
         )
         active[caller] = token
         return token
@@ -118,10 +138,12 @@ def _registry():
             raise ReviewInputError("historical checkpoint mutation family changed")
         if entry["attempted"] is not None:
             raise ReviewInputError("historical root cannot repeat an unconfirmed PATCH")
+        phase = description.checkpoint_phase
         entry["attempted"] = (
             caller._checkpoint,
             caller._checkpoint.record_sha256,
             len(caller.observations),
+            phase,
         )
 
     def confirm_checkpoint(caller, ledger, record, persisted):
@@ -189,6 +211,7 @@ def _registry():
             raw=canonical_bytes(record.to_dict()),
             root=record.record_sha256,
             count=entry["count"] + 1,
+            phase=attempt[3],
             attempted=None,
             terminal=persisted.action is not None
             and persisted.action["phase"] == "terminal",
@@ -196,10 +219,10 @@ def _registry():
         if entry["terminal"]:
             active.pop(caller, None)
 
-    return start, require_current, before_request, confirm_checkpoint
+    return start, start_guarded, require_current, before_request, confirm_checkpoint
 
 
-start, require_current, before_request, confirm_checkpoint = _registry()
+start, start_guarded, require_current, before_request, confirm_checkpoint = _registry()
 del _registry
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

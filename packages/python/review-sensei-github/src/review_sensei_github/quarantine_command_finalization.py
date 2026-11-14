@@ -570,6 +570,10 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
             "guarded suffix requires one update and check replay only"
         )
     _require_no_body_readback(plan.journal, payload["review_before"]["id"])
+    if any(effect["status"] == "pending" for effect in plan.journal.effects):
+        raise ReviewInputError(
+            "guarded suffix retains a separately priced native pending effect"
+        )
     method, path, raw = check
     keys = {
         finding_lifecycle._digest({"method": method, "path": path, "request": value})
@@ -683,6 +687,51 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
     capture()
     projected.before_request(*review)
     capture()
+    # The receipt is a source-produced body, not a generic raw-size promise.
+    # Existing same-marker receipts are a different update route and remain
+    # pre-effect holds; unrelated retained receipts stay in the full census.
+    from review_sensei import presentation
+
+    require_module_seal(presentation)
+    result = quarantine_action.historical_command_result(
+        target.command,
+        target,
+        saved["record"],
+        existing=None,
+        actor=saved["authority"].document["actor"],
+    )
+    authority = saved["authority"].document
+    receipt = presentation.render_command_receipt(
+        actor=authority["actor"]["login"],
+        source_comment_id=authority["source"]["id"],
+        command_digest=authority["source"]["body_sha256"],
+        receipts=result.receipts,
+        ledger_written=True,
+    )
+    marker = receipt.rstrip().rsplit("<!--", 1)[-1]
+    if any(
+        row["body"].rstrip().endswith("<!--" + marker)
+        and row["user"].get("id") == run.ledger._evidence_author_id
+        for row in comment_rows
+    ):
+        raise ReviewInputError(
+            "guarded suffix existing receipt update is separately priced"
+        )
+    receipt_wire = quarantine_capacity._wire({"body": receipt})
+    if receipt_wire > 65536:
+        raise ReviewInputError(
+            "guarded suffix receipt exceeds its complete wire projection"
+        )
+    projected.before_request(
+        "POST", run.ledger._comments_path(run.identity), {"body": receipt}
+    )
+    receipt_id = future_id - 1
+    if receipt_id in full_known:
+        raise ReviewInputError("guarded suffix future receipt ID collides")
+    full_known[receipt_id] = receipt_wire
+    terminal_comments = full_cache_plan().worst_read_calls()
+    if terminal_comments > 10 or terminal_comments + 6 > 50:
+        raise ReviewInputError("guarded suffix complete terminal census is unfunded")
     if quarantine_capacity._guard_state(guard) != original:
         raise ReviewInputError("guarded suffix sizing changed installed capacity")
     C, R = max(value[0] for value in prefixes), max(value[1] for value in prefixes)
@@ -724,6 +773,9 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
         "review": json.loads(canonical_bytes(review)),
         "check": json.loads(canonical_bytes(check)),
         "event": event_body,
+        "receipt": receipt,
+        "receipt_wire": receipt_wire,
+        "terminal_comment_reads": terminal_comments,
     }
 
 

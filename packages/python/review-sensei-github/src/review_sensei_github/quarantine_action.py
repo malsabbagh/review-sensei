@@ -595,7 +595,13 @@ def _require_installed_command_tail(run, authenticated):
     if not required and getattr(transport, "_quarantine_capacity_guard", None) is None:
         return
     guard = installed_capacity(run.ledger, run.identity)
-    if not guard.complete_tail:
+    from review_sensei.source_registry import require_module_seal
+
+    from . import quarantine_historical_execution
+
+    require_module_seal(quarantine_historical_execution)
+    closed = quarantine_historical_execution.available(run.caller, run.ledger)
+    if not guard.complete_tail and not closed:
         raise ReviewInputError(
             "quarantine command finalization capacity unavailable before business "
             "writes: installed command tail has no complete lifecycle proof"

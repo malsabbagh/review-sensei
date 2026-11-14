@@ -284,6 +284,15 @@ def _make_issuer():
             )
         ):
             raise ReviewInputError("receipt preparation target source changed")
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        closed = quarantine_historical_execution.receipt_preparation(
+            run, authority, target
+        )
+        if closed is not None:
+            prepared[run.ledger] = closed
+            return
         if (
             native_reserve(target.authenticated.archive["target_isolation"]) is not None
             or getattr(
@@ -444,6 +453,11 @@ def _make_issuer():
         ):
             return None
         final = censuses.pop(run.ledger, None)
+        if final is None:
+            from . import quarantine_historical_execution
+
+            require_module_seal(quarantine_historical_execution)
+            final = quarantine_historical_execution.take_final_census(run)
         record = run.caller._effect_record
         if final is None or record is None:
             return None
@@ -563,14 +577,21 @@ def _make_issuer():
         ) = entry
         run.caller._require_ledger(run.ledger, run.identity)
         current_blocks, remaining, pending = _blocks(run.caller)
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        closed = quarantine_historical_execution.available(run.caller, run.ledger)
         if (
             current_blocks != block_state[0]
             or remaining > block_state[1]
             or not block_state[2].issubset(pending)
-            or getattr(
-                _publication_transport(run.http), "_quarantine_capacity_guard", None
+            or (
+                getattr(
+                    _publication_transport(run.http), "_quarantine_capacity_guard", None
+                )
+                is not None
+                and not closed
             )
-            is not None
             or writer.f_locals.get("run") is not run
             or writer.f_locals.get("authority") is not authority
             or writer.f_locals.get("text") != membership.receipt_text

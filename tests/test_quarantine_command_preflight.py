@@ -13,8 +13,8 @@ from test_quarantine_published_tail_journey import PublishedTailJourneyFixture
 
 
 class ColdCommandPreflightTests(unittest.TestCase):
-    def test_unsupported_installed_tail_stops_before_decision_and_action_boundary(self):
-        self.exercise_guard("unsupported")
+    def test_closed_installed_tail_reaches_decision_and_action_boundary(self):
+        self.exercise_guard("guarded-positive")
 
     def test_removed_and_copied_installed_guards_cannot_bypass_preflight(self):
         for fault in ("removed", "copied"):
@@ -252,6 +252,7 @@ class ColdCommandPreflightTests(unittest.TestCase):
                     status = fixture.invoke_command()
                     if fault in {
                         "plain-positive",
+                        "guarded-positive",
                         "plain-permit-seal",
                         "plain-candidate-receipt",
                     }:
@@ -269,6 +270,7 @@ class ColdCommandPreflightTests(unittest.TestCase):
                 )
                 if fault in {
                     "plain-positive",
+                    "guarded-positive",
                     "plain-permit-seal",
                     "plain-candidate-receipt",
                 }:
