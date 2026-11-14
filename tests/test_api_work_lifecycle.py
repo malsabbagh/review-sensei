@@ -62,6 +62,11 @@ def forbid_replacement_phase_budget():
 # Fixed modest fixture: measured work attempts, not a shipping default/minimum.
 # Admission 11 + provider metadata 4 + completion 8 + publication 45.
 QUALIFIED_WORK_CALLS = 11 + 4 + 8 + 45
+# The authenticated genuinely empty original omits its redundant per-comment
+# inventory and its post-staging fence. This is a measured 14-dispatch saving,
+# not a smaller runtime quote or a change to the nonempty fixture's allowance.
+EMPTY_ORIGINAL_SAVED_CALLS = 14
+QUALIFIED_EMPTY_WORK_CALLS = QUALIFIED_WORK_CALLS - EMPTY_ORIGINAL_SAVED_CALLS
 # The final selected write keeps two undispatched confirmation attempts.
 QUALIFIED_CONFIRMATION_HEADROOM = 2
 QUALIFICATION_LIMIT = HOSTED_API_STARTUP_PLAN.liability + 2 * (
@@ -680,7 +685,7 @@ class CallerLifecycleTests(unittest.TestCase):
         self,
     ):
         for human, work in (
-            (False, QUALIFIED_WORK_CALLS - 1),
+            (False, QUALIFIED_EMPTY_WORK_CALLS - 1),
             (True, QUALIFIED_WORK_CALLS - 5),
         ):
             # Initial owner receives the odd unit; the successor must work with
@@ -721,9 +726,13 @@ class CallerLifecycleTests(unittest.TestCase):
                             directory, prepared=(fixture, native), human=human
                         )
                         self.assertEqual(publication.status, "published")
-                        self.assertEqual(len(fixture.trace), 77 if human else 81)
                         self.assertEqual(
-                            fixture.accounted.accounting.confirmed, 67 if human else 71
+                            len(fixture.trace),
+                            77 if human else 81 - EMPTY_ORIGINAL_SAVED_CALLS,
+                        )
+                        self.assertEqual(
+                            fixture.accounted.accounting.confirmed,
+                            67 if human else 71 - EMPTY_ORIGINAL_SAVED_CALLS,
                         )
                         self.assertEqual(
                             fixture.accounted.usable, TERMINAL_REQUESTS - 4
@@ -731,7 +740,10 @@ class CallerLifecycleTests(unittest.TestCase):
 
     def test_successor_one_short_keeps_predecessor_capacity_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
-            fixture = LifecycleFixture(directory, limit=QUALIFICATION_LIMIT - 3)
+            fixture = LifecycleFixture(
+                directory,
+                limit=QUALIFICATION_LIMIT - 2 * EMPTY_ORIGINAL_SAVED_CALLS - 3,
+            )
             native, config, _, owner = fixture.prelude()
             fixture.accounted.initialize_and_activate(native, IDENTITY, config, owner)
             fixture.accounted.replace_checkpoint(native, IDENTITY)
@@ -750,7 +762,7 @@ class CallerLifecycleTests(unittest.TestCase):
             self.assertEqual(fixture.accounted.accounting.blocks[:2], original.blocks)
             self.assertEqual(fixture.accounted.accounting.remaining, 0)
             self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
-            self.assertEqual(len(fixture.trace), 99)
+            self.assertEqual(len(fixture.trace), 99 - EMPTY_ORIGINAL_SAVED_CALLS)
 
     def test_worker_internal_fanout_does_not_change_public_caller_cost(self):
         observed = []
