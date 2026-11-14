@@ -180,7 +180,9 @@ class QuarantineDecisionFence:
     def __call__(self):
         if _decision_fence_scope(self) is None:
             raise ReviewInputError("quarantine decision fence source changed")
-        return decision_authority(self.run, self.authority)
+        role = decision_authority(self.run, self.authority)
+        _seal_pending_decision_fence(self, role)
+        return role
 
 
 _DECISION_FENCE_CALL = QuarantineDecisionFence.__call__
@@ -886,6 +888,95 @@ _DECISION_BINDINGS: weakref.WeakKeyDictionary[Any, tuple[Any, ...]] = (
 _DECISION_CANDIDATES: weakref.WeakKeyDictionary[Any, bytes] = (
     weakref.WeakKeyDictionary()
 )
+_FENCED_DECISIONS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _seal_pending_decision_fence(guard, role):
+    """Only the actual own-CAS business guard completes a pending permit.
+
+    Permit construction is pure. This is the original fresh four-read fence,
+    not cached authority or an independently callable execution capability.
+    """
+    import inspect
+    import sys
+
+    from review_sensei.source_registry import (
+        require_instance_source,
+        require_module_seal,
+    )
+
+    from . import review_run
+    from .review_run import ActionRunLedger
+
+    run = guard.run
+    caller = run.caller
+    authority_document = canonical_bytes(guard.authority.document)
+    permit = getattr(run.ledger, "_quarantine_decision_permit", None)
+    if permit is None or getattr(permit, "consumed", False):
+        return
+    require_module_seal(sys.modules[__name__])
+    require_instance_source(run.ledger, methods=("replace",))
+    frame = inspect.currentframe()
+    call = None if frame is None else frame.f_back
+    replace_frame = None if call is None else call.f_back
+    apply_frame = None if replace_frame is None else replace_frame.f_back
+    if (
+        type(permit) is not _DecisionPermit
+        or permit not in _ISSUED_DECISIONS
+        or _DECISION_BINDINGS.get(permit) != _decision_permit_binding(permit)
+        or permit.ledger is not run.ledger
+        or permit.authority is not guard.authority
+        or getattr(run.ledger, "business_guard", None) is not guard
+        or _decision_fence_scope(guard) is None
+        or call is None
+        or call.f_code is not _DECISION_FENCE_CALL.__code__
+        or call.f_globals is not globals()
+        or call.f_locals.get("self") is not guard
+        or replace_frame is None
+        or replace_frame.f_code is not ActionRunLedger.replace.__code__
+        or replace_frame.f_globals is not vars(review_run)
+        or replace_frame.f_locals.get("self") is not run.ledger
+        or replace_frame.f_locals.get("identity") != run.identity
+        or apply_frame is None
+        or apply_frame.f_code is not apply_quarantine_target.__code__
+        or apply_frame.f_globals is not globals()
+        or apply_frame.f_locals.get("run") is not run
+        or apply_frame.f_locals.get("mutate")
+        is not replace_frame.f_locals.get("mutate")
+        or json.loads(permit.decision)["role"] != role
+    ):
+        raise ReviewInputError(
+            "quarantine decision requires its original fresh CAS fence"
+        )
+    _FENCED_DECISIONS[permit] = (
+        guard,
+        caller,
+        caller._root,
+        _decision_permit_binding(permit),
+        authority_document,
+    )
+
+
+def _has_current_decision_fence(ledger, permit, before):
+    guard = getattr(ledger, "business_guard", None)
+    caller = getattr(ledger, "caller", None)
+    if (
+        caller is None
+        or type(guard) is not QuarantineDecisionFence
+        or _decision_fence_scope(guard) is None
+    ):
+        return False
+    return (
+        _FENCED_DECISIONS.get(permit)
+        == (
+            guard,
+            caller,
+            before.record_sha256,
+            _decision_permit_binding(permit),
+            canonical_bytes(guard.authority.document),
+        )
+        and caller._root == before.record_sha256
+    )
 
 
 def _decision_permit_binding(permit):
@@ -925,10 +1016,12 @@ def _issue_decision_permit(run, authority, before, decision, tail):
         raise ReviewInputError(
             "quarantine individual decision requires current action authority"
         )
-    role = decision_authority(run, authority)
+    # This pending permit cannot authorize a cursor write. The immediately
+    # following original ledger.replace owns the fresh four-read authority
+    # check and seals this exact permit before require_native_decision accepts it.
     source, actor = authority.document["source"], authority.document["actor"]
     if (
-        role != decision["role"]
+        decision["role"] not in {"maintain", "admin"}
         or actor["login"] != decision["actor"]
         or source["id"] != decision["source_id"]
         or source["updated_at"] != decision["source_updated_at"]
@@ -972,6 +1065,7 @@ def require_native_decision(ledger, before, after):
         or _DECISION_BINDINGS.get(permit) != _decision_permit_binding(permit)
         or permit.consumed
         or permit.ledger is not ledger
+        or not _has_current_decision_fence(ledger, permit, before)
         or caller is None
         or caller.run.run_id != permit.run_id
         or caller._action_effect_boundary is None
@@ -995,6 +1089,7 @@ def require_native_decision(ledger, before, after):
     # This is an exact proposed candidate, not a native confirmation receipt.
     # No caller may promote it to own-CAS authority before actual echo readback.
     _DECISION_CANDIDATES[permit] = canonical_bytes(after.to_dict())
+    _FENCED_DECISIONS.pop(permit)
     object.__setattr__(permit, "consumed", True)
 
 
