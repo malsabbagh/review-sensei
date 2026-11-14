@@ -89,6 +89,12 @@ def select_quarantine(ledger, identity, items, found):
     finally:
         ledger._reuse_listed_parts = prior_reuse
         ledger._quarantine_complete_read = False
+    from review_sensei.source_registry import require_module_seal
+
+    from . import quarantine_selected_predecessor
+
+    require_module_seal(quarantine_selected_predecessor)
+    quarantine_selected_predecessor.capture(ledger, identity, selected, found)
     ledger._quarantine_required = True
     from .quarantine_capacity import install_retained_capacity
 
@@ -103,3 +109,8 @@ def select_quarantine(ledger, identity, items, found):
         caller._require_ledger(ledger, identity)
         caller._quarantine_census_api_url = ledger.http.api_url
     return selected_id, selected
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

@@ -722,10 +722,18 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         or not 0 <= added_parts <= 256
     ):
         raise ReviewInputError("quarantine lifecycle capacity source is unsupported")
+    from review_sensei.source_registry import require_module_seal
+
+    from . import quarantine_selected_predecessor
+
+    require_module_seal(quarantine_selected_predecessor)
     caller = ledger.caller
-    caller._require_ledger(ledger, identity)
     record = caller._effect_record
     authenticated = ledger._quarantine_authenticated
+    quarantine_selected_predecessor.validate_models(
+        authenticated, identity, *((record,) if record is not None else ())
+    )
+    caller._require_ledger(ledger, identity)
     if (
         not ledger._quarantine_required
         or not ledger._inventory_complete
@@ -747,7 +755,17 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         receipt = confirmed_checkpoint_capacity(caller, ledger, identity)
     predecessor = read_predecessor(authenticated.archive)
     lineage = authenticated.lineage
-    expected = {lineage["predecessor_comment_id"]: predecessor.record_sha256}
+    from review_sensei.source_registry import require_module_seal
+
+    from . import quarantine_selected_predecessor
+
+    require_module_seal(quarantine_selected_predecessor)
+    old_native_digest, selected_root_id = (
+        quarantine_selected_predecessor.selected_digest(
+            ledger, identity, authenticated, predecessor
+        )
+    )
+    expected = {lineage["predecessor_comment_id"]: old_native_digest}
     from .publication_recovery import _publication_transport
 
     guard = getattr(
@@ -799,6 +817,10 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
             ledger._part_owner(row, identity)
             roots[identifier] = parsed.record_sha256
             if parsed.record_sha256 == record.record_sha256:
+                if selected_root_id is not None and identifier != selected_root_id:
+                    raise ReviewInputError(
+                        "quarantine lifecycle selected root ID changed"
+                    )
                 if canonical_bytes(parsed.to_dict()) != canonical_bytes(
                     record.to_dict()
                 ):
