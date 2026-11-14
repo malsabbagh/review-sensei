@@ -599,3 +599,13 @@ request, change a journal, issue a census quote or price the complete operation.
 The original untouched terminal block is reported separately from ordinary
 remaining work. Carrier growth, complete future membership and all finalizer/read
 liabilities still need independent qualification before any smaller quote.
+
+Detached hot-phase sizing now records both reachable check-framing outcomes and
+passes each source pending/stop prefix through the original lifecycle renderer.
+For partitioned candidates it preserves the original conservative compression
+bound, maximal storage-ID/reference widths, framing bytes and evolving root
+generations. A call-local cache keys exact root, source binding, item count and
+complete projected document bytes; it is never a source of fresh bodies or an
+issued plan. These measurements still do not account for all physical native
+reads, root/part loss reconciliation or reachable membership, and do not supply
+a complete original-budget proof.

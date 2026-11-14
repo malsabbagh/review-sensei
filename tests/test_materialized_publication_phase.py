@@ -200,6 +200,13 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                 self.assertFalse(item["projection"]["invocation_price_issued"])
                 self.assertEqual(item["projection"]["protected_terminal_remaining"], 50)
                 self.assertTrue(item["projection"]["branches"])
+                self.assertEqual(
+                    {
+                        branch["check_published_frame"]
+                        for branch in item["projection"]["branches"]
+                    },
+                    {False, True},
+                )
                 for branch in item["projection"]["branches"]:
                     self.assertEqual(
                         len(branch["pending_document_bytes"]), branch["effects"]
@@ -208,6 +215,22 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                         len(branch["stop_document_bytes"]), branch["effects"]
                     )
                     self.assertGreater(branch["maximum_finish_document_bytes"], 0)
+                    sequences = branch["pending_and_stop_sequences"]
+                    self.assertEqual(len(sequences), branch["effects"])
+                    for index, sequence in enumerate(sequences, 2):
+                        self.assertEqual(len(sequence), index)
+                        self.assertEqual(
+                            [stage["generation"] for stage in sequence],
+                            list(
+                                range(
+                                    sequence[0]["generation"],
+                                    sequence[0]["generation"] + len(sequence),
+                                )
+                            ),
+                        )
+                        self.assertTrue(
+                            all(stage["root_bytes"] > 0 for stage in sequence)
+                        )
             self.assertTrue(all(item["retained"] for item in observed), observed)
             self.assertTrue(all(item["closed"] for item in observed), observed)
             self.assertTrue(all(not item["poisoned"] for item in observed), observed)

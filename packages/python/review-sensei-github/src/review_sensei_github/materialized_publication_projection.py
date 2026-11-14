@@ -50,6 +50,113 @@ def _data(value, *, _seen=None, _depth=0):
         _data(child, _seen=seen, _depth=_depth + 1)
 
 
+def _measure_sequence(journal, documents, item_count):
+    """Pure original renderer/retention preparation, without ledger preflight."""
+    from review_sensei import bounded_evidence, finding_lifecycle_store
+    from review_sensei.bounded_evidence import (
+        INLINE_ENCODING,
+        PACKED_CHUNK_BYTES,
+        PART_FRAMING_RESERVE,
+    )
+
+    require_module_seal(bounded_evidence)
+    require_module_seal(finding_lifecycle_store)
+    current = journal._record
+    measurements = []
+    for document in documents:
+        reference, envelope, _, allowance, candidate = (
+            finding_lifecycle_store._prepare_lifecycle(
+                journal.ledger,
+                current,
+                document=document,
+                operation_id=journal.operation_id,
+                base_sha=journal.base_sha,
+                head_sha=journal.head_sha,
+                policy_digest=journal.policy_digest,
+                configuration_digest=journal.configuration_digest,
+                item_count=item_count,
+            )
+        )
+        raw_bytes = len(canonical_bytes(envelope))
+        selected = candidate.finding_lifecycle["manifest"]
+        inline = selected["encoding"] == INLINE_ENCODING
+        parts, retained = 0, 0
+        if not inline:
+            packed = (
+                raw_bytes
+                + (raw_bytes >> 12)
+                + (raw_bytes >> 14)
+                + (raw_bytes >> 25)
+                + 13
+            )
+            parts = (packed + PACKED_CHUNK_BYTES - 1) // PACKED_CHUNK_BYTES
+            if parts > bounded_evidence.MAX_PARTS:
+                raise ReviewInputError("materialized projection part capacity exceeded")
+            sizes = []
+            for index in range(parts):
+                maximum = {
+                    "encoding": "evidence-part-v1",
+                    "binding_sha256": "f" * 64,
+                    "inventory_sha256": "f" * 64,
+                    "index": index,
+                    "count": parts,
+                    "data": "A"
+                    * (
+                        4
+                        * (
+                            (
+                                min(
+                                    PACKED_CHUNK_BYTES,
+                                    packed - index * PACKED_CHUNK_BYTES,
+                                )
+                                + 2
+                            )
+                            // 3
+                        )
+                    ),
+                }
+                sizes.append(len(canonical_bytes(maximum)))
+            retained = sum(size + PART_FRAMING_RESERVE for size in sizes)
+            manifest = {
+                "encoding": "partitioned-json-v1",
+                "binding": selected["binding"],
+                "item_count": item_count,
+                "decoded_bytes": raw_bytes,
+                "sha256": "f" * 64,
+                "encoded_bytes": retained,
+                "parts": [
+                    {"storage_id": f"{index:064d}", "bytes": size, "sha256": "f" * 64}
+                    for index, size in enumerate(sizes)
+                ],
+            }
+            if (
+                len(canonical_bytes(manifest)) > allowance
+                or retained > bounded_evidence.MAX_PARTITION_BYTES
+            ):
+                raise ReviewInputError(
+                    "materialized projection complete manifest exceeds capacity"
+                )
+            candidate = current.evolve(
+                generation=current.generation + 1,
+                transaction=candidate.transaction,
+                finding_lifecycle={**reference, "manifest": manifest},
+            )
+            finding_lifecycle_store._require_retained_snapshot_capacity(candidate)
+        measurements.append(
+            {
+                "inline": inline,
+                "envelope_bytes": raw_bytes,
+                "root_bytes": len(canonical_bytes(candidate.to_dict())),
+                "generation": candidate.generation,
+                "reference_bytes": len(canonical_bytes(candidate.finding_lifecycle)),
+                "future_parts": parts,
+                "framed_part_bytes": retained,
+            }
+        )
+        current = candidate
+    return tuple(measurements)
+
+
 def project(journal, source):
     """Bound source request/stop documents; never admit or dispatch anything."""
     from review_sensei import context, models, presentation
@@ -159,25 +266,41 @@ def project(journal, source):
         convergence_policy=source["convergence_policy"],
         auto_approval=source["auto_approval"],
     )
-    branches = plan.current_request_branches(
-        publisher,
-        journal,
-        result=source["result"],
-        assembled=assembled,
-        eligibility=source["prospective_eligibility"],
-        marker=source["marker"],
-        outcome=source["planned_check_outcome"],
-        policy=source["effective_policy"],
-        complete_inventory=source["complete_inventory"],
-        preserve_explanations=source["human_inventory"] is not None,
-        window_non_inline_blocking=source["window_non_inline_blocking"],
-    )
+    branches: list[tuple[bool, tuple[Any, ...]]] = []
+    for check_published in (False, True):
+        projected = plan.current_request_branches(
+            publisher,
+            journal,
+            result=source["result"],
+            assembled=assembled,
+            eligibility=source["prospective_eligibility"],
+            marker=source["marker"],
+            outcome=source["planned_check_outcome"],
+            policy=source["effective_policy"],
+            complete_inventory=source["complete_inventory"],
+            preserve_explanations=source["human_inventory"] is not None,
+            window_non_inline_blocking=source["window_non_inline_blocking"],
+            check_published=check_published,
+        )
+        branches.extend((check_published, branch) for branch in projected)
     summaries: list[dict[str, Any]] = []
-    projected_prefixes = {}
-    for branch in branches:
+    projected_prefixes: dict[bytes, tuple[int, int, Any, Any, Any]] = {}
+    measured_sequences: dict[Any, tuple[dict[str, Any], ...]] = {}
+    # This cache is detached sizing only. Exact source root/binding/document
+    # bytes are keys; it supplies neither current bodies nor any issued plan.
+    source_binding = (
+        canonical_bytes(journal._record.to_dict()),
+        journal.operation_id,
+        journal.base_sha,
+        journal.head_sha,
+        journal.policy_digest,
+        journal.configuration_digest,
+    )
+    for check_published, branch in branches:
         shadow = copy.copy(journal)
         shadow.effects = []
         pending_sizes, stop_sizes = [], []
+        pending_documents, prefix_measurements = [], []
         keys = set()
         for method, path, body, precondition in branch:
             request = plan._capacity_request_identity(method, path, body)
@@ -207,17 +330,38 @@ def project(journal, source):
                 )
                 pending_bytes = len(canonical_bytes(pending))
                 stop_bytes = max(pending_bytes, len(canonical_bytes(stopped)))
-                cached = pending_bytes, stop_bytes, copy.deepcopy(confirmed)
+                cached = (
+                    pending_bytes,
+                    stop_bytes,
+                    copy.deepcopy(confirmed),
+                    pending,
+                    stopped,
+                )
                 projected_prefixes[prefix_key] = cached
             pending_sizes.append(cached[0])
             stop_sizes.append(cached[1])
             shadow.effects = copy.deepcopy(cached[2])
+            pending_documents.append(cached[3])
+            documents = (*pending_documents, cached[4])
+            item_count = len(shadow.effects) + 1
+            sequence_key = (
+                source_binding,
+                item_count,
+                tuple(canonical_bytes(value) for value in documents),
+            )
+            measurement = measured_sequences.get(sequence_key)
+            if measurement is None:
+                measurement = _measure_sequence(journal, documents, item_count)
+                measured_sequences[sequence_key] = measurement
+            prefix_measurements.append(measurement)
         summaries.append(
             {
+                "check_published_frame": check_published,
                 "effects": len(branch),
                 "pending_document_bytes": tuple(pending_sizes),
                 "stop_document_bytes": tuple(stop_sizes),
                 "maximum_finish_document_bytes": max(stop_sizes),
+                "pending_and_stop_sequences": tuple(prefix_measurements),
             }
         )
     if before != (
