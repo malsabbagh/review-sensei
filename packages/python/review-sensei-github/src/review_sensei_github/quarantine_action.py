@@ -703,6 +703,47 @@ def _decision_binding(record, run):
     }
 
 
+def historical_command_result(command, target, record, *, existing, actor):
+    """Original historical result producer shared with detached size proofs."""
+    if existing is None:
+        summary = (
+            (
+                "Carried historical assessment dismissed"
+                if command.action == "dismiss"
+                else "Carried historical assessment risk accepted"
+            )
+            + "; the predecessor remains unresolved and no verified fix is claimed; fresh findings require independent decisions"
+        )
+        outcome, detail = "recorded", command.action
+    else:
+        same_decision = (existing["action"], existing["actor"]) == (
+            command.action,
+            actor["login"],
+        )
+        summary = (
+            "Carried historical assessment decision already recorded"
+            if same_decision
+            else "Conflicting carried historical assessment decision not applied"
+        ) + f"; immutable prior action: {existing['action']} by {existing['actor']}"
+        outcome = "already-recorded" if same_decision else "not-applied"
+        detail = f"prior action={existing['action']}; actor={existing['actor']}; requested action={command.action}; actor={actor['login']}"
+    result = MaintainerCommandResult(
+        action=command.action,
+        applied=existing is None,
+        operator_paused=record.operator_paused,
+        summary=summary,
+        receipts=(
+            OverrideReceipt(
+                "quarantine:" + command.scope + "/RS-" + target.instance.upper(),
+                target.instance,
+                outcome,
+                detail,
+            ),
+        ),
+    )
+    return result
+
+
 def apply_quarantine_target(run, authority, command, target, app):
     actor = authority.document["actor"]
     before = target.authenticated
@@ -777,41 +818,8 @@ def apply_quarantine_target(run, authority, command, target, app):
         )
     else:
         confirmed = run.ledger.load(run.identity).record
-    if existing is None:
-        summary = (
-            (
-                "Carried historical assessment dismissed"
-                if command.action == "dismiss"
-                else "Carried historical assessment risk accepted"
-            )
-            + "; the predecessor remains unresolved and no verified fix is claimed; fresh findings require independent decisions"
-        )
-        outcome, detail = "recorded", command.action
-    else:
-        same_decision = (existing["action"], existing["actor"]) == (
-            command.action,
-            actor["login"],
-        )
-        summary = (
-            "Carried historical assessment decision already recorded"
-            if same_decision
-            else "Conflicting carried historical assessment decision not applied"
-        ) + f"; immutable prior action: {existing['action']} by {existing['actor']}"
-        outcome = "already-recorded" if same_decision else "not-applied"
-        detail = f"prior action={existing['action']}; actor={existing['actor']}; requested action={command.action}; actor={actor['login']}"
-    result = MaintainerCommandResult(
-        action=command.action,
-        applied=existing is None,
-        operator_paused=confirmed.operator_paused,
-        summary=summary,
-        receipts=(
-            OverrideReceipt(
-                "quarantine:" + command.scope + "/RS-" + target.instance.upper(),
-                target.instance,
-                outcome,
-                detail,
-            ),
-        ),
+    result = historical_command_result(
+        command, target, confirmed, existing=existing, actor=actor
     )
     decision_authority(run, authority)
     return app._refinalize_command(
