@@ -635,7 +635,7 @@ class ReviewCheckPublisher:
             if not isinstance(slug, str) or slug.casefold() not in expected_slugs:
                 continue
             check_run_id = run.get("id")
-            if isinstance(check_run_id, int) and not isinstance(check_run_id, bool):
+            if type(check_run_id) is int and 1 <= check_run_id <= 2**63 - 1:
                 from .controlled_restart import owns_target
 
                 if owns_target(
@@ -643,6 +643,8 @@ class ReviewCheckPublisher:
                     self._repository_path(repository, f"/check-runs/{check_run_id}"),
                 ):
                     return check_run_id
+            else:
+                raise CheckOperationError(check_failure("lookup", status=status))
         return None
 
     def _create(
@@ -695,7 +697,7 @@ class ReviewCheckPublisher:
             )
         if status_code == 201 and isinstance(payload, Mapping):
             check_run_id = payload.get("id")
-            if isinstance(check_run_id, int) and not isinstance(check_run_id, bool):
+            if type(check_run_id) is int and 1 <= check_run_id <= 2**63 - 1:
                 return CheckPublicationResult(
                     status="created", check_run_id=check_run_id
                 )
@@ -754,7 +756,11 @@ class ReviewCheckPublisher:
             )
         if status_code == 200 and isinstance(payload, Mapping):
             updated_id = payload.get("id")
-            if isinstance(updated_id, int) and not isinstance(updated_id, bool):
+            if (
+                type(updated_id) is int
+                and 1 <= updated_id <= 2**63 - 1
+                and updated_id == check_run_id
+            ):
                 return CheckPublicationResult(status="updated", check_run_id=updated_id)
         raise CheckOperationError(
             capture.bind(check_failure("update", status=status_code))
