@@ -1132,6 +1132,32 @@ def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
     return proof
 
 
+def lifecycle_extension_plan(proof, *, ledger, identity):
+    """Read an unchanged full lifetime proposal, never consume or activate it.
+
+    Sizing-token expiry cannot convert this data accessor into writer authority.
+    A consumer must pin this exact immutable plan and revalidate before each use.
+    """
+    import sys
+
+    from review_sensei.source_registry import require_module_seal
+
+    require_module_seal(sys.modules[__name__])
+    if (
+        type(proof) is not _LifecycleExtension
+        or _CAPACITY_EXTENSIONS.get(proof) != _extension_seal(proof)
+        or proof.ledger is not ledger
+        or proof.identity != identity
+    ):
+        raise ReviewInputError(
+            "quarantine lifecycle plan proposal is unissued or changed"
+        )
+    guard = installed_capacity(ledger, identity)
+    if guard is not proof.guard or _guard_state(guard) != proof.state:
+        raise ReviewInputError("quarantine lifecycle plan proposal is stale")
+    return proof.plan
+
+
 def _extension_seal(proof):
     plan = proof.plan
     return (
