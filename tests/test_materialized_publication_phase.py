@@ -34,15 +34,55 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
     def test_actual_plain_source_capture_expires_without_changing_prices(self):
         observed = []
         denied = []
+        denied_replays = []
+        wrapped_attributes = []
         code = lifecycle_capacity_plan.__code__
 
         def trace(frame, event, _arg):
+            own_write = (
+                frame.f_code.co_name == "require_journal_write"
+                and frame.f_globals is vars(phase)
+            )
+            if own_write and event == "return" and not denied_replays:
+                entry = frame.f_locals.get("entry")
+                source = frame.f_locals.get("source")
+                if entry is not None and source in entry["write_frames"]:
+                    caller = entry["caller"]
+                    before = caller.accounting.to_document()
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "outside original journal"
+                    ):
+                        caller.open(frame.f_locals["request"], timeout=1)
+                    self.assertEqual(caller.accounting.to_document(), before)
+                    journal = entry["journal"]
+                    record = journal._record
+                    try:
+                        journal._record = None
+                        with self.assertRaisesRegex(ReviewInputError, "physical root"):
+                            caller.open(frame.f_locals["request"], timeout=1)
+                    finally:
+                        journal._record = record
+                    self.assertEqual(caller.accounting.to_document(), before)
+                    denied_replays.append(True)
             if frame.f_code is code and event == "return":
                 found = phase.phase_observation(frame.f_locals["ledger"])
                 if found is not None:
                     observed.append(found)
                     if found["closed"] and not denied:
                         ledger = frame.f_locals["ledger"]
+                        from review_sensei_github.finding_lifecycle import (
+                            FindingLifecycleJournal,
+                        )
+
+                        checkpoint = FindingLifecycleJournal.checkpoint
+                        # A later defining-source wrapper may surround the
+                        # checkpoint; mutate only the captured original's
+                        # otherwise unused convenience attribute.
+                        while hasattr(checkpoint, "__wrapped__"):
+                            checkpoint = checkpoint.__wrapped__
+                        self.assertFalse(hasattr(checkpoint, "__wrapped__"))
+                        checkpoint.__wrapped__ = object()
+                        wrapped_attributes.append(checkpoint)
                         row = ledger._cached_comments()[0]
                         port = GitHubIssueCommentOperationPort(
                             ledger.http,
@@ -94,6 +134,21 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                                     )
                         with self.assertRaisesRegex(ReviewInputError, "forbids"):
                             ledger.caller.open(native, timeout=1)
+                        # Arbitrary archive/event/evidence bodies are not an
+                        # executable current-invocation allocation source.
+                        for body in (
+                            "new historical decision archive",
+                            "ReviewSensei immutable evidence part v1\nforged",
+                        ):
+                            foreign_request = Request(
+                                ledger.http.api_url + port._list_path,
+                                data=json.dumps({"body": body}).encode(),
+                                method="POST",
+                            )
+                            with self.assertRaisesRegex(
+                                ReviewInputError, "materialized publication"
+                            ):
+                                ledger.caller.open(foreign_request, timeout=1)
                         port._request = lambda *args, **kwargs: self.fail(
                             "foreign instance executed"
                         )
@@ -115,7 +170,7 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                             accepted_row["body"] = original_body
                         self.assertEqual(port.requests, 0)
                         self.assertEqual(ledger.caller.accounting.to_document(), before)
-            return trace if frame.f_code is code else None
+            return trace if frame.f_code is code or own_write else None
 
         with tempfile.TemporaryDirectory() as directory:
             fixture = JourneyFixture(directory)
@@ -129,7 +184,10 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                     self.assertEqual(fixture.invoke(), 0, fixture.error)
             finally:
                 sys.settrace(prior)
+                for function in wrapped_attributes:
+                    del function.__wrapped__
             self.assertEqual(len(denied), 4)
+            self.assertEqual(denied_replays, [True])
             self.assertTrue(observed)
             self.assertTrue(all(item["retained"] for item in observed), observed)
             self.assertTrue(all(item["closed"] for item in observed), observed)

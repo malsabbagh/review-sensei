@@ -557,3 +557,33 @@ all installed carriers and original lifetime promises. No startup completion,
 terminal settlement or cold-command authority is inferred from the hot capture.
 Cold commands require their own original entry/no-new-analysis contract and
 independent authentication of the retained source and physical carrier inventory.
+
+The hot phase's physical issue-comment boundary additionally binds each write to
+one executing original ledger request inside its captured journal checkpoint, or
+to the original application's direct terminal publication completion PATCH. The
+method, path and complete body must equal that source request. Repeating the same
+source dispatch, or issuing an archive/event/part-shaped body outside those
+source frames, is rejected before physical accounting. This closes additional
+write paths but does not issue a smaller quote or authenticate membership.
+
+A future invocation-scoped plan must coexist with the unchanged lifetime
+allocation plan. It must preserve every promised event/archive slot while
+separately proving which allocations this invocation can reach. Its opening
+metadata must reject identities outside the authenticated initial frontier plus
+exact own-write receipts before fetching bodies. An interrupted own part requires
+an independently precommitted body/owner bound, fresh exact reconciliation and a
+write freeze until reconciliation; a guessed identifier or body-size observation
+is insufficient. A lost root PATCH requires the original exact CAS/readback, not
+cached-body authority. Current full-body reads and fresh closing membership remain
+mandatory. The source phase does not yet implement these membership/receipt
+proofs and still uses the unchanged full census price.
+
+The first original 80/23 frontier contains 29 known identities with 1181696 bytes
+of retained body maxima and 109 future event/archive promises. A hypothetical
+plan restricted to those identities plus up to five own-part slots requires four
+physical reads under the existing planner. That arithmetic is not an admitted
+plan: the complete remaining checkpoint sequence, native readback, failed and
+unknown outcomes, and terminal publication completion must all be proven within
+the original remaining allowance. Neither this arithmetic nor the hot source
+capture covers a cold successor's bootstrap discovery or authorizes dropping
+lifetime allocation promises.

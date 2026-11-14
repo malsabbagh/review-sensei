@@ -31,6 +31,7 @@ def _build():
     source_classes: dict[type, Any] = {}
     port_instances: WeakSet[Any] = WeakSet()
     original_functions: list[tuple[Any, Any]] = []
+    journal_checkpoint_sources: dict[type, Any] = {}
 
     def definition(name):
         frame = inspect.currentframe()
@@ -180,12 +181,15 @@ def _build():
                     "poisoned": False,
                     "closed": False,
                     "censuses": 0,
+                    "write_frames": [],
                 }
             token = active.set(entry)
             try:
                 return original(app, **kwargs)
             finally:
                 active.reset(token)
+                if entry is not None:
+                    entry["write_frames"].clear()
                 if key is not None:
                     accepted.pop(key, None)
 
@@ -194,6 +198,11 @@ def _build():
     def install_journal(cls):
         definition("review_sensei_github.finding_lifecycle")
         original = cls.__init__
+        checkpoint = cls.checkpoint
+        if hasattr(checkpoint, "__wrapped__"):
+            raise ReviewInputError("materialization checkpoint is not defining source")
+        journal_checkpoint_sources[cls] = checkpoint.__code__
+        original_functions.append((checkpoint, checkpoint.__code__))
 
         @wraps(original)
         def construct(journal, *args, **kwargs):
@@ -513,6 +522,95 @@ def _build():
             raise ReviewInputError("materialized accepted payload changed")
         return True
 
+    def require_journal_write(entry, request, path, payload):
+        """Bind a physical write to one executing original journal request.
+
+        This is a negative reachability fence, not a smaller census issuer.
+        Retaining the frame until phase exit prevents frame-id reuse and denies
+        an uncertain transport retry within the same source request.
+        """
+        from review_sensei import session
+        from review_sensei.source_registry import require_module_seal
+
+        from .guarded_pending_publication import _original_methods
+        from .session_ledger import GitHubIssueCommentSessionLedger
+
+        require_module_seal(session)
+        ledger, journal = entry["ledger"], entry["journal"]
+        if journal is None:
+            raise ReviewInputError("materialized publication has no original journal")
+        _original_methods(ledger)
+        _original_methods(journal)
+        from .quarantine_checkpoint import _CheckpointSnapshot
+
+        caller = entry["caller"]
+        snapshot = getattr(ledger, "_quarantine_checkpoint_snapshot", None)
+        record = caller._effect_record
+        if (
+            journal.ledger is not ledger
+            or entry["app"].session_ledger is not ledger
+            or ledger.caller is not caller
+            or journal._record is not record
+            or record is None
+            or record.record_sha256 != caller._root
+            or type(snapshot) is not _CheckpointSnapshot
+            or snapshot.ledger is not ledger
+            or snapshot.caller is not caller
+            or snapshot.identity != journal.identity
+            or canonical_bytes(snapshot.record.to_dict())
+            != canonical_bytes(record.to_dict())
+        ):
+            raise ReviewInputError("materialized publication physical root changed")
+        _original_methods(snapshot)
+        snapshot.require()
+        if request.get_method() == "PATCH" and (
+            path
+            != ledger.http.repository_path(
+                journal.identity.repository, f"/issues/comments/{snapshot.comment_id}"
+            )
+            or payload != {"body": snapshot.candidate_body}
+        ):
+            raise ReviewInputError(
+                "materialized publication physical root candidate changed"
+            )
+        ledger_code = GitHubIssueCommentSessionLedger._request.__code__
+        frame = inspect.currentframe()
+        source = None
+        journal_frame = False
+        completion_frame = False
+        while frame is not None:
+            if frame.f_code is ledger_code and frame.f_locals.get("self") is ledger:
+                if source is not None:
+                    raise ReviewInputError("materialized publication writer is nested")
+                source = frame
+            if (
+                frame.f_code is journal_checkpoint_sources.get(type(journal))
+                and frame.f_locals.get("self") is journal
+            ):
+                journal_frame = True
+            if (
+                frame.f_code is session.complete_review_publication.__code__
+                and frame.f_locals.get("ledger") is ledger
+                and frame.f_back is not None
+                and frame.f_back.f_code is entry["application_code"]
+                and frame.f_back.f_locals.get("self") is entry["app"]
+                and request.get_method() == "PATCH"
+            ):
+                completion_frame = True
+            frame = frame.f_back
+        if (
+            source is None
+            or not (journal_frame or completion_frame)
+            or source in entry["write_frames"]
+            or source.f_locals.get("method") != request.get_method()
+            or source.f_locals.get("path") != path
+            or canonical_bytes(source.f_locals.get("body")) != canonical_bytes(payload)
+        ):
+            raise ReviewInputError(
+                "materialized publication forbids writes outside original journal request"
+            )
+        entry["write_frames"].append(source)
+
     def install_caller(cls):
         definition("review_sensei_github.api_run_requests")
         original = cls.open
@@ -558,6 +656,7 @@ def _build():
                             raise ReviewInputError(
                                 "materialized publication forbids new operation artifacts"
                             )
+                        require_journal_write(entry, request, path, payload)
             return original(caller, request, timeout=timeout)
 
         cls.open = opened
