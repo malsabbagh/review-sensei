@@ -262,6 +262,130 @@ def observe(frame,event,result):
         ):
             checkpoint_projection(raw, empty, {"source": "original"})
 
+    def test_zero_effect_original_still_requires_uncorrupted_exact_source(self):
+        import copy
+        import inspect
+        from contextlib import nullcontext
+
+        from review_sensei_github import empty_original_admission, finding_lifecycle
+        from review_sensei_github.application import GitHubApplication
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.api_work import ApiRunAccounting
+        from tests.publication_timing_observers import (
+            at_empty_original_publication_fence,
+        )
+        from tests.test_force_push_ancestry_g06 import IDENTITY, LifecycleEntryFixture
+
+        restore_code = inspect.unwrap(
+            finding_lifecycle.restore_finding_lifecycle
+        ).__code__
+        publish_code = GitHubApplication.publish_review.__code__
+        for fault in ("unknown", "copied_return", "consumer_source"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                fixture = LifecycleEntryFixture(Path(directory))
+                with at_empty_original_publication_fence(
+                    lambda: setattr(fixture, "base_ref", "release/1.0")
+                ):
+                    code, outcome = fixture.run_and_read(human=False)
+                self.assertEqual(code, 1, fixture.error)
+                self.assertEqual(outcome["status"], "skipped_stale_base")
+                original = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                before = ApiRunAccounting.from_document(original.api_run_accounting)
+                fixture.attempt = 2
+                fixture.trace.clear()
+                fixture.transports.clear()
+                fixture.worker_observations.clear()
+                injected = []
+                previous = sys.getprofile()
+
+                def observe(frame, event, result):
+                    if (
+                        fault == "unknown"
+                        and event == "return"
+                        and frame.f_code is restore_code
+                        and isinstance(result, tuple)
+                        and result[1] is not None
+                    ):
+                        self.assertEqual(result[1]["effects"], [])
+                        result[1]["unknown_trust_effect"] = True
+                        injected.append(True)
+                    if (
+                        fault == "copied_return"
+                        and event == "call"
+                        and frame.f_code is publish_code
+                    ):
+                        frame.f_locals["kwargs"]["result"] = copy.copy(
+                            frame.f_locals["kwargs"]["result"]
+                        )
+                        injected.append(True)
+                    if previous is not None:
+                        previous(frame, event, result)
+
+                changed = (
+                    patch.object(empty_original_admission, "consume", return_value=True)
+                    if fault == "consumer_source"
+                    else nullcontext()
+                )
+                sys.setprofile(observe)
+                try:
+                    with changed as consumer:
+                        code, _ = fixture.run_and_read(human=False)
+                        if fault == "consumer_source":
+                            consumer.assert_not_called()
+                finally:
+                    sys.setprofile(previous)
+                if fault != "consumer_source":
+                    self.assertTrue(injected)
+                self.assertEqual(code, 1, fixture.error)
+                self.assertIn("no confirmed complete original staging", fixture.error)
+                self.assertEqual(fixture.provider_calls, 1)
+                self.assertEqual(fixture.check_runs, [])
+                self.assertEqual(fixture.review_posts, [])
+                current = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                after = ApiRunAccounting.from_document(current.api_run_accounting)
+                from review_sensei_github.finding_lifecycle import _unpack_journal
+
+                from review_sensei.bounded_evidence import read_inline_evidence
+
+                def journal(record):
+                    manifest = record.finding_lifecycle["manifest"]
+                    stored = read_inline_evidence(
+                        manifest, expected_binding=manifest["binding"]
+                    )
+                    return _unpack_journal(stored["lifecycle"])
+
+                original_journal, current_journal = journal(original), journal(current)
+                self.assertEqual(
+                    current_journal["effects"], original_journal["effects"]
+                )
+                self.assertEqual(
+                    current_journal["native_receipts"],
+                    original_journal["native_receipts"],
+                )
+                self.assertEqual(
+                    current_journal["lifecycle"], original_journal["lifecycle"]
+                )
+                self.assertEqual(
+                    current_journal.get("accepted_semantic_history"),
+                    original_journal.get("accepted_semantic_history"),
+                )
+                self.assertGreaterEqual(
+                    current_journal["unknown_trust_effect"],
+                    original_journal["unknown_trust_effect"],
+                )
+                self.assertEqual(
+                    current.quarantine_lineage, original.quarantine_lineage
+                )
+                self.assertEqual(after.configuration, before.configuration)
+                self.assertEqual(after.identity, before.identity)
+                self.assertGreaterEqual(after.uncertain, before.uncertain)
+                self.assertIsNone(after.terminal_transaction)
+
     def test_receipt_checkpoint_crash_never_settles_before_durable_return(self):
         from urllib.parse import urlsplit
 

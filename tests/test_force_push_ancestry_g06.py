@@ -660,6 +660,22 @@ class ForcePushAncestryG06Tests(unittest.TestCase):
             self.assertFalse(out_mid["accounting_terminal"])
             self.assertEqual(fixture.provider_calls, 1)
             self.assertEqual(fixture.review_posts, [])
+            self.assertEqual(fixture.check_runs, [])
+            from review_sensei_github.finding_lifecycle import _unpack_journal
+
+            from review_sensei.bounded_evidence import read_inline_evidence
+
+            stopped = parse_session_comment(fixture.comment["body"], identity=IDENTITY)
+            self.assertIsNone(stopped.quarantine_lineage)
+            manifest = stopped.finding_lifecycle["manifest"]
+            retained = read_inline_evidence(
+                manifest, expected_binding=manifest["binding"]
+            )
+            journal = _unpack_journal(retained["lifecycle"])
+            self.assertEqual(journal["effects"], [])
+            self.assertEqual(journal["native_receipts"], [])
+            self.assertFalse(journal["unknown_trust_effect"])
+            self.assertIsNone(stopped.api_run_accounting["terminal_transaction"])
 
             # Live gate explicitly classifies same-SHA base-ref retarget as `stale_base_ref`.
             gate = evaluate_live_pr_write_gate(

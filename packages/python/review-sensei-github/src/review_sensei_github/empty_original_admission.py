@@ -413,7 +413,14 @@ def _build():
             create=True,
             **check._state_fields(),
         )
+        if expected["external_id"] != checks.REVIEW_CHECK_EXTERNAL_ID:
+            return False
         effects = document["effects"]
+        if not effects:
+            # The authenticated ordinary journal stopped before any native
+            # business intent. This grants no settlement: the consumer still
+            # needs the exact complete original recovery and selected root.
+            return True
         # Only the original initial check. A rejected effect, review intent,
         # update, or unknown is not evidence of an empty original admission.
         if len(effects) != 1:
@@ -424,7 +431,6 @@ def _build():
             effect["method"] == "POST"
             and effect["path"] == f"/repos/{identity.repository}/check-runs"
             and effect["status"] == "confirmed"
-            and expected["external_id"] == checks.REVIEW_CHECK_EXTERNAL_ID
             and effect["request"] == expected
             and response is not None
             and response[0] in {200, 201}
