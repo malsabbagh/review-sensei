@@ -427,9 +427,9 @@ def fetch_packed_comments(
 ):
     """Complete walk: original opening/closing or optional single response.
 
-    Specialized cold/receipt owners retain their original multi-read protocol.
-    A scheduling hint only selects the independently complete single response
-    when neither owner has issued custody for this invocation.
+    Cold checkpoint custody retains its original multi-read protocol. Receipt
+    observers already accept one complete physical read and still validate the
+    original frame, plan, rows, owner and actual observations unchanged.
     """
     from .quarantine_command_checkpoint import begin_census, completed_census
     from .quarantine_command_execution import (
@@ -489,11 +489,7 @@ def fetch_packed_comments(
     from . import body_census_hint
 
     require_module_seal(body_census_hint)
-    hinted_first = (
-        body_census_hint.first()
-        if cold_census is None and receipt_census is None
-        else None
-    )
+    hinted_first = body_census_hint.first() if cold_census is None else None
     if hinted_first is not None:
         require_module_seal(sys.modules[__name__])
         plan_snapshot = _single_plan_snapshot(plan)
