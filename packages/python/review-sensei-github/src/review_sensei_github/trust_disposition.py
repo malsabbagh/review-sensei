@@ -396,6 +396,8 @@ def _build_preparation():
 
         def require():
             context["require_source"]()
+            require_value(record)
+            require_value(caller._effect_record)
             if (
                 verification_profile(caller) is not context["profile"]
                 or caller._root != root

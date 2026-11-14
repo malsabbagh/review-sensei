@@ -183,6 +183,19 @@ class PreentryCapacityTests(unittest.TestCase):
                     observe_disposition_capacity(receipt)
             finally:
                 object.__setattr__(receipt, "root", root)
+            before_record_reads = len(run.caller.observations)
+            record_callbacks = []
+            current_record = run.caller._effect_record
+            object.__setattr__(
+                current_record, "to_dict", lambda: record_callbacks.append(True)
+            )
+            try:
+                with self.assertRaises(ReviewInputError):
+                    observe_disposition_capacity(receipt)
+                self.assertEqual(record_callbacks, [])
+                self.assertEqual(len(run.caller.observations), before_record_reads)
+            finally:
+                object.__delattr__(current_record, "to_dict")
             plan = observe_disposition_capacity(receipt)
             plan.require(plan.journal, http=plan.http, budget=plan.budget)
             before_sizing = len(run.caller.observations)
