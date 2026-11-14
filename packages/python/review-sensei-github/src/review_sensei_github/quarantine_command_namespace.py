@@ -529,6 +529,111 @@ def _registry():
     def require(token, caller):
         _require(token, caller)
 
+    def capture_paid_prefix(caller):
+        """Reconstruct a genuine completed preparation; no execution authority."""
+        from . import quarantine_command_suffix
+
+        require_module_seal(quarantine_command_suffix)
+        frame = sys._getframe(1)
+        if (
+            caller is None
+            or frame.f_code is not quarantine_command_suffix.prepare.__code__
+            or frame.f_globals is not vars(quarantine_command_suffix)
+            or id(getattr(frame.f_locals.get("run"), "caller", None)) != id(caller)
+            or id(frame.f_locals.get("state")) != id(caller.accounting)
+        ):
+            raise ReviewInputError("cold paid prefix requires original preparation")
+        from . import quarantine_command_finalization
+
+        require_module_seal(quarantine_command_finalization)
+        saved = quarantine_command_finalization.require_observation(
+            frame.f_locals.get("observation")
+        )
+        if saved["run"] is not frame.f_locals["run"] or saved[
+            "target"
+        ] is not frame.f_locals.get("target"):
+            raise ReviewInputError("cold paid prefix observation changed")
+        entry = _require(active.get(caller), caller)
+        if "paid_projection" in entry:
+            raise ReviewInputError("cold paid prefix was already captured")
+        start = frame.f_locals.get("before_preparation")
+        count = frame.f_locals.get("preparation_calls")
+        if (
+            type(start) is not int
+            or type(count) is not int
+            or not 0 < count <= frame.f_locals.get("preparation_ceiling", 0)
+            or len(caller.observations) != start + count
+            or observed.get(caller) != entry["start"] + count
+            or caller._sequence != entry["start"] + count
+            or caller._terminal_reason is not None
+        ):
+            raise ReviewInputError("cold paid prefix sequence is unsupported")
+        prefix = caller.observations[start:]
+        reconstructed = entry["state"]
+        for offset, item in enumerate(prefix, 1):
+            identifier = (
+                f"c-{reconstructed.owner.generation:x}-{entry['start'] + offset:x}"
+            )
+            if (
+                item.get("request_id") != identifier
+                or item.get("outcome") != "response"
+                or (
+                    item.get("mutation") is not False
+                    and caller._confirmed_control_writes.get(identifier)
+                    != ("broker_authentication", str(caller.run.run_id))
+                )
+                or item.get("uncertain_effect")
+                or type(item.get("deadline_unix_ms")) is not int
+            ):
+                raise ReviewInputError("cold paid prefix response is unconfirmed")
+            request = PendingApiRequest(identifier, item["deadline_unix_ms"])
+            reconstructed = reconstructed.dispatch(entry["ordinary"], request).confirm(
+                request
+            )
+        state_bytes = canonical_bytes(caller.accounting.to_document())
+        if canonical_bytes(reconstructed.to_document()) != state_bytes:
+            raise ReviewInputError("cold paid prefix accounting changed")
+        projected = reconstructed
+        sequence = caller._sequence
+        for block in reconstructed.blocks:
+            if block.block_id not in (entry["ordinary"], entry["terminal"]):
+                continue
+            for _ in range(block.undispatched):
+                sequence += 1
+                projected = projected.dispatch(
+                    block.block_id,
+                    PendingApiRequest(
+                        f"c-{reconstructed.owner.generation:x}-{sequence:x}",
+                        MAX_API_REQUEST_LIMIT,
+                    ),
+                )
+        if sequence != entry["ceiling"]:
+            raise ReviewInputError("cold paid prefix changed future namespace")
+        entry["paid_state"] = state_bytes
+        entry["paid_sequence"] = caller._sequence
+        entry["paid_observations"] = tuple(
+            (item, canonical_bytes(item)) for item in prefix
+        )
+        entry["paid_projection"] = canonical_bytes(projected.to_document())
+
+    def project_prepared_prefix(caller):
+        """Conditional detached data; original baseline projection is unchanged."""
+        import json
+
+        entry = _require(active.get(caller), caller)
+        if "paid_projection" not in entry:
+            return project(active.get(caller), caller)
+        if (
+            canonical_bytes(caller.accounting.to_document()) != entry["paid_state"]
+            or caller._sequence != entry["paid_sequence"]
+            or observed.get(caller) != entry["paid_sequence"]
+            or any(
+                canonical_bytes(item) != raw for item, raw in entry["paid_observations"]
+            )
+        ):
+            raise ReviewInputError("cold paid prefix is stale or changed")
+        return json.loads(entry["paid_projection"])
+
     def project_current(caller):
         return project(active.get(caller), caller)
 
@@ -538,6 +643,8 @@ def _registry():
         before_sequence,
         project,
         project_current,
+        capture_paid_prefix,
+        project_prepared_prefix,
         require,
         observed_sequence,
         install_current_validator,
@@ -550,6 +657,8 @@ def _registry():
     before_sequence,
     project,
     project_current,
+    capture_paid_prefix,
+    project_prepared_prefix,
     require,
     observed_sequence,
     install_current_validator,

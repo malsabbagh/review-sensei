@@ -405,9 +405,9 @@ def _measure_inline_branches(observation):
             "assessment_state_manifest": json.loads(projected.cursor_manifest_bytes),
         }
     prospective = record.evolve(generation=generation, **fields)
-    from .quarantine_command_namespace import project_current
+    from .quarantine_command_namespace import project_prepared_prefix
 
-    accounting_upper = project_current(run.caller)
+    accounting_upper = project_prepared_prefix(run.caller)
     witness = getattr(run.caller, "_accepted_semantic_capacity", None)
     result_upper = None
     if saved["projection"].creates_event:

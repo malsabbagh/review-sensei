@@ -258,6 +258,9 @@ def _registry():
                 "guarded suffix preparation is not a confirmed bounded paid prefix"
             )
         state = run.caller.accounting
+        from .quarantine_command_namespace import capture_paid_prefix
+
+        capture_paid_prefix(run.caller)
         recipe = intermediate_suffix_recipe(observation, comment_rows=rows)
         recipe["event_exact_body"] = event_body
         recipe["event_wire_bound"] = event_wire
