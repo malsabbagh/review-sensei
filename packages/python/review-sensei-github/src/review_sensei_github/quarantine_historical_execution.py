@@ -276,7 +276,10 @@ def _registry():
                 original = cast(Any, frame.f_back)
                 request = original.f_locals["request"]
                 body = json.loads(request.data)
-                if len(canonical_bytes(body)) > 6 * 32768 + 11:
+                if (
+                    body != {"body": recipe["event_exact_body"]}
+                    or len(canonical_bytes(body)) > recipe["event_wire_bound"]
+                ):
                     raise ReviewInputError(
                         "historical event exceeds its promised wire bound"
                     )

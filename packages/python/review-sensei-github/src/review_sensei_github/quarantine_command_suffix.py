@@ -21,6 +21,34 @@ class SuffixProposal:
     pass
 
 
+def _closed_event_body(run, target, record):
+    """Exact next event bytes under the original entry-then-event sequence."""
+    from review_sensei import bounded_evidence
+
+    from . import quarantine_action, quarantine_command_projection
+
+    require_module_seal(quarantine_action)
+    quarantine_command_projection.require_projection_source()
+    projection = target.capacity_projection
+    if not projection.creates_event or not isinstance(projection.event_bytes, bytes):
+        raise ReviewInputError("guarded suffix requires an exact new event")
+    # The entry checkpoint is the sole predecessor of the event. Its loaded
+    # generation is original+1, and _decision_binding advances it once more.
+    binding = {
+        **quarantine_action._decision_binding(record, run),
+        "generation": record.generation + 2,
+    }
+    parts = bounded_evidence.partition_evidence(
+        json.loads(projection.event_bytes), binding=binding, item_count=1
+    )
+    if len(parts) != 1:
+        raise ReviewInputError("guarded suffix event exceeds one carrier")
+    body = quarantine_command_projection._event_body(parts[0])
+    if len(body.encode()) > bounded_evidence.MAX_PART_BYTES:
+        raise ReviewInputError("guarded suffix event exceeds its original body bound")
+    return body
+
+
 def _registry():
     starts: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
     completed: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
@@ -185,6 +213,8 @@ def _registry():
             raise ReviewInputError("guarded suffix retained grant framing changed")
         # These are invocation growth promises, not replacement lifetime slots.
         # Admission must still prove and enforce the closed mutation families.
+        event_body = _closed_event_body(run, target, record)
+        event_wire = len(canonical_bytes({"body": event_body}))
         page = project_receipt_page(
             rows,
             mutable_bounds=(
@@ -198,7 +228,7 @@ def _registry():
                     + 9,
                 ),
             ),
-            future_bounds=(6 * 32768 + 11, 65536),
+            future_bounds=(event_wire, 65536),
         )
         from .quarantine_command_finalization import intermediate_suffix_recipe
 
@@ -229,6 +259,8 @@ def _registry():
             )
         state = run.caller.accounting
         recipe = intermediate_suffix_recipe(observation, comment_rows=rows)
+        recipe["event_exact_body"] = event_body
+        recipe["event_wire_bound"] = event_wire
         if run.caller.budget_view.ordinary_remaining() < recipe["combined_loss_calls"]:
             raise ReviewInputError("guarded suffix complete ordinary tail is unfunded")
         token = SuffixProposal()
