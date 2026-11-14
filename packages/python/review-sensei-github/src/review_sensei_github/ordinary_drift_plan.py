@@ -73,6 +73,8 @@ def _require_data(value, seen=None):
 def _require_preparation_source(publisher, journal, *data):
     from .ordinary_publication_reads import _source_guard
 
+    _require_methods(publisher)
+    _require_methods(journal)
     _source_guard(publisher, journal)
     for owner in (
         publisher,
@@ -86,11 +88,19 @@ def _require_preparation_source(publisher, journal, *data):
         journal._record,
         journal.effects,
         getattr(journal, "_input_identity", None),
+        getattr(journal, "_planned", None),
+        getattr(journal, "_finalizer_capacity_states", None),
         getattr(journal, "_accepted_semantic_history", None),
         getattr(journal, "_review_update_capacity_states", None),
         getattr(journal, "_batch_body_updates", None),
         getattr(publisher, "_unknown_effect_holds", None),
         getattr(publisher, "_native_finding_context", None),
+        getattr(publisher, "_native_finding_receipt_records", None),
+        getattr(publisher, "_drift_states", None),
+        getattr(publisher, "_drift_inputs", None),
+        getattr(publisher, "_drift_concern_history", None),
+        getattr(publisher, "_active_window_states", None),
+        getattr(publisher, "_active_window_inputs", None),
         *data,
     ):
         _require_data(value)
@@ -175,7 +185,27 @@ def observe_current(
     from .ordinary_publication_plan import current_request_branches
     from .ordinary_publication_reads import _require_reader_profile
 
-    if journal is None or planned is None or not complete_inventory:
+    # Explicit internal diagnostic selection only. Ordinary callers retain
+    # their conservative route until the complete execution consumer qualifies.
+    if getattr(publisher, "_ordinary_drift_measurement", False) is not True:
+        return None
+    if journal is None:
+        return None
+    _require_preparation_source(
+        publisher,
+        journal,
+        planned,
+        assembled,
+        eligibility,
+        result,
+        outcome,
+        convergence_policy,
+        policy,
+        marker,
+        complete_inventory,
+        auto_approval,
+    )
+    if planned is None or complete_inventory is not True:
         return None
     if journal.effects or not any(
         obligation.thread_binding is not None
@@ -184,7 +214,6 @@ def observe_current(
         return None
     if getattr(journal._record, "quarantine_lineage", None) is not None:
         return None
-    _require_preparation_source(publisher, journal, planned, assembled, eligibility)
     _require_reader_profile(publisher)
     context = getattr(publisher, "_native_finding_context", None)
     if context is None or assembled is None:
@@ -206,7 +235,20 @@ def observe_current(
         head_sha=context["head_sha"],
         base_sha=context["base_sha"],
     )
-    _require_preparation_source(publisher, journal, planned, assembled, eligibility)
+    _require_preparation_source(
+        publisher,
+        journal,
+        planned,
+        assembled,
+        eligibility,
+        result,
+        outcome,
+        convergence_policy,
+        policy,
+        marker,
+        complete_inventory,
+        auto_approval,
+    )
     if (
         journal._record.record_sha256 != original_root
         or canonical_bytes(journal._record.to_dict()) != original_record

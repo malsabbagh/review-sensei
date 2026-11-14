@@ -55,6 +55,7 @@ class OrdinaryDriftPreparationTests(unittest.TestCase):
 
             def inspect(frame, event, value):
                 if frame.f_code is source and event == "call":
+                    frame.f_locals["publisher"]._ordinary_drift_measurement = True
                     planned = frame.f_locals["planned"]
                     if planned is not None and any(
                         ob.thread_binding is not None
@@ -92,6 +93,10 @@ class OrdinaryDriftPreparationTests(unittest.TestCase):
             update_code = ReviewPublisher._prepare_existing_drift_updates.__code__
 
             def inspect(frame, event, value):
+                if frame.f_code is code and event == "call":
+                    # Diagnostic-only selection, not an executable profile or
+                    # replacement of any source method/callback.
+                    frame.f_locals["publisher"]._ordinary_drift_measurement = True
                 if (
                     event == "call"
                     and frame.f_code
@@ -208,7 +213,10 @@ class OrdinaryDriftPreparationTests(unittest.TestCase):
                 eligibility=eligibility,
                 review_id=999,
             )
-            self.assertIsNone(clone._pending_thread_cleanup)
+            # Generic scheduling remains deferred. Early elision is not
+            # enabled until the selected route proves lifetime custody.
+            self.assertTrue(callable(clone._pending_thread_cleanup))
+            clone._pending_thread_cleanup = None
             # Removing the retained matching state is not an empty proof. The
             # generic nonempty callback remains scheduled, never executed here.
             clone._drift_states = {}

@@ -4,13 +4,32 @@ import copy
 import unittest
 from unittest.mock import patch
 
-from review_sensei_github.ordinary_drift_plan import _require_methods
+from review_sensei_github.ordinary_drift_plan import _require_methods, observe_current
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.presentation import FindingView
 
 
 class OrdinaryDriftSourceSealTests(unittest.TestCase):
+    def test_default_measurement_does_not_touch_unsupported_inputs(self):
+        opaque = object()
+        self.assertIsNone(
+            observe_current(
+                opaque,
+                opaque,
+                planned=opaque,
+                result=opaque,
+                assembled=opaque,
+                eligibility=opaque,
+                marker=opaque,
+                outcome=opaque,
+                policy=opaque,
+                complete_inventory=opaque,
+                convergence_policy=opaque,
+                auto_approval=opaque,
+            )
+        )
+
     def test_original_presentation_class_and_copy_remain_qualified(self):
         value = object.__new__(FindingView)
         _require_methods(value)

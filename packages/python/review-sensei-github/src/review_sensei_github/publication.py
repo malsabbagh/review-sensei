@@ -8149,23 +8149,6 @@ class ReviewPublisher:
         # None still means discover; do not erase a previously pending owner.
         if threads is not None and not threads and self._pending_thread_cleanup is None:
             return
-        # Use the very same source selector as execution. This only suppresses
-        # work that has no obsolete target; it never settles or deletes an
-        # active obligation and never accepts a caller-provided empty proof.
-        if (
-            drift_state is not None
-            and threads is not None
-            and self._pending_thread_cleanup is None
-            and not self._matching_superseded_threads(
-                threads=threads,
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                replacements=replacements,
-            )
-        ):
-            return
-
         def cleanup() -> str | None:
             try:
                 candidates = threads
