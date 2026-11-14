@@ -38,7 +38,6 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
         observed = []
         denied = []
         denied_replays = []
-        wrapped_attributes = []
         denied_intervening_reads = []
         code = lifecycle_capacity_plan.__code__
 
@@ -102,14 +101,25 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                         )
 
                         checkpoint = FindingLifecycleJournal.checkpoint
-                        # A later defining-source wrapper may surround the
-                        # checkpoint; mutate only the captured original's
-                        # otherwise unused convenience attribute.
+                        # Wrapper metadata is now sealed. Prove its own refusal,
+                        # restore it, then exercise unchanged allocation controls.
                         while hasattr(checkpoint, "__wrapped__"):
                             checkpoint = checkpoint.__wrapped__
                         self.assertFalse(hasattr(checkpoint, "__wrapped__"))
+                        before_metadata = ledger.caller.accounting.to_document()
                         checkpoint.__wrapped__ = object()
-                        wrapped_attributes.append(checkpoint)
+                        try:
+                            with self.assertRaisesRegex(
+                                ReviewInputError, "source changed"
+                            ):
+                                lifecycle_capacity_plan(
+                                    ledger, frame.f_locals["identity"], added_parts=0
+                                )
+                        finally:
+                            del checkpoint.__wrapped__
+                        self.assertEqual(
+                            ledger.caller.accounting.to_document(), before_metadata
+                        )
                         row = ledger._cached_comments()[0]
                         port = GitHubIssueCommentOperationPort(
                             ledger.http,
@@ -173,7 +183,8 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                                 method="POST",
                             )
                             with self.assertRaisesRegex(
-                                ReviewInputError, "materialized publication"
+                                ReviewInputError,
+                                "materialized fixed membership forbids comment allocations",
                             ):
                                 ledger.caller.open(foreign_request, timeout=1)
                         port._request = lambda *args, **kwargs: self.fail(
@@ -211,8 +222,6 @@ class MaterializedPublicationPhaseTests(unittest.TestCase):
                     self.assertEqual(fixture.invoke(), 0, fixture.error)
             finally:
                 sys.settrace(prior)
-                for function in wrapped_attributes:
-                    del function.__wrapped__
             self.assertEqual(len(denied), 4)
             self.assertEqual(denied_replays, [True])
             self.assertEqual(denied_intervening_reads, [True])

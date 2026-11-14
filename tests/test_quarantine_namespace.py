@@ -1,6 +1,8 @@
 """Historical origin coverage, not a lineage marker, separates fresh findings."""
 
 import copy
+import dis
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -30,9 +32,6 @@ class QuarantineNamespaceTests(unittest.TestCase):
             seen = []
 
             def inspect(ledger, record, state, document):
-                result = original(ledger, record, state, document)
-                if not result:
-                    return result
                 seen.append(state)
                 authenticated = ledger._quarantine_authenticated
                 before_requests = len(fixture.trace)
@@ -97,15 +96,35 @@ class QuarantineNamespaceTests(unittest.TestCase):
                 ):
                     original(ledger, record, state, pending)
                 self.assertEqual(len(fixture.trace), before_requests)
-                return result
 
-            with (
-                registered_resource([registration]),
-                patch.object(
-                    namespace, "inherited_namespace_is_historical", side_effect=inspect
-                ),
-            ):
-                self.assertEqual(fixture.invoke(), 0, fixture.error)
+            returns = {
+                item.offset
+                for item in dis.get_instructions(original)
+                if item.opname in {"RETURN_VALUE", "RETURN_CONST"}
+            }
+
+            def observe(frame, event, value):
+                if (
+                    event == "return"
+                    and value is True
+                    and frame.f_code is original.__code__
+                    and frame.f_globals is original.__globals__
+                    and frame.f_lasti in returns
+                ):
+                    inspect(
+                        *(
+                            frame.f_locals[name]
+                            for name in ("ledger", "record", "state", "document")
+                        )
+                    )
+
+            previous_profile = sys.getprofile()
+            try:
+                sys.setprofile(observe)
+                with registered_resource([registration]):
+                    self.assertEqual(fixture.invoke(), 0, fixture.error)
+            finally:
+                sys.setprofile(previous_profile)
             self.assertTrue(seen)
             self.assertGreater(
                 len(seen[0].inventory.obligations), len(seen[0].active_entries)
