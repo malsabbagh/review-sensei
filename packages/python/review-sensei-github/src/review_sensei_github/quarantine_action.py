@@ -702,6 +702,7 @@ def apply_quarantine_target(run, authority, command, target, app):
         ),
         None,
     )
+    lifecycle_transfer = None
     if existing is None:
         decision = _decision_value(
             run, authority, command, target.instance, target.permission
@@ -758,12 +759,9 @@ def apply_quarantine_target(run, authority, command, target, app):
 
         _issue_decision_permit(run, authority, before, decision, tail)
         confirmed = run.ledger.replace(run.identity, mutate)
-        actual = target.reader.read(head_sha=run.head_sha)
-        if (
-            not actual.state["settlements"]
-            or actual.state["settlements"][-1] != decision
-        ):
-            raise ReviewInputError("quarantine individual decision was not confirmed")
+        lifecycle_transfer = _confirmed_own_decision(
+            run, target, confirmed, decision=decision
+        )
     else:
         confirmed = run.ledger.load(run.identity).record
     if existing is None:
@@ -802,18 +800,6 @@ def apply_quarantine_target(run, authority, command, target, app):
             ),
         ),
     )
-    from .quarantine_lifecycle_transfer import confirmed_transfer
-
-    lifecycle_transfer = (
-        confirmed_transfer(
-            target,
-            run,
-            confirmed,
-            decision_permit=getattr(run.ledger, "_quarantine_decision_permit", None),
-        )
-        if existing is None
-        else None
-    )
     decision_authority(run, authority)
     return app._refinalize_command(
         result,
@@ -829,6 +815,60 @@ def apply_quarantine_target(run, authority, command, target, app):
         evidence_budget=run.caller.budget_view,
         policy_digest=run.caller.accounting.configuration.digest,
         _quarantine_lifecycle_transfer=lifecycle_transfer,
+    )
+
+
+def _confirmed_own_decision(run, target, confirmed, *, decision):
+    """Reuse only the actual exact owned cursor GET, never a projection."""
+    import inspect
+    import sys
+
+    from review_sensei.source_registry import require_module_seal
+
+    from . import quarantine_candidate_receipt, quarantine_lifecycle_transfer
+    from .quarantine_command_projection import require_projection_source
+    from .quarantine_origin import require_authenticated_read_owner
+
+    current = inspect.currentframe()
+    frame = current.f_back if current is not None else None
+    if frame is None or frame.f_code is not apply_quarantine_target.__code__:
+        raise ReviewInputError("quarantine own decision requires its original caller")
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(quarantine_lifecycle_transfer)
+    require_projection_source()
+    require_authenticated_read_owner(
+        target.authenticated, run.ledger, run.caller, run.identity
+    )
+    permit = getattr(run.ledger, "_quarantine_decision_permit", None)
+    if (
+        type(permit) is not _DecisionPermit
+        or permit not in _ISSUED_DECISIONS
+        or _DECISION_BINDINGS.get(permit) != _decision_permit_binding(permit)
+        or permit.consumed is not True
+        or permit.ledger is not run.ledger
+        or permit.authority.run is not run
+        or permit.run_id != run.caller.run.run_id
+        or permit.head_sha != run.head_sha
+        or permit.before_state != target.authenticated.state_bytes
+        or permit.decision != canonical_bytes(decision)
+        or permit.scope != target.authenticated.lineage["scope_sha256"]
+        or _DECISION_CANDIDATES.get(permit) != canonical_bytes(confirmed.to_dict())
+    ):
+        raise ReviewInputError("quarantine own decision candidate custody changed")
+    manifest = confirmed.quarantine_lineage["assessment_state_manifest"]
+    if read_inline_evidence(
+        manifest, expected_binding=manifest["binding"]
+    ) != assessment_cursor(
+        scope=permit.scope,
+        count=len(target.authenticated.state["settlements"]) + 1,
+        tail_manifest=json.loads(permit.tail),
+    ):
+        raise ReviewInputError("quarantine own decision committed cursor changed")
+    quarantine_candidate_receipt.consume(
+        run.caller, run.ledger, run.identity, confirmed
+    )
+    return quarantine_lifecycle_transfer.confirmed_transfer(
+        target, run, confirmed, decision_permit=permit
     )
 
 

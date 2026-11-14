@@ -222,6 +222,9 @@ class _CheckpointSnapshot:
         return parsed
 
     def get(self, *, candidate=False):
+        from .quarantine_candidate_receipt import begin, finish
+
+        receipt = begin(self, candidate=candidate)
         self.require()
         record = self.candidate if candidate else self.record
         body = self.candidate_body if candidate else self.body
@@ -237,7 +240,8 @@ class _CheckpointSnapshot:
             raise ReviewInputError(
                 "quarantine exact checkpoint readback is unavailable"
             )
-        return self.validate(payload, record=record, body=body)
+        parsed = self.validate(payload, record=record, body=body)
+        return finish(receipt, self, parsed, payload) if candidate else parsed
 
 
 def expire(snapshot: _CheckpointSnapshot | None):
@@ -384,6 +388,12 @@ def reconcile_quarantine_checkpoint(caller, ledger, identity):
         )
     return _remember_confirmation(snapshot, snapshot.get(candidate=True))
 
+
+from .quarantine_candidate_receipt import install_source as _install_candidate_receipt  # noqa: E402
+
+# Capture the defining GET producer before the hot-path wrapper is installed.
+_install_candidate_receipt(_CheckpointSnapshot)
+del _install_candidate_receipt
 
 from .materialized_publication_phase import (  # noqa: E402
     install_checkpoint as _install_materialized_checkpoint,

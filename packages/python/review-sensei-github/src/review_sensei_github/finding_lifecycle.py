@@ -749,104 +749,113 @@ def restore_finding_lifecycle(
     reviewer, ledger, identity: SessionIdentity, *, loaded=None, _retained=None
 ):
     """Read only from the independently selected current session root."""
-    from review_sensei.finding_lifecycle_store import (
-        read_finding_lifecycle,
-        select_finding_lifecycle,
-    )
+    from .quarantine_lifecycle_transfer import clear_namespace_restore
 
-    if _retained is not None:
-        if loaded is not None:
-            raise ReviewInputError(
-                "quarantine lifecycle transfer cannot combine sources"
-            )
-        from .quarantine_lifecycle_transfer import consume
-
-        record, document = consume(_retained, ledger, identity)
-        document = _validate(document)
-    else:
-        if loaded is None:
-            selected, stored = select_finding_lifecycle(ledger, identity)
-        else:
-            selected, stored = loaded, None
-        if selected.status not in {"ok", "migrated", "missing"}:
-            raise ReviewInputError(
-                "finding lifecycle selected session is unavailable: " + selected.status
-            )
-        record = selected.record
-        if record is None or record.finding_lifecycle is None:
-            return record, None
-        if loaded is not None:
-            stored = read_finding_lifecycle(ledger, record, _selected_load=selected)
-        from .finding_lifecycle_dictionary import resolve_stored
-
-        stored = resolve_stored(ledger, record, stored)
-        document = _validate(_unpack_journal(stored))
-    restored = decode_lifecycle_state(document["lifecycle"])
-    state = restored.state
-    binding = record.finding_lifecycle["manifest"]["binding"]
-    if state.head_sha != binding["head_sha"] or state.base_sha != binding["base_sha"]:
-        raise ReviewInputError(
-            "finding lifecycle inner snapshot conflicts with selected authority"
+    try:
+        from review_sensei.finding_lifecycle_store import (
+            read_finding_lifecycle,
+            select_finding_lifecycle,
         )
-    _require_effect_scope(document, identity, binding["head_sha"])
-    key = (identity.repository_id, identity.pull_request)
-    from review_sensei.active_finding_window import ActiveWindowRoundState
 
-    expected_producer = binding["producer"]
-    for receipt in document["native_receipts"]:
-        if (receipt["repository_id"], receipt["pull_request"]) != key or (
-            expected_producer.startswith("github-bot:")
-            and str(receipt["producer_id"]) != expected_producer.split(":", 1)[1]
-        ):
-            raise ReviewInputError(
-                "finding lifecycle receipt scope conflicts with selected authority"
-            )
-    history = record.finding_lifecycle.get(
-        "accepted_semantic_history", document.get("accepted_semantic_history")
-    )
-    if history is not None and history.get("qualification") != "unavailable":
-        from .accepted_semantic_history import validate_history
+        if _retained is not None:
+            if loaded is not None:
+                raise ReviewInputError(
+                    "quarantine lifecycle transfer cannot combine sources"
+                )
+            from .quarantine_lifecycle_transfer import consume
 
-        validate_history(history, identity)
-    from .quarantine_namespace import inherited_namespace_is_historical
+            record, document = consume(_retained, ledger, identity)
+            document = _validate(document)
+        else:
+            if loaded is None:
+                selected, stored = select_finding_lifecycle(ledger, identity)
+            else:
+                selected, stored = loaded, None
+            if selected.status not in {"ok", "migrated", "missing"}:
+                raise ReviewInputError(
+                    "finding lifecycle selected session is unavailable: "
+                    + selected.status
+                )
+            record = selected.record
+            if record is None or record.finding_lifecycle is None:
+                return record, None
+            if loaded is not None:
+                stored = read_finding_lifecycle(ledger, record, _selected_load=selected)
+            from .finding_lifecycle_dictionary import resolve_stored
 
-    if inherited_namespace_is_historical(ledger, record, state, document):
+            stored = resolve_stored(ledger, record, stored)
+            document = _validate(_unpack_journal(stored))
+        restored = decode_lifecycle_state(document["lifecycle"])
+        state = restored.state
+        binding = record.finding_lifecycle["manifest"]["binding"]
         if (
-            key in reviewer._active_window_states
-            or key in reviewer._drift_states
-            or key in reviewer._unknown_effect_holds
+            state.head_sha != binding["head_sha"]
+            or state.base_sha != binding["base_sha"]
         ):
             raise ReviewInputError(
-                "quarantine finding namespace requires an independent current projection"
+                "finding lifecycle inner snapshot conflicts with selected authority"
             )
-        # The exact old reference and all effects remain in the immutable
-        # predecessor/origin. They are not fresh findings or replay authority.
-        return record, None
-    if isinstance(state, ActiveWindowRoundState):
-        reviewer._active_window_states[key] = state
-        reviewer._drift_states.pop(key, None)
-        if restored.input_identity is not None:
-            reviewer._active_window_inputs[key] = restored.input_identity
-    else:
-        reviewer._drift_states[key] = state
-        reviewer._active_window_states.pop(key, None)
-        if restored.input_identity is not None:
-            reviewer._drift_inputs[key] = restored.input_identity
-        for obligation, concerns in restored.concern_history.items():
-            reviewer._drift_concern_history[(*key, obligation)] = concerns
-    reviewer._accepted_semantic_histories = getattr(
-        reviewer, "_accepted_semantic_histories", {}
-    )
-    reviewer._accepted_semantic_histories[key] = history
-    reviewer._native_finding_receipt_records = getattr(
-        reviewer, "_native_finding_receipt_records", {}
-    )
-    reviewer._native_finding_receipt_records[key] = {
-        receipt["instance"]: receipt for receipt in document["native_receipts"]
-    }
-    if document["unknown_trust_effect"]:
-        reviewer._unknown_effect_holds.add(key)
-    return record, document
+        _require_effect_scope(document, identity, binding["head_sha"])
+        key = (identity.repository_id, identity.pull_request)
+        from review_sensei.active_finding_window import ActiveWindowRoundState
+
+        expected_producer = binding["producer"]
+        for receipt in document["native_receipts"]:
+            if (receipt["repository_id"], receipt["pull_request"]) != key or (
+                expected_producer.startswith("github-bot:")
+                and str(receipt["producer_id"]) != expected_producer.split(":", 1)[1]
+            ):
+                raise ReviewInputError(
+                    "finding lifecycle receipt scope conflicts with selected authority"
+                )
+        history = record.finding_lifecycle.get(
+            "accepted_semantic_history", document.get("accepted_semantic_history")
+        )
+        if history is not None and history.get("qualification") != "unavailable":
+            from .accepted_semantic_history import validate_history
+
+            validate_history(history, identity)
+        from .quarantine_namespace import inherited_namespace_is_historical
+
+        if inherited_namespace_is_historical(ledger, record, state, document):
+            if (
+                key in reviewer._active_window_states
+                or key in reviewer._drift_states
+                or key in reviewer._unknown_effect_holds
+            ):
+                raise ReviewInputError(
+                    "quarantine finding namespace requires an independent current projection"
+                )
+            # The exact old reference and all effects remain in the immutable
+            # predecessor/origin. They are not fresh findings or replay authority.
+            return record, None
+        if isinstance(state, ActiveWindowRoundState):
+            reviewer._active_window_states[key] = state
+            reviewer._drift_states.pop(key, None)
+            if restored.input_identity is not None:
+                reviewer._active_window_inputs[key] = restored.input_identity
+        else:
+            reviewer._drift_states[key] = state
+            reviewer._active_window_states.pop(key, None)
+            if restored.input_identity is not None:
+                reviewer._drift_inputs[key] = restored.input_identity
+            for obligation, concerns in restored.concern_history.items():
+                reviewer._drift_concern_history[(*key, obligation)] = concerns
+        reviewer._accepted_semantic_histories = getattr(
+            reviewer, "_accepted_semantic_histories", {}
+        )
+        reviewer._accepted_semantic_histories[key] = history
+        reviewer._native_finding_receipt_records = getattr(
+            reviewer, "_native_finding_receipt_records", {}
+        )
+        reviewer._native_finding_receipt_records[key] = {
+            receipt["instance"]: receipt for receipt in document["native_receipts"]
+        }
+        if document["unknown_trust_effect"]:
+            reviewer._unknown_effect_holds.add(key)
+        return record, document
+    finally:
+        clear_namespace_restore(ledger)
 
 
 class _JournalTransport:

@@ -24,13 +24,17 @@ from review_sensei.models import ReviewResult
 def inherited_namespace_is_historical(ledger, record, state, document):
     if record.quarantine_lineage is None:
         return False
+    from .quarantine_lifecycle_transfer import consume_namespace_original
     from .quarantine_origin import (
         _AUTHENTICATED,
         AuthenticatedQuarantine,
         read_predecessor,
     )
 
-    authenticated = getattr(ledger, "_quarantine_authenticated", None)
+    retained_origin = consume_namespace_original(ledger, record)
+    authenticated = retained_origin or getattr(
+        ledger, "_quarantine_authenticated", None
+    )
     caller = getattr(ledger, "caller", None)
     if (
         type(authenticated) is not AuthenticatedQuarantine
@@ -38,13 +42,17 @@ def inherited_namespace_is_historical(ledger, record, state, document):
         or caller is None
         or authenticated.original_caller is not caller
         or authenticated.original_identity != record.identity()
-        or canonical_bytes(record.quarantine_lineage) != authenticated.lineage_bytes
+        or (
+            retained_origin is None
+            and canonical_bytes(record.quarantine_lineage)
+            != authenticated.lineage_bytes
+        )
     ):
         raise ReviewInputError(
             "quarantine finding namespace lacks authenticated origins"
         )
     cast(Any, caller)._require_ledger(ledger, record.identity())
-    if authenticated.record_sha256 != record.record_sha256:
+    if retained_origin is None and authenticated.record_sha256 != record.record_sha256:
         from .quarantine_checkpoint import confirmed_checkpoint_capacity
 
         receipt = confirmed_checkpoint_capacity(caller, ledger, record.identity())
@@ -153,3 +161,8 @@ def inherited_namespace_is_historical(ledger, record, state, document):
                 "quarantine finding namespace has an unrepresented original criterion"
             )
     return True
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

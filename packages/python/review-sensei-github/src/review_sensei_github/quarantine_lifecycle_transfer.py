@@ -11,8 +11,10 @@ from weakref import WeakKeyDictionary
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
+from review_sensei.source_registry import require_module_seal
 
 _ISSUED: WeakKeyDictionary = WeakKeyDictionary()
+_NAMESPACE_RESTORE: WeakKeyDictionary = WeakKeyDictionary()
 
 
 @dataclass(frozen=True, eq=False)
@@ -221,7 +223,21 @@ def confirmed_transfer(target, run, confirmed, *, decision_permit):
         or run.caller._action_effect_boundary is None
     ):
         raise ReviewInputError("quarantine lifecycle own decision was not confirmed")
+    import inspect
+
+    from . import quarantine_action
+
+    frame = inspect.currentframe()
+    frame = frame.f_back if frame is not None else None
+    if (
+        frame is None
+        or frame.f_code is not quarantine_action._confirmed_own_decision.__code__
+    ):
+        raise ReviewInputError(
+            "quarantine lifecycle own decision was not confirmed by its source"
+        )
     _require_unchanged(saved, confirmed)
+    saved["observation_index"] = len(run.caller.observations)
     saved["confirmed"] = confirmed
     saved["confirmed_bytes"] = canonical_bytes(confirmed.to_dict())
     return token
@@ -294,7 +310,59 @@ def consume(token, ledger, identity):
     ):
         raise ReviewInputError("quarantine lifecycle transfer current root changed")
     _require_unchanged(saved, record)
+    for observation in caller.observations[saved["observation_index"] :]:
+        if observation.get("mutation"):
+            control = caller._confirmed_control_writes.get(
+                observation.get("request_id")
+            )
+            if (
+                control is None
+                or control[0] != "broker_authentication"
+                or observation.get("outcome") != "response"
+                or observation.get("uncertain_effect")
+            ):
+                raise ReviewInputError(
+                    "quarantine namespace transfer crossed a native effect"
+                )
+    _NAMESPACE_RESTORE[ledger] = saved
     return record, json.loads(saved["document"])
+
+
+def consume_namespace_original(ledger, record):
+    """One restore-only bridge for unchanged immutable origins after own cursor CAS."""
+    import inspect
+
+    from . import quarantine_namespace
+
+    frame = inspect.currentframe()
+    frame = frame.f_back if frame is not None else None
+    if (
+        frame is None
+        or frame.f_code
+        is not quarantine_namespace.inherited_namespace_is_historical.__code__
+    ):
+        raise ReviewInputError(
+            "quarantine namespace transfer requires its original consumer"
+        )
+    require_module_seal(quarantine_namespace)
+    saved = _NAMESPACE_RESTORE.pop(ledger, None)
+    if saved is None:
+        return None
+    if (
+        record is not saved["confirmed"]
+        or record is not saved["caller"]._effect_record
+        or record.record_sha256 != saved["caller"]._root
+        or canonical_bytes(record.to_dict()) != saved["confirmed_bytes"]
+        or saved["target_bytes"] != _target_binding(saved["target"])
+    ):
+        raise ReviewInputError("quarantine namespace own cursor transfer changed")
+    _require_unchanged(saved, record)
+    return saved["target"].authenticated
+
+
+def clear_namespace_restore(ledger):
+    """Expire pending restoration-only data on every original restore exit."""
+    _NAMESPACE_RESTORE.pop(ledger, None)
 
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

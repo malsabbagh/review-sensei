@@ -32,6 +32,9 @@ class ColdCommandPreflightTests(unittest.TestCase):
     def test_actual_decision_permit_fields_cannot_be_replaced_before_cursor_write(self):
         self.exercise_guard("plain-permit-seal")
 
+    def test_actual_candidate_get_receipt_rejects_corruption_copy_and_replay(self):
+        self.exercise_guard("plain-candidate-receipt")
+
     def exercise_guard(self, fault):
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -65,10 +68,86 @@ class ColdCommandPreflightTests(unittest.TestCase):
                 entered = []
                 touched = []
                 sealed = []
+                snapshots = []
+                receipt_checks = []
                 helper_code = quarantine_action._require_installed_command_tail.__code__
                 stage_code = quarantine_action._stage_decision_event.__code__
 
                 def observe(frame, event, arg):
+                    from review_sensei_github import quarantine_candidate_receipt
+
+                    if fault == "plain-candidate-receipt":
+                        if (
+                            frame.f_code is quarantine_candidate_receipt.finish.__code__
+                            and event == "return"
+                        ):
+                            snapshots.append(frame.f_locals["snapshot"])
+                        if (
+                            frame.f_code
+                            is quarantine_action._confirmed_own_decision.__code__
+                        ):
+                            run = frame.f_locals["run"]
+                            confirmed = frame.f_locals["confirmed"]
+                            from review_sensei.errors import ReviewInputError
+
+                            if event == "call":
+                                snapshot = snapshots[-1]
+                                before_reads = len(fixture.trace)
+                                for field, changed in (
+                                    ("owner_id", snapshot.owner_id + 1),
+                                    ("comment_id", snapshot.comment_id + 1),
+                                    ("candidate_body", snapshot.candidate_body + " "),
+                                ):
+                                    original_value = getattr(snapshot, field)
+                                    try:
+                                        object.__setattr__(snapshot, field, changed)
+                                        with self.assertRaisesRegex(
+                                            ReviewInputError, "changed"
+                                        ):
+                                            quarantine_candidate_receipt.consume(
+                                                run.caller,
+                                                run.ledger,
+                                                run.identity,
+                                                confirmed,
+                                            )
+                                    finally:
+                                        object.__setattr__(
+                                            snapshot, field, original_value
+                                        )
+                                with self.assertRaisesRegex(
+                                    ReviewInputError, "changed"
+                                ):
+                                    quarantine_candidate_receipt.consume(
+                                        run.caller,
+                                        run.ledger,
+                                        run.identity,
+                                        copy.copy(confirmed),
+                                    )
+                                observation = run.caller.observations[-1]
+                                original_outcome = observation["outcome"]
+                                try:
+                                    observation["outcome"] = "unknown"
+                                    with self.assertRaisesRegex(
+                                        ReviewInputError, "changed"
+                                    ):
+                                        quarantine_candidate_receipt.consume(
+                                            run.caller,
+                                            run.ledger,
+                                            run.identity,
+                                            confirmed,
+                                        )
+                                finally:
+                                    observation["outcome"] = original_outcome
+                                self.assertEqual(len(fixture.trace), before_reads)
+                                receipt_checks.append(before_reads)
+                            elif event == "return":
+                                with self.assertRaisesRegex(
+                                    ReviewInputError, "unavailable"
+                                ):
+                                    quarantine_candidate_receipt.consume(
+                                        run.caller, run.ledger, run.identity, confirmed
+                                    )
+                                self.assertEqual(len(fixture.trace), receipt_checks[-1])
                     if (
                         fault == "plain-permit-seal"
                         and event == "call"
@@ -171,7 +250,11 @@ class ColdCommandPreflightTests(unittest.TestCase):
                 try:
                     sys.setprofile(observe)
                     status = fixture.invoke_command()
-                    if fault in {"plain-positive", "plain-permit-seal"}:
+                    if fault in {
+                        "plain-positive",
+                        "plain-permit-seal",
+                        "plain-candidate-receipt",
+                    }:
                         self.assertEqual(status, 0, fixture.error)
                     else:
                         self.assertNotEqual(status, 0)
@@ -184,7 +267,11 @@ class ColdCommandPreflightTests(unittest.TestCase):
                     if fault == "unsupported"
                     else "installed capacity source changed"
                 )
-                if fault in {"plain-positive", "plain-permit-seal"}:
+                if fault in {
+                    "plain-positive",
+                    "plain-permit-seal",
+                    "plain-candidate-receipt",
+                }:
                     self.assertEqual(
                         entered, ["begin_action_effect", "_stage_decision_event"]
                     )
@@ -202,6 +289,13 @@ class ColdCommandPreflightTests(unittest.TestCase):
                 if fault == "plain-permit-seal":
                     self.assertEqual(len(sealed), 1)
                     self.assertIn(sealed[0], quarantine_action._DECISION_CANDIDATES)
+                if fault == "plain-candidate-receipt":
+                    from review_sensei_github.quarantine_lifecycle_transfer import (
+                        _NAMESPACE_RESTORE,
+                    )
+
+                    self.assertEqual(len(receipt_checks), 1)
+                    self.assertNotIn(fixture.selected.ledger, _NAMESPACE_RESTORE)
                 self.assertEqual(len(touched), 1)
                 self.assertEqual(old.to_dict(), original_history)
 
