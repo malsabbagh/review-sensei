@@ -2,6 +2,7 @@
 
 import copy
 import dis
+import inspect
 import json
 import subprocess
 import sys
@@ -24,7 +25,7 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
     def fixture(self, directory, *, reopened):
         reply = reply_fixtures.VerifiedFixedReplyPrefixTests().fixture(directory)
         documents = []
-        checkpoint = FindingLifecycleJournal.checkpoint
+        checkpoint = inspect.unwrap(FindingLifecycleJournal.checkpoint)
         external = reply.external
 
         @contextmanager
@@ -45,7 +46,11 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
                 successful_return = event == "return" and frame.f_lasti in returns.get(
                     frame.f_code, ()
                 )
-                if frame.f_code is checkpoint.__code__ and successful_return:
+                if (
+                    frame.f_code is checkpoint.__code__
+                    and frame.f_globals is checkpoint.__globals__
+                    and successful_return
+                ):
                     documents.append(copy.deepcopy(frame.f_locals["self"]._document()))
                 if (
                     extra is not None

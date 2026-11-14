@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dis
+import inspect
 import json
 import os
 import subprocess
@@ -133,7 +134,7 @@ def _capture_checkpoint_documents(documents):
 
     from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
 
-    checkpoint = FindingLifecycleJournal.checkpoint
+    checkpoint = inspect.unwrap(FindingLifecycleJournal.checkpoint)
     # A profile return on exception unwind is not a committed checkpoint.
     returns = {
         item.offset
@@ -144,6 +145,7 @@ def _capture_checkpoint_documents(documents):
     def observe(frame, event, arg):
         if (
             frame.f_code is checkpoint.__code__
+            and frame.f_globals is checkpoint.__globals__
             and event == "return"
             and frame.f_lasti in returns
         ):

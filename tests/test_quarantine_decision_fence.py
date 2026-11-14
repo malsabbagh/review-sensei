@@ -1,6 +1,7 @@
 """Typed existing decision fence retains four real authenticated reads."""
 
 import copy
+import dis
 import sys
 import tempfile
 import unittest
@@ -37,8 +38,7 @@ class QuarantineDecisionFenceTests(unittest.TestCase):
                 issue = action.issue_decision_fence
                 issued, spans, starts = [], [], []
 
-                def observe(run, authority):
-                    guard = issue(run, authority)
+                def observe(run, authority, guard):
                     before = len(fixture.trace)
                     with patch.object(run.ledger, "business_guard", guard):
                         self.assertEqual(
@@ -78,7 +78,22 @@ class QuarantineDecisionFenceTests(unittest.TestCase):
                     issued.append(guard)
                     return guard
 
+                returns = {
+                    item.offset
+                    for item in dis.get_instructions(issue)
+                    if item.opname in {"RETURN_VALUE", "RETURN_CONST"}
+                }
+
                 def profile(frame, event, value):
+                    if (
+                        event == "return"
+                        and frame.f_code is issue.__code__
+                        and frame.f_globals is issue.__globals__
+                        and frame.f_lasti in returns
+                    ):
+                        observe(
+                            frame.f_locals["run"], frame.f_locals["authority"], value
+                        )
                     if frame.f_code is action.decision_authority.__code__ and issued:
                         if event == "call":
                             starts.append(len(fixture.trace))
@@ -90,8 +105,7 @@ class QuarantineDecisionFenceTests(unittest.TestCase):
                 previous = sys.getprofile()
                 try:
                     sys.setprofile(profile)
-                    with patch.object(action, "issue_decision_fence", observe):
-                        self.assertEqual(fixture.invoke_command(), 0, fixture.error)
+                    self.assertEqual(fixture.invoke_command(), 0, fixture.error)
                 finally:
                     sys.setprofile(previous)
                 self.assertTrue(issued)

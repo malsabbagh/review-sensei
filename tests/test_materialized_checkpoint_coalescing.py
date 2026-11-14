@@ -124,14 +124,18 @@ class MaterializedCheckpointCoalescingTests(unittest.TestCase):
         injected = []
 
         def trace(frame, event, _arg):
-            own = frame.f_code.co_name == "walked" and frame.f_globals is vars(phase)
-            if own and event == "return" and not injected:
+            own = frame.f_code.co_name == "get" and frame.f_globals is vars(phase)
+            if own and event == "line" and not injected:
                 entry = frame.f_locals.get("entry")
                 if entry is not None and entry["census_receipt"] is not None:
                     ledger = entry["ledger"]
+                    before = len(ledger.caller.observations)
+                    usable = ledger.caller.usable
                     ledger.http.request(
                         "GET", "/repos/owner/repo/pulls/7", token=ledger.token
                     )
+                    self.assertEqual(len(ledger.caller.observations), before + 1)
+                    self.assertEqual(ledger.caller.usable, usable - 1)
                     injected.append(True)
             return trace if own else None
 
