@@ -343,3 +343,78 @@ class SourceRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ReviewInputError, "unavailable"):
                 require_module_seal(disposition)
         self.assertEqual(calls, [])
+
+    def test_mutated_default_refuses_without_hostile_callbacks(self):
+        from review_sensei_github import http
+
+        calls = []
+
+        class HostileMeta(type):
+            def __eq__(cls, other):
+                calls.append("metaclass equality")
+                raise AssertionError("default type callback")
+
+            def __hash__(cls):
+                calls.append("metaclass hash")
+                raise AssertionError("default type hash")
+
+        class Hostile(metaclass=HostileMeta):
+            def __getattribute__(self, name):
+                calls.append(name)
+                raise AssertionError("default attribute callback")
+
+            def __repr__(self):
+                calls.append("repr")
+                raise AssertionError("default repr callback")
+
+        function = http.GitHubHttp.paginate
+        original = function.__kwdefaults__["before_read"]
+        hostile = Hostile()
+        for value in (hostile, [hostile], {"nested": hostile}):
+            try:
+                function.__kwdefaults__["before_read"] = value
+                with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                    require_module_seal(http)
+            finally:
+                function.__kwdefaults__["before_read"] = original
+            self.assertEqual(calls, [])
+            require_module_seal(http)
+
+    def test_original_function_default_still_binds_exact_code(self):
+        from review_sensei_github import http
+
+        function = http.GitHubHttp.__init__
+        original = function.__kwdefaults__["opener"]
+        self.assertIs(type(original), types.FunctionType)
+        require_module_seal(http)
+        code = original.__code__
+        try:
+            original.__code__ = code.replace(co_name="changed_default")
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(http)
+        finally:
+            original.__code__ = code
+        require_module_seal(http)
+
+    def test_mutated_original_slot_name_refuses_without_equality_callback(self):
+        from review_sensei_github import operation_host
+
+        calls = []
+
+        class Hostile:
+            def __eq__(self, other):
+                calls.append("slot equality")
+                raise AssertionError("slot callback")
+
+        slots = operation_host.AdmissionProof.__slotnames__
+        self.assertTrue(slots)
+        original = slots[0]
+        require_module_seal(operation_host)
+        try:
+            slots[0] = Hostile()
+            with self.assertRaisesRegex(ReviewInputError, "class source changed"):
+                require_module_seal(operation_host)
+        finally:
+            slots[0] = original
+        self.assertEqual(calls, [])
+        require_module_seal(operation_host)

@@ -9,7 +9,7 @@ from __future__ import annotations
 import copyreg
 import inspect
 import sys
-from types import MethodType, ModuleType
+from types import FunctionType, MethodType, ModuleType
 from typing import Any
 
 from .errors import ReviewInputError
@@ -36,9 +36,17 @@ def _build_registry():
         if identity in ancestors:
             return (identity, "cycle")
         ancestors = (*ancestors, identity)
-        if type(value) in (type(None), bool, int, float, str, bytes):
+        kind = type(value)
+        if (
+            kind is type(None)
+            or kind is bool
+            or kind is int
+            or kind is float
+            or kind is str
+            or kind is bytes
+        ):
             return (identity, type(value), repr(value))
-        if type(value) in (tuple, list):
+        if type(value) is tuple or type(value) is list:
             return (identity, tuple(default_snapshot(v, ancestors) for v in value))
         if type(value) is dict:
             return (
@@ -48,9 +56,14 @@ def _build_registry():
                     for k, v in value.items()
                 ),
             )
-        if type(value) in (set, frozenset):
+        if type(value) is set or type(value) is frozenset:
             return (identity, frozenset(default_snapshot(v, ancestors) for v in value))
-        return (identity, getattr(value, "__code__", None))
+        if type(value) is FunctionType:
+            return (identity, id(FunctionType), value.__code__)
+        # Unsupported defaults are opaque: never inspect a replacement's
+        # attributes, repr, equality or hash. Integer type identity also detects
+        # __class__ reassignment without invoking metaclass comparisons.
+        return (identity, id(type(value)))
 
     def defaults(function):
         if function.__defaults__ is None and function.__kwdefaults__ is None:
@@ -238,6 +251,7 @@ def _build_registry():
             or frozenset(vars(cls)) != namespace
             or vars(cls).get("__slotnames__") is not slots[0]
             or type(slot_values) is not list
+            or any(type(slot) is not str for slot in slot_values)
             or tuple(slot_values) != slots[1]
         ):
             raise ReviewInputError("original class source changed")
