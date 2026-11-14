@@ -508,3 +508,10 @@ operation/result and every remaining permitted renderer/fallback branch, prove
 which promised allocations have already materialized, and enforce that scope
 before affected writes. A cached body is not fresh census evidence; all current
 membership/body checks and cold source dependencies remain required.
+
+The tail's small projection widths also require writer qualification: the
+checkpoint and human-inventory adapters currently select compact projections
+only with an installed quarantine capacity guard. Plain target-isolation without
+that guard uses the raw writers. A prospective plain-profile optimization must
+therefore prove/enforce its actual renderer variants, not assume that the tail
+helper's advertised projection slots alone constrain those raw writes.
