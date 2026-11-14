@@ -34,6 +34,58 @@ BINDING = {
 
 
 class CommandResultWireBoundTests(unittest.TestCase):
+    def test_future_journal_approval_upper_is_conditional_data_not_a_result(self):
+        from review_sensei.action_result_codec import decode_action_result_carrier
+        from review_sensei.bounded_evidence import read_inline_evidence
+
+        base = MaintainerCommandResult("dismiss", True, False, "decision recorded")
+        args = dict(
+            binding=BINDING,
+            intent_sha256="c" * 64,
+            outcome={"kind": "applied", "reason": None},
+            call_limit=512,
+            source_review_id=42,
+            reference_history=True,
+        )
+        future = bound.future_journal_approval_result_capacity_upper(base, **args)
+        known_maximum = bound.command_result_capacity_upper(
+            base, **args, approval_review_id=2**63 - 1
+        )
+        self.assertEqual(future, known_maximum)
+        for identifier in (None, 1, 10**9, 2**63 - 1):
+            known = bound.command_result_capacity_upper(
+                base, **args, approval_review_id=identifier
+            )
+            self.assertGreaterEqual(
+                len(canonical_bytes(future)), len(canonical_bytes(known))
+            )
+        carrier = read_inline_evidence(future, expected_binding=BINDING)
+        with self.assertRaises(ReviewInputError):
+            decode_action_result_carrier(carrier, history={})
+        with self.assertRaises(ReviewInputError):
+            bound.future_journal_approval_result_capacity_upper(
+                base, **{**args, "reference_history": False}
+            )
+
+    def test_original_journal_receipt_refuses_future_approval_outside_signed63(self):
+        from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
+
+        effect = {"method": "POST", "path": "/repos/owner/repo/pulls/7/reviews"}
+        self.assertEqual(
+            FindingLifecycleJournal._compact_response({"id": 2**63 - 1}, effect=effect)[
+                "id"
+            ],
+            2**63 - 1,
+        )
+        for identifier in (None, True, False, 0, -1, 2**63, "42"):
+            with (
+                self.subTest(identifier=identifier),
+                self.assertRaises(ReviewInputError),
+            ):
+                FindingLifecycleJournal._compact_response(
+                    {"id": identifier}, effect=effect
+                )
+
     def test_raw_upper_is_only_an_inert_outer_manifest(self):
         from review_sensei.action_result_codec import decode_action_result_carrier
         from review_sensei.bounded_evidence import read_inline_evidence

@@ -19,6 +19,15 @@ def formatter_growth_bound(*, call_limit, source_review_id, approval_review_id):
     approval is reachable). Original publication source seals alone do not
     enforce these ID widths. An unknown future approval is unsupported.
     """
+    return _formatter_growth_bound(
+        call_limit=call_limit,
+        source_review_id=source_review_id,
+        approval_review_id=approval_review_id,
+    )
+
+
+def _formatter_growth_bound(*, call_limit, source_review_id, approval_review_id):
+    """Conditional width arithmetic; no proof of the caller's native producer."""
     from . import (
         application,
         approval,
@@ -190,6 +199,52 @@ def command_result_capacity_upper(
         call_limit=call_limit,
         source_review_id=source_review_id,
         approval_review_id=approval_review_id,
+    )
+    return raw_result_manifest_upper(
+        envelope_bytes=size, binding=binding, reference_history=reference_history
+    )
+
+
+def future_journal_approval_result_capacity_upper(
+    result,
+    *,
+    binding,
+    intent_sha256,
+    outcome,
+    call_limit,
+    reference_history,
+    source_review_id,
+):
+    """Inert upper shape for a separately proven journaled future approval.
+
+    This is conditional DATA, not an approval-ID witness or execution grant.
+    Unlike the existing known-output API, it prices every positive signed-63
+    future approval ID plus None on stop/already-approved branches. Its consumer
+    must bind the original command result and selected source review, and prove
+    every reachable approval result passes the original journal's strict native
+    receipt validation before reaching progress/result formatting. A source seal
+    alone does not establish that route. Unjournaled approval is unsupported.
+    """
+    from review_sensei.action_result_codec import V1, validate_action_result_envelope
+    from review_sensei.disposition import MaintainerCommandResult
+
+    from . import finding_lifecycle
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(finding_lifecycle)
+    if type(result) is not MaintainerCommandResult or reference_history is not True:
+        raise ReviewInputError("future approval result capacity data is unsupported")
+    envelope = {
+        "schema_version": V1,
+        "intent_sha256": intent_sha256,
+        "outcome": outcome,
+        "result": asdict(result),
+    }
+    validate_action_result_envelope(envelope)
+    size = len(canonical_bytes(envelope)) + _formatter_growth_bound(
+        call_limit=call_limit,
+        source_review_id=source_review_id,
+        approval_review_id=2**63 - 1,
     )
     return raw_result_manifest_upper(
         envelope_bytes=size, binding=binding, reference_history=reference_history
