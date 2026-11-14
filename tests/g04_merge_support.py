@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
 
 from fake_github_http import json_response
@@ -92,6 +94,7 @@ class G04MergeFixture(EntryFixture):
         self.acquisitions = []
         self.before_acquisition = None
         self.broker_reads = []
+        self.broker_head_rejections = []
         self.review_payloads = []
         self.analysis_diffs = []
         self.provider_has_exact_diff = []
@@ -101,6 +104,28 @@ class G04MergeFixture(EntryFixture):
         path = urlsplit(request.full_url).path
         if urlsplit(request.full_url).hostname == "broker.github.test":
             self.broker_reads.append(request.get_method())
+            if path.endswith("/token"):
+                from review_sensei_github.run_authority import parse_authority
+
+                payload = json.loads(request.data)
+                authority = parse_authority(payload["session_attestation"])
+                # The real broker independently reads the current PR head before
+                # minting even the unscoped Actions token (token-broker.ts).
+                if (
+                    authority["head_sha"] != self.live_head
+                    and payload.get("release_only") is not True
+                ):
+                    self.trace.append((self.attempt, request.get_method(), path))
+                    self.broker_head_rejections.append(
+                        (authority["head_sha"], self.live_head)
+                    )
+                    raise HTTPError(
+                        request.full_url,
+                        403,
+                        "Forbidden",
+                        {},
+                        io.BytesIO(b'{"error":"broker_session_head_rejected"}'),
+                    )
         if path.endswith("/pulls/7/reviews") and request.get_method() == "POST":
             self.review_payloads.append(json.loads(request.data))
         response = super().external(request, timeout)
