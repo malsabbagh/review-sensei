@@ -94,6 +94,78 @@ def _accounting_data(state):
     return api_work.ApiRunAccounting.to_document(state)
 
 
+def require_projection_shape(run: Any):
+    """Validate eligibility for conditional DATA; install no fence or lease."""
+    from . import (
+        action_run,
+        api_run_plan,
+        api_run_requests,
+        quarantine_command_namespace,
+        review_run,
+    )
+    from . import historical_terminal_projection as projection
+
+    for module in (
+        sys.modules[__name__],
+        projection,
+        api_run_requests,
+        api_run_plan,
+        action_run,
+        quarantine_command_namespace,
+        review_run,
+    ):
+        require_module_seal(module)
+    frame = sys._getframe(1)
+    if (
+        frame.f_code is not projection._derive.__code__
+        or frame.f_globals is not vars(projection)
+        or frame.f_locals.get("run") is not run
+    ):
+        raise ReviewInputError("terminal projection shape lacks original source")
+    if type(run) is not review_run.ReviewRun:
+        raise ReviewInputError("terminal projection run is not original")
+    require_instance_source(run, methods=())
+    caller = run.caller
+    if type(caller) is not api_run_requests.ApiRunRequestTransport:
+        raise ReviewInputError("terminal projection caller is not original")
+    require_instance_source(
+        caller,
+        methods=(
+            "open",
+            "close_action",
+            "_action_checkpoint",
+            "replace_checkpoint",
+            "reconcile_checkpoint",
+            "_require_ledger",
+        ),
+    )
+    state = caller.accounting
+    projection._plain_accounting(state)
+    _accounting_data(state)
+    _zero_fences(caller)
+    terminal = next(
+        (b for b in state.blocks if b.block_id == caller._terminal_block), None
+    )
+    if (
+        api_run_plan.QUARANTINE_CHECKPOINT_REQUESTS != 16
+        or state.configuration.limit != 512
+        or terminal is None
+        or terminal.undispatched != 50
+        or terminal.pending
+        or terminal.issued_by != state.owner
+        or caller._terminal_reason is not None
+        or caller._active_operation is not None
+        or caller._checkpoint is not None
+        or state.action is None
+        or state.action["phase"] != "pending"
+        or state.action["execution_started"] is not False
+    ):
+        raise ReviewInputError(
+            "terminal projection requires exact original 512/50 scope"
+        )
+    caller._require_ledger(run.ledger, run.identity)
+
+
 def _registry():
     # id lookup does not invoke an unissued object's hash or property callbacks.
     active: dict[int, Any] = {}
@@ -233,6 +305,42 @@ def _registry():
             ordinary_block=caller._block,
             unknowns=frozenset(),
         )
+
+    def require_active(run: Any, lease):
+        """Negative post-install assertion; never synthesizes missing custody."""
+        from . import quarantine_historical_execution as historical
+
+        require_module_seal(sys.modules[__name__])
+        require_module_seal(historical)
+        frame = sys._getframe(1)
+        if (
+            frame.f_code is not historical.activate.__code__
+            or frame.f_globals is not vars(historical)
+            or frame.f_locals.get("run") is not run
+            or frame.f_locals.get("lease") is not lease
+        ):
+            raise ReviewInputError(
+                "terminal projection installation lacks original activation"
+            )
+        if run is None:
+            raise ReviewInputError("terminal projection run is absent")
+        caller = run.caller
+        entry = active.get(id(caller))
+        if (
+            entry is None
+            or entry["caller"] is not caller
+            or entry["run"] is not run
+            or entry["lease"] is not lease
+            or entry["phase"] != "ordinary"
+            or entry["attempts"] != 0
+            or entry["operation"] is not None
+            or entry["terminal_initial"].undispatched != 50
+        ):
+            raise ReviewInputError(
+                "conditional terminal projection has no installed fence"
+            )
+        common(entry, caller)
+        _zero_fences(caller)
 
     def common(entry, caller):
         from . import action_run, api_run_requests
@@ -519,12 +627,24 @@ def _registry():
                 record_bytes=canonical_bytes(record_data),
             )
 
-    return execution_scope, start, before_terminal, before_request, confirm_checkpoint
+    return (
+        execution_scope,
+        start,
+        before_terminal,
+        before_request,
+        confirm_checkpoint,
+        require_active,
+    )
 
 
-execution_scope, start, before_terminal, before_request, confirm_checkpoint = (
-    _registry()
-)
+(
+    execution_scope,
+    start,
+    before_terminal,
+    before_request,
+    confirm_checkpoint,
+    require_active,
+) = _registry()
 del _registry
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

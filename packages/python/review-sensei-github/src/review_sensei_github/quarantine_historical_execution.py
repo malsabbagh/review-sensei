@@ -147,6 +147,12 @@ def _registry():
         _require_default_profile(run.caller)
         recipe = json.loads(entry["recipe"])
         measured = recipe["root_measurement"]
+        terminal_projection = measured.get("terminal_projection")
+        if terminal_projection is not None:
+            from . import historical_terminal_projection
+
+            require_module_seal(historical_terminal_projection)
+            historical_terminal_projection.require_activation(run, terminal_projection)
         if (
             not measured["all_growth_roots_fit"]
             or not all(
@@ -219,6 +225,8 @@ def _registry():
 
             require_module_seal(historical_terminal_fence)
             historical_terminal_fence.start(run, lease)
+            if terminal_projection is not None:
+                historical_terminal_fence.require_active(run, lease)
         except BaseException:
             active.pop(run.caller, None)
             leases.pop(lease, None)

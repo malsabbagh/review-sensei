@@ -249,7 +249,9 @@ def measure_inline_branches(observation):
             caller._accepted_semantic_capacity = previous
 
 
-def _root_growth_measurement(record, accounting, witness, result_upper=None, grants=()):
+def _root_growth_measurement(
+    record, accounting, witness, result_upper=None, grants=(), terminal_accounting=None
+):
     """Validate and render inert full-width roots with original source machinery.
 
     The result carrier is deliberately not decodable evidence. These detached
@@ -307,6 +309,10 @@ def _root_growth_measurement(record, accounting, witness, result_upper=None, gra
     ordinary, ordinary_body = render(raw)
     terminal_raw = json.loads(canonical_bytes(raw))
     terminal_raw["generation"] = session.MAX_GENERATION
+    if terminal_accounting is not None:
+        terminal_raw["api_run_accounting"] = json.loads(
+            canonical_bytes(terminal_accounting)
+        )
     terminal_raw["api_run_accounting"]["action"].update(
         phase="terminal",
         execution_started=True,
@@ -408,6 +414,13 @@ def _measure_inline_branches(observation):
     from .quarantine_command_namespace import project_prepared_prefix
 
     accounting_upper = project_prepared_prefix(run.caller)
+    from . import historical_terminal_projection
+
+    require_module_seal(historical_terminal_projection)
+    terminal_projection = historical_terminal_projection.prepare(
+        observation, accounting_upper
+    )
+    terminal_upper = None if terminal_projection is None else terminal_projection[0]
     witness = getattr(run.caller, "_accepted_semantic_capacity", None)
     result_upper = None
     if saved["projection"].creates_event:
@@ -478,7 +491,9 @@ def _measure_inline_branches(observation):
         )
     grants = tuple(sorted(run.ledger._observed_consumed_grants))
     growth_roots = [
-        _root_growth_measurement(root, accounting_upper, witness, result_upper, grants)
+        _root_growth_measurement(
+            root, accounting_upper, witness, result_upper, grants, terminal_upper
+        )
         for root in (record, prospective)
     ]
     branches = []
@@ -504,7 +519,12 @@ def _measure_inline_branches(observation):
                     "quarantine complete command requires a non-inline checkpoint"
                 )
             growth = _root_growth_measurement(
-                candidate, accounting_upper, witness, result_upper, grants
+                candidate,
+                accounting_upper,
+                witness,
+                result_upper,
+                grants,
+                terminal_upper,
             )
             growth_roots.append(growth)
             checkpoints.append(
@@ -521,6 +541,9 @@ def _measure_inline_branches(observation):
         branches.append(tuple(checkpoints))
     require_observation(observation)
     return {
+        "terminal_projection": None
+        if terminal_projection is None
+        else terminal_projection[1],
         "branches": tuple(branches),
         "growth_roots": tuple(growth_roots),
         "result_manifest_bound": len(canonical_bytes(result_upper)),
