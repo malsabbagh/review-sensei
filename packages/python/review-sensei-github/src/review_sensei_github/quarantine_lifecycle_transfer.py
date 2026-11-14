@@ -7,7 +7,7 @@ quarantine assessment reads, source fences and native/checkpoint CAS remain live
 import json
 from dataclasses import dataclass
 from functools import wraps
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, ref
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
@@ -363,6 +363,12 @@ def consume_namespace_original(ledger, record):
 
 def clear_namespace_restore(ledger):
     """Expire pending restoration-only data on every original restore exit."""
+    try:
+        ref(ledger)
+    except TypeError:
+        # An unregistrable read-only ledger cannot own a restoration token.
+        # Do not replace its original selected-ledger refusal during cleanup.
+        return
     _NAMESPACE_RESTORE.pop(ledger, None)
 
 
