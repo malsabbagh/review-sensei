@@ -6190,7 +6190,9 @@ _install_fusion(GitHubApplication)
 del _install_fusion
 
 
-from .materialized_publication_phase import install_application as _install_materialized_phase  # noqa: E402
+from .materialized_publication_phase import (  # noqa: E402
+    install_application as _install_materialized_phase,
+)
 
 _install_materialized_phase(GitHubApplication)
 del _install_materialized_phase

@@ -857,7 +857,9 @@ def call_operation_trigger(
     return decode(admitted.replay_payload)
 
 
-from .materialized_publication_phase import install_analysis as _install_materialized_phase  # noqa: E402
+from .materialized_publication_phase import (  # noqa: E402
+    install_analysis as _install_materialized_phase,
+)
 
 _install_materialized_phase(globals())
 del _install_materialized_phase

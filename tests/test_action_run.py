@@ -12,10 +12,9 @@ import hashlib
 import io
 import json
 import os
-import sys
 import tempfile
 import unittest
-from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -29,6 +28,7 @@ from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.run_authority import REQUEST_KEYS, parse_authority
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_lifecycle import forbid_replacement_phase_budget
 from test_api_work_persistence import HEAD, IDENTITY
 from test_review_run import (
     EntryFixture,
@@ -37,27 +37,7 @@ from test_review_run import (
 )
 
 from review_sensei.api_work import ApiExecutionOwner, ApiRunAccounting
-from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
-
-
-@contextmanager
-def forbid_replacement_phase_budget():
-    """Observe only this invocation; leave audited constructors intact."""
-    original = EvidenceReadBudget.__init__.__code__
-    previous = sys.getprofile()
-
-    def observe(frame, event, arg):
-        if event == "call" and frame.f_code is original:
-            raise AssertionError("no replacement phase budget")
-        if previous is not None:
-            previous(frame, event, arg)
-
-    try:
-        sys.setprofile(observe)
-        yield
-    finally:
-        sys.setprofile(previous)
 
 
 class CommandEntryFixture(EntryFixture):

@@ -3992,7 +3992,9 @@ class FindingLifecycleJournal:
                 owner.http = http
 
 
-from .materialized_publication_phase import install_journal as _install_materialized_phase  # noqa: E402
+from .materialized_publication_phase import (  # noqa: E402
+    install_journal as _install_materialized_phase,
+)
 
 _install_materialized_phase(FindingLifecycleJournal)
 del _install_materialized_phase

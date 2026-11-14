@@ -70,9 +70,50 @@ def _require_data(value, seen=None):
         raise ReviewInputError("ordinary drift source data graph is unqualified")
 
 
+def _require_projection_sources():
+    """Validate defining producer modules before consuming projected bytes."""
+    from review_sensei import (
+        active_finding_window,
+        bounded_evidence,
+        context,
+        finding_drift,
+        finding_lifecycle_store,
+        human_assessment,
+    )
+    from review_sensei import (
+        finding_lifecycle as lifecycle_codec,
+    )
+    from review_sensei.source_registry import require_module_seal
+
+    from . import (
+        approval,
+        checks,
+        finding_lifecycle,
+        ordinary_publication_plan,
+        publication,
+    )
+
+    for module in (
+        active_finding_window,
+        bounded_evidence,
+        context,
+        finding_drift,
+        lifecycle_codec,
+        finding_lifecycle_store,
+        human_assessment,
+        approval,
+        checks,
+        finding_lifecycle,
+        ordinary_publication_plan,
+        publication,
+    ):
+        require_module_seal(module)
+
+
 def _require_preparation_source(publisher, journal, *data):
     from .ordinary_publication_reads import _source_guard
 
+    _require_projection_sources()
     _require_methods(publisher)
     _require_methods(journal)
     _source_guard(publisher, journal)
@@ -270,10 +311,10 @@ def _observe_source(
     if not updates or any(
         resolved or carried for _, _, _, resolved, _, carried in updates
     ):
-        raise ReviewInputError("ordinary drift census selected unsupported updates")
+        return None
     edits = tuple(row for row in updates if row[1] != row[4])
     if not edits:
-        raise ReviewInputError("ordinary drift census selected no updates")
+        return None
     branches = current_request_branches(
         publisher,
         journal,
@@ -330,7 +371,7 @@ def _observe_source(
         )
         projections.append((requests, documents, item_count))
     if not projections:
-        raise ReviewInputError("ordinary drift source branches are unavailable")
+        return None
     # Measure already-packed wire alternatives. The core applies its original
     # outer compressBound; no exact-document proof or discounted dispatch is
     # supplied. The sealed negative read contract supplies the finite role

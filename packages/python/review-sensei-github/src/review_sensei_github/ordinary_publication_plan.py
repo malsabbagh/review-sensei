@@ -439,3 +439,8 @@ def admit_current(
     plan = admit_prefix_branches(journal, branches, read_calls=witness.read_calls)
     witness.require(journal, publisher)
     return plan
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

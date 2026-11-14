@@ -1116,7 +1116,9 @@ def lifecycle_staging_pricing(ledger, record, *, checkpoint_parts, target, facto
     )
 
 
-from .materialized_publication_phase import install_census as _install_materialized_phase  # noqa: E402
+from .materialized_publication_phase import (  # noqa: E402
+    install_census as _install_materialized_phase,
+)
 
 _install_materialized_phase(globals())
 del _install_materialized_phase

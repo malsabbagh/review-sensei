@@ -10,7 +10,11 @@ from pathlib import Path
 
 from review_sensei_github.api_run_host import ApiRunReviewHooks
 from review_sensei_github.api_run_requests import ApiRunSessionLedger
-from test_api_work_lifecycle import QUALIFICATION_LIMIT, LifecycleFixture
+from test_api_work_lifecycle import (
+    QUALIFICATION_LIMIT,
+    LifecycleFixture,
+    forbid_replacement_phase_budget,
+)
 from test_api_work_persistence import BASE, HEAD, IDENTITY
 
 
@@ -383,7 +387,6 @@ class EntryFixture(LifecycleFixture):
         from review_sensei_github.broker_client import BrokerClient
         from review_sensei_github.http import GitHubHttp
 
-        from review_sensei.bounded_evidence import EvidenceReadBudget
         from review_sensei.models import ProviderResponse
 
         fixture = self
@@ -545,11 +548,7 @@ class EntryFixture(LifecycleFixture):
                         "review_sensei.cli.default_registry",
                         return_value=tx.HostedAnalysisCliTests._Registry(Provider()),
                     ),
-                    patch.object(
-                        EvidenceReadBudget,
-                        "__init__",
-                        side_effect=AssertionError("no phase budget"),
-                    ),
+                    forbid_replacement_phase_budget(),
                     redirect_stdout(io.StringIO()),
                     redirect_stderr(errors),
                 ):

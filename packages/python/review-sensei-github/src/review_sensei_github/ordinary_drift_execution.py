@@ -255,7 +255,7 @@ class _Mode:
         self.remaining = read_limits()
         self.index = 0
         self.chosen = None
-        self.confirmed = ()
+        self.confirmed: tuple[bytes, ...] = ()
         self.check_id = None
         self.review_id = None
         self.stopped = False
@@ -547,7 +547,9 @@ def prepare_current(
         preserve_explanations=preserve_explanations,
     )
     if prepared is None:
-        raise _hold("selected source preparation did not complete")
+        # Trusted unsupported shapes decline before mode/discount issuance.
+        # Paid preparation remains charged; original generic preflights apply.
+        return None
     _require_observer(observer)
     mode = _Mode(
         observer,

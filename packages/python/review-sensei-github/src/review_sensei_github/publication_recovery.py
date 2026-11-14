@@ -1176,7 +1176,9 @@ _install_fusion(globals())
 del _install_fusion
 
 
-from .materialized_publication_phase import install_retention as _install_materialized_phase  # noqa: E402
+from .materialized_publication_phase import (  # noqa: E402
+    install_retention as _install_materialized_phase,
+)
 
 _install_materialized_phase(globals())
 del _install_materialized_phase

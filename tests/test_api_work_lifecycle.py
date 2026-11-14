@@ -6,10 +6,11 @@ import copy
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from collections import Counter
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -37,6 +38,26 @@ from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.cli import main
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ProviderResponse, ReviewResult
+
+
+@contextmanager
+def forbid_replacement_phase_budget():
+    """Observe only this invocation; leave audited constructors intact."""
+    original = EvidenceReadBudget.__init__.__code__
+    previous = sys.getprofile()
+
+    def observe(frame, event, arg):
+        if event == "call" and frame.f_code is original:
+            raise AssertionError("no replacement phase budget")
+        if previous is not None:
+            previous(frame, event, arg)
+
+    try:
+        sys.setprofile(observe)
+        yield
+    finally:
+        sys.setprofile(previous)
+
 
 # Fixed modest fixture: measured work attempts, not a shipping default/minimum.
 # Admission 11 + provider metadata 4 + completion 8 + publication 45.
@@ -484,11 +505,7 @@ class CallerLifecycleTests(unittest.TestCase):
                     "REVIEWSENSEI_APP_ID": "999",
                 },
             ),
-            patch.object(
-                EvidenceReadBudget,
-                "__init__",
-                side_effect=AssertionError("no replacement phase budget"),
-            ),
+            forbid_replacement_phase_budget(),
             patch(
                 "review_sensei.cli.default_registry",
                 return_value=tx.HostedAnalysisCliTests._Registry(Provider()),
