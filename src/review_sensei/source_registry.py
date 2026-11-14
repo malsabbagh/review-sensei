@@ -24,6 +24,10 @@ def _build_registry():
     function_wrappers: dict[Any, Any] = {}
     function_definitions: dict[Any, Any] = {}
     no_wrapper = object()
+    # Immutable data only, not a cached validation result. Each function's two
+    # current attributes are still read before selecting this exact snapshot.
+    none_snapshot = (id(None), type(None), repr(None))
+    empty_defaults = (none_snapshot, none_snapshot)
 
     def default_snapshot(value, ancestors=()):
         # Retain both binding identity and container contents. In particular the
@@ -49,6 +53,8 @@ def _build_registry():
         return (identity, getattr(value, "__code__", None))
 
     def defaults(function):
+        if function.__defaults__ is None and function.__kwdefaults__ is None:
+            return empty_defaults
         return (
             default_snapshot(function.__defaults__),
             default_snapshot(function.__kwdefaults__),

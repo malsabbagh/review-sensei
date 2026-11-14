@@ -116,6 +116,44 @@ class SourceRegistryTests(unittest.TestCase):
                 require_module_seal(http)
         require_module_seal(http)
 
+    def test_empty_default_fast_path_rechecks_both_current_attributes(self):
+        function = disposition._require_reason
+        self.assertIsNone(function.__defaults__)
+        self.assertIsNone(function.__kwdefaults__)
+        require_module_seal(disposition)
+        for attribute, replacement in (
+            ("__defaults__", ()),
+            ("__defaults__", (None,)),
+            ("__kwdefaults__", {}),
+            ("__kwdefaults__", {"reason": None}),
+        ):
+            with self.subTest(attribute=attribute, value=replacement):
+                with patch.object(function, attribute, replacement):
+                    with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                        require_module_seal(disposition)
+                require_module_seal(disposition)
+
+    def test_original_mutable_defaults_cannot_be_cleared_or_mutated_in_place(self):
+        from review_sensei_github import http
+
+        function = http.GitHubHttp.paginate
+        original = function.__kwdefaults__
+        self.assertIsNone(function.__defaults__)
+        self.assertIsNotNone(original)
+        require_module_seal(http)
+        with patch.object(function, "__kwdefaults__", None):
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(http)
+        previous = original["before_read"]
+        try:
+            original["before_read"] = lambda: None
+            self.assertIs(function.__kwdefaults__, original)
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(http)
+        finally:
+            original["before_read"] = previous
+        require_module_seal(http)
+
     def test_plain_function_cannot_acquire_a_forged_unwrap_target(self):
         function = disposition.apply_session_command
         self.assertFalse(hasattr(function, "__wrapped__"))
