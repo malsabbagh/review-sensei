@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from typing import Any, Mapping
 from weakref import WeakKeyDictionary
 
@@ -1053,6 +1054,191 @@ def _source_semantic_history_width(binding):
     }
 
 
+@dataclass(frozen=True)
+class JointPublicationProjection:
+    """Copyable sizing data, never a writer, native permit or phase grant."""
+
+    parent_root: str
+    staging: bytes | None
+    blocks: tuple[str, ...]
+    accounting_upper: bytes | None
+
+
+def project_joint_publication(record, *, after, blocks=()):
+    """Preserve v3 liabilities and bound generic future receipt widths.
+
+    Only the selected owner's existing two tranches are projected as pending;
+    every old pending receipt, other block and frozen configuration is retained.
+    Selection of those tranches is data, not authority to spend either of them.
+    """
+    from .api_work import (
+        ACCOUNTING_VERSION,
+        MAX_API_REQUEST_LIMIT,
+        ApiRunAccounting,
+        PendingApiRequest,
+    )
+    from .grouped_publication_declarations import GroupedDeclarations
+    from .publication_staging import require_staging_successor
+
+    if after is not None and type(after) is not GroupedDeclarations:
+        raise ReviewInputError(
+            "joint publication projection requires explicit declarations"
+        )
+    staging = None if after is None else after.to_document()
+    require_staging_successor(record.publication_staging, staging)
+    tx = record.transaction
+    if tx is None or tx.phase not in {"publication_pending", "publication_failed"}:
+        raise ReviewInputError(
+            "joint publication projection transaction is unavailable"
+        )
+    if after is not None and (after.transaction_id, after.result_sha256) != (
+        tx.transaction_id,
+        tx.result_sha256,
+    ):
+        raise ReviewInputError("joint publication projection transaction changed")
+    if type(blocks) is not tuple or any(type(key) is not str for key in blocks):
+        raise ReviewInputError(
+            "joint publication projection tranche selection is invalid"
+        )
+    upper = None
+    if record.api_run_accounting is None:
+        if blocks != ():
+            raise ReviewInputError("joint publication projection has no accounting")
+    else:
+        state = ApiRunAccounting.from_document(record.api_run_accounting)
+        if (
+            state.version != ACCOUNTING_VERSION
+            or type(blocks) is not tuple
+            or len(blocks) != 2
+            or any(type(key) is not str for key in blocks)
+            or state.action is not None
+            or len(set(blocks)) != 2
+        ):
+            raise ReviewInputError(
+                "joint publication projection tranche selection is invalid"
+            )
+        selected = tuple(
+            next((b for b in state.blocks if b.block_id == key), None) for key in blocks
+        )
+        if any(b is None or b.issued_by != state.owner for b in selected):
+            raise ReviewInputError("joint publication projection tranche owner changed")
+        from .session import MAX_SESSION_RECORD_BYTES
+
+        # Pending IDs alone would overflow the uncompressed root. Refuse this
+        # representation before constructing an unbounded diagnostic graph.
+        if (
+            sum(b.undispatched for b in selected if b is not None) * 128
+            > MAX_SESSION_RECORD_BYTES
+        ):
+            raise ReviewInputError("joint publication projected root capacity exceeded")
+        used = {p.request_id for p in state.completed}
+        used.update(p.request_id for b in state.blocks for p in b.pending)
+        projected, serial = state, 0
+        for block in selected:
+            assert block is not None
+            for _ in range(block.undispatched):
+                while True:
+                    request_id = "p" + str(serial).zfill(127)
+                    serial += 1
+                    if len(request_id) != 128:
+                        raise ReviewInputError(
+                            "joint publication projection ID bound exceeded"
+                        )
+                    if request_id not in used:
+                        break
+                used.add(request_id)
+                projected = projected.dispatch(
+                    block.block_id, PendingApiRequest(request_id, MAX_API_REQUEST_LIMIT)
+                )
+        upper = canonical_bytes(projected.to_document())
+    return JointPublicationProjection(
+        record.record_sha256,
+        None if staging is None else canonical_bytes(staging),
+        blocks,
+        upper,
+    )
+
+
+def _joint_projection_snapshot(projection):
+    if projection is None:
+        return None
+    if (
+        type(projection) is not JointPublicationProjection
+        or type(projection.parent_root) is not str
+        or projection.staging is not None
+        and type(projection.staging) is not bytes
+        or type(projection.blocks) is not tuple
+        or any(type(key) is not str for key in projection.blocks)
+        or projection.accounting_upper is not None
+        and type(projection.accounting_upper) is not bytes
+    ):
+        raise ReviewInputError("joint publication projection field type changed")
+    return JointPublicationProjection(
+        projection.parent_root,
+        projection.staging,
+        projection.blocks,
+        projection.accounting_upper,
+    )
+
+
+def _joint_projection_fields(record, projection):
+    projection = _joint_projection_snapshot(projection)
+    if projection is None:
+        return {}
+    from .grouped_publication_declarations import GroupedDeclarations
+
+    if (
+        type(projection) is not JointPublicationProjection
+        or type(projection.parent_root) is not str
+        or projection.parent_root != record.record_sha256
+        or projection.staging is not None
+        and type(projection.staging) is not bytes
+        or projection.accounting_upper is not None
+        and type(projection.accounting_upper) is not bytes
+    ):
+        raise ReviewInputError("joint publication projection parent changed")
+    try:
+        after = (
+            None
+            if projection.staging is None
+            else GroupedDeclarations.from_document(json.loads(projection.staging))
+        )
+    except (ValueError, TypeError) as error:
+        raise ReviewInputError("joint publication projection data changed") from error
+    # Recompute from the original parent, so a copied/edited data value cannot
+    # shrink old liabilities or choose narrower request IDs or deadlines.
+    if (
+        project_joint_publication(record, after=after, blocks=projection.blocks)
+        != projection
+    ):
+        raise ReviewInputError("joint publication projection data changed")
+    return {"publication_staging": None if after is None else after.to_document()}
+
+
+def _require_joint_projection_root(candidate, projection):
+    if projection is None:
+        return
+    from .models import TRANSACTION_PHASES
+    from .session import MAX_GENERATION, MAX_SESSION_RECORD_BYTES
+
+    # Sizing only: this deliberately over-wide terminal/pending combination is
+    # never parsed as accounting or sent to the original writer.
+    maximum = candidate.to_dict()
+    if projection.accounting_upper is not None:
+        maximum["api_run_accounting"] = json.loads(projection.accounting_upper)
+        maximum["api_run_accounting"]["terminal_transaction"] = "f" * 64
+    maximum["generation"] = MAX_GENERATION
+    maximum["completed_initial_reviews"] += 1
+    maximum["completed_verification_rounds"] += 1
+    maximum["updated_at"] = max(
+        maximum["updated_at"], "9999-12-31T23:59:59.999999Z", key=len
+    )
+    maximum["transaction"]["generation"] = MAX_GENERATION
+    maximum["transaction"]["phase"] = max(TRANSACTION_PHASES, key=len)
+    if len(canonical_bytes(maximum)) > MAX_SESSION_RECORD_BYTES:
+        raise ReviewInputError("joint publication projected root capacity exceeded")
+
+
 def _prepare_lifecycle(
     ledger: Any,
     record: Any,
@@ -1065,6 +1251,7 @@ def _prepare_lifecycle(
     configuration_digest: str,
     item_count: int,
     reserved_tail_calls: int = 0,
+    joint_projection: JointPublicationProjection | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], tuple[dict[str, object], ...], int, Any]:
     _sha(operation_id, "operation")
     if not isinstance(document, Mapping):
@@ -1077,6 +1264,7 @@ def _prepare_lifecycle(
     fusion_fields = (
         {} if fused_transaction is None else {"transaction": fused_transaction}
     )
+    joint_fields = _joint_projection_fields(record, joint_projection)
     previous = normalize_reference(record.finding_lifecycle)
     require_accepted_operation(
         record,
@@ -1128,6 +1316,7 @@ def _prepare_lifecycle(
     record.evolve(
         generation=record.generation + 1,
         **fusion_fields,
+        **joint_fields,
         finding_lifecycle={**reference, "manifest": prospective},
     )
     capacity_reference = reference
@@ -1203,9 +1392,11 @@ def _prepare_lifecycle(
         candidate = record.evolve(
             generation=record.generation + 1,
             **fusion_fields,
+            **joint_fields,
             finding_lifecycle={**reference, "manifest": manifest},
         )
         _require_retained_snapshot_capacity(candidate)
+        _require_joint_projection_root(candidate, joint_projection)
         if capacity_reference is not reference:
             # Sizing data is never published as a semantic observation.
             from .session import MAX_SESSION_RECORD_BYTES
@@ -1231,6 +1422,7 @@ def _prepare_lifecycle(
         # have a smaller root even when inline fits the reference's 8 KiB cap.
         capacity_errors = {
             "session record exceeds the configured size limit",
+            "joint publication projected root capacity exceeded",
             "finding lifecycle prospective terminal history root capacity exceeded",
             "finding lifecycle prospective history root capacity exceeded",
             "finding lifecycle retained snapshot joint capacity exceeded",
@@ -1251,7 +1443,7 @@ def _prepare_lifecycle(
     return reference, envelope, parts, allowance, candidate
 
 
-def stage_finding_lifecycle(
+def _prepare_lifecycle_mutation(
     ledger: Any,
     record: Any,
     *,
@@ -1263,12 +1455,13 @@ def stage_finding_lifecycle(
     configuration_digest: str,
     item_count: int,
     reserved_tail_calls: int = 0,
+    joint_projection: JointPublicationProjection | None = None,
 ) -> Any:
-    """Stage/read back all bytes within the existing conditional owner boundary.
+    """Prepare the original writer closure, never an execution capability.
 
-    Returns the new root. Never dispatches a native review, changes a reservation
-    or resets accounting. Partial staging is nonauthoritative retained evidence.
-    The caller retains ownership of full effect/tail funding and its admission.
+    Its mutation retains the exact parent check, complete staging price and
+    original stage_evidence call. A joint writer must invoke this closure inside
+    its existing owned CAS, not install the pure prospective record instead.
     """
     from .publication_intent_fusion import prospective_transaction, require_stage
 
@@ -1277,6 +1470,10 @@ def stage_finding_lifecycle(
     fusion_fields = (
         {} if fused_transaction is None else {"transaction": fused_transaction}
     )
+    joint_fields = _joint_projection_fields(record, joint_projection)
+    # Retain every immutable field that selected the original allowance. An
+    # algebraically valid replacement projection is not this preparation.
+    prepared_projection = _joint_projection_snapshot(joint_projection)
     reference, envelope, parts, allowance, prospective_record = _prepare_lifecycle(
         ledger,
         record,
@@ -1288,6 +1485,7 @@ def stage_finding_lifecycle(
         configuration_digest=configuration_digest,
         item_count=item_count,
         reserved_tail_calls=reserved_tail_calls,
+        joint_projection=prepared_projection,
     )
     # The prepared envelope is bound independently to this next root generation.
     binding = validate_binding(
@@ -1309,6 +1507,10 @@ def stage_finding_lifecycle(
     def mutate(current: Any) -> Any:
         if current.record_sha256 != record.record_sha256:
             raise ReviewInputError("finding lifecycle session changed before staging")
+        if _joint_projection_snapshot(joint_projection) != prepared_projection:
+            raise ReviewInputError("joint publication prepared projection changed")
+        if _joint_projection_fields(current, prepared_projection) != joint_fields:
+            raise ReviewInputError("joint publication projection mutation changed")
         budget = getattr(ledger, "evidence_budget", None)
         if budget is not None:
             inlined = inline_manifest(envelope, binding=binding, item_count=item_count)
@@ -1358,9 +1560,46 @@ def stage_finding_lifecycle(
         candidate = current.evolve(
             generation=current.generation + 1,
             **fusion_fields,
+            **joint_fields,
             finding_lifecycle={**reference, "manifest": manifest},
         )
+        _require_joint_projection_root(candidate, prepared_projection)
         return candidate
+
+    return prospective_record, parts, mutate
+
+
+def stage_finding_lifecycle(
+    ledger: Any,
+    record: Any,
+    *,
+    document: Mapping[str, object],
+    operation_id: str,
+    base_sha: str,
+    head_sha: str,
+    policy_digest: str,
+    configuration_digest: str,
+    item_count: int,
+    reserved_tail_calls: int = 0,
+) -> Any:
+    """Stage/read back all bytes within the existing conditional owner boundary.
+
+    Returns the new root. Never dispatches a native review, changes a reservation
+    or resets accounting. Partial staging is nonauthoritative retained evidence.
+    The caller retains ownership of full effect/tail funding and its admission.
+    """
+    prospective_record, parts, mutate = _prepare_lifecycle_mutation(
+        ledger,
+        record,
+        document=document,
+        operation_id=operation_id,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        policy_digest=policy_digest,
+        configuration_digest=configuration_digest,
+        item_count=item_count,
+        reserved_tail_calls=reserved_tail_calls,
+    )
 
     # stage_evidence already read back every part, and replace independently
     # fences and reads back the current root. Repeating both complete reads here
