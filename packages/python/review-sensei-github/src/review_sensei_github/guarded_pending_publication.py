@@ -532,7 +532,7 @@ def _three_checkpoints(journal, branch):
     stops = [_initial_carrier_bound(first_stop), complete_stop, review_stop, batch]
     # Every initial stop remains legacy-packed. Its unobserved PATCH path and
     # digest entropy are bounded by compressBound, not placeholder compression.
-    outcomes = [("pending", None)]
+    outcomes: list[tuple[str, Any]] = [("pending", None)]
     outcomes.extend(
         ("rejected", [status, None]) for status in (400, 401, 403, 404, 405, 410)
     )

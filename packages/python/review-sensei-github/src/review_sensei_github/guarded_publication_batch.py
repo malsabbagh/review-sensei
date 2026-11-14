@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import NoReturn
 from weakref import WeakKeyDictionary
 
 from review_sensei.bounded_evidence import canonical_bytes
@@ -229,7 +230,7 @@ def describe_pair(effects, complete_index=1, review_index=2):
     """Data-only closed pair descriptor. This never issues dispatch authority."""
     from .finding_lifecycle import _digest
 
-    def fail():
+    def fail() -> NoReturn:
         raise ReviewInputError("guarded publication durable pair is invalid")
 
     if (
