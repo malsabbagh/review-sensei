@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
@@ -26,10 +26,35 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
         checkpoint = FindingLifecycleJournal.checkpoint
         external = reply.external
 
-        def capture(journal, **kwargs):
-            result = checkpoint(journal, **kwargs)
-            documents.append(copy.deepcopy(journal._document()))
-            return result
+        @contextmanager
+        def capture(extra=None):
+            # Observe genuine successful checkpoints without replacing a sealed
+            # class method. An exception unwinding the frame is not a receipt.
+            failed = set()
+
+            def observe(frame, event, arg):
+                if frame.f_code is checkpoint.__code__:
+                    key = id(frame)
+                    if event == "exception":
+                        failed.add(key)
+                    elif event == "line":
+                        failed.discard(key)
+                    elif event == "return":
+                        if key not in failed:
+                            documents.append(
+                                copy.deepcopy(frame.f_locals["self"]._document())
+                            )
+                        failed.discard(key)
+                if extra is not None:
+                    extra(frame, event, arg)
+                return observe
+
+            previous = sys.gettrace()
+            try:
+                sys.settrace(observe)
+                yield
+            finally:
+                sys.settrace(previous)
 
         def externally_resolve(request, timeout):
             body = json.loads(request.data) if request.data else {}
@@ -41,7 +66,7 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
             return external(request, timeout)
 
         reply.external = externally_resolve
-        with patch.object(FindingLifecycleJournal, "checkpoint", capture):
+        with capture():
             self.assertEqual(reply.invoke_reply(), 0, reply.error)
         self.assertEqual(reply.action()["phase"], "terminal")
         original = obligations(documents[-1])
@@ -99,7 +124,7 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
                 fixture, original, documents, capture = self.fixture(
                     directory, reopened=reopened
                 )
-                with patch.object(FindingLifecycleJournal, "checkpoint", capture):
+                with capture():
                     self.assertEqual(
                         fixture.invoke_command(), 0, fixture.error + fixture.stdout
                     )
@@ -110,7 +135,7 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
                 self.assertEqual(self.action(fixture)["phase"], "terminal")
                 fixture.SOURCE_ID += 1
                 fixture.select_command("@reviewsensei verify", new_run=True)
-                with patch.object(FindingLifecycleJournal, "checkpoint", capture):
+                with capture():
                     self.assertEqual(
                         fixture.invoke_command(), 0, fixture.error + fixture.stdout
                     )
@@ -161,7 +186,7 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
                 fixture.external = fail
                 checks = copy.deepcopy(fixture.check_runs)
                 review_count = len(fixture.reviews)
-                with patch.object(FindingLifecycleJournal, "checkpoint", capture):
+                with capture():
                     self.assertEqual(
                         fixture.invoke_command(), 1, fixture.error + fixture.stdout
                     )
@@ -357,10 +382,23 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
                 before = copy.deepcopy((fixture.reviews, fixture.check_runs))
                 attach = plans.attach_execution_reads
 
-                def transfer(plan, *args, **kwargs):
-                    if fault == "clone":
-                        plan = copy.copy(plan)
-                    result = attach(plan, *args, **kwargs)
+                def transfer(frame, event, arg):
+                    if frame.f_code is not attach.__code__:
+                        return
+                    if event == "call" and fault == "clone":
+                        values = frame.f_locals
+                        # Exercise the genuine entry with a copied capability;
+                        # the refused call must not dispatch any native request.
+                        attach(
+                            copy.copy(values["plan"]),
+                            values["finalizer"],
+                            values["journal"],
+                            dispositions=values["dispositions"],
+                            check_token=values["check_token"],
+                        )
+                        self.fail("copied execution plan was accepted")
+                    if event != "return":
+                        return
                     if fault == "late_preconfirmed_criterion":
                         fixture.threads[0]["comments"]["nodes"][0]["body"] += (
                             "\nEdited after planning."
@@ -372,12 +410,8 @@ class VerifiedFixedCommandPrefixTests(unittest.TestCase):
                             if "reviewsensei:human-review:v1" in r["body"]
                         )
                         authority["body"] += "\nChanged after planning."
-                    return result
 
-                with (
-                    patch.object(plans, "attach_execution_reads", transfer),
-                    patch.object(FindingLifecycleJournal, "checkpoint", capture),
-                ):
+                with capture(transfer):
                     code = fixture.invoke_command()
                 if fault is None:
                     self.assertEqual(code, 0, fixture.error)
