@@ -7483,15 +7483,13 @@ class ReviewPublisher:
         )
         return planned, input_key
 
-    def _update_existing_drift_threads(
+    def _prepare_existing_drift_updates(
         self,
         *,
         planned: DriftEvaluationResult | None,
         prepared: Sequence[tuple[ReviewComment, str, str, str]],
-        base_branch: str,
-        following_native_calls: int,
-    ) -> frozenset[str]:
-        """Update exact retained native roots, never replace a moved concern.
+    ) -> list[tuple[Any, ...]]:
+        """Describe exact retained-root updates without reads or mutation.
 
         GitHub retains a comment's original review and commit when its body is
         edited. The receipt records that native association separately from the
@@ -7499,7 +7497,7 @@ class ReviewPublisher:
         """
         context = getattr(self, "_native_finding_context", None)
         if planned is None or context is None:
-            return frozenset()
+            return []
         retained = self.native_finding_receipts(
             repository_id=context["repository_id"], pull_request=context["pull_request"]
         )
@@ -7579,8 +7577,25 @@ class ReviewPublisher:
             updates.append(
                 (instance, desired, previous, node["isResolved"], text, carried_intent)
             )
+        return updates
+
+    def _update_existing_drift_threads(
+        self,
+        *,
+        planned: DriftEvaluationResult | None,
+        prepared: Sequence[tuple[ReviewComment, str, str, str]],
+        base_branch: str,
+        following_native_calls: int,
+    ) -> frozenset[str]:
+        """Update only the exact native roots authenticated by the source plan."""
+        updates = self._prepare_existing_drift_updates(
+            planned=planned, prepared=prepared
+        )
+        context = getattr(self, "_native_finding_context", None)
         if not updates:
             return frozenset()
+        if context is None:
+            raise GitHubPublicationError("drift native preparation context changed")
         # One complete bounded opening above preflights every update before any
         # dispatch. The lifecycle transport stages each exact intent durably.
         journal = getattr(self, "_finding_lifecycle_journal", None)
