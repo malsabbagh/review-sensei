@@ -2354,9 +2354,30 @@ def project_drift_review_result(
 
     comments_tuple = tuple(display_comments)
     lifecycles_tuple = tuple(display_lifecycles)
-    if (
-        comments_tuple == result.comments
-        and lifecycles_tuple == result.finding_lifecycles
+
+    def same_items(left: tuple, right: tuple) -> bool:
+        if left == right:
+            return True
+        if len(left) != len(right):
+            return False
+        remaining = list(right)
+        for item in left:
+            for index, candidate in enumerate(remaining):
+                if item == candidate:
+                    remaining.pop(index)
+                    break
+            else:
+                return False
+        return True
+
+    # Selecting every original item with identical content, placement and
+    # admission flags only permutes presentation. Preserve the frozen order
+    # and transaction in that case; dropping its identity would make grouped
+    # native publication lose the original accepted-source binding. Compare
+    # full values with multiplicity, never only fingerprints or serialized
+    # comment fields (which omit runtime admission flags).
+    if same_items(comments_tuple, result.comments) and same_items(
+        lifecycles_tuple, result.finding_lifecycles
     ):
         return result
     return replace(
