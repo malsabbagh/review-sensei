@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from original_finish_interrupt import interrupt_original_finish
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
 from review_sensei_github.publication import ReviewPublisher
 from review_sensei_github.session_ledger import parse_session_comment
@@ -275,10 +276,14 @@ assert 'review_sensei.cli' not in sys.modules
                         self.assertEqual(fixture.invoke(), 0, fixture.error)
                         fixture.next_run()
                         fixture.requested_head = fixture.live_head = head
-                    with patch.object(
-                        ApiRunRequestTransport, "finish_review_run", side_effect=fault
-                    ):
+                    with interrupt_original_finish(
+                        ApiRunRequestTransport,
+                        run_id=fixture.run_id,
+                        attempt=fixture.attempt,
+                        exception=fault,
+                    ) as interrupted:
                         self.assertEqual(fixture.invoke(), code, fixture.error)
+                    self.assertEqual(interrupted, [True])
                     value = outcome(self, fixture.error)
                     self.assertEqual(value["phase"], "caller_close")
                     self.assertEqual(value["step"], "caller_close")
@@ -642,12 +647,14 @@ assert 'review_sensei.cli' not in sys.modules
     def test_terminal_close_error_is_classified_without_copying_exception_text(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = EntryFixture(directory)
-            with patch.object(
+            with interrupt_original_finish(
                 ApiRunRequestTransport,
-                "finish_review_run",
-                side_effect=ReviewInputError("synthetic-secret-must-not-be-logged"),
-            ):
+                run_id=fixture.run_id,
+                attempt=fixture.attempt,
+                exception=ReviewInputError("synthetic-secret-must-not-be-logged"),
+            ) as interrupted:
                 self.assertEqual(fixture.invoke(), 1, fixture.error)
+            self.assertEqual(interrupted, [True])
             value = outcome(self, fixture.error)
             self.assertEqual(value["reason"], "terminal_close_unconfirmed")
             self.assertFalse(value["publication"]["accounting_terminal"])

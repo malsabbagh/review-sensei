@@ -3237,8 +3237,8 @@ os._exit(92)
 
     def test_close_refusal_reports_terminal_pending_for_published_and_skipped(self):
         import json
-        from unittest.mock import patch
 
+        from original_finish_interrupt import interrupt_original_finish
         from review_sensei_github.api_run_requests import ApiRunRequestTransport
 
         from review_sensei.errors import ReviewInputError
@@ -3257,14 +3257,17 @@ os._exit(92)
                     self.assertEqual(f.invoke(), 0, f.error)
                     f.next_run()
                     f.requested_head = f.live_head = HEAD
-                with patch.object(
+                with interrupt_original_finish(
                     ApiRunRequestTransport,
-                    method,
-                    side_effect=ReviewInputError(
+                    run_id=f.run_id,
+                    attempt=f.attempt,
+                    method=method,
+                    exception=ReviewInputError(
                         "synthetic close acknowledgment unknown"
                     ),
-                ):
+                ) as interrupted:
                     self.assertEqual(f.invoke(), 1, f.error)
+                self.assertEqual(interrupted, [True])
                 outcome = json.loads((f.root / "publication.json").read_text())
                 self.assertEqual(outcome["status"], "published_terminal_pending")
                 self.assertEqual(
