@@ -5,9 +5,14 @@ projected assessment view cannot be consumed by ordinary approval execution.
 Physical admission must separately prove every native and lifecycle tail.
 """
 
+import inspect
 import json
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from types import FrameType
+from typing import Any
 from weakref import WeakKeyDictionary
 
 from review_sensei.bounded_evidence import canonical_bytes
@@ -1010,6 +1015,214 @@ def intermediate_suffix_recipe(observation, *, comment_rows, receipt_page):
     }
 
 
+_SIZING_SCOPE: ContextVar[Any] = ContextVar(
+    "quarantine_prospective_sizing", default=None
+)
+
+
+def _hold_bytes(authenticated):
+    """Freeze all retained hold components, without evaluating object properties."""
+    from . import quarantine_origin
+
+    require_module_seal(quarantine_origin)
+    if type(authenticated) is not quarantine_origin.AuthenticatedQuarantine:
+        raise ReviewInputError("prospective sizing hold type changed")
+    raw = object.__getattribute__(authenticated, "__dict__")
+    names = (
+        "lineage_bytes",
+        "archive_bytes",
+        "inventories_bytes",
+        "state_bytes",
+        "source_documents_bytes",
+    )
+    if type(raw) is not dict or any(type(k) is not str for k in raw):
+        raise ReviewInputError("prospective sizing hold fields changed")
+    values = tuple(raw.get(name) for name in names)
+    if any(type(value) is not bytes for value in values):
+        raise ReviewInputError("prospective sizing hold bytes changed")
+    return values
+
+
+def _source_frame(module, owner, name):
+    require_module_seal(module)
+    function = vars(module)[owner] if owner is not None else None
+    function = vars(function)[name] if function is not None else vars(module)[name]
+    original = inspect.unwrap(function)
+    frame: FrameType | None = sys._getframe(1)
+    while frame is not None:
+        if frame.f_code is original.__code__ and frame.f_globals is vars(module):
+            return frame
+        frame = frame.f_back
+    raise ReviewInputError("prospective sizing original frame is absent")
+
+
+@contextmanager
+def prospective_sizing_scope(token, app, run, authority, target, finalizer):
+    """Only the original observation call may enter; returned observations survive."""
+    require_module_seal(sys.modules[__name__])
+    from . import application, quarantine_historical_execution, quarantine_origin
+
+    frame = _source_frame(
+        application, "GitHubApplication", "_observe_quarantine_command_finalization"
+    )
+    if (
+        any(
+            frame.f_locals.get(name) is not value
+            for name, value in (
+                ("self", app),
+                ("run", run),
+                ("authority", authority),
+                ("target", target),
+                ("preparation", token),
+                ("finalizer", finalizer),
+            )
+        )
+        or _SIZING_SCOPE.get() is not None
+    ):
+        raise ReviewInputError("prospective sizing invocation is not original")
+    saved = require(token)
+    if (
+        saved["app"] is not app
+        or saved["run"] is not run
+        or saved["target"] is not target
+    ):
+        raise ReviewInputError("prospective sizing preparation owner changed")
+    require_module_seal(quarantine_historical_execution)
+    quarantine_historical_execution._require_default_profile(run.caller)
+    require_module_seal(quarantine_origin)
+    quarantine_origin.require_authenticated_read_owner(
+        target.authenticated, run.ledger, run.caller, run.identity
+    )
+    scope = (token, app, run, authority, target, finalizer, run.caller._root)
+    reset = _SIZING_SCOPE.set(scope)
+    try:
+        yield
+    finally:
+        _SIZING_SCOPE.reset(reset)
+
+
+def _require_prospective(token, finalizer):
+    require_module_seal(sys.modules[__name__])
+    from . import application, publication, quarantine_origin
+
+    scope = _SIZING_SCOPE.get()
+    if type(scope) is not tuple or len(scope) != 7 or scope[0] is not token:
+        raise ReviewInputError("prospective sizing scope is absent or expired")
+    saved = require(token, finalizer=finalizer)
+    app, run, authority, target, initial, root = scope[1:]
+    source = _source_frame(
+        application, "GitHubApplication", "_observe_quarantine_command_finalization"
+    )
+    copied = _source_frame(
+        publication, "ReviewApprovalFinalizer", "prepare_quarantine_command_capacity"
+    )
+    preparing = _source_frame(
+        publication, "ReviewApprovalFinalizer", "prepare_command_capacity"
+    )
+    executing = _source_frame(
+        publication, "ReviewApprovalFinalizer", "_refinalize_with_dispositions_impl"
+    )
+    if (
+        source.f_locals.get("self") is not app
+        or source.f_locals.get("run") is not run
+        or source.f_locals.get("preparation") is not token
+        or source.f_locals.get("finalizer") is not initial
+        or copied.f_locals.get("self") is not initial
+        or copied.f_locals.get("preparation") is not token
+        or preparing.f_locals.get("self") is not copied.f_locals.get("operation")
+        or preparing.f_locals.get("operation") is not finalizer
+        or executing.f_locals.get("self") is not finalizer
+        or run.caller._root != root
+        or run.caller._checkpoint is not None
+        or saved["run"] is not run
+        or saved["authority"] is not authority
+        or saved["target"] is not target
+        or _hold_bytes(target.authenticated) != saved["hold_bytes"]
+    ):
+        raise ReviewInputError("prospective sizing copied source or root changed")
+    require_module_seal(quarantine_origin)
+    quarantine_origin.require_authenticated_read_owner(
+        target.authenticated, run.ledger, run.caller, run.identity
+    )
+    return saved, executing
+
+
+def attach_sizing_hold(token, finalizer, eligibility, *, head_sha):
+    """Attach retained DATA then project a decision; never a fresh hold read."""
+    require_module_seal(sys.modules[__name__])
+    from . import publication
+
+    saved, executing = _require_prospective(token, finalizer)
+    frame = _source_frame(publication, "ReviewApprovalFinalizer", "attach_quarantine")
+    carried = _source_frame(publication, "ReviewApprovalFinalizer", "attach_carried")
+    if (
+        frame.f_locals.get("self") is not finalizer
+        or frame.f_locals.get("eligibility") is not eligibility
+        or head_sha != saved["run"].head_sha
+        # attach_historical intentionally replaces the outer adjusted value.
+        # Bind its original consumer's post-historical local instead.
+        or carried.f_locals.get("self") is not finalizer
+        or carried.f_locals.get("eligibility") is not eligibility
+        or frame.f_back is not carried
+        or carried.f_back is not executing
+    ):
+        raise ReviewInputError("prospective sizing hold consumer changed")
+    before = saved["hold_bytes"]
+    lineage, archive, inventories, state = (json.loads(value) for value in before[:4])
+    fresh = eligibility.fresh_human_pending
+    current = assessment_view(
+        archive["assessment_origins"],
+        inventories,
+        state,
+        scope=lineage["scope_sha256"],
+        fresh_human_pending=fresh,
+    )
+    actual = replace(
+        eligibility,
+        quarantine_assessments=current,
+        facts=replace(
+            eligibility.facts,
+            has_human_adjudication_findings=(
+                fresh
+                or bool(current["pending"])
+                or bool((eligibility.historical_assessments or {}).get("pending"))
+            ),
+        ),
+    )
+    return projected_eligibility(token, finalizer, actual)
+
+
+@dataclass(frozen=True)
+class ProspectiveSizingBranch:
+    """Conditional continuation DATA, deliberately not _FinalizationPreflight."""
+
+    repository_id: int
+    base_sha: str
+    result: None = None
+
+
+def prospective_pr_branch(
+    token, finalizer, *, repository, repository_id, pull_request, head_sha, base_sha
+):
+    require_module_seal(sys.modules[__name__])
+    saved, frame = _require_prospective(token, finalizer)
+    run = saved["run"]
+    if (
+        frame.f_locals.get("compacted") is not False
+        or frame.f_locals.get("repository") != repository
+        or frame.f_locals.get("repository_id") != repository_id
+        or frame.f_locals.get("pull_request") != pull_request
+        or frame.f_locals.get("head_sha") != head_sha
+        or repository != run.identity.repository
+        or repository_id != run.identity.repository_id
+        or pull_request != run.identity.pull_request
+        or head_sha != run.head_sha
+        or base_sha != saved["record"].transaction.base_sha
+    ):
+        raise ReviewInputError("prospective sizing conditional scope changed")
+    return ProspectiveSizingBranch(repository_id, base_sha)
+
+
 def prepare(run, authority, target, app):
     from . import quarantine_action, quarantine_lifecycle_transfer
     from .application import GitHubApplication
@@ -1063,6 +1276,7 @@ def prepare(run, authority, target, app):
         "native": target.native_review_bytes,
         "frontier": target.native_frontier_bytes,
         "guard": guard,
+        "hold_bytes": _hold_bytes(target.authenticated),
     }
     return token
 
@@ -1089,6 +1303,7 @@ def require(token, *, finalizer=None):
         or target.native_review_bytes != saved["native"]
         or target.native_frontier_bytes != saved["frontier"]
         or target.capacity_projection != saved["projection"]
+        or _hold_bytes(target.authenticated) != saved["hold_bytes"]
         or saved["app"].session_ledger is not run.ledger
         or saved["authority"].run is not run
         or (
