@@ -189,6 +189,8 @@ class AcceptedSemanticHistoryTests(unittest.TestCase):
         self,
     ):
         import copy
+        import hashlib
+        from dataclasses import replace
         from unittest.mock import patch
 
         import test_api_work_lifecycle as lifecycle
@@ -204,6 +206,9 @@ class AcceptedSemanticHistoryTests(unittest.TestCase):
         )
         from test_activation_tail import CurrentHostedFixture
         from test_api_work_persistence import IDENTITY
+
+        from review_sensei.active_finding_window import evaluate_active_window_round
+        from tests.test_finding_lifecycle_codec import comment, result
 
         with tempfile.TemporaryDirectory() as directory:
             fixture = CurrentHostedFixture(directory)
@@ -236,17 +241,25 @@ class AcceptedSemanticHistoryTests(unittest.TestCase):
                 document=document,
                 record=record,
             )
-            with (
-                patch(
-                    "review_sensei.finding_lifecycle_store.inline_manifest",
-                    return_value=None,
+            # Use a complete synthetic admitted state that genuinely requires
+            # partitioning. Leave both original serializer exports intact.
+            large = replace(
+                comment(),
+                body="".join(
+                    hashlib.sha256(f"semantic:{i}".encode()).hexdigest()
+                    for i in range(200)
                 ),
-                patch(
-                    "review_sensei_github.session_ledger.inline_manifest",
-                    return_value=None,
+            )
+            journal.plan(
+                evaluate_active_window_round(
+                    result(large),
+                    head_sha=binding["head_sha"],
+                    base_sha=binding["base_sha"],
+                    max_active_findings=1,
                 ),
-            ):
-                journal.checkpoint()
+                "d" * 64,
+            )
+            journal.checkpoint()
             current = service.accounted._effect_record
             self.assertEqual(
                 current.finding_lifecycle["manifest"]["encoding"], "partitioned-json-v1"
