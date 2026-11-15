@@ -116,6 +116,9 @@ def _registry():
             or any(item.get("mutation") for item in observations)
         ):
             raise ReviewInputError("guarded suffix complete census custody changed")
+        from . import packed_comment_census
+
+        require_module_seal(packed_comment_census)
         completed[ledger] = dict(
             identity=identity,
             caller=caller,
@@ -123,6 +126,12 @@ def _registry():
             root=root,
             record=record,
             rows=canonical_bytes(rows),
+            plan=plan,
+            plan_snapshot=(
+                packed_comment_census._single_plan_snapshot(plan)
+                if plan is not None
+                else None
+            ),
             stop=len(caller.observations),
             observations=tuple((item, canonical_bytes(item)) for item in observations),
         )
@@ -233,6 +242,19 @@ def _registry():
             source_comment_id=authority.document["source"]["id"],
             command_digest=authority.document["source"]["body_sha256"],
         )
+        from . import packed_comment_census
+
+        require_module_seal(packed_comment_census)
+        ordered_known = captured["plan"] is guard.comment_plan
+        if ordered_known and (
+            packed_comment_census._single_plan_snapshot(guard.comment_plan)
+            != captured["plan_snapshot"]
+            or tuple(row["id"] for row in rows if row["id"] in guard.comment_plan.known)
+            != tuple(guard.comment_plan.known)
+        ):
+            raise ReviewInputError(
+                "guarded suffix original packed census order changed"
+            )
         page = project_receipt_page(
             rows,
             mutable_bounds=(
@@ -250,6 +272,7 @@ def _registry():
             allow_graphql=True,
             identity=run.identity,
             max_reads=2,
+            ordered_known=ordered_known,
         )
         page_binding = _projection_binding(page)
         from .quarantine_command_finalization import intermediate_suffix_recipe
@@ -349,6 +372,16 @@ def _registry():
             )
         ):
             raise ReviewInputError("guarded suffix proposal source changed")
+        if entry["page"].protocol == "graphql-two-page-ordered":
+            from . import packed_comment_census
+
+            require_module_seal(packed_comment_census)
+            if (
+                entry["captured"]["plan"] is not entry["plan"]
+                or packed_comment_census._single_plan_snapshot(entry["plan"])
+                != entry["captured"]["plan_snapshot"]
+            ):
+                raise ReviewInputError("guarded suffix packed order source changed")
         return entry["page"]
 
     def require_execution(token, run):

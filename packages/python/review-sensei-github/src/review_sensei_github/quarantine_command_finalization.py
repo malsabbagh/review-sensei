@@ -768,7 +768,7 @@ def intermediate_suffix_recipe(observation, *, comment_rows, receipt_page):
         != frame.f_locals.get("page_binding")
     ):
         raise ReviewInputError("guarded suffix receipt projection changed")
-    receipt_reads = 2 if receipt_page.protocol == "graphql-two-page" else 1
+    receipt_reads = 2 if receipt_page.pages else 1
     saved = require_observation(observation)
     plan = _NATIVE_PLANS.get(observation)
     if plan is None or saved["guard"] is None:

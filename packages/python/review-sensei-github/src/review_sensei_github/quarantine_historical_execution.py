@@ -151,7 +151,7 @@ def _registry():
 
         require_module_seal(receipt_source)
         receipt_source._projection_binding(entry["page"])
-        page_reads = 2 if entry["page"].protocol == "graphql-two-page" else 1
+        page_reads = 2 if entry["page"].pages else 1
         terminal_projection = measured.get("terminal_projection")
         if terminal_projection is not None:
             from . import historical_terminal_projection
