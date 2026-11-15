@@ -24,19 +24,18 @@ def _build_registry():
     function_wrappers: dict[Any, Any] = {}
     function_definitions: dict[Any, Any] = {}
     no_wrapper = object()
-    # Immutable data only, not a cached validation result. Each function's two
-    # current attributes are still read before selecting this exact snapshot.
-    none_snapshot = (id(None), type(None), repr(None))
-    empty_defaults = (none_snapshot, none_snapshot)
+    immutable_default = object()
+    ancestor_default = object()
 
     def default_snapshot(value, ancestors=()):
-        # Retain both binding identity and container contents. In particular the
-        # kwdefaults dictionary can be mutated without replacing the function.
+        # Retain original identities as well as container contents. Holding the
+        # originals prevents a replacement from recycling a recorded object ID.
+        # This describes definitions, never a previous validation result.
         identity = id(value)
-        if identity in ancestors:
-            return (identity, "cycle")
-        ancestors = (*ancestors, identity)
         kind = type(value)
+        if identity in ancestors:
+            return (value, kind, ancestor_default)
+        ancestors = (*ancestors, identity)
         if (
             kind is type(None)
             or kind is bool
@@ -45,25 +44,66 @@ def _build_registry():
             or kind is str
             or kind is bytes
         ):
-            return (identity, type(value), repr(value))
-        if type(value) is tuple or type(value) is list:
-            return (identity, tuple(default_snapshot(v, ancestors) for v in value))
-        if type(value) is dict:
+            return (value, kind, immutable_default)
+        if kind is tuple or kind is list:
+            children = tuple(default_snapshot(v, ancestors) for v in value)
+            if kind is tuple and all(v[2] is immutable_default for v in children):
+                return (value, kind, immutable_default)
+            return (value, kind, children)
+        if kind is dict:
             return (
-                identity,
+                value,
+                kind,
                 tuple(
                     (default_snapshot(k, ancestors), default_snapshot(v, ancestors))
                     for k, v in value.items()
                 ),
             )
-        if type(value) is set or type(value) is frozenset:
-            return (identity, frozenset(default_snapshot(v, ancestors) for v in value))
-        if type(value) is FunctionType:
-            return (identity, id(FunctionType), value.__code__)
+        if kind is set or kind is frozenset:
+            set_children = {id(v): default_snapshot(v, ancestors) for v in value}
+            if kind is frozenset and all(
+                v[2] is immutable_default for v in set_children.values()
+            ):
+                return (value, kind, immutable_default)
+            return (value, kind, set_children)
+        if kind is FunctionType:
+            return (value, kind, value.__code__)
         # Unsupported defaults are opaque: never inspect a replacement's
-        # attributes, repr, equality or hash. Integer type identity also detects
+        # attributes, repr, equality or hash. Exact type identity also detects
         # __class__ reassignment without invoking metaclass comparisons.
-        return (identity, id(type(value)))
+        return (value, kind, None)
+
+    def default_unchanged(value, snapshot):
+        original, kind, contents = snapshot
+        if value is not original or type(value) is not kind:
+            return False
+        # Only exact immutable values/graphs can skip traversal. Mutable
+        # containers, opaque types and function code are checked afresh below.
+        if contents is immutable_default or contents is ancestor_default:
+            return True
+        if kind is tuple or kind is list:
+            return len(value) == len(contents) and all(
+                default_unchanged(current, saved)
+                for current, saved in zip(value, contents)
+            )
+        if kind is dict:
+            return len(value) == len(contents) and all(
+                default_unchanged(key, saved_key)
+                and default_unchanged(item, saved_item)
+                for (key, item), (saved_key, saved_item) in zip(value.items(), contents)
+            )
+        if kind is set or kind is frozenset:
+            return len(value) == len(contents) and all(
+                (saved := contents.get(id(item))) is not None
+                and default_unchanged(item, saved)
+                for item in value
+            )
+        if kind is FunctionType:
+            return value.__code__ is contents
+        return True
+
+    none_snapshot = default_snapshot(None)
+    empty_defaults = (none_snapshot, none_snapshot)
 
     def defaults(function):
         if function.__defaults__ is None and function.__kwdefaults__ is None:
@@ -71,6 +111,14 @@ def _build_registry():
         return (
             default_snapshot(function.__defaults__),
             default_snapshot(function.__kwdefaults__),
+        )
+
+    def defaults_unchanged(function, snapshot):
+        positional, keywords = function.__defaults__, function.__kwdefaults__
+        if positional is None and keywords is None:
+            return snapshot is empty_defaults
+        return default_unchanged(positional, snapshot[0]) and default_unchanged(
+            keywords, snapshot[1]
         )
 
     def normalize(value):
@@ -114,7 +162,7 @@ def _build_registry():
                 definition is None
                 or function.__code__ is not definition[0]
                 or function.__globals__ is not definition[1]
-                or defaults(function) != function_defaults[function]
+                or not defaults_unchanged(function, function_defaults[function])
                 or vars(function).get("__wrapped__", no_wrapper)
                 is not function_wrappers[function]
             ):

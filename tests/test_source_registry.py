@@ -421,6 +421,116 @@ class SourceRegistryTests(unittest.TestCase):
         require_module_seal(operation_host)
 
 
+class OriginalDefaultSnapshotTests(unittest.TestCase):
+    def _readers(self):
+        def closure(function):
+            return dict(
+                zip(
+                    function.__code__.co_freevars,
+                    (cell.cell_contents for cell in function.__closure__),
+                )
+            )
+
+        remember = closure(seal_module)["remember_function"]
+        snapshot = closure(closure(remember)["defaults"])["default_snapshot"]
+        bindings = closure(require_module_seal)["require_bindings"]
+        unchanged = closure(bindings)["function_unchanged"]
+        matches = closure(closure(unchanged)["defaults_unchanged"])["default_unchanged"]
+        return snapshot, matches
+
+    def test_nested_mutable_contents_and_cycles_are_fresh_on_every_check(self):
+        snapshot, matches = self._readers()
+        leaf = ["original"]
+        members = {1, 2}
+        mapping = {"first": leaf, "second": members}
+        cycle = [mapping]
+        cycle.append(cycle)
+        value = (cycle, {"nested": (leaf,)})
+        saved = snapshot(value)
+        self.assertTrue(matches(value, saved))
+        mutations = (
+            (lambda: leaf.append("changed"), lambda: leaf.pop()),
+            (lambda: members.add(3), lambda: members.remove(3)),
+            (lambda: mapping.update(extra=None), lambda: mapping.pop("extra")),
+            (lambda: cycle.append(None), lambda: cycle.pop()),
+        )
+        for change, restore in mutations:
+            change()
+            try:
+                self.assertFalse(matches(value, saved))
+            finally:
+                restore()
+            self.assertTrue(matches(value, saved))
+
+    def test_equal_replacements_and_dictionary_reordering_do_not_match(self):
+        snapshot, matches = self._readers()
+        value = {"first": [1], "second": [2]}
+        saved = snapshot(value)
+        first = value["first"]
+        value["first"] = [1]
+        self.assertFalse(matches(value, saved))
+        value["first"] = first
+        self.assertTrue(matches(value, saved))
+        value["first"] = value.pop("first")
+        self.assertFalse(matches(value, saved))
+        immutable = (None, True, 42, float("nan"), "text", b"bytes", frozenset((1, 2)))
+        frozen = snapshot(immutable)
+        self.assertTrue(matches(immutable, frozen))
+        replacement = tuple(list(immutable))
+        self.assertIsNot(replacement, immutable)
+        self.assertFalse(matches(replacement, frozen))
+
+    def test_function_inside_tuple_and_frozenset_keeps_original_code_identity(self):
+        snapshot, matches = self._readers()
+
+        def function():
+            return None
+
+        value = ((function,), frozenset((function,)))
+        saved = snapshot(value)
+        code = function.__code__
+        self.assertTrue(matches(value, saved))
+        try:
+            function.__code__ = code.replace(co_name="changed")
+            self.assertFalse(matches(value, saved))
+        finally:
+            function.__code__ = code
+        self.assertTrue(matches(value, saved))
+
+    def test_opaque_members_never_invoke_callbacks_and_recheck_their_type(self):
+        snapshot, matches = self._readers()
+        calls = []
+
+        class Hostile:
+            def __getattribute__(self, name):
+                calls.append(name)
+                raise AssertionError("attribute callback")
+
+            def __repr__(self):
+                calls.append("repr")
+                raise AssertionError("repr callback")
+
+            def __eq__(self, other):
+                calls.append("equality")
+                raise AssertionError("equality callback")
+
+            __hash__ = object.__hash__
+
+        class Other:
+            pass
+
+        opaque = Hostile()
+        value = {"items": [opaque], "set": {opaque}, "frozen": frozenset((opaque,))}
+        saved = snapshot(value)
+        self.assertTrue(matches(value, saved))
+        self.assertEqual(calls, [])
+        object.__setattr__(opaque, "__class__", Other)
+        self.assertFalse(matches(value, saved))
+        object.__setattr__(opaque, "__class__", Hostile)
+        self.assertTrue(matches(value, saved))
+        self.assertEqual(calls, [])
+
+
 class FreshStaticMemberSnapshotTests(unittest.TestCase):
     def _snapshot_reader(self):
         # Exercise the private pure enumeration unit as well as the public seal
