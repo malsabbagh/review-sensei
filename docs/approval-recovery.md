@@ -367,6 +367,11 @@ native receipts are recorded:
   with `terminal_settlement_form="unsettled"`, `inferred_cause="unknown"`, and
   explicit missing proofs rather than inventing a diagnosis from absent logs.
 - **Pre-entry abort vs provider-entered holds (`pre_entry_abort_recovery`, G29):**
+  Generated and supplied review diffs are validated before durable caller
+  enrollment using the configured review mode. Unified/orchestrated input uses
+  the existing 8 MiB aggregate input ceiling; ordinary input retains the 1 MiB
+  ceiling. This changes neither per-request limits nor provider/caller funding.
+  Rejecting new input before enrollment does not settle an older retained ledger.
   `NoTransactionAttemptPacket` binds original entry, reservation, caller
   dispatch, owner cessation, executor provenance, and abort/cleanup evidence for
   `SiteVault #142` and `SiteVault #153` shapes without resetting or reenrolling
