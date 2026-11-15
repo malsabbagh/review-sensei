@@ -16,6 +16,20 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.source_registry import require_instance_source, require_module_seal
 
 
+def _matches_census_plan(plan, lifetime, read_plan, issuer):
+    """Identity check only; caller must first authenticate the live scope.
+
+    Equivalent geometry is not issuance. The lifetime plan remains the source
+    of allocation liabilities even when this one checkpoint reads another plan.
+    """
+    return plan is lifetime or (
+        type(issuer) is str
+        and issuer == "historical-journal"
+        and read_plan is not None
+        and plan is read_plan
+    )
+
+
 def _registry():
     sources: dict[str, Any] = {}
     active: ContextVar[Any] = ContextVar("quarantine_command_checkpoint", default=None)
@@ -150,7 +164,9 @@ def _registry():
         from .quarantine_census import _LifecycleCapacity
 
         _LifecycleCapacity._require_scope(scope, ledger, identity)
-        if plan is not scope.plan:
+        if not _matches_census_plan(
+            plan, scope.plan, scope.read_plan, scope.read_issuer
+        ):
             raise ReviewInputError("cold census lifetime allocation plan changed")
         caller = entry["caller"]
         operation = caller._checkpoint_operation
