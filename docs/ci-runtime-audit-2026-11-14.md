@@ -313,6 +313,14 @@ relabelled as validation of the later combined runner candidate.
 
 ## Credible path to under 30 minutes
 
+The November 15 command-fixture origin correction was reviewed before updating
+its class-sharding dependency pin. Its two changes use the existing per-instance
+API origin for source-comment scope and the command HTTP factory, matching the
+review factory. They introduce no module/class fixture, shared mutable state,
+hook, test omission or process-order dependency. The five class units and all
+87 inherited methods remain unchanged; the configured-origin regression covers
+both synthetic and default GitHub origins without inference.
+
 1. **First reconcile the held executions and fix correctness failures.** A faster
    failed run is not the objective. Refresh timings from a complete passing
    exact-candidate run when existing owners permit it; retain all original

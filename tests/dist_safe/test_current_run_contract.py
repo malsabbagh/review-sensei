@@ -197,7 +197,7 @@ INSTALLED_CLASS_SHARD_CONTRACT = (
         ),
         (
             "test_action_run.py",
-            "3f3cd3143c5bdc94bfcb7b9e666261b8ab94065d99ffba33079f03ce9542218e",
+            "e7f669481eae0347d6c2cb0a34bce369cfce6949a59e7b9de840c905fe808e77",
         ),
         (
             "test_api_work_lifecycle.py",
