@@ -312,7 +312,16 @@ def _registry():
         recipe["event_exact_body"] = event_body
         recipe["event_wire_bound"] = event_wire
         if run.caller.budget_view.ordinary_remaining() < recipe["ordinary_required"]:
-            raise ReviewInputError("guarded suffix complete ordinary tail is unfunded")
+            raise ReviewInputError(
+                "guarded suffix complete ordinary tail is unfunded "
+                f"(available={run.caller.budget_view.ordinary_remaining()}, "
+                f"required={recipe['ordinary_required']}, "
+                f"before_preparation={ordinary_before}, "
+                f"preparation_calls={preparation_calls}, "
+                f"comment_reads={recipe['comment_reads']}, "
+                f"review_reads={recipe['review_reads']}, "
+                f"receipt_reads={recipe['receipt_reads']})"
+            )
         token = SuffixProposal()
         require_module_seal(receipt_source)
         proposals[token] = dict(
