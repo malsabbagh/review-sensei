@@ -1634,8 +1634,14 @@ class SessionRecord:
                 value.get("continuation_grants", [])
             ),
             transaction=transaction,
-            convergence_history=_stored_convergence_history(
-                value.get("convergence_history")
+            # The exact constructor normalizes, copies and validates history
+            # before checking its digest or consuming it. Plain documents can
+            # use that same boundary once; callback-bearing mappings and
+            # subclasses retain the original pre-construction validation.
+            convergence_history=(
+                cast(Mapping[str, object] | None, value.get("convergence_history"))
+                if cls is SessionRecord and type(value) is dict
+                else _stored_convergence_history(value.get("convergence_history"))
             ),
             reservation_owner=_stored_reservation_owner(value.get("reservation_owner")),
             rescan_state=value.get("rescan_state"),  # type: ignore[arg-type]
