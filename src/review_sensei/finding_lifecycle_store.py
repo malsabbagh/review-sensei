@@ -1961,6 +1961,68 @@ def stage_finding_lifecycle(
     return ledger.replace(record.identity(), mutate)
 
 
+def _price_checkpoint_alternatives(
+    ledger, record, measured, *, budget, branching, reserved_tail_calls
+):
+    """Price detached checkpoint widths against one original frontier.
+
+    This arithmetic seam returns DATA, never an exact-document proof, dispatch
+    ticket or retention authority. The caller still authenticates source-owned
+    alternatives and enforces complete retention before returning its quote.
+    """
+    from .bounded_evidence import MAX_STORED_PART_BYTES, MAX_STORED_PARTS
+    from .session import LocalSessionLedger
+
+    # One observed frontier covers the independent maxima of all reachable
+    # branches. The quoted vector must have exactly the maximum part count.
+    checkpoints, added_parts, _, calls = max(
+        measured, key=lambda measured: (measured[1], measured[3])
+    )
+    added_bytes = max(measured[2] for measured in measured)
+    if added_parts > MAX_STORED_PARTS or added_bytes > MAX_STORED_PART_BYTES:
+        raise ReviewInputError(
+            "finding lifecycle whole future retention capacity exceeded"
+        )
+    remote_observed = None
+    if type(ledger) is not LocalSessionLedger:
+        remote_observed = _refine_checkpoint_pricing(
+            ledger,
+            record,
+            checkpoints,
+            added_parts=added_parts,
+            added_bytes=added_bytes,
+        )
+        if remote_observed is not None:
+            if branching:
+                prices: dict[tuple[Any, Any, Any], int] = {}
+                for checkpoint in checkpoints:
+                    shape = (
+                        checkpoint["parts"],
+                        checkpoint.get("source_pricing", True),
+                        checkpoint.get("inline_source_plain", False),
+                    )
+                    prices[shape] = max(
+                        prices.get(shape, 0), checkpoint["conditional_calls"]
+                    )
+                for sequence, _, _, _ in measured:
+                    for checkpoint in sequence:
+                        shape = (
+                            checkpoint["parts"],
+                            checkpoint.get("source_pricing", True),
+                            checkpoint.get("inline_source_plain", False),
+                        )
+                        if shape in prices:
+                            checkpoint["conditional_calls"] = prices[shape]
+            calls = sum(checkpoint["conditional_calls"] for checkpoint in checkpoints)
+    if branching:
+        calls = max(
+            sum(checkpoint["conditional_calls"] for checkpoint in sequence)
+            for sequence, _, _, _ in measured
+        )
+    budget.preflight(calls + reserved_tail_calls)
+    return checkpoints, added_parts, added_bytes, calls, remote_observed
+
+
 def preflight_finding_lifecycle(
     ledger: Any,
     record: Any,
@@ -2220,53 +2282,16 @@ def preflight_finding_lifecycle(
         return checkpoints, added_parts, added_bytes, calls
 
     measured = [measure(values, indices) for values, indices in alternatives]
-    # One observed frontier covers the independent maxima of all reachable
-    # branches. The quoted vector must have exactly the maximum part count.
-    checkpoints, added_parts, _, calls = max(
-        measured, key=lambda measured: (measured[1], measured[3])
-    )
-    added_bytes = max(measured[2] for measured in measured)
-    if added_parts > MAX_STORED_PARTS or added_bytes > MAX_STORED_PART_BYTES:
-        raise ReviewInputError(
-            "finding lifecycle whole future retention capacity exceeded"
-        )
-    remote_observed = None
-    if type(ledger) is not LocalSessionLedger:
-        remote_observed = _refine_checkpoint_pricing(
+    checkpoints, added_parts, added_bytes, calls, remote_observed = (
+        _price_checkpoint_alternatives(
             ledger,
             record,
-            checkpoints,
-            added_parts=added_parts,
-            added_bytes=added_bytes,
+            measured,
+            budget=budget,
+            branching=branch_documents is not None,
+            reserved_tail_calls=reserved_tail_calls,
         )
-        if remote_observed is not None:
-            if branch_documents is not None:
-                prices: dict[tuple[Any, Any, Any], int] = {}
-                for checkpoint in checkpoints:
-                    shape = (
-                        checkpoint["parts"],
-                        checkpoint.get("source_pricing", True),
-                        checkpoint.get("inline_source_plain", False),
-                    )
-                    prices[shape] = max(
-                        prices.get(shape, 0), checkpoint["conditional_calls"]
-                    )
-                for sequence, _, _, _ in measured:
-                    for checkpoint in sequence:
-                        shape = (
-                            checkpoint["parts"],
-                            checkpoint.get("source_pricing", True),
-                            checkpoint.get("inline_source_plain", False),
-                        )
-                        if shape in prices:
-                            checkpoint["conditional_calls"] = prices[shape]
-            calls = sum(checkpoint["conditional_calls"] for checkpoint in checkpoints)
-    if branch_documents is not None:
-        calls = max(
-            sum(checkpoint["conditional_calls"] for checkpoint in sequence)
-            for sequence, _, _, _ in measured
-        )
-    budget.preflight(calls + reserved_tail_calls)
+    )
     if added_parts:
         if type(ledger) is LocalSessionLedger:
             import os
