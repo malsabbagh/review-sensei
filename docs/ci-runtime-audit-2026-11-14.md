@@ -3,30 +3,66 @@
 ## Result and limits
 
 **The under-30-minute goal is not achieved or verified.** This change makes a
-bounded first improvement: refreshed complete historical scheduling hints,
-a Linux-specific seed instead of macOS weights, and removal of two proven,
-negligible-cost duplicate assertions. It does not remove a platform, a recovery
+bounded improvement: refreshed complete historical scheduling hints,
+a Linux-specific seed instead of macOS weights, reviewed installed-suite
+sharding with fixture protection, and removal of two proven, negligible-cost
+duplicate assertions. It does not remove a platform, a recovery
 scenario, a process boundary, an accounting assertion, or any safety limit.
+
+### November 15 publication update
+
+The scoped draft is stacked on PR #462 at
+`50dbc4a234ac23eee9bf901a92d300f7e1298e6a`, not on the unpublished repair work.
+It adds a socket guard at the imported quarantine modules' actual unittest
+fixture boundary, seven independently reviewed checkpoint methods (all 28
+cases), and five intact current-run classes (all 87 methods). Exact source,
+fixture and worker-inventory checks preserve original-root fallback when a
+split is ineligible; protection drift fails rather than executing unprotected.
+No original journey body, recovery/accounting assertion or platform lane is
+removed. Timing hints never determine test inclusion.
+
+The final publication selection passed 68 isolated synthetic controls plus the
+exact distribution-command oracle: 69 checks on Linux Python 3.11 (29.156 s)
+and 3.12 (36.897 s). They did not import product or held fixtures. The oracle
+retains all six existing reviewed hook arguments and the new advisory
+installed-cost path.
+These are focused results, not native installed-suite qualification or a
+measured end-to-end improvement. The draft's normal remote checks are required;
+the old held local selections are not rerun to publish it.
+
+The matrix and discovery counts below describe the **initial scheduling slice**,
+before the later synthetic runner controls. Full discovery of the combined
+candidate has not been repeated under the existing holds. The archived installed
+inventory maps from 68 units to 78 with the two reviewed splits while retaining
+all 1,139 archived IDs; this is not fresh discovery of the advancing repair.
+The archived aggregate work implies a 93.45-minute ideal four-worker floor, so
+sharding alone cannot deliver the under-30-minute objective.
+
+Production source-validation optimization and all inactive shared-history,
+Git-seed and digest-preparation prototypes are excluded from this draft.
+Later repair changes to the action-reply fixture and its helper closure need
+explicit source review before refreshing class-sharding pins; a mismatch keeps
+the unsplit root. Neither this draft nor its timings qualify those later changes.
 
 The initial audit baseline is `c021eeb205d0ca3c5293d572ef2c2dc45c4b087b`.
 Discovery-only inspection found **6,969 test IDs in 833 classes**, and the initial
 audit working tree contained 6,975 IDs after removing two duplicates and adding
 eight timing-import regressions.
 
-For publication, only the audit change is stacked onto remote PR #462 head
+For the initial scheduling slice, only the audit change was stacked onto PR #462 head
 `50dbc4a234ac23eee9bf901a92d300f7e1298e6a`. This intentionally excludes the three
 unpublished source-hardening commits between that head and c021, including their
 ten new source-registry tests. It is not deletion of those tests by this PR.
-The publication base has **6,959 IDs in 833 classes**; this audit candidate has
+That base has **6,959 IDs in 833 classes**; the initial scheduling slice has
 **6,965 IDs in 834 classes**. Every other publication-base identity is retained.
 The candidate inventory SHA-256 is
 `32863b68c94e7032b6ad2943a5bb522144b657d6ad0656c8c84171d5962e00f3`.
 This is discovery evidence, not a full-candidate pass. The matrix below describes
-this publication candidate, not the unpublished source-hardening branch.
+that initial slice, not the later runner additions or unpublished repair branch.
 
-The complete per-class matrix is
+The complete per-class matrix for that initial slice is
 [`ci-runtime-class-matrix-2026-11-14.csv`](ci-runtime-class-matrix-2026-11-14.csv).
-It lists every final discovered class, source file, all method/scenario names,
+It lists every class discovered in that slice, source file, all method/scenario names,
 declared contract, cross-platform lanes, installed-helper status, available
 historical timings, and proposed action. Blank timing cells mean unmeasured,
 not zero. Declaration descriptions are orientation; actual assertions remain
@@ -96,7 +132,7 @@ The reported final shard's 282 methods were not the whole suite. All four shards
 together started 1,139 methods. More workers alone cannot reduce an indivisible
 124-minute unit to under 30 minutes.
 
-## Changes implemented
+## Initial scheduling-slice changes (`ac42fe6`)
 
 1. **Refresh all measured class hints, not only the old top 100.** macOS and Linux
    now have 802 applicable class costs each; coverage and Windows have 681 each.
@@ -114,9 +150,11 @@ together started 1,139 methods. More workers alone cannot reduce an indivisible
 4. **Remove exactly two redundant methods.** See the proof table below. No
    runtime production module changes, generic budget changes, fixture caches,
    response-limit changes, or source-verification bypasses were made.
-5. **Keep the four-worker runner and every gate unchanged.** The new regression
-   module is explicitly checkout-only in the distribution contract. No installed
-   helper, wheel import guard, or reusable release-workflow bytes changed.
+5. **Keep four workers and every gate.** In that initial slice, the new regression
+   module is explicitly checkout-only in the distribution contract and no
+   installed helper changed. The later additions described above change both
+   installed wrapper fixtures and runner scheduling, but not wheel import guards
+   or reusable release-workflow bytes.
 
 ### Scheduling result: modeled, not a new full-run measurement
 
@@ -178,7 +216,10 @@ local-contract and readback workflows remain unchanged. Native build → assembl
 installed-consumer dependencies matter to total elapsed time; their individual
 30/15/15-minute timeouts are not an aggregate 30-minute guarantee.
 
-## Verification and execution holds
+## Initial-slice verification and continuing local execution holds
+
+These receipts belong to the initial `ac42fe6` scheduling slice. They are not
+relabelled as validation of the later combined runner candidate.
 
 - Baseline and final discovery were read-only, without executing test bodies.
 - Four duplicate candidates: 4 passed in 0.001 seconds before cleanup.
@@ -197,9 +238,11 @@ installed-consumer dependencies matter to total elapsed time; their individual
   claimed as a speed improvement. No other known held selection overlaps it.
   The same explicit 166-test selection also passed on the stacked publication
   candidate in **10.714 seconds**, excluding the held method.
-- Full checkout/coverage/installed-suite executions remain held until the original
+- Full local checkout/coverage/installed-suite executions remain held until the original
   selections are reconciled. Targeted success is not a full-candidate pass. No
-  replacement CI run was started.
+  replacement CI run was started for that initial slice. The subsequently
+  authorized separate draft PR runs its normal remote checks; it does not clear
+  the old local holds.
 - Whole-repository Ruff format/check passed for 1,032 Python files; Action pin
   validation passed for 19 workflows; JSON contracts, public schemas, helper
   compilation and `git diff --check` passed. Validation initially used an
@@ -220,10 +263,12 @@ installed-consumer dependencies matter to total elapsed time; their individual
    Reusing an immutable fixture seed is a candidate only after proving independent
    mutable state, unchanged source-freshness guarantees and the same actual crash
    and cold-reader boundaries. Do not cache authority or disable authenticity.
-3. **Make installed scheduling units safely divisible where possible.** The
-   7,478-second checkpoint unit needs fixture-ownership analysis before splitting;
-   preserve module/class setup, wrapper load hooks, import guards and exact total
-   accounting. Merely raising the worker count cannot repair that floor.
+3. **Qualify the reviewed installed scheduling splits.** The draft divides the
+   historical 7,478-second checkpoint unit into seven methods and the 4,683-second
+   current-run unit into five intact classes. Source/fixture eligibility and
+   native elapsed costs still require exact-candidate remote qualification.
+   Preserve module/class setup, wrapper load hooks, import guards and exact total
+   accounting; scheduling does not reduce the aggregate-work floor.
 4. **Then consider additional independent CI shards while preserving every OS.**
    At fixed historical macOS costs, 16 equal workers still need at least 34.35
    minutes of class work. Twenty equal independent workers model approximately
