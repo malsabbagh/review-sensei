@@ -260,9 +260,10 @@ class SelectedPartsTests(unittest.TestCase):
             f = self.producer(directory)
             caught = []
 
-            def run(ledger, identity, mutate, **kwargs):
-                if kwargs["parts"] != 2:
-                    return original(ledger, identity, mutate, **kwargs)
+            def run(frame):
+                if frame.f_locals["parts"] != 2:
+                    return
+                ledger = frame.f_locals["self"]
                 before = copy.deepcopy(f.extra_comments)
                 with patch.object(
                     type(ledger.caller),
@@ -271,16 +272,24 @@ class SelectedPartsTests(unittest.TestCase):
                     return_value=9,
                 ):
                     try:
-                        return original(ledger, identity, mutate, **kwargs)
+                        original(
+                            ledger,
+                            frame.f_locals["identity"],
+                            frame.f_locals["mutate"],
+                            record=frame.f_locals["record"],
+                            parts=frame.f_locals["parts"],
+                            retained_bytes=frame.f_locals["retained_bytes"],
+                            reserved_tail_calls=frame.f_locals["reserved_tail_calls"],
+                        )
+                        self.fail("one-short part funding was accepted")
                     finally:
                         caught.append(True)
                         self.assertEqual(f.extra_comments, before)
 
-            with patch.object(
-                ApiRunSessionLedger, "replace_finding_lifecycle_parts", run
-            ):
+            with observe_original(original, entered=run):
                 self.assertNotEqual(f.invoke(), 0)
             self.assertTrue(caught)
+            self.assertNotIn("original module source changed", f.error)
 
     def test_competing_root_after_staging_retains_orphans_and_never_attaches(self):
         original = ApiRunSessionLedger.stage_evidence
