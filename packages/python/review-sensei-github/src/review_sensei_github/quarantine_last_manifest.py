@@ -2,6 +2,8 @@
 
 import sys
 from dataclasses import dataclass
+from types import MethodType
+from typing import cast
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
@@ -329,7 +331,8 @@ def _failed_size_data(error, document, input_bytes):
     original_input = False
     while trace is not None:
         if (
-            trace.tb_frame.f_code is session.SessionRecord.from_dict.__func__.__code__
+            trace.tb_frame.f_code
+            is cast(MethodType, session.SessionRecord.from_dict).__func__.__code__
             and trace.tb_frame.f_globals is vars(session)
             and trace.tb_frame.f_locals.get("value") is document
         ):
