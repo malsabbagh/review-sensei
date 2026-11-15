@@ -1,17 +1,56 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
+from jsonschema.validators import extend
 from referencing import Registry, Resource
 
 from .errors import ReviewInputError
 
 SCHEMA_DIR = Path(__file__).parent / "schemas"
+
+
+def _accounting_pair_prefix(validator, prefixes, instance, schema):
+    """Specialize one unchanged schema program, never an instance's validity.
+
+    Other keywords (including length and additional items) still execute in
+    the original validator. Nonplain values, errors and changed schemas retain
+    the original keyword handler and its complete error paths/counts.
+    """
+    pattern = "^[A-Za-z0-9_.:-]{1,128}$"
+    if (
+        validator.TYPE_CHECKER is Draft202012Validator.TYPE_CHECKER
+        and all(
+            validator.VALIDATORS.get(name) is Draft202012Validator.VALIDATORS[name]
+            for name in ("type", "pattern", "minimum", "maximum")
+        )
+        and prefixes
+        == [
+            {"type": "string", "pattern": pattern},
+            {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        ]
+        and type(instance) is list
+        and len(instance) >= 2
+        and type(instance[0]) is str
+        and type(instance[1]) is int
+        and 1 <= instance[1] <= 9007199254740991
+        and re.search(pattern, instance[0]) is not None
+    ):
+        return
+    yield from Draft202012Validator.VALIDATORS["prefixItems"](
+        validator, prefixes, instance, schema
+    )
+
+
+_AccountingValidator = extend(
+    Draft202012Validator, {"prefixItems": _accounting_pair_prefix}
+)
 
 
 def _inline_accounting_leaves(schema: dict) -> dict:
@@ -138,7 +177,12 @@ def _validator(schema_name: str) -> Draft202012Validator:
     if schema_name == "api-run-accounting":
         schema = _inline_accounting_leaves(schema)
     try:
-        return Draft202012Validator(schema, registry=_schema_registry())
+        validator = (
+            _AccountingValidator
+            if schema_name == "api-run-accounting"
+            else Draft202012Validator
+        )
+        return validator(schema, registry=_schema_registry())
     except Exception as exc:
         raise ReviewInputError(
             f"schema '{schema_name}' is not a valid JSON Schema"
