@@ -599,26 +599,20 @@ jobs:
           python -m pip install -r requirements/test.txt
           python -m pip install -e .
           python -m pip install -e packages/python/review-sensei-github --no-deps
-      - name: Qualify production feedback broker IPC
+      - name: Qualify every production Worker composition in isolated processes
         env:
           EPIC238_F_MEASUREMENTS: ${{ runner.temp }}/feedback-broker-ipc-metrics.json
-        run: python -W error::ResourceWarning -m tests.epic238_feedback_broker_qualification -v
-      - name: Qualify original broker physical dispatch accounting
-        run: python -W error::ResourceWarning -m tests.epic238_broker_control_qualification -v
-      - name: Qualify supported media CLI with production broker accounting
-        env:
-          REVIEWSENSEI_MEDIA_BROKER_QUALIFICATION: "1"
-        run: python -W error::ResourceWarning -m unittest tests.test_media_cli_activation tests.test_hosted_disposition_snapshots -v
-      - name: Qualify coalesced original assessment admission
-        run: python -W error::ResourceWarning -m tests.epic238_initial_tail_qualification -v
-      - name: Qualify current review caller and production Worker composition
-        run: python -W error::ResourceWarning -m unittest tests.api_work_worker_qualification -v
-      - name: Qualify current command caller and production Worker composition
-        run: python -W error::ResourceWarning -m unittest tests.action_run_worker_qualification -v
-      - name: Qualify isolated quarantine and production Worker composition
-        run: python -W error::ResourceWarning -m unittest tests.quarantine_worker_qualification tests.quarantine_lifecycle_transfer_qualification -v
-      - name: Qualify body-limit and published-tail recovery with production Worker
-        run: python -W error::ResourceWarning -m unittest tests.quarantine_body_worker_qualification tests.quarantine_published_tail_worker_qualification -v
+        run: python scripts/run_worker_qualifications.py --report "${{ runner.temp }}/worker-qualification-timings.json"
+      - name: Retain complete Worker qualification outcomes and timings
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: worker-qualification-timings
+          path: |
+            ${{ runner.temp }}/worker-qualification-timings.json
+            ${{ runner.temp }}/feedback-broker-ipc-metrics.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Run Worker tests
         working-directory: deploy/cloudflare
         run: npm test

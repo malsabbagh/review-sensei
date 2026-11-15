@@ -1,5 +1,29 @@
 # ReviewSensei test and CI runtime audit, November 14, 2026
 
+## November 15 Worker process scheduling
+
+The Worker lane now runs its original Python qualification entry points in at
+most two child processes on the same runner. The body-limit and published-tail
+wrappers are separate invocations; each owns an independent temporary fixture,
+Node IPC broker and synthetic transport. Neither wrapper has module/class setup
+hooks. The bridge transpiles production TypeScript in memory, uses fixture-owned
+trace files, and binds redirect probes to dynamically assigned loopback ports.
+No shared mutable fixture, additional runner, test retry, or new funding is used.
+
+All eleven original qualification modules remain selected exactly once, including
+the feedback module's custom main that writes metrics and the media modules'
+required environment flag. Each failure is retained while remaining selections
+continue; missing process execution fails the controller. Native Worker tests,
+typechecking, binding generation and dry-run bundling retain their original steps.
+The job retains per-process outcomes and elapsed times alongside feedback metrics.
+
+Four synthetic controller tests pass: exact entry-point/environment inventory,
+bounded overlap with a failing child and no skipped work, launch-failure
+accounting, and child cessation on controller interruption. No actual Worker
+journey was rerun locally for this scheduling change.
+The original Worker correctness failures remain open, and only current-head
+remote execution can qualify this scheduling change or its end-to-end duration.
+
 ## Result and limits
 
 **The under-30-minute goal is not achieved or verified.** This change makes a
