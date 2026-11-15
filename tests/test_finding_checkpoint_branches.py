@@ -1,9 +1,12 @@
 """Mutually exclusive checkpoint futures retain their own cumulative costs."""
 
+import copy
 import hashlib
 import tempfile
 import unittest
 from unittest.mock import patch
+
+from original_source_observation import observe_original
 
 from review_sensei import finding_lifecycle_store as store
 from review_sensei.errors import ReviewInputError
@@ -28,39 +31,67 @@ class CheckpointBranchTests(unittest.TestCase):
                 for n, width in enumerate((200, 210, 220, 350))
             )
             alternatives = (
-                ((documents[0], documents[1], documents[2]), frozenset({0, 1})),
-                ((documents[0], documents[3]), frozenset({0})),
+                (documents[0], documents[1], documents[2]),
+                (documents[0], documents[3]),
             )
+            measured = []
 
-            def measure(branches):
+            def capture(frame):
+                # Original conservative checkpoint measurements only. No fake
+                # exact-document/branch token or protected producer replacement.
+                measured.extend(copy.deepcopy(frame.f_locals["measured"]))
+
+            singles = []
+            for branch in alternatives:
+                with observe_original(
+                    store._price_checkpoint_alternatives, entered=capture
+                ):
+                    singles.append(
+                        store.preflight_finding_lifecycle(
+                            fixture.ledger,
+                            record,
+                            document=branch[0],
+                            future_documents=branch[1:],
+                            **arguments,
+                        )
+                    )
+            self.assertEqual(len(measured), len(alternatives))
+
+            def measure():
+                refinements = []
+
+                def unexpected_inline_read(frame):
+                    self.fail("per-branch remote read")
+
                 with (
-                    patch.object(
-                        store, "_consume_checkpoint_branches", return_value=branches
+                    observe_original(
+                        store._refine_checkpoint_pricing,
+                        entered=lambda frame: refinements.append(
+                            frame.f_locals["record"]
+                        ),
                     ),
-                    patch.object(
-                        store,
-                        "_refine_checkpoint_pricing",
-                        wraps=store._refine_checkpoint_pricing,
-                    ) as observation,
-                    patch.object(
-                        store,
-                        "_remote_inline_plan",
-                        side_effect=AssertionError("per-branch remote read"),
+                    observe_original(
+                        store._remote_inline_plan, entered=unexpected_inline_read
                     ),
                 ):
-                    result = store.preflight_finding_lifecycle(
-                        fixture.ledger,
-                        record,
-                        document=branches[0][0][0],
-                        future_documents=branches[0][0][1:],
-                        branch_documents=object(),
-                        **arguments,
+                    _, parts, retained_bytes, calls, _ = (
+                        store._price_checkpoint_alternatives(
+                            fixture.ledger,
+                            record,
+                            copy.deepcopy(measured),
+                            budget=fixture.ledger.evidence_budget,
+                            branching=True,
+                            reserved_tail_calls=0,
+                        )
                     )
-                    self.assertEqual(observation.call_count, 1)
-                return result
+                    self.assertEqual(refinements, [record])
+                return dict(
+                    added_parts=parts,
+                    added_bytes=retained_bytes,
+                    conditional_calls=calls,
+                )
 
-            singles = [measure((branch,)) for branch in alternatives]
-            result = measure(alternatives)
+            result = measure()
             for key in ("added_bytes", "added_parts", "conditional_calls"):
                 self.assertEqual(result[key], max(one[key] for one in singles))
             self.assertLess(
@@ -72,7 +103,7 @@ class CheckpointBranchTests(unittest.TestCase):
                 side_effect=ReviewInputError("one short"),
             ):
                 with self.assertRaisesRegex(ReviewInputError, "one short"):
-                    measure(alternatives)
+                    measure()
 
     def test_unissued_caller_branch_flag_and_known_method_cannot_grant_exactness(self):
         from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
