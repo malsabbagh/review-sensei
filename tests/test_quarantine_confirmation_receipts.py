@@ -126,7 +126,7 @@ class ConfirmationReceiptTests(unittest.TestCase):
             ):
                 entry = values["entry"]
                 self.assertFalse(entry["recording_confirmations"])
-                self.assertEqual(len(entry["confirmed_receipts"]), 5)
+                self.assertEqual(len(entry["confirmed_receipts"]), 2)
                 for identifier, (observation, raw, deadline, status, broker) in entry[
                     "confirmed_receipts"
                 ].items():
@@ -136,12 +136,12 @@ class ConfirmationReceiptTests(unittest.TestCase):
                     self.assertEqual(status, 200)
                     self.assertEqual(broker, observation["mutation"])
                 self.assertEqual(
-                    len(json.loads(entry["paid_projection"])["completed"]), 35
+                    len(json.loads(entry["paid_projection"])["completed"]), 28
                 )
                 prepared.append(entry)
 
         census_tests.HistoricalInvocationCensusTests().exercise(extra_observer=observe)
-        self.assertEqual(len(bound), 5)
+        self.assertEqual(len(bound), 2)
         self.assertEqual(confirmed, bound)
         self.assertEqual(len(prepared), 1)
 

@@ -62,7 +62,12 @@ class PublishedFirstCommandTests(unittest.TestCase):
                                 run.caller.budget_view.ordinary_remaining(),
                                 state.remaining,
                             ),
-                            (512, 35, 105, 190),
+                            (512, 28, 112, 190),
+                        )
+                        # The complete-census hint saves seven actual reads;
+                        # it does not refund or enlarge the original allowance.
+                        self.assertEqual(
+                            len(fixture.trace), len(run.caller.observations)
                         )
                         self.assertEqual(
                             next(

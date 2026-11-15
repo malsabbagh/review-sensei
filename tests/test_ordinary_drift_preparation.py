@@ -135,7 +135,7 @@ class OrdinaryDriftPreparationTests(unittest.TestCase):
             observed = observations[0]
             self.assertEqual(observed["census_calls"], 1)
             self.assertEqual(
-                (observed["usable_before"], observed["usable_after"]), (92, 91)
+                (observed["usable_before"], observed["usable_after"]), (96, 95)
             )
             self.assertTrue(actual_updates)
             self.assertTrue(

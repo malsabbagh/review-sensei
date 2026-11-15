@@ -150,8 +150,19 @@ class HistoricalExecutionTests(unittest.TestCase):
                             blocks[run.caller._terminal_block].undispatched,
                             state.remaining,
                         ),
-                        (512, 132, 35, 105, 50, 190),
+                        (512, 132, 28, 112, 50, 190),
                     )
+                    # Fresh complete-census scheduling avoids seven physical
+                    # reads; their allowance stays in the original block. Every
+                    # completed receipt must still have its actual observation.
+                    self.assertEqual(len(fixture.trace), len(run.caller.observations))
+                    observations = {
+                        row["request_id"]: row for row in run.caller.observations
+                    }
+                    for receipt in state.completed:
+                        self.assertEqual(
+                            observations[receipt.request_id]["outcome"], "response"
+                        )
                     guard = installed_capacity(run.ledger, run.identity)
                     self.assertFalse(guard.complete_tail)
                     self.assertEqual(len(guard.comment_plan.unknown), 16)

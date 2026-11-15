@@ -16,14 +16,13 @@ from test_quarantine_published_tail_journey import (
 )
 
 from review_sensei.api_work import PendingApiRequest
-from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
 
 
 class PaidPrefixProjectionTests(unittest.TestCase):
-    def test_original_paid_prefix_and_last_root_hold_preserve_all_funding(self):
+    def test_original_paid_prefix_and_final_command_hold_preserve_all_funding(self):
         captured = []
-        overflow = []
+        measured = []
 
         def observe(frame, event, result):
             if (
@@ -34,15 +33,15 @@ class PaidPrefixProjectionTests(unittest.TestCase):
                 prepared = namespace.project_prepared_prefix(caller)
                 baseline = namespace.project_current(caller)
                 self.assertEqual(
-                    len(prepared["completed"]), len(baseline["completed"]) + 5
+                    len(prepared["completed"]), len(baseline["completed"]) + 2
                 )
                 self.assertEqual(
-                    sum(len(b["pending"]) for b in prepared["blocks"]), 155
+                    sum(len(b["pending"]) for b in prepared["blocks"]), 162
                 )
                 self.assertEqual(
-                    sum(len(b["pending"]) for b in baseline["blocks"]), 160
+                    sum(len(b["pending"]) for b in baseline["blocks"]), 164
                 )
-                self.assertEqual(caller.budget_view.ordinary_remaining(), 105)
+                self.assertEqual(caller.budget_view.ordinary_remaining(), 112)
                 self.assertEqual(caller.accounting.remaining, 190)
                 self.assertEqual(
                     next(
@@ -93,24 +92,20 @@ class PaidPrefixProjectionTests(unittest.TestCase):
                 observation = frame.f_locals["observation"]
                 if json.loads(observation.payload)["conditional_approval"] is None:
                     return
-                try:
-                    finalization.measure_inline_branches(observation)
-                except ReviewInputError as error:
-                    self.assertIn("session record exceeds", str(error))
-                    trace = error.__traceback__
-                    while trace is not None:
-                        if (
-                            trace.tb_frame.f_code.co_name == "render"
-                            and trace.tb_frame.f_globals is vars(finalization)
-                        ):
-                            overflow.append(
-                                len(
-                                    canonical_bytes(trace.tb_frame.f_locals["document"])
-                                )
-                            )
-                        trace = trace.tb_next
-                else:
-                    self.fail("unpriced final branch unexpectedly lost its root hold")
+                # Source-fixed native IDs now let this small two-obligation
+                # fixture fit. Complete sizing still grants no final-command
+                # lease: the original application must retain its hold below.
+                result = finalization.measure_inline_branches(observation)
+                self.assertTrue(result["all_growth_roots_fit"])
+                self.assertTrue(
+                    result["future_approval_domain_requires_execution_proof"]
+                )
+                for root in result["growth_roots"]:
+                    self.assertTrue(root["original_validated_and_rendered"])
+                    self.assertLessEqual(root["ordinary_root_bytes"], 32768)
+                    self.assertLessEqual(root["terminal_root_bytes"], 32768)
+                    self.assertLessEqual(root["comment_body_bytes"], 65536)
+                measured.append(result)
 
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -158,8 +153,7 @@ class PaidPrefixProjectionTests(unittest.TestCase):
                     )
                 self.assertIn("one update and check replay only", fixture.error)
         self.assertEqual(len(captured), 2)
-        self.assertTrue(overflow)
-        self.assertTrue(all(size > 32768 for size in overflow))
+        self.assertEqual(len(measured), 1)
 
     def test_coordinated_original_and_live_accounting_mutation_is_refused(self):
         baselines, changed, callers = [], [], []
@@ -223,7 +217,7 @@ class PaidPrefixProjectionTests(unittest.TestCase):
                 self.assertEqual(len(callers), 1)
                 caller = callers[0]
                 self.assertFalse(caller.accounting.action["execution_started"])
-                self.assertEqual(caller.budget_view.ordinary_remaining(), 105)
+                self.assertEqual(caller.budget_view.ordinary_remaining(), 112)
                 self.assertEqual(caller.accounting.remaining, 190)
                 self.assertEqual(
                     next(
