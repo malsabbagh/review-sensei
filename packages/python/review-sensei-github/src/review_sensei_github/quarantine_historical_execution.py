@@ -599,6 +599,96 @@ def _registry():
             return None
         return entry.pop("final_census", None)
 
+    def journal_census_membership(ledger, identity, *, added_parts):
+        """Original checkpoint-only reader premise; no admission or new funds."""
+        from . import finding_lifecycle, historical_journal_census, quarantine_action
+        from .quarantine_command_phase import _optional_frame
+
+        for module in (historical_journal_census, finding_lifecycle, quarantine_action):
+            require_module_seal(module)
+        source = sys._getframe(1)
+        if source.f_globals is not vars(
+            historical_journal_census
+        ) or source.f_code not in (
+            historical_journal_census.choose.__code__,
+            historical_journal_census.require_scope.__code__,
+        ):
+            raise ReviewInputError(
+                "historical journal membership lacks original consumer"
+            )
+        entry = require(ledger.caller)
+        if entry is None:
+            return None
+        recipe = json.loads(entry["recipe"])
+        if recipe["contract"] != "closed-inline-c5-r2-p2-no-verification-v1":
+            return None
+        checkpoint = _optional_frame(
+            finding_lifecycle, finding_lifecycle.FindingLifecycleJournal.checkpoint
+        )
+        if checkpoint is None:
+            return None
+        if (
+            entry["ledger"] is not ledger
+            or identity != entry["identity"]
+            or added_parts != 0
+            or entry["phase"] not in (3, 5)
+            or entry["caller"]._terminal_reason is not None
+            or checkpoint.f_locals.get("self") is not entry["journal"]
+            or checkpoint.f_locals.get("pending_intent") is not (entry["phase"] == 3)
+        ):
+            raise ReviewInputError("historical journal reader phase changed")
+        measured = recipe["root_measurement"]
+        if (
+            measured.get("max_checkpoints") != 2
+            or measured.get("all_growth_roots_fit") is not True
+            or not measured.get("growth_roots")
+            or any(
+                row.get("original_validated_and_rendered") is not True
+                or row.get("root_fits") is not True
+                for row in measured["growth_roots"]
+            )
+        ):
+            raise ReviewInputError("historical journal inline branches are unproven")
+        # Activation already refuses all prior physical pending and prior
+        # nonstartup liability. Subsequent issue-comment creation is the one
+        # exact event; the original phase fence forbids receipt before finish.
+        if (
+            entry["prior"]
+            or tuple(entry["guard"].comment_plan.unknown) != entry["initial_unknown"]
+        ):
+            raise ReviewInputError("historical journal lifetime liabilities changed")
+        permit = vars(ledger).get("_quarantine_decision_permit")
+        if (
+            type(permit) is not quarantine_action._DecisionPermit
+            or permit not in quarantine_action._ISSUED_DECISIONS
+            or quarantine_action._DECISION_BINDINGS.get(permit)
+            != quarantine_action._decision_permit_binding(permit)
+            or permit.ledger is not ledger
+            or permit.authority is not entry["authority"]
+            or permit.run_id != entry["caller"].run.run_id
+            or not permit.consumed
+            or permit not in quarantine_action._DECISION_CANDIDATES
+        ):
+            raise ReviewInputError("historical journal event/own CAS is unconfirmed")
+        tail = json.loads(permit.tail)
+        parts = tail.get("parts")
+        if type(parts) is not list or len(parts) != 1:
+            raise ReviewInputError("historical journal event membership changed")
+        identifier = parts[0].get("storage_id")
+        if (
+            type(identifier) is not str
+            or not identifier.isascii()
+            or not identifier.isdecimal()
+            or len(identifier) > 16
+        ):
+            raise ReviewInputError("historical journal event identity changed")
+        event_id = int(identifier)
+        rows = json.loads(entry["captured"]["rows"])
+        known = tuple(row["id"] for row in rows)
+        if not 0 < event_id <= 2**53 - 1 or event_id in known:
+            raise ReviewInputError("historical journal event identity conflicts")
+        return (*known, event_id)
+
     def lifecycle_execution_context(ledger, identity, *, known, added_parts):
         entry = require(ledger.caller)
         if entry is None:
@@ -727,6 +817,7 @@ def _registry():
         bind_journal,
         require_journal,
         retained_prefix_source,
+        journal_census_membership,
         lifecycle_execution_context,
         consume_lifecycle_execution_context,
         receipt_preparation,
@@ -743,6 +834,7 @@ def _registry():
     bind_journal,
     require_journal,
     retained_prefix_source,
+    journal_census_membership,
     lifecycle_execution_context,
     consume_lifecycle_execution_context,
     receipt_preparation,

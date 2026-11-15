@@ -359,6 +359,24 @@ def fetch_comments(
         if type(lifecycle) is not _LifecycleCapacity:
             raise ReviewInputError("quarantine lifecycle census scope is unissued")
         lifetime_plan = _LifecycleCapacity.require(lifecycle, ledger, identity)
+        if lifecycle.read_issuer == "historical-journal":
+            if historical_reader is not None:
+                raise ReviewInputError("historical journal reader scope conflicts")
+            from . import historical_journal_census
+
+            require_module_seal(historical_journal_census)
+            historical_journal_census.begin(lifecycle)
+            rows = fetch_packed_comments(
+                ledger,
+                identity,
+                plan=lifetime_plan,
+                max_requests=lifetime_plan.worst_read_calls(),
+                timeout_seconds=timeout_seconds,
+                before_read=before_read,
+                observe_request=observe_request,
+            )
+            require_module_seal(historical_journal_census)
+            return historical_journal_census.finish(lifecycle, rows)
         if historical_reader is None:
             return fetch_packed_comments(
                 ledger,
@@ -590,6 +608,7 @@ class _LifecycleCapacity:
     parts: int
     extension: Any = None
     read_plan: Any = None
+    read_issuer: str | None = None
 
     def enumeration_plan(self):
         return self.plan if self.read_plan is None else self.read_plan
@@ -613,10 +632,20 @@ class _LifecycleCapacity:
         if self.read_plan is not None:
             from review_sensei.source_registry import require_module_seal
 
-            from . import materialized_publication_phase
+            if self.read_issuer == "materialized":
+                from . import materialized_publication_phase
 
-            require_module_seal(materialized_publication_phase)
-            materialized_publication_phase.require_invocation_read_plan(self)
+                require_module_seal(materialized_publication_phase)
+                materialized_publication_phase.require_invocation_read_plan(self)
+            elif self.read_issuer == "historical-journal":
+                from . import historical_journal_census
+
+                require_module_seal(historical_journal_census)
+                historical_journal_census.require_scope(self)
+            else:
+                raise ReviewInputError("quarantine lifecycle reader issuer changed")
+        elif self.read_issuer is not None:
+            raise ReviewInputError("quarantine lifecycle reader plan is absent")
         return issued
 
     def require(self, ledger, identity):
@@ -657,6 +686,7 @@ class _LifecycleCapacity:
             self.parts,
             id(self.extension),
             id(self.read_plan),
+            self.read_issuer,
             None
             if self.read_plan is None
             else (
@@ -888,6 +918,17 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
     read_plan = materialized_publication_phase.invocation_read_plan(
         ledger, identity, plan=plan, added_parts=added_parts
     )
+    read_issuer = "materialized" if read_plan is not None else None
+    from . import historical_journal_census
+
+    require_module_seal(historical_journal_census)
+    historical_plan = historical_journal_census.choose(
+        ledger, identity, plan=plan, added_parts=added_parts
+    )
+    if historical_plan is not None:
+        if read_plan is not None:
+            raise ReviewInputError("quarantine lifecycle reader issuers conflict")
+        read_plan, read_issuer = historical_plan, "historical-journal"
     enumeration = plan if read_plan is None else read_plan
     if enumeration.worst_read_calls() > MAX_PAGINATION_PAGES:
         raise ReviewInputError(
@@ -905,6 +946,7 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         added_parts,
         extension,
         read_plan,
+        read_issuer,
     )
     _LIFECYCLE_ISSUED[scope] = _LifecycleCapacity._seal(scope)
     return scope
