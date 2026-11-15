@@ -89,6 +89,101 @@ class PackedBackend(CensusBackend):
 
 
 class PackedCommentCensusTests(unittest.TestCase):
+    def test_validated_metadata_bounds_fund_the_complete_combined_page(self):
+        for known_count in (0, 30, 60):
+            backend = PackedBackend(["x" * (7200 - wire({"body": ""}))] * 60)
+            known = {
+                int(row["fullDatabaseId"]): 7200 for row in backend.rows[:known_count]
+            }
+            plan = CommentAllocationPlan(
+                known,
+                (7200,) * (60 - known_count),
+                {identifier: 373 for identifier in known},
+                373,
+            )
+            self.assertEqual(plan.worst_read_calls(), 2)
+            self.assertEqual(
+                len(
+                    fetch_packed_comments(
+                        backend.ledger(), IDENTITY, plan=plan, max_requests=2
+                    )
+                ),
+                60,
+            )
+            self.assertEqual(len(backend.physical), 2)
+            self.assertEqual(backend.physical[-1]["query"], CLOSING_QUERY)
+
+    def test_tight_metadata_certificate_covers_unknown_interleavings(self):
+        known, unknown = (160000, 190000), (110000, 170000, 230000)
+        for positions in itertools.combinations(range(5), 2):
+            for permutation in itertools.permutations(unknown):
+                for actual_unknown in (permutation, (100, 100, 100)):
+                    k = u = 0
+                    costs, known_at = [], {}
+                    for position in range(5):
+                        if position in positions:
+                            known_at[position] = known[k]
+                            costs.append(known[k])
+                            k += 1
+                        else:
+                            costs.append(actual_unknown[u])
+                            u += 1
+                    backend = PackedBackend(
+                        ["x" * (n - wire({"body": ""})) for n in costs]
+                    )
+                    members = {
+                        int(backend.rows[i]["fullDatabaseId"]): n
+                        for i, n in known_at.items()
+                    }
+                    plan = CommentAllocationPlan(
+                        members, unknown, {key: 373 for key in members}, 373
+                    )
+                    self.assertEqual(
+                        len(
+                            fetch_packed_comments(backend.ledger(), IDENTITY, plan=plan)
+                        ),
+                        5,
+                    )
+                    self.assertLessEqual(len(backend.physical), plan.worst_read_calls())
+
+    def test_tight_metadata_does_not_accept_excess_or_changed_metadata(self):
+        backend = PackedBackend(["small"])
+        identifier = int(backend.rows[0]["fullDatabaseId"])
+        metadata = {k: v for k, v in backend.rows[0].items() if k != "body"}
+        plan = CommentAllocationPlan(
+            {identifier: 100}, (), {identifier: wire(metadata) - 1}
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "metadata is malformed"
+        ) as caught:
+            fetch_packed_comments(backend.ledger(), IDENTITY, plan=plan)
+        self.assertRegex(str(caught.exception.__cause__), "metadata exceeds")
+        self.assertEqual(len(backend.physical), 1)
+        backend = PackedBackend(["small"])
+        plan = CommentAllocationPlan({}, (100,), metadata_unknown=373)
+        backend.mutate_closing = lambda rows: rows[0].update(
+            updatedAt="2026-10-29T01:00:00Z"
+        )
+        with self.assertRaises(ReviewInputError):
+            fetch_packed_comments(backend.ledger(), IDENTITY, plan=plan)
+
+    def test_certificate_rejects_invalid_metadata_envelopes(self):
+        for known, unknown in (
+            ((0,), 373),
+            ((True,), 373),
+            ((), 373),
+            ((373,), 0),
+            ((373,), 1025),
+            ((373,), True),
+        ):
+            with self.subTest(known=known, unknown=unknown):
+                self.assertGreater(
+                    packed_request_bound(
+                        (100,), (100,), known_metadata=known, unknown_metadata=unknown
+                    ),
+                    10,
+                )
+
     def test_issuer_reserves_old_allocations_and_each_mutable_root_before_effects(self):
         from review_sensei_github.quarantine_capacity import _comment_allocation_plan
         from test_quarantine_published_tail_isolation import contract_fixture
