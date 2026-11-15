@@ -675,6 +675,65 @@ def _default_c5_prefix_headroom(stages, *, terminal_comments, receipt_reads=1):
     return rows
 
 
+def exact_intermediate_receipt(
+    *,
+    action,
+    scope,
+    instance,
+    operator_paused,
+    actor,
+    source_comment_id,
+    command_digest,
+):
+    """Pure source-produced receipt DATA, never permission to publish it.
+
+    Callers must bind these primitives to their original target/authority. The
+    actual receipt window independently requires byte-identical dispatch text.
+    """
+    from types import SimpleNamespace
+
+    from review_sensei import presentation
+
+    from . import quarantine_action
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(quarantine_action)
+    require_module_seal(presentation)
+    strings = (action, scope, instance, actor, command_digest)
+    if (
+        any(type(value) is not str for value in strings)
+        or type(operator_paused) is not bool
+        or type(source_comment_id) is not int
+    ):
+        raise ReviewInputError("intermediate receipt primitives are invalid")
+    if (
+        action not in ("dismiss", "accept-risk")
+        or not 0 < source_comment_id <= 2**63 - 1
+        or any(not value or len(value) > 65536 for value in strings)
+    ):
+        raise ReviewInputError("intermediate receipt primitive bounds changed")
+    result = quarantine_action.historical_command_result(
+        SimpleNamespace(action=action, scope=scope),
+        SimpleNamespace(instance=instance),
+        SimpleNamespace(operator_paused=operator_paused),
+        existing=None,
+        actor={"login": actor},
+    )
+    text = presentation.render_command_receipt(
+        actor=actor,
+        source_comment_id=source_comment_id,
+        command_digest=command_digest,
+        receipts=result.receipts,
+        ledger_written=True,
+    )
+    wire = len(canonical_bytes({"body": text}))
+    if wire > 65536:
+        raise ReviewInputError(
+            "guarded suffix receipt exceeds its complete wire projection"
+        )
+    return text, wire
+
+
 def intermediate_suffix_recipe(observation, *, comment_rows, receipt_page):
     """Derive the closed intermediate recipe; data, not an execution lease."""
     from copy import copy, deepcopy
@@ -851,24 +910,18 @@ def intermediate_suffix_recipe(observation, *, comment_rows, receipt_page):
     # The receipt is a source-produced body, not a generic raw-size promise.
     # Existing same-marker receipts are a different update route and remain
     # pre-effect holds; unrelated retained receipts stay in the full census.
-    from review_sensei import presentation
-
-    require_module_seal(presentation)
-    result = quarantine_action.historical_command_result(
-        target.command,
-        target,
-        saved["record"],
-        existing=None,
-        actor=saved["authority"].document["actor"],
-    )
     authority = saved["authority"].document
-    receipt = presentation.render_command_receipt(
+    receipt, receipt_wire = exact_intermediate_receipt(
+        action=target.command.action,
+        scope=target.command.scope,
+        instance=target.instance,
+        operator_paused=saved["record"].operator_paused,
         actor=authority["actor"]["login"],
         source_comment_id=authority["source"]["id"],
         command_digest=authority["source"]["body_sha256"],
-        receipts=result.receipts,
-        ledger_written=True,
     )
+    if (receipt, receipt_wire) != frame.f_locals.get("receipt_data"):
+        raise ReviewInputError("guarded suffix exact receipt projection changed")
     marker = receipt.rstrip().rsplit("<!--", 1)[-1]
     if any(
         row["body"].rstrip().endswith("<!--" + marker)

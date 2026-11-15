@@ -221,6 +221,18 @@ def _registry():
         # Admission must still prove and enforce the closed mutation families.
         event_body = _closed_event_body(run, target, record)
         event_wire = len(canonical_bytes({"body": event_body}))
+        from . import quarantine_command_finalization
+
+        require_module_seal(quarantine_command_finalization)
+        receipt_data = quarantine_command_finalization.exact_intermediate_receipt(
+            action=target.command.action,
+            scope=target.command.scope,
+            instance=target.instance,
+            operator_paused=record.operator_paused,
+            actor=authority.document["actor"]["login"],
+            source_comment_id=authority.document["source"]["id"],
+            command_digest=authority.document["source"]["body_sha256"],
+        )
         page = project_receipt_page(
             rows,
             mutable_bounds=(
@@ -234,7 +246,7 @@ def _registry():
                     + 9,
                 ),
             ),
-            future_bounds=(event_wire, 65536),
+            future_bounds=(event_wire, receipt_data[1]),
             allow_graphql=True,
             identity=run.identity,
             max_reads=2,
