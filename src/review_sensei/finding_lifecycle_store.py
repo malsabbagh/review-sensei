@@ -11,8 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from dataclasses import dataclass
-from typing import Any, Mapping
+from types import CellType, CodeType, FrameType, FunctionType, ModuleType
+from typing import Any, Mapping, cast
 from weakref import WeakKeyDictionary
 
 from .bounded_evidence import (
@@ -246,14 +248,242 @@ _CHECKPOINT_SOURCE: Any = None
 _CHECKPOINT_SUPPORTS: Any = None
 
 
+# Specific defining-loader and closure custody, not a general callback registry.
+_CHECKPOINT_GRAPH: Any = None
+
+
+def _pricer_definition(frame, *, class_body):
+    """Use the existing defining-module seal's loader protocol."""
+    import sys as source_sys
+
+    from .source_registry import require_module_seal
+
+    require_module_seal(source_sys.modules[__name__])
+    module = sys.modules.get("review_sensei_github.api_run_requests")
+    if type(module) is not ModuleType:
+        return False
+    raw = vars(module)
+    module_frame = frame.f_back if class_body else frame
+    if (
+        module_frame is None
+        or module_frame.f_code.co_name != "<module>"
+        or module_frame.f_globals is not raw
+        or module_frame.f_locals is not raw
+        or frame.f_globals is not raw
+    ):
+        return False
+    spec = raw.get("__spec__")
+    if not getattr(spec, "_initializing", False):
+        return False
+    get_code = getattr(getattr(spec, "loader", None), "get_code", None)
+    if not callable(get_code):
+        return False
+    code = get_code(raw["__name__"])
+    if code != module_frame.f_code:
+        return False
+    if not class_body:
+        return True
+    candidates = tuple(
+        item
+        for item in code.co_consts
+        if type(item) is CodeType and item.co_name == "ApiRunSessionLedger"
+    )
+    return (
+        len(candidates) == 1
+        and frame.f_code == candidates[0]
+        and frame.f_locals.get("__module__") == raw["__name__"]
+        and frame.f_locals.get("__qualname__") == "ApiRunSessionLedger"
+    )
+
+
+def _checkpoint_graph_shape():
+    """No graph row, metadata or cell is traversed before exact type gates."""
+    import sys as source_sys
+
+    from .source_registry import require_module_seal
+
+    require_module_seal(source_sys.modules[__name__])
+    graph = _CHECKPOINT_GRAPH
+    if type(graph) is not tuple or len(graph) != 4:
+        raise ReviewInputError("checkpoint pricer graph shape changed")
+    for row in graph:
+        if type(row) is not tuple or len(row) != 8:
+            raise ReviewInputError("checkpoint pricer row shape changed")
+        function, code, namespace, defaults, kwdefaults, items, wrapped, cells = row
+        if (
+            type(function) is not FunctionType
+            or type(code) is not CodeType
+            or type(namespace) is not int
+            or (defaults is not None and type(defaults) is not tuple)
+            or (kwdefaults is not None and type(kwdefaults) is not dict)
+            or (wrapped is not None and type(wrapped) is not FunctionType)
+            or type(cells) is not tuple
+        ):
+            raise ReviewInputError("checkpoint pricer metadata shape changed")
+        if kwdefaults is None:
+            if items is not None:
+                raise ReviewInputError("checkpoint pricer defaults shape changed")
+        elif (
+            type(items) is not tuple
+            or any(type(key) is not str for key in kwdefaults)
+            or any(
+                type(item) is not tuple or len(item) != 2 or type(item[0]) is not str
+                for item in items
+            )
+        ):
+            raise ReviewInputError("checkpoint pricer defaults shape changed")
+        for item in cells:
+            if (
+                type(item) is not tuple
+                or len(item) != 3
+                or type(item[0]) is not str
+                or type(item[1]) is not CellType
+            ):
+                raise ReviewInputError("checkpoint pricer cell shape changed")
+    return graph
+
+
+def _checkpoint_candidate(source, graph):
+    import sys as source_sys
+
+    from .source_registry import require_module_seal
+
+    require_module_seal(source_sys.modules[__name__])
+    if type(_CHECKPOINT_CANDIDATES) is not dict:
+        raise ReviewInputError("checkpoint pricer candidates changed")
+    pair = _CHECKPOINT_CANDIDATES.get(source)
+    if (
+        type(pair) is not tuple
+        or len(pair) != 2
+        or pair[0] is not graph[3][0]
+        or pair[1] is not graph[1][0]
+    ):
+        raise ReviewInputError("checkpoint pricer candidate pair changed")
+    return pair
+
+
+def _pricer_snapshot(function):
+    import sys as source_sys
+
+    from .source_registry import require_module_seal
+
+    require_module_seal(source_sys.modules[__name__])
+    if type(function) is not FunctionType:
+        raise ReviewInputError("checkpoint pricer function changed")
+    cells = function.__closure__ or ()
+    return (
+        function,
+        function.__code__,
+        id(function.__globals__),
+        function.__defaults__,
+        function.__kwdefaults__,
+        None
+        if function.__kwdefaults__ is None
+        else tuple(function.__kwdefaults__.items()),
+        vars(function).get("__wrapped__"),
+        tuple(
+            (name, cell, cell.cell_contents)
+            for name, cell in zip(function.__code__.co_freevars, cells)
+        ),
+    )
+
+
+def _require_checkpoint_graph(wrapper, *, frame=None, initializing=False):
+    import sys as source_sys
+
+    from .source_registry import require_module_seal
+
+    require_module_seal(source_sys.modules[__name__])
+    if frame is not None and type(frame) is not FrameType:
+        raise ReviewInputError("checkpoint pricer frame changed")
+    graph = _checkpoint_graph_shape()
+    if wrapper is not graph[2][0]:
+        raise ReviewInputError("checkpoint pricer closure is unregistered")
+    # The defining host seal pins this immutable graph in the wrapper defaults.
+    # During installation only the original verified module body can enter.
+    if initializing:
+        if not _pricer_definition(
+            sys._getframe(
+                3 if frame is not None and frame.f_code is graph[3][1] else 2
+            ),
+            class_body=False,
+        ):
+            raise ReviewInputError("checkpoint pricer installation source changed")
+    else:
+        module = sys.modules.get("review_sensei_github.api_run_requests")
+        require_module_seal(module)
+        if _CHECKPOINT_SUPPORTS is not graph[1][0]:
+            raise ReviewInputError("checkpoint pricer support binding changed")
+    if (
+        type(wrapper.__kwdefaults__) is not dict
+        or any(type(key) is not str for key in wrapper.__kwdefaults__)
+        or set(wrapper.__kwdefaults__) != {"_pricer_graph"}
+    ):
+        raise ReviewInputError("checkpoint pricer graph default changed")
+    if wrapper.__kwdefaults__["_pricer_graph"] is not graph:
+        raise ReviewInputError("checkpoint pricer graph was replaced")
+    for row in graph:
+        function, code, namespace, defaults, kwdefaults, items, wrapped, cells = row
+        if (
+            type(function) is not FunctionType
+            or function.__code__ is not code
+            or id(function.__globals__) != namespace
+            or function.__defaults__ is not defaults
+            or vars(function).get("__wrapped__") is not wrapped
+        ):
+            raise ReviewInputError("checkpoint pricer function metadata changed")
+        if function is not wrapper:
+            current = function.__kwdefaults__
+            if current is not kwdefaults or (
+                current is not None
+                and (
+                    len(current) != len(items)
+                    or any(type(key) is not str for key in current)
+                    or any(
+                        key not in current or current[key] is not value
+                        for key, value in items
+                    )
+                )
+            ):
+                raise ReviewInputError("checkpoint pricer keyword defaults changed")
+        current_cells = function.__closure__ or ()
+        if len(current_cells) != len(cells):
+            raise ReviewInputError("checkpoint pricer closure shape changed")
+        for actual, (name, original, value) in zip(current_cells, cells):
+            if actual is not original or actual.cell_contents is not value:
+                raise ReviewInputError("checkpoint pricer closure binding changed")
+        if frame is not None and frame.f_code is code:
+            if id(frame.f_globals) != namespace or any(
+                frame.f_locals.get(name) is not value for name, _, value in cells
+            ):
+                raise ReviewInputError("checkpoint pricer executing closure changed")
+    if frame is not None and not any(frame.f_code is row[1] for row in graph):
+        raise ReviewInputError("checkpoint pricer executing source changed")
+    return graph
+
+
 def _checkpoint_pricer(method):
     """Inject issuance only while executing the exact installed host producer."""
     import sys
+    import sys as source_sys
     from functools import wraps
 
+    from .source_registry import require_module_seal
+
+    require_module_seal(source_sys.modules[__name__])
+    global _CHECKPOINT_GRAPH
+    defining = _pricer_definition(sys._getframe(1), class_body=True)
+    if defining and (_CHECKPOINT_GRAPH is not None or _CHECKPOINT_SOURCE is not None):
+        raise ReviewInputError("checkpoint pricer duplicate definition")
     token = object()
 
     def supported(owner):
+        import sys as source_sys
+
+        from .source_registry import require_module_seal
+
+        require_module_seal(source_sys.modules[__name__])
+        _require_checkpoint_graph(wrapped, frame=sys._getframe())
         module = sys.modules.get("review_sensei_github.api_run_requests")
         run_module = sys.modules.get("review_sensei_github.review_run")
         cls = getattr(module, "ApiRunSessionLedger", None)
@@ -273,7 +503,22 @@ def _checkpoint_pricer(method):
         )
 
     @wraps(method)
-    def wrapped(owner, *args, **kwargs):
+    def wrapped(owner, *args, _pricer_graph=None, **kwargs):
+        # Import the original authenticator at entry, not through a mutable
+        # closure validator cell. No captured helper is executed first.
+        import sys as source_sys
+
+        from .source_registry import require_module_seal
+
+        require_module_seal(source_sys.modules[__name__])
+        graph = _checkpoint_graph_shape()
+        if wrapped is not graph[2][0]:
+            raise ReviewInputError(
+                "finding lifecycle checkpoint producer is unsupported"
+            )
+        _require_checkpoint_graph(wrapped, frame=sys._getframe())
+        if _pricer_graph is not _CHECKPOINT_GRAPH:
+            raise ReviewInputError("checkpoint pricer graph argument changed")
         if "_checkpoint_factory" in kwargs:
             raise ReviewInputError(
                 "finding lifecycle checkpoint producer is unsupported"
@@ -297,33 +542,99 @@ def _checkpoint_pricer(method):
             )
 
         active = True
+        invocation = sys._getframe()
 
         def issue(ledger, record, **values):
+            import sys as source_sys
+
+            from .source_registry import require_module_seal
+
+            require_module_seal(source_sys.modules[__name__])
+            graph = _require_checkpoint_graph(wrapped, frame=invocation)
+            issuing = source_sys._getframe()
+            ancestor = issuing.f_back
+            host_frame = None
+            while ancestor is not None and ancestor is not invocation:
+                if (
+                    ancestor.f_code is graph[0][1]
+                    and id(ancestor.f_globals) == graph[0][2]
+                ):
+                    host_frame = ancestor
+                ancestor = ancestor.f_back
+            if (
+                ancestor is not invocation
+                or host_frame is None
+                or host_frame.f_locals.get("self") is not owner
+                or host_frame.f_locals.get("record") is not record
+                or host_frame.f_locals.get("_checkpoint_factory") is not issue
+            ):
+                raise ReviewInputError(
+                    "checkpoint pricer invocation is no longer active"
+                )
+            if (
+                invocation.f_locals.get("issue") is not issue
+                or issuing.f_code is not issue.__code__
+                or issuing.f_globals is not issue.__globals__
+                or any(
+                    issuing.f_locals.get(name) is not invocation.f_locals.get(name)
+                    for name in (
+                        "active",
+                        "owner",
+                        "supported",
+                        "token",
+                        "wrapped",
+                        "sys",
+                    )
+                )
+            ):
+                raise ReviewInputError("checkpoint pricer issue closure changed")
             if not active or ledger is not owner or not supported(owner):
                 raise ReviewInputError("finding lifecycle checkpoint producer changed")
             return _issue_checkpoint_pricing(ledger, record, _source=token, **values)
 
         try:
+            _require_checkpoint_graph(wrapped, frame=invocation)
             return method(owner, *args, _checkpoint_factory=issue, **kwargs)
         finally:
             active = False
 
     def install():
+        import sys as source_sys
+
+        from .source_registry import require_module_seal
+
+        require_module_seal(source_sys.modules[__name__])
+        _require_checkpoint_graph(wrapped, frame=sys._getframe(), initializing=True)
         if _CHECKPOINT_SOURCE is not wrapped:
             raise ReviewInputError(
                 "finding lifecycle checkpoint source is not installed"
             )
         _CHECKPOINT_PRICERS.add(token)
 
-    _CHECKPOINT_CANDIDATES[wrapped] = (install, supported)
+    if defining:
+        _CHECKPOINT_GRAPH = tuple(
+            _pricer_snapshot(f) for f in (method, supported, wrapped, install)
+        )
+        cast(Any, wrapped).__kwdefaults__ = {"_pricer_graph": _CHECKPOINT_GRAPH}
+        _CHECKPOINT_CANDIDATES[wrapped] = (install, supported)
     return wrapped
 
 
 def _install_checkpoint_pricer(source):
     """Pin the actual adapter producer once, during its trusted module install."""
     import sys
+    import sys as source_sys
 
+    from .source_registry import require_module_seal
+
+    require_module_seal(source_sys.modules[__name__])
     global _CHECKPOINT_SOURCE, _CHECKPOINT_SUPPORTS
+    if _CHECKPOINT_SOURCE is not None or not _pricer_definition(
+        sys._getframe(1), class_body=False
+    ):
+        raise ReviewInputError("finding lifecycle checkpoint source cannot be replaced")
+    graph = _require_checkpoint_graph(source, initializing=True)
+    pair = _checkpoint_candidate(source, graph)
     module = sys.modules.get("review_sensei_github.api_run_requests")
     cls = getattr(module, "ApiRunSessionLedger", None)
     if (
@@ -334,13 +645,22 @@ def _install_checkpoint_pricer(source):
         or source not in _CHECKPOINT_CANDIDATES
     ):
         raise ReviewInputError("finding lifecycle checkpoint source cannot be replaced")
-    install, supported = _CHECKPOINT_CANDIDATES.pop(source)
+    if _CHECKPOINT_CANDIDATES.pop(source) is not pair:
+        raise ReviewInputError("checkpoint pricer candidate changed during install")
+    install, supported = pair
     _CHECKPOINT_SOURCE, _CHECKPOINT_SUPPORTS = source, supported
     _CHECKPOINT_PRODUCERS.add(source)
     install()
 
 
 def _qualified_checkpoint_pricer(ledger):
+    import sys as source_sys
+
+    from .source_registry import require_module_seal
+
+    require_module_seal(source_sys.modules[__name__])
+    if _CHECKPOINT_SOURCE is not None:
+        _require_checkpoint_graph(_CHECKPOINT_SOURCE)
     method = getattr(ledger, "preflight_finding_lifecycle_checkpoint_pricing", None)
     if (
         _CHECKPOINT_SOURCE is None
