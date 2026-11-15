@@ -43,6 +43,39 @@ with other pull requests, the heavy lanes alone need roughly an hour of runner
 throughput. Reaching 30 minutes therefore still requires lower test CPU cost.
 Only exact-head remote CI can measure the result.
 
+### Measured: run 43748051487
+
+The first sharded run,
+[43748051487](https://github.com/malsabbagh/review-sensei/actions/runs/43748051487)
+on `9f9a843c`, took 74 minutes from start to the final `Required checks` job.
+Every shard verifier accounted for its whole inventory (for example, 7,287 tests
+across the ten coverage shards) and failed on the failing workers. Every test
+failure was already failing on the unsharded runs except two subprocess timeouts
+(45-second limit) in one Linux 3.11 shard. The installed shards were skipped
+because `Build distributions` failed its in-checkout verification; verification
+now runs in a separate job so the shards depend only on the built
+distributions.
+
+| Lane | Measured class seconds | Measured wall time | Modeled largest worker with the new weights |
+| --- | ---: | ---: | ---: |
+| Linux 3.11 | 76,058 | 64 min | 2,377 s (was 3,677 s) |
+| Linux 3.14 | 36,387 | 27 min | unchanged |
+| macOS 3.13 | 28,567 | 31 min | unchanged |
+| Windows 3.12 | 58,575 | 73 min | 2,929 s (was 4,178 s) |
+| Coverage (Linux 3.11) | 67,362 | 53 min | 2,414 s (was 2,645 s) |
+
+Linux 3.11 does about twice the work of Linux 3.14 with different per-class
+ratios, and Windows ran 34% above its old weights. Linux 3.11 now has its own
+weights, and Windows and coverage use this run's weights. The model reproduced
+the measured critical workers of the old plan (3,677 s modeled against 3,857 s
+for Linux 3.11, and 4,178 s against 4,337 s for Windows).
+
+All 26 Windows-only installed-runner failures had one cause: the synthetic tests
+wrote fixtures with `write_text` (CRLF on Windows) but pinned the SHA-256 of
+those raw bytes. The runner pins LF-normalized text, so it correctly fell back to
+the original root. The tests now pin the same canonical digest. Under simulated
+Windows newline translation, the old tests fail 26 times and the new ones pass.
+
 ## November 15 Worker process scheduling
 
 The Worker lane now runs its original Python qualification entry points in at

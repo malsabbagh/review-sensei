@@ -34,10 +34,10 @@ jobs:
           - {lane: macos-3.13, shard: 7}
           - {lane: macos-3.13, shard: 8}
         include:
-          - {lane: linux-3.11, os: ubuntu-latest, python-version: "3.11", shards: 8}
+          - {lane: linux-3.11, os: ubuntu-latest, python-version: "3.11", shards: 8, costs: linux311}
           - {lane: windows-3.12, os: windows-latest, python-version: "3.12", shards: 5}
           - {lane: macos-3.13, os: macos-latest, python-version: "3.13", shards: 5}
-          - {lane: linux-3.14, os: ubuntu-latest, python-version: "3.14", shards: 8}
+          - {lane: linux-3.14, os: ubuntu-latest, python-version: "3.14", shards: 8, costs: linux}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,12 +61,13 @@ jobs:
       - name: Run every macOS test in isolated processes
         if: runner.os == 'macOS'
         run: python scripts/run_checkout_tests.py --workers 4 --controller-module test_provider_common_flow --costs tests/fixtures/checkout-class-seconds-macos.json --shard "${{ matrix.shard }}/${{ matrix.shards }}" --report "${{ runner.temp }}/checkout-timings.json"
-      # Linux 3.14 measurements from the same run (artifact 14172687965).
-      # Reuse as hints for Linux 3.11, not as its measured duration or a pass.
+      # Linux 3.14 timings: run 43723162022, artifact 14172687965. Linux 3.11
+      # runs about twice as long with different class ratios, so it uses its own
+      # sharded timings: run 43748051487, artifact 14178101935. Both failed tests.
       - name: Run every Linux test in isolated processes
         if: runner.os == 'Linux'
-        run: python scripts/run_checkout_tests.py --workers 4 --controller-module test_provider_common_flow --costs tests/fixtures/checkout-class-seconds-linux.json --shard "${{ matrix.shard }}/${{ matrix.shards }}" --report "${{ runner.temp }}/checkout-timings.json"
-      # Complete-inventory Windows timings: run 43723162022, artifact 14172564619.
+        run: python scripts/run_checkout_tests.py --workers 4 --controller-module test_provider_common_flow --costs "tests/fixtures/checkout-class-seconds-${{ matrix.costs }}.json" --shard "${{ matrix.shard }}/${{ matrix.shards }}" --report "${{ runner.temp }}/checkout-timings.json"
+      # Complete-inventory Windows timings: run 43748051487, artifact 14177504251.
       # Its tests failed; preserve all tests and use timings only for scheduling.
       - name: Run every Windows test in isolated processes
         if: runner.os == 'Windows'
@@ -169,8 +170,7 @@ jobs:
           python -m pip install -r requirements/ci.txt
           python -m pip install -e .
           python -m pip install -e packages/python/review-sensei-github --no-deps
-      # Linux 3.14 class timings (run 43723162022, artifact 14172687965) as relative
-      # weights until a complete current branch-coverage receipt exists.
+      # Merged branch-coverage shard timings (run 43748051487, artifact 14176879375).
       # Its tests failed; this changes scheduling, not test or coverage scope.
       - name: Branch coverage
         run: |

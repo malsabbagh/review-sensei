@@ -117,11 +117,14 @@ class CheckoutRunnerTests(CheckoutAccountingChecks, unittest.TestCase):
         )["jobs"]
         compatibility = jobs["compatibility-shard"]
         lanes = {
-            (item["os"], item["python-version"])
+            (item["os"], item["python-version"]): item.get("costs")
             for item in compatibility["strategy"]["matrix"]["include"]
         }
-        for version in ("3.11", "3.14"):
-            self.assertIn(("ubuntu-latest", version), lanes)
+        for version, costs in (("3.11", "linux311"), ("3.14", "linux")):
+            self.assertEqual(lanes[("ubuntu-latest", version)], costs)
+            self.assertTrue(
+                (ROOT / f"tests/fixtures/checkout-class-seconds-{costs}.json").is_file()
+            )
         routes = [
             step
             for step in compatibility["steps"]
@@ -140,7 +143,7 @@ class CheckoutRunnerTests(CheckoutAccountingChecks, unittest.TestCase):
                 "--controller-module",
                 "test_provider_common_flow",
                 "--costs",
-                "tests/fixtures/checkout-class-seconds-linux.json",
+                "tests/fixtures/checkout-class-seconds-${{ matrix.costs }}.json",
                 "--shard",
                 "${{ matrix.shard }}/${{ matrix.shards }}",
                 "--report",

@@ -190,7 +190,9 @@ class InstalledIndependentMethodTests(unittest.TestCase):
                             (
                                 name,
                                 hashlib.sha256(
-                                    (fixtures / name).read_bytes()
+                                    (fixtures / name)
+                                    .read_text(encoding="utf-8")
+                                    .encode("utf-8")
                                 ).hexdigest(),
                             )
                             for name in (MODULE + ".py", "probe_support.py")

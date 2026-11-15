@@ -182,7 +182,12 @@ class InstalledClassShardTests(unittest.TestCase):
                 "child_probe.py",
             )
             sources = tuple(
-                (name, hashlib.sha256((fixtures / name).read_bytes()).hexdigest())
+                (
+                    name,
+                    hashlib.sha256(
+                        (fixtures / name).read_text(encoding="utf-8").encode("utf-8")
+                    ).hexdigest(),
+                )
                 for name in names
             )
             if mode == "missing-id":
