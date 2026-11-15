@@ -163,8 +163,24 @@ def _build_registry():
                 definition is None
                 or function.__code__ is not definition[0]
                 or function.__globals__ is not definition[1]
-                or not defaults_unchanged(function, definition[2])
-                or vars(function).get("__wrapped__", no_wrapper) is not definition[3]
+            ):
+                return False
+            if definition[2] is empty_defaults:
+                # The common empty case still checks both live bindings on
+                # every call; it needs no nested snapshot traversal/helper.
+                if (
+                    function.__defaults__ is not None
+                    or function.__kwdefaults__ is not None
+                ):
+                    return False
+            elif not defaults_unchanged(function, definition[2]):
+                return False
+            metadata = function.__dict__
+            # Function metadata can be replaced with a dict subclass. Reject it
+            # before .get can invoke a callback during source authentication.
+            if (
+                type(metadata) is not dict
+                or metadata.get("__wrapped__", no_wrapper) is not definition[3]
             ):
                 return False
             wrapped = definition[3]
