@@ -362,7 +362,8 @@ def _maximum_native_allocation(packed, *, preserve_observed=False, _pair_source=
             )
             remainder = finding_lifecycle_prefix.remainder(document, prefix_count=count)
             # Only unknown suffix atoms receive maxima. The separately proven
-            # old effects and complete pair retain their exact observed bytes.
+            # old effects and source-fixed updates retain their exact bytes;
+            # synthetic confirmations are never treated as observations.
             maximum = _maximum_native_allocation(remainder, preserve_observed=True)
             return finding_lifecycle_prefix.assemble_data(prefix, remainder=maximum)
     path_bounds = (
