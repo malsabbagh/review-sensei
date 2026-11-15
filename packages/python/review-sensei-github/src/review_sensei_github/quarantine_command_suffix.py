@@ -311,6 +311,16 @@ def _registry():
         )
         recipe["event_exact_body"] = event_body
         recipe["event_wire_bound"] = event_wire
+        from . import historical_journal_census
+
+        require_module_seal(historical_journal_census)
+        if recipe["contract"] == "closed-inline-c5-r2-p2-no-verification-v1":
+            descriptor = historical_journal_census.proposal_descriptor(
+                run, guard, captured, recipe
+            )
+            if descriptor is not None:
+                recipe["journal_enumeration"] = descriptor
+                recipe["contract"] = "closed-inline-c5-r2-p2-journal-c3-reserved105-v1"
         if run.caller.budget_view.ordinary_remaining() < recipe["ordinary_required"]:
             raise ReviewInputError(
                 "guarded suffix complete ordinary tail is unfunded "

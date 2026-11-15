@@ -194,6 +194,20 @@ def _registry():
             )
         _require_default_profile(run.caller)
         recipe = json.loads(entry["recipe"])
+        from . import historical_journal_census
+
+        require_module_seal(historical_journal_census)
+        descriptor = recipe.get("journal_enumeration")
+        if recipe["contract"] == "closed-inline-c5-r2-p2-journal-c3-reserved105-v1":
+            expected_descriptor = historical_journal_census.proposal_descriptor(
+                run, entry["guard"], entry["captured"], recipe
+            )
+            if expected_descriptor is None or canonical_bytes(
+                descriptor
+            ) != canonical_bytes(expected_descriptor):
+                raise ReviewInputError("historical C3 pre-effect proof changed")
+        elif descriptor is not None:
+            raise ReviewInputError("historical C3 descriptor has no opted-in contract")
         measured = recipe["root_measurement"]
         from . import quarantine_command_receipt as receipt_source
 
@@ -223,6 +237,7 @@ def _registry():
                 ("closed-inline-c4-reserved-verification-v1", 4, 3, 1, 105),
                 ("closed-inline-c5-original-no-verification-v1", 5, 3, 1, 105),
                 ("closed-inline-c5-r2-p2-no-verification-v1", 5, 2, 2, 104),
+                ("closed-inline-c5-r2-p2-journal-c3-reserved105-v1", 5, 2, 2, 104),
             }
             or recipe.get("ordinary_required") != 105
             or recipe.get("receipt_reads") != page_reads
@@ -257,6 +272,9 @@ def _registry():
             prior=state.prior_nonstartup_liability,
             intent=canonical_bytes(state.action["intent"]),
             recipe=entry["recipe"],
+            journal_enumeration=canonical_bytes(descriptor)
+            if descriptor is not None
+            else None,
             captured=entry["captured"],
             page=entry["page"],
             page_binding=entry["page_binding"],
@@ -614,6 +632,35 @@ def _registry():
             return None
         return entry.pop("final_census", None)
 
+    def journal_census_descriptor(ledger, identity):
+        from . import historical_journal_census
+
+        require_module_seal(historical_journal_census)
+        source = sys._getframe(1)
+        if source.f_globals is not vars(
+            historical_journal_census
+        ) or source.f_code not in (
+            historical_journal_census.choose.__code__,
+            historical_journal_census.require_scope.__code__,
+        ):
+            raise ReviewInputError("historical C3 descriptor lacks original consumer")
+        entry = require(ledger.caller)
+        if (
+            entry is None
+            or entry["ledger"] is not ledger
+            or entry["identity"] != identity
+        ):
+            raise ReviewInputError("historical C3 descriptor owner changed")
+        recipe = json.loads(entry["recipe"])
+        raw = entry["journal_enumeration"]
+        if (
+            recipe["contract"] != "closed-inline-c5-r2-p2-journal-c3-reserved105-v1"
+            or type(raw) is not bytes
+            or canonical_bytes(recipe.get("journal_enumeration")) != raw
+        ):
+            raise ReviewInputError("historical C3 descriptor binding changed")
+        return json.loads(raw)
+
     def journal_census_membership(ledger, identity, *, added_parts):
         """Original checkpoint-only reader premise; no admission or new funds."""
         from . import finding_lifecycle, historical_journal_census, quarantine_action
@@ -635,7 +682,7 @@ def _registry():
         if entry is None:
             return None
         recipe = json.loads(entry["recipe"])
-        if recipe["contract"] != "closed-inline-c5-r2-p2-no-verification-v1":
+        if recipe["contract"] != "closed-inline-c5-r2-p2-journal-c3-reserved105-v1":
             return None
         _journal_phase_reader(phase_reader)
         checkpoint = phase_reader(
@@ -833,6 +880,7 @@ def _registry():
         bind_journal,
         require_journal,
         retained_prefix_source,
+        journal_census_descriptor,
         journal_census_membership,
         lifecycle_execution_context,
         consume_lifecycle_execution_context,
@@ -850,6 +898,7 @@ def _registry():
     bind_journal,
     require_journal,
     retained_prefix_source,
+    journal_census_descriptor,
     journal_census_membership,
     lifecycle_execution_context,
     consume_lifecycle_execution_context,
