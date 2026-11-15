@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import PropertyMock, patch
 
+from original_source_observation import observe_original
 from review_sensei_github.api_run_requests import ApiRunSessionLedger
 from review_sensei_github.session_ledger import parse_session_comment
 from test_action_run import CommandEntryFixture
@@ -56,17 +57,21 @@ class SelectedPartsTests(unittest.TestCase):
     def test_actual_two_part_producer_keeps_original_operation_and_funding(self):
         original = ApiRunSessionLedger.replace_finding_lifecycle_parts
         witnessed = []
+        entries = {}
 
-        def run(ledger, identity, mutate, **kwargs):
-            before = len(ledger.caller.observations)
-            result = original(ledger, identity, mutate, **kwargs)
-            witnessed.append(kwargs["parts"])
-            self.assertLessEqual(len(ledger.caller.observations) - before, 10)
-            return result
+        def entered(frame):
+            entries[id(frame)] = len(frame.f_locals["self"].caller.observations)
+
+        def returned(frame, result):
+            ledger = frame.f_locals["self"]
+            witnessed.append(frame.f_locals["parts"])
+            self.assertLessEqual(
+                len(ledger.caller.observations) - entries.pop(id(frame)), 10
+            )
 
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(ApiRunSessionLedger, "replace_finding_lifecycle_parts", run),
+            observe_original(original, entered=entered, returned=returned),
         ):
             f = self.producer(directory)
             self.assertEqual(f.invoke(), 0, f.error)
@@ -115,8 +120,8 @@ class SelectedPartsTests(unittest.TestCase):
         consume = ApiRunSessionLedger._consume_plain_finding_input
         caught = []
 
-        def observed(ledger, identity):
-            result = consume(ledger, identity)
+        def observed(frame, result):
+            ledger, identity = frame.f_locals["self"], frame.f_locals["identity"]
             if result is not None:
                 caught.append(True)
                 with self.assertRaisesRegex(ReviewInputError, "already consumed"):
@@ -129,11 +134,10 @@ class SelectedPartsTests(unittest.TestCase):
                         parts=1,
                         retained_bytes=100,
                     )
-            return result
 
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(ApiRunSessionLedger, "_consume_plain_finding_input", observed),
+            observe_original(consume, returned=observed),
         ):
             f = self.producer(directory)
             self.assertEqual(f.invoke(), 0, f.error)
@@ -269,8 +273,7 @@ class SelectedPartsTests(unittest.TestCase):
             f = self.producer(directory)
             raced = []
 
-            def stage(ledger, identity, **kwargs):
-                manifest = original(ledger, identity, **kwargs)
+            def stage(frame, manifest):
                 if manifest["encoding"] == "partitioned-json-v1" and not raced:
                     current = parse_session_comment(
                         f.comment["body"], identity=IDENTITY
@@ -284,9 +287,8 @@ class SelectedPartsTests(unittest.TestCase):
                         repository_id=123, pull_request=7, record=rival
                     )
                     raced.append((f.comment["body"], copy.deepcopy(f.extra_comments)))
-                return manifest
 
-            with patch.object(ApiRunSessionLedger, "stage_evidence", stage):
+            with observe_original(original, returned=stage):
                 self.assertNotEqual(f.invoke(), 0)
             self.assertTrue(raced)
             self.assertEqual(f.comment["body"], raced[0][0])
