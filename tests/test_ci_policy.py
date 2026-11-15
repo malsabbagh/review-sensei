@@ -2109,7 +2109,7 @@ class ActionPinPolicyTests(InstalledAccountingChecks, unittest.TestCase):
                 "test_quarantine_contract",
             ],
         )
-        self.assertIn("tests/fixtures/installed-unit-log-delta-seconds.json", text)
+        self.assertIn("tests/fixtures/installed-unit-seconds.json", text)
         self.assertIn('unittest discover -s "$suite/downstream" -v', text)
         self.assertNotIn(
             'unittest discover -s "$GITHUB_WORKSPACE/tests" -v',
