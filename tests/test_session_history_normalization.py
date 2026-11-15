@@ -4,7 +4,8 @@ import unittest
 from collections import UserDict
 from copy import deepcopy
 
-from test_session_ledger import FIXED_NOW, IDENTITY, SessionRecordTests
+import test_session_ledger as ledger_fixture
+from test_session_ledger import FIXED_NOW, IDENTITY
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionRecord
@@ -15,7 +16,7 @@ class SessionHistoryNormalizationTests(unittest.TestCase):
         return SessionRecord.create(
             IDENTITY,
             now=FIXED_NOW,
-            convergence_history=SessionRecordTests()._history(),
+            convergence_history=ledger_fixture.SessionRecordTests()._history(),
         )
 
     def test_restoration_keeps_fresh_history_and_original_integrity(self):
@@ -62,7 +63,7 @@ class SessionHistoryNormalizationTests(unittest.TestCase):
         self.assertEqual(entered, [True])
 
     def test_create_and_evolve_keep_full_history_validation_and_fresh_values(self):
-        history = SessionRecordTests()._history()
+        history = ledger_fixture.SessionRecordTests()._history()
         record = SessionRecord.create(
             IDENTITY, now=FIXED_NOW, convergence_history=history
         )
@@ -92,7 +93,7 @@ class SessionHistoryNormalizationTests(unittest.TestCase):
                 entered.append(True)
                 super().__post_init__(digest_shape)
 
-        history = SessionRecordTests()._history()
+        history = ledger_fixture.SessionRecordTests()._history()
         history["baseline"]["findings"][0]["blocking"] = "invalid"
         with self.assertRaises(ReviewInputError):
             ObservingRecord.create(IDENTITY, now=FIXED_NOW, convergence_history=history)
