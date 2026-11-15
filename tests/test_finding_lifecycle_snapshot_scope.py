@@ -7,6 +7,7 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from fake_github_http import json_response
+from original_source_observation import observe_original
 from review_sensei_github.api_run_requests import ApiRunSessionLedger
 
 from review_sensei.errors import ReviewInputError
@@ -81,14 +82,13 @@ class SnapshotScopeTests(unittest.TestCase):
                 original_read = ApiRunSessionLedger._current_plain_snapshot_part
                 original_open = f.caller._opener
 
-                def read(current, identity, storage_id):
-                    result = original_read(current, identity, storage_id)
+                def read(frame, result):
+                    current = frame.f_locals["self"]
                     if (
                         getattr(current, "_plain_finding_snapshot_scope", None)
                         is not None
                     ):
                         armed.append(True)
-                    return result
 
                 def external(request, timeout):
                     response = original_open(request, timeout)
@@ -114,9 +114,7 @@ class SnapshotScopeTests(unittest.TestCase):
                     return response
 
                 f.caller._opener = external
-                with patch.object(
-                    ApiRunSessionLedger, "_current_plain_snapshot_part", read
-                ):
+                with observe_original(original_read, returned=read):
                     with self.assertRaises(ReviewInputError):
                         stage_finding_lifecycle(ledger, record, **kwargs)
                 self.assertTrue(armed)
