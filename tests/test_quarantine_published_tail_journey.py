@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 import test_quarantine_journey as journey_contract
 from fake_github_http import json_response
+from original_finish_interrupt import interrupt_original_finish
 from quarantine_fixture_identity import PUBLISHED_TAIL_RUNS
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
 from review_sensei_github.publication import (
@@ -187,10 +188,11 @@ class PublishedTailJourneyFixture(JourneyFixture):
             }
             for n in range(failed_count)
         ]
-        with patch.object(
-            ApiRunRequestTransport, "finish_review_run", side_effect=KeyboardInterrupt
-        ):
+        with interrupt_original_finish(
+            ApiRunRequestTransport, run_id=self.run_id, attempt=self.attempt
+        ) as interrupted:
             assert self.invoke(human=True) == 130, self.error
+        assert interrupted == [True], "original finish entry was not interrupted"
         old = parse_session_comment(
             self.comment["body"], identity=self.selected.identity
         )
