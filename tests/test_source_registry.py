@@ -25,6 +25,21 @@ class SourceRegistryTests(unittest.TestCase):
                 require_module_seal(disposition)
         require_module_seal(disposition)
 
+    def test_module_exports_cannot_add_descriptor_or_receiver_binding(self):
+        original = disposition.apply_session_command
+        for replacement in (
+            types.MethodType(original, object()),
+            staticmethod(original),
+            classmethod(original),
+        ):
+            with (
+                self.subTest(kind=type(replacement).__name__),
+                patch.object(disposition, "apply_session_command", replacement),
+                self.assertRaisesRegex(ReviewInputError, "source changed"),
+            ):
+                require_module_seal(disposition)
+            require_module_seal(disposition)
+
     def test_original_ledger_method_consumer_is_read_only_and_rejects_shadow(self):
         from review_sensei_github.review_run import ActionRunLedger, ReviewRunLedger
         from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger

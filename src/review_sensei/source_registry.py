@@ -265,10 +265,10 @@ def _build_registry():
         registered[module] = tuple(row for row in bindings if row[0] is module)
         module_classes[module] = tuple(defined_classes)
 
-    def require_bindings(bindings, *, class_snapshot=None):
+    def require_bindings(bindings, *, owner_snapshot=None):
         for owner, name, original, code in bindings:
-            if class_snapshot is not None and owner is class_snapshot[0]:
-                current = class_snapshot[1].get(name)
+            if owner_snapshot is not None and owner is owner_snapshot[0]:
+                current = owner_snapshot[1].get(name)
             else:
                 current = normalize(
                     inspect.getattr_static(owner, name, None)
@@ -350,20 +350,25 @@ def _build_registry():
             != executable
         ):
             raise ReviewInputError("original class source changed")
-        require_bindings(bindings, class_snapshot=(cls, members))
+        require_bindings(bindings, owner_snapshot=(cls, members))
 
     def require_module_seal(module):
         if type(module) is not ModuleType:
             raise ReviewInputError("original source module seal is unavailable")
         bindings = registered.get(module)
-        module_name = vars(module).get("__name__")
+        namespace = vars(module)
+        module_name = namespace.get("__name__")
         if (
             bindings is None
             or type(module_name) is not str
             or sys.modules.get(module_name) is not module
         ):
             raise ReviewInputError("original source module seal is unavailable")
-        require_bindings(bindings)
+        # Module exports have no descriptor binding. Check their exact current
+        # values directly: normalizing a replacement bound method/descriptor
+        # could incorrectly accept changed call semantics as the same function.
+        # Reuse this invocation's live namespace, never a prior acceptance.
+        require_bindings(bindings, owner_snapshot=(module, namespace))
         for cls in module_classes[module]:
             require_class(cls)
 
