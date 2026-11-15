@@ -47,3 +47,24 @@ class HistoricalRecordSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "record source changed"):
             fence._record_data(Poison())
         self.assertEqual(calls, [])
+
+    def test_nested_hostile_metaclass_never_receives_type_comparison(self):
+        calls = []
+
+        class Meta(type):
+            def __eq__(cls, other):
+                calls.append("type equality")
+                return False
+
+        class Poison(metaclass=Meta):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            helper = actions.NativeActionTests()
+            fixture, ledger = helper.prepare(directory)
+            _, _, _, record = helper.complete(fixture, ledger)
+            changed = copy.copy(record)
+            object.__setattr__(changed, "dispositions", {"nested": [Poison()]})
+            with self.assertRaisesRegex(ReviewInputError, "non-original data"):
+                snapshot._record_snapshot(changed)
+        self.assertEqual(calls, [])

@@ -354,12 +354,35 @@ def fetch_comments(
 
     lifecycle = getattr(ledger, "_quarantine_lifecycle_capacity", None)
     if lifecycle is not None:
-        from .packed_comment_census import fetch_packed_comments
-
         if type(lifecycle) is not _LifecycleCapacity:
             raise ReviewInputError("quarantine lifecycle census scope is unissued")
         lifetime_plan = _LifecycleCapacity.require(lifecycle, ledger, identity)
+        if lifecycle.read_issuer == "historical-journal":
+            if historical_reader is not None:
+                raise ReviewInputError("historical journal reader scope conflicts")
+            from . import historical_journal_census
+
+            require_module_seal(historical_journal_census)
+            packed_reader = historical_journal_census.packed_reader()
+            complete_cap = historical_journal_census.complete_read_cap(
+                lifetime_plan.worst_read_calls(), max_requests
+            )
+            historical_journal_census.begin(lifecycle)
+            rows = packed_reader(
+                ledger,
+                identity,
+                plan=lifetime_plan,
+                max_requests=complete_cap,
+                timeout_seconds=timeout_seconds,
+                before_read=before_read,
+                observe_request=observe_request,
+            )
+            require_module_seal(historical_journal_census)
+            historical_journal_census.packed_reader(packed_reader)
+            return historical_journal_census.finish(lifecycle, rows)
         if historical_reader is None:
+            from .packed_comment_census import fetch_packed_comments
+
             return fetch_packed_comments(
                 ledger,
                 identity,
@@ -590,6 +613,7 @@ class _LifecycleCapacity:
     parts: int
     extension: Any = None
     read_plan: Any = None
+    read_issuer: str | None = None
 
     def enumeration_plan(self):
         return self.plan if self.read_plan is None else self.read_plan
@@ -613,10 +637,20 @@ class _LifecycleCapacity:
         if self.read_plan is not None:
             from review_sensei.source_registry import require_module_seal
 
-            from . import materialized_publication_phase
+            if self.read_issuer == "materialized":
+                from . import materialized_publication_phase
 
-            require_module_seal(materialized_publication_phase)
-            materialized_publication_phase.require_invocation_read_plan(self)
+                require_module_seal(materialized_publication_phase)
+                materialized_publication_phase.require_invocation_read_plan(self)
+            elif self.read_issuer == "historical-journal":
+                from . import historical_journal_census
+
+                require_module_seal(historical_journal_census)
+                historical_journal_census.require_scope(self)
+            else:
+                raise ReviewInputError("quarantine lifecycle reader issuer changed")
+        elif self.read_issuer is not None:
+            raise ReviewInputError("quarantine lifecycle reader plan is absent")
         return issued
 
     def require(self, ledger, identity):
@@ -641,6 +675,12 @@ class _LifecycleCapacity:
         return _LifecycleCapacity.enumeration_plan(self)
 
     def _seal(self):
+        issuer = self.read_issuer
+        if issuer is not None and (
+            type(issuer) is not str
+            or issuer not in ("materialized", "historical-journal")
+        ):
+            raise ReviewInputError("quarantine lifecycle reader issuer is unsupported")
         return (
             id(self.ledger),
             id(self.caller),
@@ -657,6 +697,7 @@ class _LifecycleCapacity:
             self.parts,
             id(self.extension),
             id(self.read_plan),
+            self.read_issuer,
             None
             if self.read_plan is None
             else (
@@ -722,10 +763,18 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         or not 0 <= added_parts <= 256
     ):
         raise ReviewInputError("quarantine lifecycle capacity source is unsupported")
+    from review_sensei.source_registry import require_module_seal
+
+    from . import quarantine_selected_predecessor
+
+    require_module_seal(quarantine_selected_predecessor)
     caller = ledger.caller
-    caller._require_ledger(ledger, identity)
     record = caller._effect_record
     authenticated = ledger._quarantine_authenticated
+    quarantine_selected_predecessor.validate_models(
+        authenticated, identity, *((record,) if record is not None else ())
+    )
+    caller._require_ledger(ledger, identity)
     if (
         not ledger._quarantine_required
         or not ledger._inventory_complete
@@ -747,7 +796,17 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         receipt = confirmed_checkpoint_capacity(caller, ledger, identity)
     predecessor = read_predecessor(authenticated.archive)
     lineage = authenticated.lineage
-    expected = {lineage["predecessor_comment_id"]: predecessor.record_sha256}
+    from review_sensei.source_registry import require_module_seal
+
+    from . import quarantine_selected_predecessor
+
+    require_module_seal(quarantine_selected_predecessor)
+    old_native_digest, selected_root_id = (
+        quarantine_selected_predecessor.selected_digest(
+            ledger, identity, authenticated, predecessor
+        )
+    )
+    expected = {lineage["predecessor_comment_id"]: old_native_digest}
     from .publication_recovery import _publication_transport
 
     guard = getattr(
@@ -799,6 +858,10 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
             ledger._part_owner(row, identity)
             roots[identifier] = parsed.record_sha256
             if parsed.record_sha256 == record.record_sha256:
+                if selected_root_id is not None and identifier != selected_root_id:
+                    raise ReviewInputError(
+                        "quarantine lifecycle selected root ID changed"
+                    )
                 if canonical_bytes(parsed.to_dict()) != canonical_bytes(
                     record.to_dict()
                 ):
@@ -866,6 +929,17 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
     read_plan = materialized_publication_phase.invocation_read_plan(
         ledger, identity, plan=plan, added_parts=added_parts
     )
+    read_issuer = "materialized" if read_plan is not None else None
+    from . import historical_journal_census
+
+    require_module_seal(historical_journal_census)
+    historical_plan = historical_journal_census.choose(
+        ledger, identity, plan=plan, added_parts=added_parts
+    )
+    if historical_plan is not None:
+        if read_plan is not None:
+            raise ReviewInputError("quarantine lifecycle reader issuers conflict")
+        read_plan, read_issuer = historical_plan, "historical-journal"
     enumeration = plan if read_plan is None else read_plan
     if enumeration.worst_read_calls() > MAX_PAGINATION_PAGES:
         raise ReviewInputError(
@@ -883,6 +957,7 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         added_parts,
         extension,
         read_plan,
+        read_issuer,
     )
     _LIFECYCLE_ISSUED[scope] = _LifecycleCapacity._seal(scope)
     return scope
@@ -920,6 +995,48 @@ def _bind_lifecycle_activation(scope, capability):
     _LIFECYCLE_ACTIVE[scope] = (issued[0], None, capability)
 
 
+def _reservation_state_matches(seal, issued, active):
+    """Registry-state DATA decision; it never inserts or activates a scope."""
+    if issued is not None:
+        return active is None and type(issued) is tuple and issued == seal
+    return type(active) is tuple and len(active) == 3 and active[0] == seal
+
+
+def reservation_plan(scope):
+    """Preserve lifetime writer liquidity for the historical-only reader."""
+    import sys
+
+    from review_sensei.source_registry import require_module_seal
+
+    from . import packed_comment_census
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(packed_comment_census)
+    if type(scope) is not _LifecycleCapacity:
+        raise ReviewInputError("quarantine lifecycle reservation scope is unissued")
+    fields = vars(scope)
+    if any(type(key) is not str for key in fields):
+        raise ReviewInputError("quarantine lifecycle reservation fields changed")
+    issuer = fields.get("read_issuer")
+    if issuer is not None and (
+        type(issuer) is not str or issuer not in ("historical-journal", "materialized")
+    ):
+        raise ReviewInputError("quarantine lifecycle reservation issuer changed")
+    packed_comment_census._single_plan_snapshot(fields.get("plan"))
+    if fields.get("read_plan") is not None:
+        packed_comment_census._single_plan_snapshot(fields["read_plan"])
+    seal = _LifecycleCapacity._seal(scope)
+    issued = _LIFECYCLE_ISSUED.get(scope)
+    active = _LIFECYCLE_ACTIVE.get(scope)
+    if not _reservation_state_matches(seal, issued, active):
+        raise ReviewInputError("quarantine lifecycle reservation scope is unissued")
+    # Callers retain their original live scope/root/source validation. Pricing
+    # also uses this helper before activation, against the original issued seal.
+    if issuer == "historical-journal":
+        return fields["plan"]
+    return _LifecycleCapacity.enumeration_plan(scope)
+
+
 def lifecycle_checkpoint_operation(ledger, caller, identity):
     """Price only the active source-issued quarantine lifecycle checkpoint."""
     scope = getattr(ledger, "_quarantine_lifecycle_capacity", None)
@@ -928,11 +1045,7 @@ def lifecycle_checkpoint_operation(ledger, caller, identity):
     if type(scope) is not _LifecycleCapacity or scope.caller is not caller:
         raise ReviewInputError("quarantine lifecycle checkpoint scope is unissued")
     _LifecycleCapacity._require_scope(scope, ledger, identity)
-    return (
-        _LifecycleCapacity.enumeration_plan(scope).worst_read_calls()
-        + 6
-        + 2 * scope.parts
-    )
+    return reservation_plan(scope).worst_read_calls() + 6 + 2 * scope.parts
 
 
 def lifecycle_checkpoint_pricing(
@@ -1043,7 +1156,7 @@ def lifecycle_checkpoint_pricing(
         added_bytes=added_bytes,
         checkpoint_parts=checkpoint_parts,
     )
-    pages = _LifecycleCapacity.enumeration_plan(scope).worst_read_calls()
+    pages = reservation_plan(scope).worst_read_calls()
     return factory(
         ledger,
         record,

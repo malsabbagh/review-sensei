@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 import test_quarantine_journey as journey_contract
 from fake_github_http import json_response
+from original_finish_interrupt import interrupt_original_finish
 from quarantine_fixture_identity import PUBLISHED_TAIL_RUNS
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
 from review_sensei_github.publication import (
@@ -28,6 +29,7 @@ from review_sensei_github.quarantine_published_tail import (
     execution_manifest_digest,
 )
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_lifecycle import forbid_replacement_phase_budget
 from test_quarantine_activation import event, registered_resource
 from test_quarantine_evidence import original_objects
 from test_quarantine_journey import JourneyFixture
@@ -186,10 +188,11 @@ class PublishedTailJourneyFixture(JourneyFixture):
             }
             for n in range(failed_count)
         ]
-        with patch.object(
-            ApiRunRequestTransport, "finish_review_run", side_effect=KeyboardInterrupt
-        ):
+        with interrupt_original_finish(
+            ApiRunRequestTransport, run_id=self.run_id, attempt=self.attempt
+        ) as interrupted:
             assert self.invoke(human=True) == 130, self.error
+        assert interrupted == [True], "original finish entry was not interrupted"
         old = parse_session_comment(
             self.comment["body"], identity=self.selected.identity
         )
@@ -550,11 +553,14 @@ class PublishedTailJourneyTests(unittest.TestCase):
                     self.assertEqual(fixture.root_posts, 1)
 
     def test_fresh_recurrence_stays_independent_of_fourteen_historical_decisions(self):
+        from hot_original_entry import invoke_original
+
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             fixture = NativePublishedTailJourneyFixture(directory)
+            fixture.api_url = "https://api.github.com"
             old, registration = fixture.original_origins()
             fixture.provider_comments = [
                 {
@@ -569,7 +575,12 @@ class PublishedTailJourneyTests(unittest.TestCase):
                 }
             ]
             with registered_resource([registration]):
-                self.assertEqual(fixture.invoke(), 0, fixture.error)
+                # A populated current admission authenticates the actual
+                # engine and owner. Keep its definitions intact and fake only
+                # the external wire, not EntryFixture's legacy engine wrapper.
+                with forbid_replacement_phase_budget():
+                    result, _ = invoke_original(fixture)
+                self.assertEqual(result, 0, fixture.error)
                 # Inspect the displayed current obligations structurally. The
                 # unaware parser must still refuse v8; runtime commands below
                 # must use the independently authenticated complete union.

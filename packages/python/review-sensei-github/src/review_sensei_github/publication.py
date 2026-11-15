@@ -2368,6 +2368,18 @@ class ReviewApprovalFinalizer:
     def attach_quarantine(
         self, eligibility, *, token, repository, pull_request, head_sha
     ):
+        if self._quarantine_capacity_preparation is not None:
+            from review_sensei.source_registry import require_module_seal
+
+            from . import quarantine_command_finalization as sizing_source
+
+            require_module_seal(sizing_source)
+            return sizing_source.attach_sizing_hold(
+                self._quarantine_capacity_preparation,
+                self,
+                eligibility,
+                head_sha=head_sha,
+            )
         reader = self.quarantine_reader(
             token=token,
             repository=repository,
@@ -3745,27 +3757,43 @@ class ReviewApprovalFinalizer:
                     status="gate_reevaluation_failed",
                     diagnostic="command_body_capacity_unverifiable",
                 )
-        live = (
-            None
-            if compacted
-            else _consume_quarantine_pr(
-                quarantine_pr,
+        if self._quarantine_capacity_preparation is not None:
+            from review_sensei.source_registry import require_module_seal
+
+            from . import quarantine_command_finalization as sizing_source
+
+            require_module_seal(sizing_source)
+            live = sizing_source.prospective_pr_branch(
+                self._quarantine_capacity_preparation,
                 self,
-                token=token,
                 repository=repository,
+                repository_id=repository_id,
                 pull_request=pull_request,
                 head_sha=head_sha,
-                app_slug=app_slug,
+                base_sha=index.base_sha,
             )
-        )
-        if live is None:
-            live = self._preflight(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
+        else:
+            live = (
+                None
+                if compacted
+                else _consume_quarantine_pr(
+                    quarantine_pr,
+                    self,
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
             )
+            if live is None:
+                live = self._preflight(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
         if live.result is not None:
             return live.result
         if live.base_sha != index.base_sha or live.repository_id != repository_id:

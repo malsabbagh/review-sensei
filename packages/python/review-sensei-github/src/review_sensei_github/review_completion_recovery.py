@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from datetime import datetime
 from typing import Any, NoReturn
 
@@ -127,7 +128,11 @@ def _digest(value: Any) -> str:
 
 class _ReadOnlyHttp(GitHubHttp):
     def __init__(self, transport: GitHubHttp) -> None:
-        super().__init__(api_url=transport.api_url, timeout=transport.timeout)
+        super().__init__(
+            api_url=transport.api_url,
+            timeout=transport.timeout,
+            evidence_monotonic=getattr(transport, "evidence_monotonic", time.monotonic),
+        )
         self.transport = transport
 
     def request(self, method, path, *, token, body=None, timeout_seconds=None):

@@ -77,7 +77,7 @@ def _install_checkpoint_source(source_class):
     original = source_class.checkpoint
     original_document = source_class._document
     original_pending = source_class._pending_wire
-    original_pack = finding_lifecycle._pack_journal
+    original_pack = finding_lifecycle._pack_current_journal
 
     @wraps(original)
     def checkpoint(journal, *, reserved_tail_calls=0, pending_intent=False):

@@ -189,7 +189,7 @@ INSTALLED_CLASS_SHARD_CONTRACT = (
         ),
         (
             "test_action_reply_entry.py",
-            "b0591eedaf036714a07b5e9a3045f6635c580783536fac781275ccff6f20fed9",
+            "4e79c17a218a1357681a3aff1a0c99d2e35ad5edfcdd3b9f5ffb7fee92217fb9",
         ),
         (
             "test_action_run.py",
@@ -209,7 +209,7 @@ INSTALLED_CLASS_SHARD_CONTRACT = (
         ),
         (
             "test_review_run.py",
-            "180edccb52e098f6854eea65d784d710a5cc2caae6db20a24d4bce2db87bf000",
+            "922502198c6ad42dcf6ca06a7b30fb6cdc9af13fa147682cb15b999e0059a620",
         ),
         (
             "test_review_run_rescan.py",

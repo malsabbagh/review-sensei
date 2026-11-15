@@ -5,80 +5,228 @@ import tempfile
 import unittest
 from copy import deepcopy
 from dataclasses import replace
-from unittest.mock import Mock, patch
 
-from review_sensei_github.historical_assessments import HistoricalAssessmentReader
 from review_sensei_github.publication import (
-    ReviewApprovalFinalizer,
     approval_eligibility_from_body,
     approval_eligibility_marker,
 )
 from test_carried_assessment_composition import carried_views
-from test_human_assessment import HEAD, Provider, State, prior, response_for
+from test_human_assessment import State, prior
 
 from review_sensei.errors import ReviewInputError
-from review_sensei.historical_assessments import hold_view
 
 
 class CarriedHumanProgressTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        from review_sensei_github.session_ledger import parse_session_comment
-        from test_action_run import historical_command_case
-        from test_review_run import IDENTITY
-
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = historical_command_case(directory)
-            cls.hold = deepcopy(
-                parse_session_comment(
-                    fixture.comment["body"], identity=IDENTITY
-                ).historical_assessments
-            )
-
     def test_application_reassessment_keeps_pending_and_settled_historical_holds(self):
-        for pending in (False, True):
-            with self.subTest(pending=pending):
-                hold = deepcopy(self.hold)
-                if not pending:
-                    hold["settlements"] = [
-                        dict(
-                            instance=item["instance"],
-                            action="dismiss",
-                            actor="alice",
-                            role="maintain",
-                            head_sha=HEAD,
-                            source_id=100 + i,
-                            source_updated_at="2026-10-29T00:00:00Z",
-                            source_body_sha256="d" * 64,
-                            reason="The separately authenticated historical decision is retained.",
-                            policy_sha256="e" * 64,
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_action_reply_entry import ReplyEntryFixture
+        from test_action_run import historical_body, historical_command_case
+        from test_review_run import IDENTITY, _CompletionFixture
+
+        class HistoricalReplyFixture(ReplyEntryFixture, _CompletionFixture):
+            """Reply endpoints followed by original historical metadata endpoints.
+
+            Only external synthetic HTTP is composed. Production readers,
+            finalizer methods, archive verification and caller ownership remain
+            the original implementations.
+            """
+
+            def external(self, request, timeout):
+                import json
+                from urllib.parse import urlsplit
+
+                from fake_github_http import json_response
+
+                response = super().external(request, timeout)
+                path = urlsplit(request.full_url).path
+                # Retain the command helper's external predecessor-job truth
+                # after switching to reply endpoint dispatch.
+                if "/actions/runs/" in path and path.endswith("/jobs"):
+                    run_id = int(path.split("/actions/runs/")[1].split("/")[0])
+                    if run_id in self.past_jobs:
+                        value = json.loads(response.read(524288))
+                        value["jobs"][0]["name"] = (
+                            "ReviewSensei / " + self.past_jobs[run_id]
                         )
-                        for i, item in enumerate(hold["assessments"])
-                    ]
-                original = prior()
-                view = dict(hold_view(hold), fresh_human_pending=True)
-                state = State(replace(original, historical_assessments=view))
-                reader = HistoricalAssessmentReader(
-                    ledger=None,
-                    http=state.http,
-                    repository="owner/repo",
-                    pull_request=1,
-                    token="synthetic",
+                        return json_response(value)
+                return response
+
+        for pending in (False, True):
+            with (
+                self.subTest(pending=pending),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture = historical_command_case(directory, complete=True)
+                record = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
                 )
-                # The source authentication boundary is supplied independently;
-                # its normalization, attachment, requirement and all publication
-                # paths remain real. This test concerns fresh progress only.
-                reader.read = Mock(return_value=hold)
-                provider = Provider(response_for(state.eligibility))
-                with patch.object(
-                    ReviewApprovalFinalizer, "historical_reader", return_value=reader
+                original_hold = deepcopy(record.historical_assessments)
+                if not pending:
+                    for item in original_hold["assessments"]:
+                        fixture.SOURCE_ID += 1
+                        fixture.select_command(
+                            historical_body(original_hold, instance=item["instance"]),
+                            new_run=True,
+                        )
+                        before = fixture.provider_calls
+                        self.assertEqual(fixture.invoke_command(), 0, fixture.error)
+                        self.assertEqual(fixture.provider_calls, before)
+                        # The command adapter served this original comment from
+                        # its selected source slot. Preserve it as external API
+                        # data after changing dispatch adapters.
+                        source_id = fixture.source["id"]
+                        if source_id in fixture.extra_comments:
+                            self.assertEqual(
+                                fixture.extra_comments[source_id], fixture.source
+                            )
+                        fixture.extra_comments[source_id] = deepcopy(fixture.source)
+                record = parse_session_comment(
+                    fixture.comment["body"], identity=IDENTITY
+                )
+                historical = deepcopy(record.historical_assessments)
+                self.assertEqual(historical["source"], original_hold["source"])
+                self.assertEqual(
+                    len(historical["settlements"]),
+                    0 if pending else len(original_hold["assessments"]),
+                )
+                original = next(
+                    value
+                    for review in reversed(fixture.reviews)
+                    if (value := approval_eligibility_from_body(review["body"]))
+                    is not None
+                )
+                self.assertTrue(original.fresh_human_pending)
+                self.assertTrue(original.human_review.pending)
+                self.assertEqual(original.facts.review_status, "complete")
+                view = original.historical_assessments
+
+                # Explicit external/configuration DATA transfer only. No old
+                # caller, ledger, HTTP adapter, selected run or callbacks enter
+                # the new reply bootstrap. Archive and root bytes stay intact.
+                reply = HistoricalReplyFixture.__new__(HistoricalReplyFixture)
+                external_fields = (
+                    "directory",
+                    "root",
+                    "fanout",
+                    "plan",
+                    "limit",
+                    "attempt",
+                    "comment",
+                    "extra_comments",
+                    "reviews",
+                    "inline",
+                    "threads",
+                    "check_runs",
+                    "config_bytes",
+                    "policy",
+                    "policy_ref",
+                    "live_head",
+                    "live_base",
+                    "requested_head",
+                    "requested_base",
+                    "run_id",
+                    "owner_job",
+                    "past_jobs",
+                    "run_results",
+                    "run_heads",
+                    "qualified_old_soft_cleanup_successes",
+                    "history_count",
+                    "provider_calls",
+                    "quarantine_predecessor_comment_id",
+                    "legacy_publication_fixture",
+                    "mode",
+                    "fault",
+                    "old_active",
+                    "incomplete_jobs",
+                    "changed_old_job",
+                    "oversized_first_page",
+                    "interrupt_engine_read",
+                    "fail_terminal_patch",
+                    "overlap",
+                    "refuse_broker",
+                    "previous_active",
+                    "previous_incomplete",
+                    "rollover_fault",
+                    "change_root",
+                    "archive_bad",
+                    "abort_fault",
+                    "completion_fault",
+                    "terminal_write_fault",
+                )
+                for name in external_fields:
+                    setattr(reply, name, deepcopy(getattr(fixture, name)))
+                for name in (
+                    "selected",
+                    "accounted",
+                    "http",
+                    "ledger",
+                    "before_provider",
+                    "before_entry",
+                    "after_engine",
+                    "before_publication",
                 ):
-                    outcome, _ = state.application_reply(provider)
+                    setattr(reply, name, None)
+                for name in (
+                    "trace",
+                    "transports",
+                    "worker_observations",
+                    "list_requests",
+                    "write_modes",
+                    "mutations",
+                    "graphql_operations",
+                ):
+                    setattr(reply, name, [])
+                for name in (
+                    "old_job_reads",
+                    "previous_reads",
+                    "completion_thread_reads",
+                ):
+                    setattr(reply, name, 0)
+                reply.terminal_fault_trace_index = None
+                reply.past_jobs[reply.run_id] = reply.owner_job
+                head = reply.requested_head
+                reply.next_run()
+                reply.live_head = reply.requested_head = head
+                reply.owner_job = "hosted"
+                retained_comments = deepcopy(reply.extra_comments)
+                source_id = (
+                    max(
+                        (41, fixture.SOURCE_ID, reply.comment["id"], *retained_comments)
+                    )
+                    + 1
+                )
+                self.assertNotIn(source_id, retained_comments)
+                reply.prepare_reply(source_id=source_id)
+                self.assertEqual(
+                    {key: reply.extra_comments[key] for key in retained_comments},
+                    retained_comments,
+                )
+                reply.source["body"] = (
+                    "@reviewsensei The caller contract is intentional; the added change is checked."
+                )
+                reply.reply_document = {
+                    "body": "The explanation is supported by the current diff.",
+                    "assessments": [
+                        {
+                            "fingerprint": finding.fingerprint,
+                            "decision": "dismissed",
+                            "rationale": "The current diff contains the intended added change.",
+                            "human_evidence": "The caller contract is intentional",
+                            "diff_evidence": "@@ -1 +1,2 @@\n keep\n+change",
+                        }
+                        for finding in original.human_review.pending
+                    ],
+                }
+                before = reply.provider_calls
+                approvals_before = sum(r["state"] == "APPROVED" for r in reply.reviews)
+                self.assertEqual(reply.invoke_reply(), 0, reply.error)
+                outcome = reply.last_result
                 self.assertEqual(outcome.status, "replied")
-                self.assertEqual(len(provider.calls), 1)
+                self.assertEqual(reply.provider_calls, before + 1)
+                self.assertEqual(len(reply.provider_requests), 1)
                 current = next(
                     approval_eligibility_from_body(review["body"])
-                    for review in reversed(state.reviews)
+                    for review in reversed(reply.reviews)
                     if approval_eligibility_from_body(review["body"]) is not None
                 )
                 self.assertFalse(current.human_review.pending)
@@ -87,8 +235,17 @@ class CarriedHumanProgressTests(unittest.TestCase):
                     current.historical_assessments["pending"], view["pending"]
                 )
                 self.assertEqual(current.facts.has_human_adjudication_findings, pending)
+                after = parse_session_comment(reply.comment["body"], identity=IDENTITY)
+                self.assertEqual(after.historical_assessments, historical)
+                self.assertEqual(
+                    {key: reply.extra_comments[key] for key in retained_comments},
+                    retained_comments,
+                )
                 if pending:
-                    self.assertNotIn("APPROVE", state.events())
+                    self.assertEqual(
+                        sum(r["state"] == "APPROVED" for r in reply.reviews),
+                        approvals_before,
+                    )
                     self.assertEqual(outcome.approval_status, "approval_withheld")
                 else:
                     self.assertEqual(outcome.approval_status, "approved")

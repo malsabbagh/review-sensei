@@ -1,6 +1,8 @@
 """Installed capacity extension, not an alternate recovery authority."""
 
 import copy
+import dis
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -32,10 +34,7 @@ class GuardedLifecycleCapacityTests(unittest.TestCase):
                 failed_count=1, published_count=1
             )
 
-            def inspect(ledger, identity, *, known, added_parts):
-                proof = real(ledger, identity, known=known, added_parts=added_parts)
-                if observed:
-                    return proof
+            def probe_extension(proof, ledger, identity, *, known, added_parts):
                 guard = capacity.installed_capacity(ledger, identity)
                 plan = guard.comment_plan
                 state = capacity._guard_state(guard)
@@ -130,11 +129,8 @@ class GuardedLifecycleCapacityTests(unittest.TestCase):
                 self.assertEqual(capacity._guard_state(guard), state)
                 self.assertEqual(len(fixture.trace), before)
                 observed.append((guard, plan))
-                return proof
 
-            def inspect_activation(proof, **kwargs):
-                if kwargs.get("capability") is None or activated:
-                    return real_activate(proof, **kwargs)
+            def probe_activation(proof, **kwargs):
                 before = len(fixture.trace)
                 guard, plan = proof.guard, proof.plan
                 state = capacity._guard_state(guard)
@@ -213,20 +209,90 @@ class GuardedLifecycleCapacityTests(unittest.TestCase):
                         )
                 self.assertEqual(capacity._guard_state(guard), state)
                 self.assertEqual(len(fixture.trace), before)
-                result = real_activate(proof, **kwargs)
-                activated.append(proof)
-                with self.assertRaisesRegex(ReviewInputError, "capability is unissued"):
-                    real_activate(proof, **kwargs)
-                return result
 
-            with (
-                registered_resource([registration]),
-                patch.object(capacity, "lifecycle_capacity_extension", inspect),
-                patch.object(
-                    capacity, "activate_lifecycle_extension", inspect_activation
-                ),
-            ):
-                result = fixture.invoke()
+            extension_code, extension_globals = real.__code__, real.__globals__
+            activation_code = real_activate.__code__
+            activation_globals = real_activate.__globals__
+            return_offsets = {
+                code: {
+                    instruction.offset
+                    for instruction in dis.get_instructions(code)
+                    if instruction.opname in {"RETURN_VALUE", "RETURN_CONST"}
+                }
+                for code in (extension_code, activation_code)
+            }
+            previous = sys.getprofile()
+            probing = False
+            activation_frame = None
+
+            def observe(frame, event, value):
+                nonlocal probing, activation_frame
+                if previous is not None:
+                    previous(frame, event, value)
+                if probing:
+                    return
+                extension_return = (
+                    event == "return"
+                    and frame.f_code is extension_code
+                    and frame.f_globals is extension_globals
+                    and frame.f_lasti in return_offsets[extension_code]
+                    and not observed
+                )
+                activation_call = (
+                    event == "call"
+                    and frame.f_code is activation_code
+                    and frame.f_globals is activation_globals
+                    and frame.f_locals["capability"] is not None
+                    and not activated
+                    and activation_frame is None
+                )
+                activation_return = (
+                    event == "return"
+                    and frame is activation_frame
+                    and frame.f_code is activation_code
+                    and frame.f_globals is activation_globals
+                )
+                if not (extension_return or activation_call or activation_return):
+                    return
+                probing = True
+                try:
+                    if extension_return:
+                        probe_extension(
+                            value,
+                            frame.f_locals["ledger"],
+                            frame.f_locals["identity"],
+                            known=frame.f_locals["known"],
+                            added_parts=frame.f_locals["added_parts"],
+                        )
+                    else:
+                        proof = frame.f_locals["proof"]
+                        kwargs = {
+                            name: frame.f_locals[name]
+                            for name in ("capability", "operation")
+                        }
+                        if activation_call:
+                            probe_activation(proof, **kwargs)
+                            activation_frame = frame
+                        else:
+                            activation_frame = None
+                            if frame.f_lasti in return_offsets[activation_code]:
+                                activated.append(proof)
+                                with self.assertRaisesRegex(
+                                    ReviewInputError, "capability is unissued"
+                                ):
+                                    real_activate(proof, **kwargs)
+                finally:
+                    probing = False
+
+            try:
+                with registered_resource([registration]):
+                    sys.setprofile(observe)
+                    result = fixture.invoke()
+            finally:
+                sys.setprofile(previous)
+                activation_frame = None
+            self.assertIs(capacity.lifecycle_capacity_extension, real)
+            self.assertIs(capacity.activate_lifecycle_extension, real_activate)
             self.assertTrue(observed, fixture.error)
             self.assertTrue(activated, fixture.error)
             # The closed empty-history producer now funds its complete tail.

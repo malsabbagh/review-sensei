@@ -134,25 +134,66 @@ class ActualFinalizerProgressTests(unittest.TestCase):
 
     def test_lost_approval_response_is_unknown_until_existing_review_is_observed(self):
         import tempfile
-        from unittest.mock import patch
 
-        from review_sensei_github.errors import GitHubPublicationError
-        from review_sensei_github.publication import ReviewApprovalFinalizer
+        from fake_github_http import FakeHTTPResponse
         from test_command_capacity_recovery import CommandCapacityState
 
         state = CommandCapacityState(complete=True)
-        real_finalize = ReviewApprovalFinalizer.finalize
+        faults = []
+        unavailable = False
 
-        def lose_response(finalizer, **kwargs):
-            result = real_finalize(finalizer, **kwargs)
-            self.assertEqual(result.status, "approved")
-            raise GitHubPublicationError("Synthetic unreadable committed approval")
+        class Unreadable(FakeHTTPResponse):
+            def read(self, size):
+                faults.append("stored-approval-response")
+                raise TimeoutError("Synthetic unreadable committed approval")
 
+        def opener(request, timeout):
+            nonlocal unavailable
+            path = urlsplit(request.full_url).path
+            body = json.loads(request.data) if request.data else None
+            if unavailable and request.method == "GET" and path.endswith("/reviews"):
+                # Record the real read attempt, but withhold its response only
+                # during this invocation. The next verify sees native state.
+                state.open(request, timeout)
+                faults.append("approval-readback")
+                raise TimeoutError("Synthetic unreadable approval readback")
+            response = state.open(request, timeout)
+            if (
+                request.method == "POST"
+                and path.endswith("/reviews")
+                and body["event"] == "APPROVE"
+            ):
+                self.assertFalse(unavailable, "duplicate approval POST")
+                self.assertEqual(
+                    sum(r["state"] == "APPROVED" for r in state.reviews), 1
+                )
+                unavailable = True
+                return Unreadable(status=response.status)
+            return response
+
+        state.http = GitHubHttp(api_url="https://api.github.test", opener=opener)
         with tempfile.TemporaryDirectory() as directory:
             decisions = state.record(directory)
-            with patch.object(ReviewApprovalFinalizer, "finalize", lose_response):
-                outcome, _, _ = state.verify(decisions)
-            replay, _, _ = state.verify(decisions)
+            outcome, _, first_calls = state.verify(decisions)
+            self.assertEqual(faults.count("stored-approval-response"), 1)
+            self.assertGreaterEqual(faults.count("approval-readback"), 1)
+            self.assertEqual(
+                sum(
+                    method == "POST"
+                    and path.endswith("/reviews")
+                    and body["event"] == "APPROVE"
+                    for method, path, body in first_calls
+                ),
+                1,
+            )
+            unavailable = False
+            replay, _, replay_calls = state.verify(decisions)
+            self.assertFalse(
+                any(
+                    method == "POST" and path.endswith("/reviews")
+                    for method, path, _ in replay_calls
+                )
+            )
         # Existing result compatibility is preserved; the new observation must
         # not interpret a caught transport/publication exception as a refusal.
         self.assertEqual(outcome.status, "approval_withheld")
@@ -160,7 +201,9 @@ class ActualFinalizerProgressTests(unittest.TestCase):
         self.assertIsNone(outcome.approval_progress.approval_review_id)
         operation = outcome.operation_diagnostics.to_dict()
         self.assertTrue(operation["approval_request_attempted"])
-        self.assertEqual(operation["approval"]["first"]["reason"], "unknown")
+        # The transport failure category is known; the native approval outcome
+        # remains UNKNOWN until a later genuine read observes the stored review.
+        self.assertEqual(operation["approval"]["first"]["reason"], "transport")
         self.assertNotIn("Synthetic unreadable", json.dumps(operation))
         from review_sensei_github import GitHubApplication
 
@@ -197,32 +240,62 @@ class ActualFinalizerProgressTests(unittest.TestCase):
         self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
 
     def test_diagnostics_add_no_http_calls_and_preserve_native_approval(self):
+        import sys
         import tempfile
-        from unittest.mock import patch
 
+        from review_sensei_github import publication
         from test_command_capacity_recovery import CommandCapacityState
 
+        builder = publication.build_approval_progress
+        code, globals_ = builder.__code__, builder.__globals__
         paths = []
-        for enabled in (False, True):
+        for _ in range(2):
             state = CommandCapacityState(complete=True)
+            pending, pairs = {}, []
+            previous = sys.getprofile()
+
+            def observe(frame, event, value):
+                if previous is not None:
+                    previous(frame, event, value)
+                if frame.f_code is not code or frame.f_globals is not globals_:
+                    return
+                if event == "call":
+                    owner = frame.f_back
+                    while (
+                        owner is not None
+                        and owner.f_code is not CommandCapacityState.verify.__code__
+                    ):
+                        owner = owner.f_back
+                    self.assertIsNotNone(owner)
+                    budget = owner.f_locals["budget"]
+                    self.assertNotIn(id(frame), pending)
+                    pending[id(frame)] = (budget, budget.calls, len(state.calls))
+                elif event == "return":
+                    budget, calls, count = pending.pop(id(frame))
+                    self.assertIsNotNone(value)
+                    self.assertEqual((budget.calls, len(state.calls)), (calls, count))
+                    pairs.append(value)
+
             with tempfile.TemporaryDirectory() as directory:
                 decisions = state.record(directory)
-                if enabled:
+                try:
+                    sys.setprofile(observe)
                     outcome, budget, calls = state.verify(decisions)
-                else:
-                    with patch(
-                        "review_sensei_github.publication.build_approval_progress",
-                        return_value=None,
-                    ):
-                        outcome, budget, calls = state.verify(decisions)
+                finally:
+                    sys.setprofile(previous)
+            self.assertEqual(len(pairs), 1)
+            self.assertFalse(pending)
+            self.assertIs(pairs[0], outcome.approval_progress)
+            self.assertIs(publication.build_approval_progress, builder)
+            self.assertIs(builder.__code__, code)
+            self.assertIs(builder.__globals__, globals_)
             self.assertEqual(outcome.status, "approved")
             self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
             self.assertEqual(budget.calls, len(calls))
             paths.append([(method, path) for method, path, _ in calls])
-            if enabled:
-                self.assertEqual(outcome.approval_progress.source_review_id, 40)
-                self.assertEqual(outcome.approval_progress.approval_review_id, 41)
-                self.assertEqual(outcome.approval_progress.check_state, "confirmed")
+            self.assertEqual(outcome.approval_progress.source_review_id, 40)
+            self.assertEqual(outcome.approval_progress.approval_review_id, 41)
+            self.assertEqual(outcome.approval_progress.check_state, "confirmed")
         self.assertEqual(paths[0], paths[1])
 
     def test_actual_check_failure_keeps_one_native_approval_across_retry(self):

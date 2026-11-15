@@ -152,6 +152,67 @@ def _pack_journal(document):
     }
 
 
+def _pack_current_journal(document):
+    """Select a self-contained representation without changing legacy v3 bytes.
+
+    This is serialization only. Unknown future values must still be sized with
+    the generic v3 bound unless their exact retained prefix has separate custody.
+    """
+    legacy = _pack_journal(document)
+    if type(document) is not dict or document.get("schema_version") != (
+        "finding-lifecycle-journal-v3"
+    ):
+        return legacy
+    effects = document.get("effects")
+    if (
+        type(effects) is not list
+        or not 4 <= len(effects) <= MAX_EFFECTS
+        or any(
+            type(e) is not dict or e.get("status") != "confirmed" for e in effects[:-1]
+        )
+        or type(document.get("guarded_publication_pair")) is not dict
+    ):
+        return legacy
+    from review_sensei.source_registry import require_module_seal
+
+    from . import finding_lifecycle_prefix
+
+    require_module_seal(finding_lifecycle_prefix)
+    finding_lifecycle_prefix._sources()
+    try:
+        plain = finding_lifecycle_prefix._plain(document)
+    except ReviewInputError:
+        # The optional format's plain finite graph is narrower than historical
+        # JSON. Keep the original representation for unsupported data, not a
+        # weakened prefix. Source authentication happened outside this fallback.
+        return legacy
+    compact = finding_lifecycle_prefix.pack(plain, prefix_count=len(effects) - 1)
+    return (
+        compact
+        if len(canonical_bytes(compact)) < len(canonical_bytes(legacy))
+        else legacy
+    )
+
+
+def _envelope_for_manifest(document, manifest):
+    """Match one committed full representation; never replace its hash.
+
+    Both candidates are finite, self-contained encodings of the same complete
+    logical journal. A match is evidence bytes only, not selected-root authority.
+    """
+    if type(manifest) is not dict or type(manifest.get("sha256")) is not str:
+        return None
+    for encode in (_pack_journal, _pack_current_journal):
+        packed = encode(document)
+        envelope = {
+            "schema_version": "finding-lifecycle-evidence-v2",
+            "lifecycle": packed,
+        }
+        if _digest(envelope) == manifest["sha256"]:
+            return envelope
+    return None
+
+
 def _thread_effect_target(effect):
     """Closed known mutation target; this does not authorize a native write."""
     if effect.get("path") != "/graphql" or effect.get("method") != "POST":
@@ -282,6 +343,28 @@ def _maximum_native_allocation(packed, *, preserve_observed=False, _pair_source=
     """A sizing-only value, never passed to stage or installed as authority."""
     import copy
 
+    document = None
+    if packed.get("schema_version") == "finding-lifecycle-packed-v5":
+        packed = _pack_journal(_unpack_journal(packed))
+    if preserve_observed and _pair_source is not None:
+        from review_sensei.source_registry import require_module_seal
+
+        from . import finding_lifecycle_prefix, historical_prefix_sizing
+
+        require_module_seal(historical_prefix_sizing)
+        require_module_seal(finding_lifecycle_prefix)
+        finding_lifecycle_prefix._sources()
+        document = _unpack_journal(packed)
+        if historical_prefix_sizing.retained_for_candidate(_pair_source, document):
+            count = len(document["effects"]) - 1
+            prefix = finding_lifecycle_prefix.prepare_prefix(
+                document, prefix_count=count
+            )
+            remainder = finding_lifecycle_prefix.remainder(document, prefix_count=count)
+            # Only unknown suffix atoms receive maxima. The separately proven
+            # old effects and complete pair retain their exact observed bytes.
+            maximum = _maximum_native_allocation(remainder, preserve_observed=True)
+            return finding_lifecycle_prefix.assemble_data(prefix, remainder=maximum)
     path_bounds = (
         {} if _pair_source is None else _closed_pair_path_bound(packed, _pair_source)
     )
@@ -314,6 +397,13 @@ def _maximum_native_allocation(packed, *, preserve_observed=False, _pair_source=
 def _unpack_journal(stored):
     if not isinstance(stored, dict):
         raise ReviewInputError("finding lifecycle carrier schema is unsupported")
+    if stored.get("schema_version") == "finding-lifecycle-packed-v5":
+        from review_sensei.source_registry import require_module_seal
+
+        from . import finding_lifecycle_prefix
+
+        require_module_seal(finding_lifecycle_prefix)
+        return finding_lifecycle_prefix.unpack(stored)
     if stored.get("schema_version") == "finding-lifecycle-packed-v1" and set(
         stored
     ) == {"schema_version", "journal"}:
@@ -1017,7 +1107,7 @@ class FindingLifecycleJournal:
         from .command_finalization_plan import pack_authorized_pending
 
         packed = pack_authorized_pending(self, document)
-        return _pack_journal(document) if packed is None else packed
+        return _pack_current_journal(document) if packed is None else packed
 
     def preflight_native_tail(self, *, calls):
         budget = (
@@ -1466,10 +1556,11 @@ class FindingLifecycleJournal:
         dictionary_base = None
         dictionary_manifest = self._record.finding_lifecycle["manifest"]
         if dictionary_manifest["encoding"] == "partitioned-json-v1":
-            dictionary_base = {
-                "schema_version": "finding-lifecycle-evidence-v2",
-                "lifecycle": _pack_journal(self._document()),
-            }
+            dictionary_base = _envelope_for_manifest(
+                self._document(), dictionary_manifest
+            )
+            if dictionary_base is None:
+                raise ReviewInputError("command dictionary base representation changed")
         shadow = copy.copy(self)
         shadow.reviewer = copy.copy(self.reviewer)
         shadow.effects = copy.deepcopy(self.effects)
@@ -2462,7 +2553,9 @@ class FindingLifecycleJournal:
         document = self._document()
         _require_effect_scope(document, self.identity, self.head_sha)
         packed = (
-            self._pending_wire(document) if pending_intent else _pack_journal(document)
+            self._pending_wire(document)
+            if pending_intent
+            else _pack_current_journal(document)
         )
         bound = getattr(self, "_future_wire_bound", None)
         if bound is not None and len(canonical_bytes(packed)) > bound:
@@ -2800,7 +2893,7 @@ class FindingLifecycleJournal:
         if (
             expected is not None
             and canonical_bytes(
-                _pack_journal(self._document(effects=[*self.effects, effect]))
+                _pack_current_journal(self._document(effects=[*self.effects, effect]))
             )
             != expected
         ):
@@ -2837,6 +2930,14 @@ class FindingLifecycleJournal:
         )
 
     def _dispatch_effect(self, http, effect, method, path, *, token, body, **kwargs):
+        from review_sensei.source_registry import require_module_seal
+
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        quarantine_historical_execution.before_native_attempt(
+            self, effect, method, path, body
+        )
         from .errors import GitHubHTTPTransientError
         from .ordinary_native_recovery import native_attempt, recover
 

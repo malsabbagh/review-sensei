@@ -5,9 +5,14 @@ projected assessment view cannot be consumed by ordinary approval execution.
 Physical admission must separately prove every native and lifecycle tail.
 """
 
+import inspect
 import json
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from types import FrameType
+from typing import Any
 from weakref import WeakKeyDictionary
 
 from review_sensei.bounded_evidence import canonical_bytes
@@ -234,14 +239,21 @@ def _detached_sizing_finalizer(finalizer):
     return detached
 
 
-def measure_inline_branches(observation):
+def measure_inline_branches(observation, *, _retain_manifest=False):
     """Keep the original caller's width witness unchanged after pure sizing."""
+    if type(_retain_manifest) is not bool:
+        raise ReviewInputError("LAST manifest selector must be an exact bool")
+    if _retain_manifest:
+        from . import quarantine_last_manifest
+
+        require_module_seal(quarantine_last_manifest)
+        quarantine_last_manifest.preliminary_participants(observation)
     saved = require_observation(observation)
     caller = saved["run"].caller
     missing = object()
     previous = getattr(caller, "_accepted_semantic_capacity", missing)
     try:
-        return _measure_inline_branches(observation)
+        return _measure_inline_branches(observation, _retain_manifest=_retain_manifest)
     finally:
         if previous is missing:
             caller.__dict__.pop("_accepted_semantic_capacity", None)
@@ -249,7 +261,16 @@ def measure_inline_branches(observation):
             caller._accepted_semantic_capacity = previous
 
 
-def _root_growth_measurement(record, accounting, witness, result_upper=None, grants=()):
+def _root_growth_measurement(
+    record,
+    accounting,
+    witness,
+    result_upper=None,
+    grants=(),
+    terminal_accounting=None,
+    *,
+    _diagnostic=False,
+):
     """Validate and render inert full-width roots with original source machinery.
 
     The result carrier is deliberately not decodable evidence. These detached
@@ -262,6 +283,38 @@ def _root_growth_measurement(record, accounting, witness, result_upper=None, gra
 
     require_module_seal(session)
     require_module_seal(session_ledger)
+    if type(_diagnostic) is not bool:
+        raise ReviewInputError("LAST root diagnostic selector changed")
+    if _diagnostic:
+        require_module_seal(sys.modules[__name__])
+        frame = sys._getframe(1)
+        origin = frame.f_back
+        if (
+            origin is not None
+            and origin.f_globals is globals()
+            and any(
+                type(code) is type(_measure_inline_branches.__code__)
+                and code.co_name == "<listcomp>"
+                and origin.f_code is code
+                for code in _measure_inline_branches.__code__.co_consts
+            )
+        ):
+            origin = origin.f_back
+        if (
+            frame.f_globals is not globals()
+            or not any(
+                type(code) is type(_measure_inline_branches.__code__)
+                and code.co_name == "growth_measurement"
+                and frame.f_code is code
+                for code in _measure_inline_branches.__code__.co_consts
+            )
+            or origin is None
+            or origin.f_code is not _measure_inline_branches.__code__
+            or origin.f_globals is not globals()
+            or origin.f_locals.get("_retain_manifest") is not True
+            or frame.f_locals.get("root") is not record
+        ):
+            raise ReviewInputError("LAST root diagnostic lacks original measurement")
     if result_upper is None:
         raise ReviewInputError("cold terminal root lacks its complete result shape")
     raw = record.to_dict()
@@ -286,7 +339,18 @@ def _root_growth_measurement(record, accounting, witness, result_upper=None, gra
             key: value for key, value in document.items() if key != "record_sha256"
         }
         document["record_sha256"] = session._digest_payload(payload)
-        candidate = session.SessionRecord.from_dict(document)
+        input_bytes = canonical_bytes(document) if _diagnostic else None
+        try:
+            candidate = session.SessionRecord.from_dict(document)
+        except ReviewInputError as error:
+            if not _diagnostic:
+                raise
+            from . import quarantine_last_manifest
+
+            require_module_seal(quarantine_last_manifest)
+            return quarantine_last_manifest.root_size_refusal(
+                error, document, input_bytes
+            )
         body = session_ledger.render_session_comment(
             repository_id=record.repository_id,
             pull_request=record.pull_request,
@@ -302,28 +366,46 @@ def _root_growth_measurement(record, accounting, witness, result_upper=None, gra
             candidate.to_dict()
         ):
             raise ReviewInputError("cold projected comment is not exactly readable")
-        return len(canonical_bytes(candidate.to_dict())), len(body.encode())
+        return {
+            "validated": True,
+            "root_bytes": len(canonical_bytes(candidate.to_dict())),
+            "comment_body_bytes": len(body.encode()),
+        }
 
-    ordinary, ordinary_body = render(raw)
+    ordinary_measurement = render(raw)
     terminal_raw = json.loads(canonical_bytes(raw))
     terminal_raw["generation"] = session.MAX_GENERATION
+    if terminal_accounting is not None:
+        terminal_raw["api_run_accounting"] = json.loads(
+            canonical_bytes(terminal_accounting)
+        )
     terminal_raw["api_run_accounting"]["action"].update(
         phase="terminal",
         execution_started=True,
         result=result_upper,
         outcome={"kind": "explicit_noop", "reason": max(ACTION_NOOP_REASONS, key=len)},
     )
-    terminal, terminal_body = render(terminal_raw)
+    terminal_measurement = render(terminal_raw)
+    if _diagnostic:
+        return {
+            "ordinary": ordinary_measurement,
+            "terminal": terminal_measurement,
+            "all_roots_validated": ordinary_measurement["validated"]
+            and terminal_measurement["validated"],
+        }
     return {
-        "ordinary_root_bytes": ordinary,
-        "comment_body_bytes": max(ordinary_body, terminal_body),
-        "terminal_root_bytes": terminal,
+        "ordinary_root_bytes": ordinary_measurement["root_bytes"],
+        "comment_body_bytes": max(
+            ordinary_measurement["comment_body_bytes"],
+            terminal_measurement["comment_body_bytes"],
+        ),
+        "terminal_root_bytes": terminal_measurement["root_bytes"],
         "root_fits": True,
         "original_validated_and_rendered": True,
     }
 
 
-def _measure_inline_branches(observation):
+def _measure_inline_branches(observation, *, _retain_manifest=False):
     """Measure all reached prefixes under the original inline/root/history caps.
 
     No reader price, part allocation or permission is inferred from this value.
@@ -335,7 +417,32 @@ def _measure_inline_branches(observation):
     from . import accepted_semantic_history, finding_lifecycle, quarantine_action
     from .publication import ReviewPublisher
 
+    if type(_retain_manifest) is not bool:
+        raise ReviewInputError("LAST manifest selector must be an exact bool")
+    if _retain_manifest:
+        from . import quarantine_last_manifest
+
+        require_module_seal(quarantine_last_manifest)
+        quarantine_last_manifest.preliminary_participants(observation)
     saved = require_observation(observation)
+    if _retain_manifest:
+        from . import quarantine_last_manifest
+
+        require_module_seal(quarantine_last_manifest)
+        frame = sys._getframe(2)
+        if (
+            frame.f_code is not quarantine_last_manifest.measure.__code__
+            or frame.f_globals is not vars(quarantine_last_manifest)
+            or frame.f_locals.get("observation") is not observation
+        ):
+            raise ReviewInputError("LAST manifest requires original measurement entry")
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        quarantine_last_manifest.require_inline_participants(
+            saved["run"].ledger, saved["run"].caller
+        )
+        quarantine_historical_execution._require_default_profile(saved["run"].caller)
     plan = _NATIVE_PLANS.get(observation)
     if plan is None:
         raise ReviewInputError("quarantine native branch source is unavailable")
@@ -382,6 +489,20 @@ def _measure_inline_branches(observation):
     alternatives, _pending, item_count, requests, _dictionary = (
         journal._command_branch_documents(plan, http=plan.http, budget=plan.budget)
     )
+    if _retain_manifest:
+        payload = json.loads(plan.payload)
+        if (
+            payload.get("cleanup_requests")
+            or payload.get("conditional_approval") is None
+        ):
+            raise ReviewInputError(
+                "LAST manifest requires an uncompacted approval branch"
+            )
+        initial_accounting = quarantine_last_manifest.accounting_bytes(
+            run.caller.accounting
+        )
+        initial_root = run.caller._root
+        initial_record = canonical_bytes(record.to_dict())
     generation = record.generation + (2 if saved["projection"].creates_event else 1)
     fields = {}
     if saved["projection"].creates_event:
@@ -408,6 +529,13 @@ def _measure_inline_branches(observation):
     from .quarantine_command_namespace import project_prepared_prefix
 
     accounting_upper = project_prepared_prefix(run.caller)
+    from . import historical_terminal_projection
+
+    require_module_seal(historical_terminal_projection)
+    terminal_projection = historical_terminal_projection.prepare(
+        observation, accounting_upper
+    )
+    terminal_upper = None if terminal_projection is None else terminal_projection[0]
     witness = getattr(run.caller, "_accepted_semantic_capacity", None)
     result_upper = None
     if saved["projection"].creates_event:
@@ -477,14 +605,48 @@ def _measure_inline_branches(observation):
             **approval_fields,
         )
     grants = tuple(sorted(run.ledger._observed_consumed_grants))
-    growth_roots = [
-        _root_growth_measurement(root, accounting_upper, witness, result_upper, grants)
-        for root in (record, prospective)
-    ]
+    conditional_data = None
+    if _retain_manifest:
+        conditional_data = quarantine_last_manifest.conditional_terminal_data(
+            run.caller.accounting,
+            ordinary=run.caller._block,
+            terminal=run.caller._terminal_block,
+            sequence=run.caller._sequence,
+        )
+
+    def growth_measurement(root):
+        if not _retain_manifest:
+            return _root_growth_measurement(
+                root, accounting_upper, witness, result_upper, grants, terminal_upper
+            )
+        assert conditional_data is not None
+        return {
+            "full_reserved_projection": _root_growth_measurement(
+                root,
+                accounting_upper,
+                witness,
+                result_upper,
+                grants,
+                _diagnostic=True,
+            ),
+            "conditional_one_close_projection": _root_growth_measurement(
+                root,
+                accounting_upper,
+                witness,
+                result_upper,
+                grants,
+                conditional_data["accounting"],
+                _diagnostic=True,
+            ),
+        }
+
+    growth_roots = [growth_measurement(root) for root in (record, prospective)]
     branches = []
+    retained = []
     for documents, _exact in alternatives:
         current = prospective
         checkpoints = []
+        retained_checkpoints = []
         for document in documents:
             _reference, envelope, _parts, _allowance, candidate = (
                 finding_lifecycle_store._prepare_lifecycle(
@@ -503,9 +665,7 @@ def _measure_inline_branches(observation):
                 raise ReviewInputError(
                     "quarantine complete command requires a non-inline checkpoint"
                 )
-            growth = _root_growth_measurement(
-                candidate, accounting_upper, witness, result_upper, grants
-            )
+            growth = growth_measurement(candidate)
             growth_roots.append(growth)
             checkpoints.append(
                 {
@@ -517,10 +677,47 @@ def _measure_inline_branches(observation):
                     "envelope_bytes": len(canonical_bytes(envelope)),
                 }
             )
+            if _retain_manifest:
+                retained_checkpoints.append(
+                    {
+                        "parent": current.to_dict(),
+                        "document": document,
+                        "candidate": candidate.to_dict(),
+                        "envelope": envelope,
+                    }
+                )
             current = candidate
         branches.append(tuple(checkpoints))
+        if _retain_manifest:
+            # Original conservative whole-sequence plan, NOT an issued local
+            # pending/finish operation. No exact-document or reader grant.
+            quarantine_last_manifest.require_inline_participants(
+                run.ledger, run.caller, prospective=prospective
+            )
+            operation_plan = finding_lifecycle_store.preflight_finding_lifecycle(
+                run.ledger,
+                prospective,
+                document=documents[0],
+                future_documents=tuple(documents[1:]),
+                operation_id=journal.operation_id,
+                base_sha=journal.base_sha,
+                head_sha=journal.head_sha,
+                policy_digest=journal.policy_digest,
+                configuration_digest=journal.configuration_digest,
+                item_count=item_count,
+                reserved_tail_calls=7,
+            )
+            retained.append(
+                {
+                    "checkpoints": retained_checkpoints,
+                    "conservative_sequence_plan": operation_plan,
+                }
+            )
     require_observation(observation)
-    return {
+    result = {
+        "terminal_projection": None
+        if terminal_projection is None
+        else terminal_projection[1],
         "branches": tuple(branches),
         "growth_roots": tuple(growth_roots),
         "result_manifest_bound": len(canonical_bytes(result_upper)),
@@ -528,11 +725,40 @@ def _measure_inline_branches(observation):
             "conditional_approval"
         )
         is not None,
-        "all_growth_roots_fit": all(root["root_fits"] for root in growth_roots),
+        **(
+            {}
+            if _retain_manifest
+            else {
+                "all_growth_roots_fit": all(root["root_fits"] for root in growth_roots)
+            }
+        ),
         "max_checkpoints": max(len(branch) for branch in branches),
         "native_requests": requests,
         "prospective_root_bytes": len(canonical_bytes(prospective.to_dict())),
     }
+    if _retain_manifest:
+        if (
+            run.caller._root != initial_root
+            or quarantine_last_manifest.accounting_bytes(run.caller.accounting)
+            != initial_accounting
+            or canonical_bytes(record.to_dict()) != initial_record
+            or plan.payload != observation.payload
+            or plan.state_bytes != observation.state_bytes
+        ):
+            raise ReviewInputError("LAST sizing changed original state")
+        result["last_manifest"] = {
+            "admission": False,
+            "runtime_fence_installed": False,
+            "conditional_terminal_projection": conditional_data,
+            "accounting": json.loads(initial_accounting),
+            "record": json.loads(initial_record),
+            "root": initial_root,
+            "payload": json.loads(plan.payload),
+            "states": json.loads(plan.state_bytes),
+            "branches": retained,
+            "operation_plan_kind": "conservative-whole-sequence-not-local-operation",
+        }
+    return result
 
 
 def _require_no_body_readback(journal, review_id):
@@ -556,7 +782,38 @@ def _require_no_body_readback(journal, review_id):
         )
 
 
-def _default_c5_prefix_headroom(stages, *, terminal_comments):
+def _intermediate_stages(C, R, receipt_reads, trust_calls):
+    """Closed source call bounds, not a refund or an execution grant."""
+    values = (C, R, receipt_reads, trust_calls)
+    if any(type(value) is not int for value in values) or values not in {
+        (4, 3, 1, 7),
+        (5, 3, 1, 0),
+        (5, 2, 2, 0),
+    }:
+        raise ReviewInputError("guarded intermediate source recipe is unsupported")
+    return (
+        ("entry-authority", 2),
+        ("entry-checkpoint", C + 5),
+        ("complete-inventory", C),
+        ("event-authority-and-echo", 6),
+        ("own-cas-authority-and-checkpoint", 4 + C + 5),
+        ("post-cas-authority", 4),
+        ("review-capability", 1),
+        ("initial-reviews", R),
+        ("carried-hold", C + 1),
+        ("pre-update-reviews", R),
+        ("pending-journal", 4 + C + 4),
+        ("review-update", 1),
+        ("post-update-reviews", R),
+        ("check-capability-and-replay", 3),
+        ("final-hold", C + 1),
+        ("finish-journal", 4 + C + 4),
+        ("receipt", 4 + receipt_reads),
+        ("trust-verifications", trust_calls),
+    )
+
+
+def _default_c5_prefix_headroom(stages, *, terminal_comments, receipt_reads=1):
     """Local reservation liquidity under all four ordinary root read losses."""
     from . import api_run_plan
 
@@ -567,6 +824,21 @@ def _default_c5_prefix_headroom(stages, *, terminal_comments):
     )
     if overhead != 6 or api_run_plan.READ_OPERATION_REQUESTS != 10:
         raise ReviewInputError("guarded C5 checkpoint source constants changed")
+    if type(receipt_reads) is not int or receipt_reads not in (1, 2):
+        raise ReviewInputError("guarded C5 receipt reader is unsupported")
+    expected = _intermediate_stages(5, 3 if receipt_reads == 1 else 2, receipt_reads, 0)
+    if (
+        type(stages) is not tuple
+        or any(
+            type(row) is not tuple
+            or len(row) != 2
+            or type(row[0]) is not str
+            or type(row[1]) is not int
+            for row in stages
+        )
+        or stages != expected
+    ):
+        raise ReviewInputError("guarded C5 source stages changed")
     C = 5
     checkpoint = 4 + C + overhead
     minima = {
@@ -575,7 +847,7 @@ def _default_c5_prefix_headroom(stages, *, terminal_comments):
         "pending-journal": checkpoint + checkpoint + 6,
         "review-update": 1 + api_run_plan.NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS,
         "finish-journal": checkpoint,
-        "receipt": 8,
+        "receipt": 2 * receipt_reads + 6,
     }
     losses = {
         "entry-checkpoint",
@@ -591,13 +863,166 @@ def _default_c5_prefix_headroom(stages, *, terminal_comments):
             rows.append({"phase": name, "available": remaining, "minimum": required})
             if remaining < required:
                 raise ReviewInputError("guarded C5 local reservation is unfunded")
-        remaining -= calls + int(name in losses) + (3 if name == "receipt" else 0)
-    if remaining != 0 or terminal_comments + overhead > 50:
+        remaining -= (
+            calls
+            + int(name in losses)
+            + (receipt_reads + 2 if name == "receipt" else 0)
+        )
+    if (
+        remaining != receipt_reads - 1
+        or type(terminal_comments) is not int
+        or not 1 <= terminal_comments <= 10
+        or terminal_comments + overhead > 50
+    ):
         raise ReviewInputError("guarded C5 complete prefix accounting changed")
     return rows
 
 
-def intermediate_suffix_recipe(observation, *, comment_rows):
+def journal_c3_101_model():
+    """Pure complete-prefix DATA; lifetime operation minima are unchanged."""
+    from . import api_run_plan
+
+    require_module_seal(api_run_plan)
+    overhead = (
+        api_run_plan.QUARANTINE_CHECKPOINT_REQUESTS
+        - api_run_plan.READ_OPERATION_REQUESTS
+    )
+    checkpoint = 4 + 5 + overhead
+    if overhead != 6 or api_run_plan.NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS != 34:
+        raise ReviewInputError("historical C3 original reservation constants changed")
+    stages = tuple(
+        (name, calls - 2 if name in ("pending-journal", "finish-journal") else calls)
+        for name, calls in _intermediate_stages(5, 2, 2, 0)
+    )
+    minima = {
+        "entry-checkpoint": 5 + overhead,
+        "own-cas-authority-and-checkpoint": checkpoint,
+        "pending-journal": 2 * checkpoint + 6,
+        "review-update": 1 + api_run_plan.NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS,
+        "finish-journal": checkpoint,
+        "receipt": 10,
+    }
+    losses = {
+        "entry-checkpoint",
+        "own-cas-authority-and-checkpoint",
+        "pending-journal",
+        "finish-journal",
+    }
+    remaining = 101
+    headroom = []
+    for name, calls in stages:
+        if name in minima:
+            headroom.append(
+                {"phase": name, "available": remaining, "minimum": minima[name]}
+            )
+            if remaining < minima[name]:
+                raise ReviewInputError("historical C3 local liquidity is insufficient")
+        remaining -= calls + int(name in losses) + (4 if name == "receipt" else 0)
+    # A transient PUT stops the noncompacted publisher before its R2/check/hold
+    # continuation. Pay recovery's GET even though PUT recovery then declines,
+    # AND finish's independent GET. Do not combine that stop with success reads.
+    put_available = next(
+        row["available"] for row in headroom if row["phase"] == "review-update"
+    )
+    stop_remaining = put_available - 1 - 1 - 1 - 12 - 10
+    if remaining != 1 or stop_remaining < 0:
+        raise ReviewInputError("historical C3 complete branch funding changed")
+    return {
+        "stages": stages,
+        "normal_calls": sum(n for _, n in stages),
+        "combined_loss_calls": 100,
+        "ordinary_required": 101,
+        "local_headroom": headroom,
+        "put_stop": {
+            "native": 1,
+            "recovery_readback": 1,
+            "independent_finish_readback": 1,
+            "finish_with_loss": 12,
+            "conservative_receipt_with_loss": 10,
+            "remaining": stop_remaining,
+        },
+    }
+
+
+def require_c3_101_observation(observation):
+    """Revalidate original prepared journal, not an observed numeric quote."""
+    from . import quarantine_historical_execution
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(quarantine_historical_execution)
+    require_observation(observation)
+    plan = _NATIVE_PLANS.get(observation)
+    if plan is None:
+        raise ReviewInputError("historical C3 native preparation is absent")
+    quarantine_historical_execution.require_no_ordinary_witness(plan.journal)
+    payload = json.loads(plan.payload)
+    _require_no_body_readback(plan.journal, payload["review_before"]["id"])
+    if payload.get("conditional_approval") is not None or payload.get(
+        "cleanup_requests"
+    ):
+        raise ReviewInputError("historical C3 native branch changed")
+
+
+def exact_intermediate_receipt(
+    *,
+    action,
+    scope,
+    instance,
+    operator_paused,
+    actor,
+    source_comment_id,
+    command_digest,
+):
+    """Pure source-produced receipt DATA, never permission to publish it.
+
+    Callers must bind these primitives to their original target/authority. The
+    actual receipt window independently requires byte-identical dispatch text.
+    """
+    from types import SimpleNamespace
+
+    from review_sensei import presentation
+
+    from . import quarantine_action
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(quarantine_action)
+    require_module_seal(presentation)
+    strings = (action, scope, instance, actor, command_digest)
+    if (
+        any(type(value) is not str for value in strings)
+        or type(operator_paused) is not bool
+        or type(source_comment_id) is not int
+    ):
+        raise ReviewInputError("intermediate receipt primitives are invalid")
+    if (
+        action not in ("dismiss", "accept-risk")
+        or not 0 < source_comment_id <= 2**63 - 1
+        or any(not value or len(value) > 65536 for value in strings)
+    ):
+        raise ReviewInputError("intermediate receipt primitive bounds changed")
+    result = quarantine_action.historical_command_result(
+        SimpleNamespace(action=action, scope=scope),
+        SimpleNamespace(instance=instance),
+        SimpleNamespace(operator_paused=operator_paused),
+        existing=None,
+        actor={"login": actor},
+    )
+    text = presentation.render_command_receipt(
+        actor=actor,
+        source_comment_id=source_comment_id,
+        command_digest=command_digest,
+        receipts=result.receipts,
+        ledger_written=True,
+    )
+    wire = len(canonical_bytes({"body": text}))
+    if wire > 65536:
+        raise ReviewInputError(
+            "guarded suffix receipt exceeds its complete wire projection"
+        )
+    return text, wire
+
+
+def intermediate_suffix_recipe(observation, *, comment_rows, receipt_page):
     """Derive the closed intermediate recipe; data, not an execution lease."""
     from copy import copy, deepcopy
 
@@ -607,6 +1032,7 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
         finding_lifecycle,
         quarantine_action,
         quarantine_capacity,
+        quarantine_command_receipt,
         quarantine_command_suffix,
     )
     from .quarantine_creation import _body
@@ -617,11 +1043,20 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
         frame.f_code is not quarantine_command_suffix.prepare.__code__
         or frame.f_globals is not vars(quarantine_command_suffix)
         or frame.f_locals.get("observation") is not observation
+        or frame.f_locals.get("page") is not receipt_page
         or frame.f_locals.get("rows") is not comment_rows
         or frame.f_locals.get("captured", {}).get("rows")
         != canonical_bytes(comment_rows)
     ):
         raise ReviewInputError("guarded suffix cache prefix lacks original paid census")
+    require_module_seal(quarantine_command_receipt)
+    if (
+        type(receipt_page) is not quarantine_command_receipt.ReceiptPageProjection
+        or quarantine_command_receipt._projection_binding(receipt_page)
+        != frame.f_locals.get("page_binding")
+    ):
+        raise ReviewInputError("guarded suffix receipt projection changed")
+    receipt_reads = 2 if receipt_page.pages else 1
     saved = require_observation(observation)
     plan = _NATIVE_PLANS.get(observation)
     if plan is None or saved["guard"] is None:
@@ -763,24 +1198,18 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
     # The receipt is a source-produced body, not a generic raw-size promise.
     # Existing same-marker receipts are a different update route and remain
     # pre-effect holds; unrelated retained receipts stay in the full census.
-    from review_sensei import presentation
-
-    require_module_seal(presentation)
-    result = quarantine_action.historical_command_result(
-        target.command,
-        target,
-        saved["record"],
-        existing=None,
-        actor=saved["authority"].document["actor"],
-    )
     authority = saved["authority"].document
-    receipt = presentation.render_command_receipt(
+    receipt, receipt_wire = exact_intermediate_receipt(
+        action=target.command.action,
+        scope=target.command.scope,
+        instance=target.instance,
+        operator_paused=saved["record"].operator_paused,
         actor=authority["actor"]["login"],
         source_comment_id=authority["source"]["id"],
         command_digest=authority["source"]["body_sha256"],
-        receipts=result.receipts,
-        ledger_written=True,
     )
+    if (receipt, receipt_wire) != frame.f_locals.get("receipt_data"):
+        raise ReviewInputError("guarded suffix exact receipt projection changed")
     marker = receipt.rstrip().rsplit("<!--", 1)[-1]
     if any(
         row["body"].rstrip().endswith("<!--" + marker)
@@ -823,32 +1252,26 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
         # The authentic body route currently needs two pages. Keep the larger
         # three-page source ceiling paid at every walk; this is not a refund.
         R = 3
+    if receipt_reads == 2:
+        if C != 5 or source_review_reads != 2:
+            raise ReviewInputError(
+                "two-page receipt needs the closed two-read review source"
+            )
+        contract = "closed-inline-c5-r2-p2-no-verification-v1"
+        R = 2
+        # Only this complete prospective two-read certificate funds the extra
+        # receipt reads. Prior spending, lifetime promises and the ordinary105
+        # requirement stay unchanged. The noncompacted native-loss branch stops
+        # before receipt and independently reconciles through journal.finish().
     # Original source branches: coalescence saves only two pre-mutation GETs.
     # Four post-mutation lost GETs and receipt's one complete fresh reconciliation
     # remain paid. These quantities alone cannot authorize any dispatch.
-    stages = (
-        ("entry-authority", 2),
-        ("entry-checkpoint", C + 5),
-        ("complete-inventory", C),
-        ("event-authority-and-echo", 6),
-        ("own-cas-authority-and-checkpoint", 4 + C + 5),
-        ("post-cas-authority", 4),
-        ("review-capability", 1),
-        ("initial-reviews", R),
-        ("carried-hold", C + 1),
-        ("pre-update-reviews", R),
-        ("pending-journal", 4 + C + 4),
-        ("review-update", 1),
-        ("post-update-reviews", R),
-        ("check-capability-and-replay", 3),
-        ("final-hold", C + 1),
-        ("finish-journal", 4 + C + 4),
-        ("receipt", 5),
-        ("trust-verifications", trust_calls),
-    )
+    stages = _intermediate_stages(C, R, receipt_reads, trust_calls)
     normal = sum(count for _, count in stages)
     local_headroom = (
-        _default_c5_prefix_headroom(stages, terminal_comments=terminal_comments)
+        _default_c5_prefix_headroom(
+            stages, terminal_comments=terminal_comments, receipt_reads=receipt_reads
+        )
         if C == 5
         else None
     )
@@ -857,7 +1280,9 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
         "local_headroom": local_headroom,
         "stages": stages,
         "normal_calls": normal,
-        "combined_loss_calls": normal + 3 + 4,
+        "combined_loss_calls": normal + receipt_reads + 2 + 4,
+        "ordinary_required": 105,
+        "receipt_reads": receipt_reads,
         "comment_reads": C,
         "cache_prefix_known": len(cache_plan.known),
         "cache_prefix_unknown": len(cache_plan.unknown),
@@ -871,6 +1296,214 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
         "receipt_wire": receipt_wire,
         "terminal_comment_reads": terminal_comments,
     }
+
+
+_SIZING_SCOPE: ContextVar[Any] = ContextVar(
+    "quarantine_prospective_sizing", default=None
+)
+
+
+def _hold_bytes(authenticated):
+    """Freeze all retained hold components, without evaluating object properties."""
+    from . import quarantine_origin
+
+    require_module_seal(quarantine_origin)
+    if type(authenticated) is not quarantine_origin.AuthenticatedQuarantine:
+        raise ReviewInputError("prospective sizing hold type changed")
+    raw = object.__getattribute__(authenticated, "__dict__")
+    names = (
+        "lineage_bytes",
+        "archive_bytes",
+        "inventories_bytes",
+        "state_bytes",
+        "source_documents_bytes",
+    )
+    if type(raw) is not dict or any(type(k) is not str for k in raw):
+        raise ReviewInputError("prospective sizing hold fields changed")
+    values = tuple(raw.get(name) for name in names)
+    if any(type(value) is not bytes for value in values):
+        raise ReviewInputError("prospective sizing hold bytes changed")
+    return values
+
+
+def _source_frame(module, owner, name):
+    require_module_seal(module)
+    function = vars(module)[owner] if owner is not None else None
+    function = vars(function)[name] if function is not None else vars(module)[name]
+    original = inspect.unwrap(function)
+    frame: FrameType | None = sys._getframe(1)
+    while frame is not None:
+        if frame.f_code is original.__code__ and frame.f_globals is vars(module):
+            return frame
+        frame = frame.f_back
+    raise ReviewInputError("prospective sizing original frame is absent")
+
+
+@contextmanager
+def prospective_sizing_scope(token, app, run, authority, target, finalizer):
+    """Only the original observation call may enter; returned observations survive."""
+    require_module_seal(sys.modules[__name__])
+    from . import application, quarantine_historical_execution, quarantine_origin
+
+    frame = _source_frame(
+        application, "GitHubApplication", "_observe_quarantine_command_finalization"
+    )
+    if (
+        any(
+            frame.f_locals.get(name) is not value
+            for name, value in (
+                ("self", app),
+                ("run", run),
+                ("authority", authority),
+                ("target", target),
+                ("preparation", token),
+                ("finalizer", finalizer),
+            )
+        )
+        or _SIZING_SCOPE.get() is not None
+    ):
+        raise ReviewInputError("prospective sizing invocation is not original")
+    saved = require(token)
+    if (
+        saved["app"] is not app
+        or saved["run"] is not run
+        or saved["target"] is not target
+    ):
+        raise ReviewInputError("prospective sizing preparation owner changed")
+    require_module_seal(quarantine_historical_execution)
+    quarantine_historical_execution._require_default_profile(run.caller)
+    require_module_seal(quarantine_origin)
+    quarantine_origin.require_authenticated_read_owner(
+        target.authenticated, run.ledger, run.caller, run.identity
+    )
+    scope = (token, app, run, authority, target, finalizer, run.caller._root)
+    reset = _SIZING_SCOPE.set(scope)
+    try:
+        yield
+    finally:
+        _SIZING_SCOPE.reset(reset)
+
+
+def _require_prospective(token, finalizer):
+    require_module_seal(sys.modules[__name__])
+    from . import application, publication, quarantine_origin
+
+    scope = _SIZING_SCOPE.get()
+    if type(scope) is not tuple or len(scope) != 7 or scope[0] is not token:
+        raise ReviewInputError("prospective sizing scope is absent or expired")
+    saved = require(token, finalizer=finalizer)
+    app, run, authority, target, initial, root = scope[1:]
+    source = _source_frame(
+        application, "GitHubApplication", "_observe_quarantine_command_finalization"
+    )
+    copied = _source_frame(
+        publication, "ReviewApprovalFinalizer", "prepare_quarantine_command_capacity"
+    )
+    preparing = _source_frame(
+        publication, "ReviewApprovalFinalizer", "prepare_command_capacity"
+    )
+    executing = _source_frame(
+        publication, "ReviewApprovalFinalizer", "_refinalize_with_dispositions_impl"
+    )
+    if (
+        source.f_locals.get("self") is not app
+        or source.f_locals.get("run") is not run
+        or source.f_locals.get("preparation") is not token
+        or source.f_locals.get("finalizer") is not initial
+        or copied.f_locals.get("self") is not initial
+        or copied.f_locals.get("preparation") is not token
+        or preparing.f_locals.get("self") is not copied.f_locals.get("operation")
+        or preparing.f_locals.get("operation") is not finalizer
+        or executing.f_locals.get("self") is not finalizer
+        or run.caller._root != root
+        or run.caller._checkpoint is not None
+        or saved["run"] is not run
+        or saved["authority"] is not authority
+        or saved["target"] is not target
+        or _hold_bytes(target.authenticated) != saved["hold_bytes"]
+    ):
+        raise ReviewInputError("prospective sizing copied source or root changed")
+    require_module_seal(quarantine_origin)
+    quarantine_origin.require_authenticated_read_owner(
+        target.authenticated, run.ledger, run.caller, run.identity
+    )
+    return saved, executing
+
+
+def attach_sizing_hold(token, finalizer, eligibility, *, head_sha):
+    """Attach retained DATA then project a decision; never a fresh hold read."""
+    require_module_seal(sys.modules[__name__])
+    from . import publication
+
+    saved, executing = _require_prospective(token, finalizer)
+    frame = _source_frame(publication, "ReviewApprovalFinalizer", "attach_quarantine")
+    carried = _source_frame(publication, "ReviewApprovalFinalizer", "attach_carried")
+    if (
+        frame.f_locals.get("self") is not finalizer
+        or frame.f_locals.get("eligibility") is not eligibility
+        or head_sha != saved["run"].head_sha
+        # attach_historical intentionally replaces the outer adjusted value.
+        # Bind its original consumer's post-historical local instead.
+        or carried.f_locals.get("self") is not finalizer
+        or carried.f_locals.get("eligibility") is not eligibility
+        or frame.f_back is not carried
+        or carried.f_back is not executing
+    ):
+        raise ReviewInputError("prospective sizing hold consumer changed")
+    before = saved["hold_bytes"]
+    lineage, archive, inventories, state = (json.loads(value) for value in before[:4])
+    fresh = eligibility.fresh_human_pending
+    current = assessment_view(
+        archive["assessment_origins"],
+        inventories,
+        state,
+        scope=lineage["scope_sha256"],
+        fresh_human_pending=fresh,
+    )
+    actual = replace(
+        eligibility,
+        quarantine_assessments=current,
+        facts=replace(
+            eligibility.facts,
+            has_human_adjudication_findings=(
+                fresh
+                or bool(current["pending"])
+                or bool((eligibility.historical_assessments or {}).get("pending"))
+            ),
+        ),
+    )
+    return projected_eligibility(token, finalizer, actual)
+
+
+@dataclass(frozen=True)
+class ProspectiveSizingBranch:
+    """Conditional continuation DATA, deliberately not _FinalizationPreflight."""
+
+    repository_id: int
+    base_sha: str
+    result: None = None
+
+
+def prospective_pr_branch(
+    token, finalizer, *, repository, repository_id, pull_request, head_sha, base_sha
+):
+    require_module_seal(sys.modules[__name__])
+    saved, frame = _require_prospective(token, finalizer)
+    run = saved["run"]
+    if (
+        frame.f_locals.get("compacted") is not False
+        or frame.f_locals.get("repository") != repository
+        or frame.f_locals.get("repository_id") != repository_id
+        or frame.f_locals.get("pull_request") != pull_request
+        or frame.f_locals.get("head_sha") != head_sha
+        or repository != run.identity.repository
+        or repository_id != run.identity.repository_id
+        or pull_request != run.identity.pull_request
+        or head_sha != run.head_sha
+        or base_sha != saved["record"].transaction.base_sha
+    ):
+        raise ReviewInputError("prospective sizing conditional scope changed")
+    return ProspectiveSizingBranch(repository_id, base_sha)
 
 
 def prepare(run, authority, target, app):
@@ -926,6 +1559,7 @@ def prepare(run, authority, target, app):
         "native": target.native_review_bytes,
         "frontier": target.native_frontier_bytes,
         "guard": guard,
+        "hold_bytes": _hold_bytes(target.authenticated),
     }
     return token
 
@@ -952,6 +1586,7 @@ def require(token, *, finalizer=None):
         or target.native_review_bytes != saved["native"]
         or target.native_frontier_bytes != saved["frontier"]
         or target.capacity_projection != saved["projection"]
+        or _hold_bytes(target.authenticated) != saved["hold_bytes"]
         or saved["app"].session_ledger is not run.ledger
         or saved["authority"].run is not run
         or (

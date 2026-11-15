@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass, field, replace
@@ -261,7 +262,11 @@ class _PaginationObservationHttp(GitHubHttp):
     """Observe oversized pages without owning request accounting."""
 
     def __init__(self, http: GitHubHttp, budget: EvidenceReadBudget) -> None:
-        super().__init__(api_url=http.api_url, timeout=getattr(http, "timeout", 30))
+        super().__init__(
+            api_url=http.api_url,
+            timeout=getattr(http, "timeout", 30),
+            evidence_monotonic=getattr(http, "evidence_monotonic", time.monotonic),
+        )
         self.transport = http
         # Preserve the existing one-shot operation-entry handoff. This adapter
         # adds no response cache and must not silently discard an admitted list.
@@ -337,7 +342,11 @@ class PublicationBudgetHttp(GitHubHttp):
     ) -> None:
         from .human_assessment import FeedbackBudgetHttp
 
-        super().__init__(api_url=http.api_url, timeout=getattr(http, "timeout", 30))
+        super().__init__(
+            api_url=http.api_url,
+            timeout=getattr(http, "timeout", 30),
+            evidence_monotonic=getattr(http, "evidence_monotonic", time.monotonic),
+        )
         self.primed_issue_comments = http.primed_issue_comments
         self.publication_budget = budget
         self.operation_observer = observer
@@ -493,7 +502,11 @@ class _RecoveryReadHttp(GitHubHttp):
     """Only metadata GETs are permitted while the explicit phase is active."""
 
     def __init__(self, transport: GitHubHttp, phase: PublicationRecoveryReadPhase):
-        super().__init__(api_url=transport.api_url, timeout=transport.timeout)
+        super().__init__(
+            api_url=transport.api_url,
+            timeout=transport.timeout,
+            evidence_monotonic=getattr(transport, "evidence_monotonic", time.monotonic),
+        )
         self.transport, self.phase = transport, phase
 
     def request(self, method, path, *, token, body=None, timeout_seconds=None):

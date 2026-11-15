@@ -4831,7 +4831,17 @@ class GitHubApplication:
         budget.check()
         check_token = self.broker.exchange(run.oidc, capability="check_publish")
         budget.check()
-        with journal.transports(finalizer=finalizer):
+        from review_sensei.source_registry import require_module_seal
+
+        from . import quarantine_command_finalization as sizing_source
+
+        require_module_seal(sizing_source)
+        with (
+            sizing_source.prospective_sizing_scope(
+                preparation, self, run, authority, target, finalizer
+            ),
+            journal.transports(finalizer=finalizer),
+        ):
             plan = finalizer.prepare_quarantine_command_capacity(
                 preparation,
                 token=run.ledger.token,

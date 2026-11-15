@@ -263,9 +263,15 @@ def _make_issuer():
 
     def prepare_receipt_phase(run, authority, target):
         from . import quarantine_action
+        from . import quarantine_command_receipt as receipt_source
         from .publication_recovery import _publication_transport
         from .quarantine_capacity import native_reserve
-        from .quarantine_command_receipt import project_receipt_page
+
+        require_module_seal(receipt_source)
+        from .quarantine_command_receipt import (
+            _projection_binding,
+            project_receipt_page,
+        )
         from .quarantine_lifecycle_transfer import _target_binding, sizing_snapshot
         from .session_ledger import (
             parse_session_comment,
@@ -376,6 +382,7 @@ def _make_issuer():
             rows=rows,
             root_id=root_id,
             projection=projection,
+            projection_binding=_projection_binding(projection),
             authority_bytes=canonical_bytes(authority.document),
         )
         from . import quarantine_command_successor
@@ -426,6 +433,9 @@ def _make_issuer():
         from review_sensei.bounded_evidence import partition_evidence
 
         from . import quarantine_action, quarantine_candidate_receipt
+        from . import quarantine_command_receipt as receipt_source
+
+        require_module_seal(receipt_source)
         from .quarantine_command_receipt import freeze_receipt_membership
         from .quarantine_creation import _body
 
@@ -533,6 +543,13 @@ def _make_issuer():
         ]
         if prior:
             return None  # Existing receipt updates retain conservative pricing.
+        from . import quarantine_command_receipt as receipt_source
+
+        require_module_seal(receipt_source)
+        from .quarantine_command_receipt import _membership_binding, _projection_binding
+
+        if _projection_binding(entry["projection"]) != entry["projection_binding"]:
+            raise ReviewInputError("receipt pre-effect projection changed")
         membership = freeze_receipt_membership(
             rows,
             projection=entry["projection"],
@@ -552,6 +569,7 @@ def _make_issuer():
             _configuration(run.caller.accounting.configuration),
             marker,
             _blocks(run.caller),
+            _membership_binding(membership),
         )
         return lease
 
@@ -574,7 +592,15 @@ def _make_issuer():
             configuration,
             marker,
             block_state,
+            membership_binding,
         ) = entry
+        from . import quarantine_command_receipt as receipt_source
+
+        require_module_seal(receipt_source)
+        from .quarantine_command_receipt import _membership_binding
+
+        if _membership_binding(membership) != membership_binding:
+            raise ReviewInputError("receipt membership protocol changed")
         run.caller._require_ledger(run.ledger, run.identity)
         current_blocks, remaining, pending = _blocks(run.caller)
         from . import quarantine_historical_execution

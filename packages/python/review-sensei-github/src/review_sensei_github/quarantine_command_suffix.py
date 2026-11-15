@@ -116,6 +116,9 @@ def _registry():
             or any(item.get("mutation") for item in observations)
         ):
             raise ReviewInputError("guarded suffix complete census custody changed")
+        from . import packed_comment_census
+
+        require_module_seal(packed_comment_census)
         completed[ledger] = dict(
             identity=identity,
             caller=caller,
@@ -123,6 +126,12 @@ def _registry():
             root=root,
             record=record,
             rows=canonical_bytes(rows),
+            plan=plan,
+            plan_snapshot=(
+                packed_comment_census._single_plan_snapshot(plan)
+                if plan is not None
+                else None
+            ),
             stop=len(caller.observations),
             observations=tuple((item, canonical_bytes(item)) for item in observations),
         )
@@ -134,10 +143,16 @@ def _registry():
 
     def prepare(run, authority, target):
         from . import quarantine_action
+        from . import quarantine_command_receipt as receipt_source
         from .quarantine_capacity import _guard_state, installed_capacity
         from .quarantine_command_execution import _source_frame
         from .quarantine_command_namespace import project_current
-        from .quarantine_command_receipt import project_receipt_page
+
+        require_module_seal(receipt_source)
+        from .quarantine_command_receipt import (
+            _projection_binding,
+            project_receipt_page,
+        )
         from .quarantine_lifecycle_transfer import _target_binding, sizing_snapshot
         from .session_ledger import (
             parse_session_comment,
@@ -215,6 +230,31 @@ def _registry():
         # Admission must still prove and enforce the closed mutation families.
         event_body = _closed_event_body(run, target, record)
         event_wire = len(canonical_bytes({"body": event_body}))
+        from . import quarantine_command_finalization
+
+        require_module_seal(quarantine_command_finalization)
+        receipt_data = quarantine_command_finalization.exact_intermediate_receipt(
+            action=target.command.action,
+            scope=target.command.scope,
+            instance=target.instance,
+            operator_paused=record.operator_paused,
+            actor=authority.document["actor"]["login"],
+            source_comment_id=authority.document["source"]["id"],
+            command_digest=authority.document["source"]["body_sha256"],
+        )
+        from . import packed_comment_census
+
+        require_module_seal(packed_comment_census)
+        ordered_known = captured["plan"] is guard.comment_plan
+        if ordered_known and (
+            packed_comment_census._single_plan_snapshot(guard.comment_plan)
+            != captured["plan_snapshot"]
+            or tuple(row["id"] for row in rows if row["id"] in guard.comment_plan.known)
+            != tuple(guard.comment_plan.known)
+        ):
+            raise ReviewInputError(
+                "guarded suffix original packed census order changed"
+            )
         page = project_receipt_page(
             rows,
             mutable_bounds=(
@@ -228,8 +268,13 @@ def _registry():
                     + 9,
                 ),
             ),
-            future_bounds=(event_wire, 65536),
+            future_bounds=(event_wire, receipt_data[1]),
+            allow_graphql=True,
+            identity=run.identity,
+            max_reads=2,
+            ordered_known=ordered_known,
         )
+        page_binding = _projection_binding(page)
         from .quarantine_command_finalization import intermediate_suffix_recipe
 
         app = frame.f_locals["app"]
@@ -261,12 +306,44 @@ def _registry():
         from .quarantine_command_namespace import capture_paid_prefix
 
         capture_paid_prefix(run.caller)
-        recipe = intermediate_suffix_recipe(observation, comment_rows=rows)
+        recipe = intermediate_suffix_recipe(
+            observation, comment_rows=rows, receipt_page=page
+        )
         recipe["event_exact_body"] = event_body
         recipe["event_wire_bound"] = event_wire
-        if run.caller.budget_view.ordinary_remaining() < recipe["combined_loss_calls"]:
-            raise ReviewInputError("guarded suffix complete ordinary tail is unfunded")
+        from . import historical_journal_census
+
+        require_module_seal(historical_journal_census)
+        if recipe["contract"] == "closed-inline-c5-r2-p2-no-verification-v1":
+            descriptor = historical_journal_census.proposal_descriptor(
+                run, guard, captured, recipe
+            )
+            if descriptor is not None:
+                recipe["journal_enumeration"] = descriptor
+                recipe["contract"] = "closed-inline-c5-r2-p2-journal-c3-reserved105-v1"
+                if run.caller.budget_view.ordinary_remaining() < 105:
+                    quarantine_command_finalization.require_c3_101_observation(
+                        observation
+                    )
+                    recipe.update(
+                        quarantine_command_finalization.journal_c3_101_model()
+                    )
+                    recipe["contract"] = (
+                        "closed-inline-c5-r2-p2-journal-c3-reserved101-v1"
+                    )
+        if run.caller.budget_view.ordinary_remaining() < recipe["ordinary_required"]:
+            raise ReviewInputError(
+                "guarded suffix complete ordinary tail is unfunded "
+                f"(available={run.caller.budget_view.ordinary_remaining()}, "
+                f"required={recipe['ordinary_required']}, "
+                f"before_preparation={ordinary_before}, "
+                f"preparation_calls={preparation_calls}, "
+                f"comment_reads={recipe['comment_reads']}, "
+                f"review_reads={recipe['review_reads']}, "
+                f"receipt_reads={recipe['receipt_reads']})"
+            )
         token = SuffixProposal()
+        require_module_seal(receipt_source)
         proposals[token] = dict(
             run=run,
             authority=authority,
@@ -282,12 +359,14 @@ def _registry():
             plan=guard.comment_plan,
             captured=captured,
             recipe=canonical_bytes(recipe),
+            c3_observation=observation,
             preparation_observations=tuple(
                 (item, canonical_bytes(item))
                 for item in run.caller.observations[before_preparation:]
             ),
             preparation_calls=preparation_calls,
             page=page,
+            page_binding=page_binding,
             accounting=canonical_bytes(project_current(run.caller)),
         )
         return token
@@ -301,8 +380,14 @@ def _registry():
         if entry is None or entry["run"] is not run:
             raise ReviewInputError("guarded suffix proposal is copied or expired")
         guard = installed_capacity(run.ledger, run.identity)
+        from . import quarantine_command_receipt as receipt_source
+
+        require_module_seal(receipt_source)
+        from .quarantine_command_receipt import _projection_binding
+
         if (
-            guard is not entry["guard"]
+            _projection_binding(entry["page"]) != entry["page_binding"]
+            or guard is not entry["guard"]
             or _guard_state(guard) != entry["guard_state"]
             or guard.comment_plan is not entry["plan"]
             or _target_binding(entry["target"]) != entry["binding"]
@@ -317,6 +402,16 @@ def _registry():
             )
         ):
             raise ReviewInputError("guarded suffix proposal source changed")
+        if entry["page"].protocol == "graphql-two-page-ordered":
+            from . import packed_comment_census
+
+            require_module_seal(packed_comment_census)
+            if (
+                entry["captured"]["plan"] is not entry["plan"]
+                or packed_comment_census._single_plan_snapshot(entry["plan"])
+                != entry["captured"]["plan_snapshot"]
+            ):
+                raise ReviewInputError("guarded suffix packed order source changed")
         return entry["page"]
 
     def require_execution(token, run):

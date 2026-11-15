@@ -212,11 +212,15 @@ class GitHubHttp:
         api_url: str = "https://api.github.com",
         opener: Opener = urlopen,
         timeout: int = 30,
+        evidence_monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not isinstance(api_url, str) or not api_url.strip():
             raise GitHubHTTPError("GitHub API URL must be non-empty")
         if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             raise GitHubHTTPError("GitHub HTTP timeout must be positive")
+        if not callable(evidence_monotonic):
+            raise GitHubHTTPError("GitHub evidence clock must be callable")
+        self.evidence_monotonic = evidence_monotonic
         self.api_url = api_url.rstrip("/")
         self.opener = opener
         self.timeout = timeout
@@ -596,7 +600,7 @@ class GitHubHttp:
         include_all_changed: bool = False,
         timeout_seconds: float = 60,
         max_requests: int = 64,
-        monotonic: Callable[[], float] = time.monotonic,
+        monotonic: Callable[[], float] | None = None,
         before_read: Callable[[], float] | None = None,
     ) -> EvidenceBundle:
         """Read one exhaustive file inventory between exact snapshot/count fences.
@@ -634,6 +638,8 @@ class GitHubHttp:
             or not 0 < timeout_seconds <= 60
         ):
             raise GitHubHTTPError("GitHub evidence acquisition budget is invalid")
+        if monotonic is None:
+            monotonic = self.evidence_monotonic
         deadline = monotonic() + timeout_seconds
         reads = 0
 

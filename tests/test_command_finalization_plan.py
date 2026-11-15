@@ -252,14 +252,17 @@ class CommandFinalizationPlanTests(unittest.TestCase):
         self.assertEqual(len(seen), 2)
 
     def test_source_command_cleanup_failure_never_uses_old_green_or_approval(self):
+        import inspect
         import tempfile
-        from unittest.mock import patch
+        from urllib.parse import urlsplit
 
+        from fake_github_http import json_response
+        from review_sensei_github.command_finalization_plan import stop_command_cleanup
+        from review_sensei_github.finding_lifecycle import FindingLifecycleJournal
         from review_sensei_github.publication import (
             ReviewApprovalFinalizer,
             parse_finding_index,
         )
-        from review_sensei_github.thread_resolution import ThreadResolutionResult
 
         from tests.test_action_run import HEAD, CommandEntryFixture
 
@@ -293,47 +296,111 @@ class CommandFinalizationPlanTests(unittest.TestCase):
                 new_run=True,
             )
             observed = []
-
-            def unresolved(finalizer, **kwargs):
-                from review_sensei_github.ordered_native_batch import (
-                    issue_ordered_batch,
+            mutations, readbacks, stopped, forbidden_entries = [], [], [], []
+            journals = []
+            external = fixture.external
+            dispatch = inspect.unwrap(FindingLifecycleJournal._dispatch_effect)
+            dispatch_code, dispatch_globals = dispatch.__code__, dispatch.__globals__
+            stop_code, stop_globals = (
+                stop_command_cleanup.__code__,
+                stop_command_cleanup.__globals__,
+            )
+            forbidden = tuple(
+                (function.__code__, function.__globals__)
+                for function in (
+                    inspect.unwrap(
+                        ReviewApprovalFinalizer._reviews_have_app_head_state
+                    ),
+                    inspect.unwrap(ReviewApprovalFinalizer.finalize),
                 )
+            )
 
-                journal = finalizer._finding_lifecycle_journal
-                requests = tuple(("POST", "/graphql", {"target": i}) for i in range(2))
-                complete = (
-                    issue_ordered_batch(journal, requests).approve().bind(requests)
-                )
-                for request in requests:
-                    complete.before_request(*request)
-                    complete.confirm_current()
-                complete.close()
-                self.assertFalse(getattr(journal, "_command_native_stopped", False))
-                stopped = (
-                    issue_ordered_batch(journal, requests).approve().bind(requests)
-                )
-                stopped.stop()
-                self.assertTrue(journal._command_native_stopped)
-                observed.append(copy.deepcopy((fixture.reviews, fixture.check_runs)))
-                return ThreadResolutionResult(unconfirmed=instances)
+            def nonconfirming_cleanup(request, timeout):
+                if (
+                    request.get_method() == "POST"
+                    and urlsplit(request.full_url).path == "/graphql"
+                ):
+                    payload = json.loads(request.data)
+                    if payload.get("operationName") == "ResolveReviewThread":
+                        identifier = payload["variables"]["input"]["threadId"]
+                        # Retain every attempt before an assertion can be
+                        # normalized by the command's exception handling.
+                        mutations.append(identifier)
+                        self.assertEqual(len(mutations), 1, "later cleanup mutation")
+                        frame = sys._getframe(1)
+                        while frame is not None and not (
+                            frame.f_code is dispatch_code
+                            and frame.f_globals is dispatch_globals
+                        ):
+                            frame = frame.f_back
+                        self.assertIsNotNone(frame, "original journal dispatch absent")
+                        journals.append(frame.f_locals["self"])
+                        fixture._meter(request)
+                        observed.append(
+                            copy.deepcopy((fixture.reviews, fixture.check_runs))
+                        )
+                        return json_response(
+                            {
+                                "data": {
+                                    "resolveReviewThread": {
+                                        "thread": {
+                                            "id": identifier,
+                                            "isResolved": False,
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                    if payload.get("operationName") == "ResolutionReadback":
+                        readbacks.append((payload["variables"]["id"], len(mutations)))
+                # Original readback owns its own metering and unchanged state.
+                return external(request, timeout)
 
-            with (
-                patch.object(
-                    ReviewApprovalFinalizer, "reconcile_decided_threads", unresolved
-                ),
-                patch.object(
-                    ReviewApprovalFinalizer,
-                    "_reviews_have_app_head_state",
-                    return_value=True,
-                ) as old_approval,
-                patch.object(
-                    ReviewApprovalFinalizer,
-                    "finalize",
-                    side_effect=AssertionError("approval after stopped cleanup"),
-                ),
-            ):
+            previous = sys.getprofile()
+
+            def observe(frame, event, value):
+                if previous is not None:
+                    previous(frame, event, value)
+                if (
+                    event == "return"
+                    and frame.f_code is stop_code
+                    and frame.f_globals is stop_globals
+                    and value is True
+                    and journals
+                    and frame.f_locals.get("journal") is journals[0]
+                ):
+                    stopped.append(True)
+                if (
+                    event == "call"
+                    and stopped
+                    and any(
+                        frame.f_code is code and frame.f_globals is namespace
+                        for code, namespace in forbidden
+                    )
+                ):
+                    # Record without changing execution: a raised assertion
+                    # could be swallowed as the command's expected failure.
+                    forbidden_entries.append(frame.f_code.co_name)
+
+            fixture.external = nonconfirming_cleanup
+            sys.setprofile(observe)
+            try:
                 self.assertEqual(fixture.invoke_command(), 1, fixture.error)
-                old_approval.assert_not_called()
+            finally:
+                sys.setprofile(previous)
+                fixture.external = external
+            self.assertEqual(len(mutations), 1)
+            self.assertTrue(readbacks, "original cleanup readback was not reached")
+            self.assertTrue(
+                all(item == (mutations[0], 1) for item in readbacks),
+                "cleanup readback did not follow the same attempted mutation",
+            )
+            self.assertTrue(stopped, "authenticated cleanup stop was not reached")
+            self.assertEqual(
+                forbidden_entries,
+                [],
+                "approval lookup/finalize after authenticated cleanup stop",
+            )
             self.assertEqual(len(observed), 1)
             self.assertEqual((fixture.reviews, fixture.check_runs), observed[0])
             self.assertIn("gate re-evaluation failed", fixture.error)

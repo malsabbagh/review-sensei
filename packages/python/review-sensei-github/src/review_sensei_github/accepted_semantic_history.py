@@ -579,10 +579,13 @@ def record_checkpoint_semantics(ledger, identity, record, document):
     the supplied packed journal, for inline and partitioned carriers alike.
     """
     from review_sensei.finding_lifecycle import decode_lifecycle_state
-    from review_sensei.finding_lifecycle_store import DOCUMENT_VERSION
     from review_sensei.session import SessionRecord
 
-    from .finding_lifecycle import _pack_journal, _require_effect_scope, _validate
+    from .finding_lifecycle import (
+        _envelope_for_manifest,
+        _require_effect_scope,
+        _validate,
+    )
 
     caller = getattr(ledger, "caller", None)
     if caller is None:
@@ -604,16 +607,12 @@ def record_checkpoint_semantics(ledger, identity, record, document):
         if reference is None:
             return False
         validated = _validate(document)
-        envelope = {
-            "schema_version": DOCUMENT_VERSION,
-            "lifecycle": _pack_journal(validated),
-        }
         manifest = reference["manifest"]
         if not isinstance(manifest, dict) or not isinstance(
             manifest.get("binding"), dict
         ):
             return False
-        if _digest(envelope) != manifest["sha256"]:
+        if _envelope_for_manifest(validated, manifest) is None:
             return False
         binding = manifest["binding"]
         if (

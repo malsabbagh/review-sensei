@@ -8,9 +8,10 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -21,6 +22,7 @@ from review_sensei_github.api_run_budget import CallerRunBudget
 from review_sensei_github.operation_host import OPERATION_COMMENT_MARKER
 from review_sensei_github.run_authority import REQUEST_KEYS, parse_authority
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_lifecycle import forbid_replacement_phase_budget
 from test_api_work_persistence import HEAD, IDENTITY
 from test_review_run import EntryFixture, fixture_process_environment
 
@@ -38,10 +40,10 @@ class ReplyEntryFixture(EntryFixture):
         super().__init__(directory, limit=limit, runner_kind=runner_kind)
         self.prepare_reply()
 
-    def prepare_reply(self):
+    def prepare_reply(self, *, source_id=41):
         self.event_name = "issue_comment"
         self.source = {
-            "id": 41,
+            "id": source_id,
             "body": BODY,
             "updated_at": UPDATED,
             "created_at": UPDATED,
@@ -49,7 +51,7 @@ class ReplyEntryFixture(EntryFixture):
             "author_association": "OWNER",
             "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
         }
-        self.extra_comments[41] = self.source
+        self.extra_comments[source_id] = self.source
         self.reply_document = {
             "body": "The changed branch preserves the caller contract.",
             "resolve": False,
@@ -226,8 +228,6 @@ class ReplyEntryFixture(EntryFixture):
         from review_sensei_github.broker_client import BrokerClient
         from review_sensei_github.http import GitHubHttp
 
-        from review_sensei.bounded_evidence import EvidenceReadBudget
-
         fixture = self
         event = self.root / "reply-event.json"
         event.write_text(
@@ -276,16 +276,39 @@ class ReplyEntryFixture(EntryFixture):
 
         original_bootstrap = action_run.bootstrap
         original_generate = GitHubApplication.generate_and_publish_reply
+        bootstrap_code, bootstrap_globals = (
+            original_bootstrap.__code__,
+            original_bootstrap.__globals__,
+        )
+        generate_code, generate_globals = (
+            original_generate.__code__,
+            original_generate.__globals__,
+        )
 
-        def bootstrap(*args, **kwargs):
-            run = original_bootstrap(*args, **kwargs)
-            fixture.selected = run
-            return run
+        @contextmanager
+        def capture_returns():
+            previous = sys.getprofile()
 
-        def generate(application, *args, **kwargs):
-            result = original_generate(application, *args, **kwargs)
-            fixture.last_result = result
-            return result
+            def observe(frame, event, value):
+                if event == "return" and value is not None:
+                    if (
+                        frame.f_code is bootstrap_code
+                        and frame.f_globals is bootstrap_globals
+                    ):
+                        fixture.selected = value
+                    elif (
+                        frame.f_code is generate_code
+                        and frame.f_globals is generate_globals
+                    ):
+                        fixture.last_result = value
+                if previous is not None:
+                    previous(frame, event, value)
+
+            try:
+                sys.setprofile(observe)
+                yield
+            finally:
+                sys.setprofile(previous)
 
         class Provider:
             name = "ollama"
@@ -329,18 +352,11 @@ class ReplyEntryFixture(EntryFixture):
                         review_run, "BrokerClient", side_effect=broker_factory
                     ),
                     patch.object(review_run, "GitHubHttp", side_effect=http_factory),
-                    patch.object(action_run, "bootstrap", side_effect=bootstrap),
-                    patch.object(
-                        GitHubApplication, "generate_and_publish_reply", generate
-                    ),
+                    capture_returns(),
                     patch.object(
                         action_reply, "default_registry", return_value=Registry()
                     ),
-                    patch.object(
-                        EvidenceReadBudget,
-                        "__init__",
-                        side_effect=AssertionError("new phase allowance"),
-                    ),
+                    forbid_replacement_phase_budget(),
                     redirect_stdout(output),
                     redirect_stderr(errors),
                 ]:

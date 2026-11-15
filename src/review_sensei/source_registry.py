@@ -9,7 +9,7 @@ from __future__ import annotations
 import copyreg
 import inspect
 import sys
-from types import ModuleType
+from types import FunctionType, MethodType, ModuleType
 from typing import Any
 
 from .errors import ReviewInputError
@@ -36,9 +36,17 @@ def _build_registry():
         if identity in ancestors:
             return (identity, "cycle")
         ancestors = (*ancestors, identity)
-        if type(value) in (type(None), bool, int, float, str, bytes):
+        kind = type(value)
+        if (
+            kind is type(None)
+            or kind is bool
+            or kind is int
+            or kind is float
+            or kind is str
+            or kind is bytes
+        ):
             return (identity, type(value), repr(value))
-        if type(value) in (tuple, list):
+        if type(value) is tuple or type(value) is list:
             return (identity, tuple(default_snapshot(v, ancestors) for v in value))
         if type(value) is dict:
             return (
@@ -48,9 +56,14 @@ def _build_registry():
                     for k, v in value.items()
                 ),
             )
-        if type(value) in (set, frozenset):
+        if type(value) is set or type(value) is frozenset:
             return (identity, frozenset(default_snapshot(v, ancestors) for v in value))
-        return (identity, getattr(value, "__code__", None))
+        if type(value) is FunctionType:
+            return (identity, id(FunctionType), value.__code__)
+        # Unsupported defaults are opaque: never inspect a replacement's
+        # attributes, repr, equality or hash. Integer type identity also detects
+        # __class__ reassignment without invoking metaclass comparisons.
+        return (identity, id(type(value)))
 
     def defaults(function):
         if function.__defaults__ is None and function.__kwdefaults__ is None:
@@ -61,7 +74,15 @@ def _build_registry():
         )
 
     def normalize(value):
-        return getattr(value, "__func__", value)
+        # Never ask an untrusted replacement export to describe itself. These
+        # exact built-in containers have non-overridable function storage.
+        if (
+            type(value) is MethodType
+            or type(value) is staticmethod
+            or type(value) is classmethod
+        ):
+            return value.__func__
+        return value
 
     def remember_function(function):
         # inspect.unwrap follows mutable function metadata. Pin each original
@@ -154,7 +175,7 @@ def _build_registry():
                 executable = set()
                 for attribute in dir(value):
                     member = normalize(inspect.getattr_static(value, attribute))
-                    if isinstance(member, property) or callable(member):
+                    if issubclass(type(member), property) or callable(member):
                         executable.add(attribute)
                         row = (
                             value,
@@ -165,7 +186,7 @@ def _build_registry():
                         members.append(row)
                         if callable(member):
                             original_methods[attribute] = member
-                    if isinstance(member, property):
+                    if issubclass(type(member), property):
                         for accessor in ("fget", "fset", "fdel"):
                             function = getattr(member, accessor)
                             if function is not None:
@@ -205,6 +226,8 @@ def _build_registry():
                 current = normalize(
                     inspect.getattr_static(owner, name, None)
                     if inspect.isclass(owner)
+                    else vars(owner).get(name)
+                    if type(owner) is ModuleType
                     else getattr(owner, name, None)
                 )
             if (
@@ -214,18 +237,48 @@ def _build_registry():
             ):
                 raise ReviewInputError("original module source changed: " + name)
 
+    def static_members(cls):
+        # For ordinary classes, getattr_static repeatedly walks the same MRO
+        # and checks the immutable built-in type's dictionary descriptor for
+        # every attribute. Read those current namespaces once instead. Exact
+        # type/key guards exclude user-controlled lookup/equality/hash hooks;
+        # unusual metaclasses and namespaces retain the original static reader.
+        # This is a fresh view, never a cached successful source validation.
+        if type(cls) is type:
+            namespaces = []
+            for base in type.__getattribute__(cls, "__mro__"):
+                if type(base) is not type:
+                    break
+                namespace = vars(base)
+                if any(type(name) is not str for name in namespace):
+                    break
+                namespaces.append(namespace)
+            else:
+                merged = {}
+                for namespace in reversed(namespaces):
+                    merged.update(namespace)
+                names = dir(cls)
+                if all(name in merged for name in names):
+                    return {name: normalize(merged[name]) for name in names}
+        return {name: normalize(inspect.getattr_static(cls, name)) for name in dir(cls)}
+
     def require_class(cls):
         original = classes.get(cls)
         if original is None:
             raise ReviewInputError("original source class is unavailable")
         module, name, namespace, executable, bindings, _methods, slots = original
         slot_values = slots[0]
+        if type(module) is not ModuleType:
+            raise ReviewInputError("original class source changed")
+        module_name = vars(module).get("__name__")
         if (
-            sys.modules.get(module.__name__) is not module
-            or getattr(module, name, None) is not cls
+            type(module_name) is not str
+            or sys.modules.get(module_name) is not module
+            or vars(module).get(name) is not cls
             or frozenset(vars(cls)) != namespace
             or vars(cls).get("__slotnames__") is not slots[0]
             or type(slot_values) is not list
+            or any(type(slot) is not str for slot in slot_values)
             or tuple(slot_values) != slots[1]
         ):
             raise ReviewInputError("original class source changed")
@@ -233,14 +286,12 @@ def _build_registry():
         # binding checks. It is discarded after this validation; no method or
         # successful source check is cached between requests. Preserve the
         # original early metadata refusals before enumerating any members.
-        members = {
-            name: normalize(inspect.getattr_static(cls, name)) for name in dir(cls)
-        }
+        members = static_members(cls)
         if (
             frozenset(
                 name
                 for name, member in members.items()
-                if callable(member) or isinstance(member, property)
+                if callable(member) or issubclass(type(member), property)
             )
             != executable
         ):
@@ -248,10 +299,15 @@ def _build_registry():
         require_bindings(bindings, class_snapshot=(cls, members))
 
     def require_module_seal(module):
-        if not isinstance(module, ModuleType):
+        if type(module) is not ModuleType:
             raise ReviewInputError("original source module seal is unavailable")
         bindings = registered.get(module)
-        if bindings is None or sys.modules.get(module.__name__) is not module:
+        module_name = vars(module).get("__name__")
+        if (
+            bindings is None
+            or type(module_name) is not str
+            or sys.modules.get(module_name) is not module
+        ):
             raise ReviewInputError("original source module seal is unavailable")
         require_bindings(bindings)
         for cls in module_classes[module]:
@@ -281,6 +337,26 @@ def _build_registry():
         ):
             raise ReviewInputError("original source class identity changed")
 
+    def require_original_class_export(*, module, name):
+        """Return registered export identity only; never construct an instance."""
+        if type(module) is not ModuleType or type(name) is not str:
+            raise ReviewInputError("original source class identity is unavailable")
+        namespace = vars(module)
+        cls = namespace.get(name)
+        if type(cls) is not type:
+            raise ReviewInputError("original source class identity is unavailable")
+        original = classes.get(cls)
+        if (
+            original is None
+            or original[0] is not module
+            or original[1] != name
+            or type(namespace.get("__name__")) is not str
+            or sys.modules.get(namespace["__name__"]) is not module
+            or namespace.get(name) is not cls
+        ):
+            raise ReviewInputError("original source class identity changed")
+        return cls
+
     def require_instance_source(instance, *, methods):
         cls = type(instance)
         for base in cls.__mro__:
@@ -304,6 +380,7 @@ def _build_registry():
         require_module_seal,
         require_instance_source,
         require_original_class_identity,
+        require_original_class_export,
     )
 
 
@@ -312,6 +389,7 @@ def _build_registry():
     require_module_seal,
     require_instance_source,
     require_original_class_identity,
+    require_original_class_export,
 ) = _build_registry()
 del _build_registry
 seal_module()

@@ -177,12 +177,19 @@ class ReviewCapacityNonmemberTests(unittest.TestCase):
 
         from review_sensei.errors import ReviewInputError
 
-        wrapper = _BudgetedReviewPagination(GitHubHttp(), EvidenceReadBudget())
+        # Retain enough genuine predecessors to reproduce the larger registry
+        # seen in a full-suite worker, even when this test runs alone.
+        wrappers = [
+            _BudgetedReviewPagination(GitHubHttp(), EvidenceReadBudget())
+            for _ in range(256)
+        ]
+        wrapper = wrappers[0]
         find = inspect.getclosurevars(membership.never_installed).nonlocals["find"]
         quick = inspect.getclosurevars(find).nonlocals["quick"]
         state = inspect.getclosurevars(quick).nonlocals["state"]
         retired = inspect.getclosurevars(quick).nonlocals["retired"]
         table = state[0][1]
+        self.assertGreater(len(table), 200)
         key = (1, id(weakref.ref(wrapper)))
         original = table[key]
         calls = []
@@ -203,7 +210,12 @@ class ReviewCapacityNonmemberTests(unittest.TestCase):
         for row in (Bomb(), (1, id(wrapper), Bomb(), original[3])):
             table[key] = row
             saved_retired = set(retired)
-            retired.update((0, -n) for n in range(1, 100))
+            # The full suite can retain more than 200 live registry rows.
+            # Derive enough impossible weakref IDs to enter compaction at its
+            # current size, rather than depending on an isolated-process size.
+            threshold = max(64, len(table) // 2)
+            retired.update((0, -n) for n in range(1, threshold + 1))
+            self.assertGreaterEqual(len(retired), threshold)
             try:
                 with self.assertRaises(ReviewInputError):
                     membership.never_installed(wrapper)

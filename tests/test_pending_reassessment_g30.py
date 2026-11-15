@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import socket
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -37,7 +39,6 @@ from fake_github_http import json_response
 from review_sensei_github.api_run_host import review_startup_plan
 from review_sensei_github.api_run_plan import owner_allocations
 from review_sensei_github.conversation import ReplyResult, reply_marker
-from review_sensei_github.errors import GitHubPublicationTransientError
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.operation_comments import (
     GitHubIssueCommentOperationPort,
@@ -332,14 +333,30 @@ class PendingReassessmentG30Tests(unittest.TestCase):
         # durably recorded in an eligibility `COMMENT` review:
         state_fin = _attach_finding_index(State())
         fin_provider = Provider(response_for(state_fin.eligibility))
-        with patch.object(
-            ReviewApprovalFinalizer,
-            "finalize",
-            side_effect=GitHubPublicationTransientError(
-                "transient check/approval loss"
-            ),
-        ):
+        original = inspect.unwrap(ReviewApprovalFinalizer.finalize)
+        code, globals_ = original.__code__, original.__globals__
+        faults = []
+
+        def interrupt_durable_finalizer(current, method, path, body):
+            if method != "GET" or path != "/repos/owner/repo/pulls/1":
+                return
+            frame = sys._getframe(1)
+            while frame is not None:
+                if frame.f_code is code and frame.f_globals is globals_:
+                    self.assertEqual(current.events(), ["COMMENT"])
+                    self.assertTrue(current.replies)
+                    faults.append((method, path))
+                    raise TimeoutError("interrupted durable reassessment finalizer")
+                frame = frame.f_back
+
+        state_fin.hook = interrupt_durable_finalizer
+        try:
             interrupted, fin_broker = _app_reply(state_fin, fin_provider)
+        finally:
+            state_fin.hook = None
+        self.assertTrue(faults, "original durable finalizer fault was not reached")
+        self.assertIs(original.__code__, code)
+        self.assertIs(original.__globals__, globals_)
 
         self.assertEqual(interrupted.status, "replied")
         self.assertEqual(interrupted.approval_status, "approval_withheld")

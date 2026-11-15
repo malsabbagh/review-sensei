@@ -15,7 +15,6 @@ CHILD = r"""
 import copy,json,sys
 from dataclasses import asdict
 from pathlib import Path
-from unittest.mock import patch
 from test_action_reply_entry import ReplyEntryFixture
 from test_api_work_persistence import IDENTITY,HEAD
 from review_sensei_github.publication import approval_eligibility_from_body
@@ -46,9 +45,17 @@ if p.get('fault')=='unknown':
         return original_external(request,timeout)
     f.external=uncertain
 observed=[]; original=lifecycle.restore_finding_lifecycle
-def capture(*a,**kw):
-    result=original(*a,**kw); observed.append((a[0],result[1])); return result
-with patch.object(lifecycle,'restore_finding_lifecycle',capture): code=f.invoke_reply()
+original_code,original_globals=original.__code__,original.__globals__
+previous_profile=sys.getprofile()
+def capture(frame,event,result):
+    if event=='return' and result is not None and frame.f_code is original_code and frame.f_globals is original_globals:
+        observed.append((frame.f_locals['reviewer'],result[1]))
+    if previous_profile is not None: previous_profile(frame,event,result)
+try:
+    sys.setprofile(capture)
+    code=f.invoke_reply()
+finally:
+    sys.setprofile(previous_profile)
 record=parse_session_comment(f.comment['body'],identity=IDENTITY)
 state=observed[-1][0]._drift_states.get((123,7)) if observed else None
 state_summary=None if state is None else {'obligations':[{'id':o.obligation_id,'criterion':o.criterion.resolution_criterion,'status':o.lifecycle_state,'binding':asdict(o.thread_binding) if o.thread_binding else None} for o in state.inventory.obligations],'slots':[asdict(x) for x in state.slots]}
@@ -66,7 +73,6 @@ PROMOTE = r"""
 import copy,json,sys
 from dataclasses import asdict
 from pathlib import Path
-from unittest.mock import patch
 from test_review_run import EntryFixture
 from test_api_work_persistence import IDENTITY,HEAD
 from review_sensei_github import finding_lifecycle as lifecycle
@@ -85,9 +91,17 @@ else:
     def no_provider(): raise AssertionError('cold replay invoked inference')
     f.before_provider=no_provider
 owners=[]; original=lifecycle.restore_finding_lifecycle
-def capture(*a,**kw):
-    result=original(*a,**kw); owners.append(a[0]); return result
-with patch.object(lifecycle,'restore_finding_lifecycle',capture): code=f.invoke()
+original_code,original_globals=original.__code__,original.__globals__
+previous_profile=sys.getprofile()
+def capture(frame,event,result):
+    if event=='return' and result is not None and frame.f_code is original_code and frame.f_globals is original_globals:
+        owners.append(frame.f_locals['reviewer'])
+    if previous_profile is not None: previous_profile(frame,event,result)
+try:
+    sys.setprofile(capture)
+    code=f.invoke()
+finally:
+    sys.setprofile(previous_profile)
 state=owners[-1]._drift_states.get((123,7)) if owners else None
 summary=None if state is None else {'obligations':[{'id':o.obligation_id,'criterion':o.criterion.resolution_criterion,'status':o.lifecycle_state,'binding':asdict(o.thread_binding) if o.thread_binding else None} for o in state.inventory.obligations],'slots':[asdict(x) for x in state.slots]}
 Path(sys.argv[3]).write_text(json.dumps({'code':code,'error':f.error,'provider_calls':f.provider_calls,'state':summary,'reviews':len(f.reviews),'threads':f.threads,'remote':{k:getattr(f,k) for k in p['remote']},'terminal':parse_session_comment(f.comment['body'],identity=IDENTITY).api_run_accounting}))

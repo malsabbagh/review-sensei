@@ -44,6 +44,33 @@ Later repair changes to the action-reply fixture and its helper closure need
 explicit source review before refreshing class-sharding pins; a mismatch keeps
 the unsplit root. Neither this draft nor its timings qualify those later changes.
 
+### November 15 base reconciliation
+
+The CI merge candidate `83533fb7` combines the published scheduling branch with
+repair head `5b42780f`. Discovery against its built wheels and extracted sdist
+failed because the packaged published-tail journey imports
+`original_finish_interrupt.py`, which was absent from the sdist. The packaging
+repair adds that existing helper to both `MANIFEST.in` and the distribution
+contract; it does not remove any journey or change the failure injection.
+
+The updated source pins were reviewed against the original `50dbc4a2` inputs:
+
+- `test_review_run.py` adds reservation-state assertions and corrects the expected
+  refusal diagnostic inside the existing process-death method. It adds no shared
+  fixture state, setup/teardown hook, method or class.
+- `test_action_reply_entry.py` replaces two production-method patches with
+  invocation-local profile observers. Both the observer and the already-pinned
+  `forbid_replacement_phase_budget` helper restore the previous profiler in
+  `finally`; the observer chains it. Reply-source selection remains instance
+  local. The eight methods, temporary fixture roots and wrapper socket/environment
+  guards are unchanged. The helper closure is already included in the source pins.
+
+These changes preserve the seven-method and five-class isolation contracts.
+Only their reviewed source hashes are refreshed. Any further source drift still
+revokes splitting, and guard drift still fails closed. This source review and
+discovery-only package check do not execute or clear the historical held tests,
+qualify the complete installed suite, or demonstrate a sub-30-minute run.
+
 The initial audit baseline is `c021eeb205d0ca3c5293d572ef2c2dc45c4b087b`.
 Discovery-only inspection found **6,969 test IDs in 833 classes**, and the initial
 audit working tree contained 6,975 IDs after removing two duplicates and adding

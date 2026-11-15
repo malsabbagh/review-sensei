@@ -8,8 +8,10 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+from hot_original_entry import invoke_original
 from review_sensei_github.quarantine_published_tail import BROKER_QUALIFICATIONS
 from review_sensei_github.session_ledger import parse_session_comment
+from test_api_work_lifecycle import forbid_replacement_phase_budget
 from test_quarantine_activation import registered_resource
 from test_quarantine_published_tail_journey import NativePublishedTailJourneyFixture
 
@@ -60,6 +62,7 @@ class GroupedProgressFusionTests(unittest.TestCase):
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             fixture = LostProgressFixture(directory)
+            fixture.api_url = "https://api.github.com"
             old, registration = fixture.original_origins()
             prior = copy.deepcopy(old.api_run_accounting)
             reviews, checks = (
@@ -92,7 +95,8 @@ class GroupedProgressFusionTests(unittest.TestCase):
                 previous = sys.getprofile()
                 try:
                     sys.setprofile(observe)
-                    rc = fixture.invoke()
+                    with forbid_replacement_phase_budget():
+                        rc, _ = invoke_original(fixture)
                 finally:
                     sys.setprofile(previous)
             self.assertEqual(rc, 1)

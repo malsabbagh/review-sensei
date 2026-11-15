@@ -74,7 +74,11 @@ class FeedbackBudgetHttp(GitHubHttp):
     def __init__(self, *, http: GitHubHttp, before_read: Callable[[], float]) -> None:
         if isinstance(http, FeedbackBudgetHttp) or not callable(before_read):
             raise FeedbackAdmissionError("feedback_read_budget_exhausted")
-        super().__init__(api_url=http.api_url, timeout=getattr(http, "timeout", 30))
+        super().__init__(
+            api_url=http.api_url,
+            timeout=getattr(http, "timeout", 30),
+            evidence_monotonic=getattr(http, "evidence_monotonic", time.monotonic),
+        )
         self.transport = http
         self.before_read = before_read
 
