@@ -1643,7 +1643,16 @@ class SessionRecord:
             disposition_snapshot=cast(
                 Mapping[str, object] | None, value.get("disposition_snapshot")
             ),
-            api_run_accounting=_stored_api_accounting(value.get("api_run_accounting")),
+            # The original constructor always normalizes and fully validates
+            # accounting, including its semantic funding/ownership invariants.
+            # For plain input and the exact class, let that existing boundary
+            # do the work once. Subclasses and callback-bearing mappings keep
+            # the original pre-construction validation as well.
+            api_run_accounting=(
+                cast(Mapping[str, object] | None, value.get("api_run_accounting"))
+                if cls is SessionRecord and type(value) is dict
+                else _stored_api_accounting(value.get("api_run_accounting"))
+            ),
             historical_assessments=cast(
                 Mapping[str, object] | None, value.get("historical_assessments")
             ),

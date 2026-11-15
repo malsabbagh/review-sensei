@@ -83,3 +83,29 @@ class SessionAccountingNormalizationTests(unittest.TestCase):
         with self.assertRaises(ReviewInputError):
             MutatingRecord(**arguments)
         self.assertEqual(mutated, [True])
+
+    def test_from_dict_refuses_semantic_overdraft_even_with_subclass_constructor(self):
+        class UncheckedRecord(SessionRecord):
+            def __post_init__(self, _digest_shape_input):
+                pass
+
+        for record_type in (SessionRecord, UncheckedRecord):
+            with self.subTest(record_type=record_type):
+                document = deepcopy(self.record().to_dict())
+                state = document["api_run_accounting"]
+                # A structurally valid integer still violates the original
+                # complete-run conservation constraint.
+                state["blocks"][0]["undispatched"] = state["configuration"]["limit"]
+                with self.assertRaises(ReviewInputError):
+                    record_type.from_dict(document)
+
+    def test_callback_mapping_keeps_preconstruction_accounting_validation(self):
+        class MappingWithCallback(dict):
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                if key == "api_run_accounting" and value is not None:
+                    value["blocks"][0]["undispatched"] = -1
+                return value
+
+        with self.assertRaises(ReviewInputError):
+            SessionRecord.from_dict(MappingWithCallback(self.record().to_dict()))
