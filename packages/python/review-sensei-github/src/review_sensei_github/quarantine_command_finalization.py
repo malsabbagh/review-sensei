@@ -1238,7 +1238,11 @@ def intermediate_suffix_recipe(observation, *, comment_rows, receipt_page):
         raise ReviewInputError("guarded suffix sizing changed installed capacity")
     C, R = max(value[0] for value in prefixes), max(value[1] for value in prefixes)
     if C not in (4, 5) or not 1 <= R <= 3:
-        raise ReviewInputError("guarded suffix complete physical reader exceeds recipe")
+        raise ReviewInputError(
+            "guarded suffix complete physical reader exceeds recipe "
+            f"(comment reads={C}, review reads={R}; "
+            "supported comment reads=4..5, review reads=1..3)"
+        )
     source_review_reads = R
     contract = "closed-inline-c4-reserved-verification-v1"
     trust_calls = 7
