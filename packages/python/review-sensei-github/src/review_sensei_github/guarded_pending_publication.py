@@ -130,10 +130,48 @@ def _fixed_record(record):
 
 def _original_accounting_graph(value, *, models=False):
     """Reject callback-bearing data before reading a price or comparing blocks."""
-    from dataclasses import fields
-
     from review_sensei import api_work
-    from review_sensei.source_registry import require_instance_source
+    from review_sensei.source_registry import require_module_seal
+
+    # Validate every original class before and after this callback-free walk.
+    # Repeating a full class seal for every pending/completed receipt is not
+    # additional evidence. No validation result survives this invocation.
+    # Fixed source field names also prevent mutable dataclass metadata from
+    # hiding a field. Every value is still visited under the original limits.
+    model_fields = {}
+    if models:
+        require_module_seal(api_work)
+        for model, names in (
+            (api_work.ApiRunIdentity, ("repository_id", "run_id")),
+            (api_work.ApiExecutionOwner, ("run_attempt", "job", "generation")),
+            (api_work.FrozenApiConfiguration, ("commit", "digest", "limit")),
+            (api_work.StartupSlot, ("job", "attempt", "requests")),
+            (api_work.StartupPlan, ("slots",)),
+            (api_work.PendingApiRequest, ("request_id", "deadline_unix_ms")),
+            (
+                api_work.CallerRequestBlock,
+                ("block_id", "issued_by", "undispatched", "pending"),
+            ),
+            (
+                api_work.ApiRunAccounting,
+                (
+                    "identity",
+                    "configuration",
+                    "owner",
+                    "startup",
+                    "startup_used",
+                    "prior_nonstartup_liability",
+                    "blocks",
+                    "completed",
+                    "version",
+                    "previous_record",
+                    "terminal_transaction",
+                    "analysis_abort",
+                    "action",
+                ),
+            ),
+        ):
+            model_fields[id(model)] = (model, names)
 
     count = 0
 
@@ -143,12 +181,12 @@ def _original_accounting_graph(value, *, models=False):
         if count > 20_000 or depth > 32:
             raise ReviewInputError("guarded publication accounting graph is unbounded")
         kind = type(item)
-        if item is None or kind in (str, int, bool, float):
+        if item is None or kind is str or kind is int or kind is bool or kind is float:
             return
         if id(item) in ancestors:
             raise ReviewInputError("guarded publication accounting graph is cyclic")
         ancestors = {*ancestors, id(item)}
-        if kind in (tuple, list):
+        if kind is tuple or kind is list:
             for child in item:
                 visit(child, ancestors, depth + 1)
             return
@@ -160,15 +198,22 @@ def _original_accounting_graph(value, *, models=False):
                     )
                 visit(child, ancestors, depth + 1)
             return
-        if not models or kind.__module__ != api_work.__name__:
+        selected = model_fields.get(id(kind))
+        if selected is None or kind is not selected[0]:
             raise ReviewInputError(
                 "guarded publication accounting source is unsupported"
             )
-        require_instance_source(item, methods=())
-        for field in fields(kind):
-            visit(getattr(item, field.name), ancestors, depth + 1)
+        data = object.__getattribute__(item, "__dict__")
+        if type(data) is not dict or any(type(key) is not str for key in data):
+            raise ReviewInputError("guarded publication accounting fields changed")
+        for name in selected[1]:
+            if name not in data:
+                raise ReviewInputError("guarded publication accounting field is absent")
+            visit(data[name], ancestors, depth + 1)
 
     visit(value, set(), 0)
+    if models:
+        require_module_seal(api_work)
 
 
 def _terminal_reservation(journal):
