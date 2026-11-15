@@ -239,14 +239,21 @@ def _detached_sizing_finalizer(finalizer):
     return detached
 
 
-def measure_inline_branches(observation):
+def measure_inline_branches(observation, *, _retain_manifest=False):
     """Keep the original caller's width witness unchanged after pure sizing."""
+    if type(_retain_manifest) is not bool:
+        raise ReviewInputError("LAST manifest selector must be an exact bool")
+    if _retain_manifest:
+        from . import quarantine_last_manifest
+
+        require_module_seal(quarantine_last_manifest)
+        quarantine_last_manifest.preliminary_participants(observation)
     saved = require_observation(observation)
     caller = saved["run"].caller
     missing = object()
     previous = getattr(caller, "_accepted_semantic_capacity", missing)
     try:
-        return _measure_inline_branches(observation)
+        return _measure_inline_branches(observation, _retain_manifest=_retain_manifest)
     finally:
         if previous is missing:
             caller.__dict__.pop("_accepted_semantic_capacity", None)
@@ -334,7 +341,7 @@ def _root_growth_measurement(
     }
 
 
-def _measure_inline_branches(observation):
+def _measure_inline_branches(observation, *, _retain_manifest=False):
     """Measure all reached prefixes under the original inline/root/history caps.
 
     No reader price, part allocation or permission is inferred from this value.
@@ -346,7 +353,32 @@ def _measure_inline_branches(observation):
     from . import accepted_semantic_history, finding_lifecycle, quarantine_action
     from .publication import ReviewPublisher
 
+    if type(_retain_manifest) is not bool:
+        raise ReviewInputError("LAST manifest selector must be an exact bool")
+    if _retain_manifest:
+        from . import quarantine_last_manifest
+
+        require_module_seal(quarantine_last_manifest)
+        quarantine_last_manifest.preliminary_participants(observation)
     saved = require_observation(observation)
+    if _retain_manifest:
+        from . import quarantine_last_manifest
+
+        require_module_seal(quarantine_last_manifest)
+        frame = sys._getframe(2)
+        if (
+            frame.f_code is not quarantine_last_manifest.measure.__code__
+            or frame.f_globals is not vars(quarantine_last_manifest)
+            or frame.f_locals.get("observation") is not observation
+        ):
+            raise ReviewInputError("LAST manifest requires original measurement entry")
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        quarantine_last_manifest.require_inline_participants(
+            saved["run"].ledger, saved["run"].caller
+        )
+        quarantine_historical_execution._require_default_profile(saved["run"].caller)
     plan = _NATIVE_PLANS.get(observation)
     if plan is None:
         raise ReviewInputError("quarantine native branch source is unavailable")
@@ -393,6 +425,20 @@ def _measure_inline_branches(observation):
     alternatives, _pending, item_count, requests, _dictionary = (
         journal._command_branch_documents(plan, http=plan.http, budget=plan.budget)
     )
+    if _retain_manifest:
+        payload = json.loads(plan.payload)
+        if (
+            payload.get("cleanup_requests")
+            or payload.get("conditional_approval") is None
+        ):
+            raise ReviewInputError(
+                "LAST manifest requires an uncompacted approval branch"
+            )
+        initial_accounting = quarantine_last_manifest.accounting_bytes(
+            run.caller.accounting
+        )
+        initial_root = run.caller._root
+        initial_record = canonical_bytes(record.to_dict())
     generation = record.generation + (2 if saved["projection"].creates_event else 1)
     fields = {}
     if saved["projection"].creates_event:
@@ -502,9 +548,11 @@ def _measure_inline_branches(observation):
         for root in (record, prospective)
     ]
     branches = []
+    retained = []
     for documents, _exact in alternatives:
         current = prospective
         checkpoints = []
+        retained_checkpoints = []
         for document in documents:
             _reference, envelope, _parts, _allowance, candidate = (
                 finding_lifecycle_store._prepare_lifecycle(
@@ -542,10 +590,44 @@ def _measure_inline_branches(observation):
                     "envelope_bytes": len(canonical_bytes(envelope)),
                 }
             )
+            if _retain_manifest:
+                retained_checkpoints.append(
+                    {
+                        "parent": current.to_dict(),
+                        "document": document,
+                        "candidate": candidate.to_dict(),
+                        "envelope": envelope,
+                    }
+                )
             current = candidate
         branches.append(tuple(checkpoints))
+        if _retain_manifest:
+            # Original conservative whole-sequence plan, NOT an issued local
+            # pending/finish operation. No exact-document or reader grant.
+            quarantine_last_manifest.require_inline_participants(
+                run.ledger, run.caller, prospective=prospective
+            )
+            operation_plan = finding_lifecycle_store.preflight_finding_lifecycle(
+                run.ledger,
+                prospective,
+                document=documents[0],
+                future_documents=tuple(documents[1:]),
+                operation_id=journal.operation_id,
+                base_sha=journal.base_sha,
+                head_sha=journal.head_sha,
+                policy_digest=journal.policy_digest,
+                configuration_digest=journal.configuration_digest,
+                item_count=item_count,
+                reserved_tail_calls=7,
+            )
+            retained.append(
+                {
+                    "checkpoints": retained_checkpoints,
+                    "conservative_sequence_plan": operation_plan,
+                }
+            )
     require_observation(observation)
-    return {
+    result = {
         "terminal_projection": None
         if terminal_projection is None
         else terminal_projection[1],
@@ -561,6 +643,27 @@ def _measure_inline_branches(observation):
         "native_requests": requests,
         "prospective_root_bytes": len(canonical_bytes(prospective.to_dict())),
     }
+    if _retain_manifest:
+        if (
+            run.caller._root != initial_root
+            or quarantine_last_manifest.accounting_bytes(run.caller.accounting)
+            != initial_accounting
+            or canonical_bytes(record.to_dict()) != initial_record
+            or plan.payload != observation.payload
+            or plan.state_bytes != observation.state_bytes
+        ):
+            raise ReviewInputError("LAST sizing changed original state")
+        result["last_manifest"] = {
+            "admission": False,
+            "accounting": json.loads(initial_accounting),
+            "record": json.loads(initial_record),
+            "root": initial_root,
+            "payload": json.loads(plan.payload),
+            "states": json.loads(plan.state_bytes),
+            "branches": retained,
+            "operation_plan_kind": "conservative-whole-sequence-not-local-operation",
+        }
+    return result
 
 
 def _require_no_body_readback(journal, review_id):

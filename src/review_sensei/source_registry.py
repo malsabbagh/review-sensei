@@ -337,6 +337,26 @@ def _build_registry():
         ):
             raise ReviewInputError("original source class identity changed")
 
+    def require_original_class_export(*, module, name):
+        """Return registered export identity only; never construct an instance."""
+        if type(module) is not ModuleType or type(name) is not str:
+            raise ReviewInputError("original source class identity is unavailable")
+        namespace = vars(module)
+        cls = namespace.get(name)
+        if type(cls) is not type:
+            raise ReviewInputError("original source class identity is unavailable")
+        original = classes.get(cls)
+        if (
+            original is None
+            or original[0] is not module
+            or original[1] != name
+            or type(namespace.get("__name__")) is not str
+            or sys.modules.get(namespace["__name__"]) is not module
+            or namespace.get(name) is not cls
+        ):
+            raise ReviewInputError("original source class identity changed")
+        return cls
+
     def require_instance_source(instance, *, methods):
         cls = type(instance)
         for base in cls.__mro__:
@@ -360,6 +380,7 @@ def _build_registry():
         require_module_seal,
         require_instance_source,
         require_original_class_identity,
+        require_original_class_export,
     )
 
 
@@ -368,6 +389,7 @@ def _build_registry():
     require_module_seal,
     require_instance_source,
     require_original_class_identity,
+    require_original_class_export,
 ) = _build_registry()
 del _build_registry
 seal_module()

@@ -654,3 +654,52 @@ class FreshStaticMemberSnapshotTests(unittest.TestCase):
                 require_module_seal(session)
         self.assertEqual(calls, [])
         require_module_seal(session)
+
+
+class OriginalClassExportIdentityTests(unittest.TestCase):
+    def test_original_export_returns_class_without_instantiation(self):
+        from review_sensei import session
+        from review_sensei.source_registry import require_original_class_export
+
+        self.assertIs(
+            require_original_class_export(module=session, name="SessionRecord"),
+            session.SessionRecord,
+        )
+
+    def test_replaced_export_never_constructs_or_finalizes(self):
+        from review_sensei import session
+        from review_sensei.source_registry import require_original_class_export
+
+        calls = []
+
+        class Replacement:
+            def __new__(cls):
+                calls.append("new")
+                return super().__new__(cls)
+
+            def __del__(self):
+                calls.append("del")
+
+        with patch.object(session, "SessionRecord", Replacement):
+            with self.assertRaises(ReviewInputError):
+                require_original_class_export(module=session, name="SessionRecord")
+        self.assertEqual(calls, [])
+
+    def test_hostile_metaclass_never_hashes(self):
+        from review_sensei import session
+        from review_sensei.source_registry import require_original_class_export
+
+        calls = []
+
+        class Meta(type):
+            def __hash__(cls):
+                calls.append("hash")
+                raise AssertionError("hash")
+
+        class Replacement(metaclass=Meta):
+            pass
+
+        with patch.object(session, "SessionRecord", Replacement):
+            with self.assertRaises(ReviewInputError):
+                require_original_class_export(module=session, name="SessionRecord")
+        self.assertEqual(calls, [])
