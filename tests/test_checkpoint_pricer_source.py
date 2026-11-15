@@ -246,6 +246,18 @@ class CheckpointPricerSourceTests(unittest.TestCase):
             sys.setprofile(previous)
         self.assertEqual(len(captured), 1)
         issue = captured[0]
+        # Every checked cell must actually belong to the original issue body.
+        # In particular sys is an outer graph binding, not an issue freevar:
+        # issue imports source_sys locally instead.
+        self.assertEqual(
+            issue.__code__.co_freevars,
+            ("active", "invocation", "issue", "owner", "supported", "token", "wrapped"),
+        )
+        invocation = dict(zip(issue.__code__.co_freevars, issue.__closure__))[
+            "invocation"
+        ].cell_contents
+        for name, cell in zip(issue.__code__.co_freevars, issue.__closure__):
+            self.assertIs(cell.cell_contents, invocation.f_locals[name])
         with self.assertRaises(ReviewInputError):
             issue(owner, record)
         cells = dict(zip(issue.__code__.co_freevars, issue.__closure__))

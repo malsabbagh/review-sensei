@@ -575,16 +575,19 @@ def _checkpoint_pricer(method):
                 invocation.f_locals.get("issue") is not issue
                 or issuing.f_code is not issue.__code__
                 or issuing.f_globals is not issue.__globals__
+                or issue.__code__.co_freevars
+                != (
+                    "active",
+                    "invocation",
+                    "issue",
+                    "owner",
+                    "supported",
+                    "token",
+                    "wrapped",
+                )
                 or any(
                     issuing.f_locals.get(name) is not invocation.f_locals.get(name)
-                    for name in (
-                        "active",
-                        "owner",
-                        "supported",
-                        "token",
-                        "wrapped",
-                        "sys",
-                    )
+                    for name in issue.__code__.co_freevars
                 )
             ):
                 raise ReviewInputError("checkpoint pricer issue closure changed")
