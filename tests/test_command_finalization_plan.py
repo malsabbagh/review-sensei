@@ -252,6 +252,12 @@ class CommandFinalizationPlanTests(unittest.TestCase):
         self.assertEqual(len(seen), 2)
 
     def test_source_command_cleanup_failure_never_uses_old_green_or_approval(self):
+        self._exercise_source_command_cleanup_failure(mutation_status=503)
+
+    def test_unconfirmed_successful_cleanup_response_retains_pending_intent(self):
+        self._exercise_source_command_cleanup_failure(mutation_status=200)
+
+    def _exercise_source_command_cleanup_failure(self, *, mutation_status):
         import inspect
         import tempfile
         from urllib.parse import urlsplit
@@ -349,7 +355,8 @@ class CommandFinalizationPlanTests(unittest.TestCase):
                                         }
                                     }
                                 }
-                            }
+                            },
+                            status=mutation_status,
                         )
                     if payload.get("operationName") == "ResolutionReadback":
                         readbacks.append((payload["variables"]["id"], len(mutations)))
@@ -372,7 +379,7 @@ class CommandFinalizationPlanTests(unittest.TestCase):
                     stopped.append(True)
                 if (
                     event == "call"
-                    and stopped
+                    and mutations
                     and any(
                         frame.f_code is code and frame.f_globals is namespace
                         for code, namespace in forbidden
@@ -390,12 +397,17 @@ class CommandFinalizationPlanTests(unittest.TestCase):
                 sys.setprofile(previous)
                 fixture.external = external
             self.assertEqual(len(mutations), 1)
-            self.assertTrue(readbacks, "original cleanup readback was not reached")
+            if mutation_status == 503:
+                self.assertTrue(readbacks, "original cleanup readback was not reached")
+            else:
+                # A contradictory successful native receipt fails the journal's
+                # strict confirmation check before the resolver's readback path.
+                self.assertEqual(readbacks, [])
+            self.assertTrue(stopped, "authenticated cleanup stop was not reached")
             self.assertTrue(
                 all(item == (mutations[0], 1) for item in readbacks),
                 "cleanup readback did not follow the same attempted mutation",
             )
-            self.assertTrue(stopped, "authenticated cleanup stop was not reached")
             self.assertEqual(
                 forbidden_entries,
                 [],
@@ -406,6 +418,15 @@ class CommandFinalizationPlanTests(unittest.TestCase):
             self.assertIn("gate re-evaluation failed", fixture.error)
             self.assertNotIn('"approval_state":"already_published"', fixture.error)
             self.assertEqual(fixture.resolved_threads, set())
+            self.assertEqual(len(journals), 1)
+            pending = journals[0].effects[-1]
+            self.assertEqual(pending["status"], "pending")
+            self.assertIsNone(pending["response"])
+            self.assertEqual(pending["path"], "/graphql")
+            self.assertEqual(
+                pending["request"]["variables"]["input"]["threadId"], mutations[0]
+            )
+            self.assertEqual(fixture.accounted.accounting.action["phase"], "pending")
 
     def test_real_dictionary_plan_custody_rejects_tampering_without_io(self):
         from review_sensei_github import command_finalization_plan as plans
