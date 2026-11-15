@@ -288,8 +288,8 @@ jobs:
           export REVIEWSENSEI_DIST_SAFE_LANE=1
           REVIEWSENSEI_EXPECTED_VERSION="$(cd "$GITHUB_WORKSPACE" && python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])')"
           export REVIEWSENSEI_EXPECTED_VERSION
-          # Scheduling weights are completion-log deltas from CI run 41455717540;
-          # they include fixture and output overhead and are only hints.
+          # Advisory unit timings from fully accounted CI run 43626273898,
+          # including failures; see tests/fixtures/installed-timing-source.json.
           "$wheel_venv/bin/python" -I "$GITHUB_WORKSPACE/scripts/run_installed_test_suites.py" \
             --start-directory "$suite/dist_safe" --workers 4 --pattern 'test*.py' \
             --split-module test_quarantine_contract.py \
@@ -299,7 +299,7 @@ jobs:
             --reviewed-local-hook test_native_group_contract \
             --reviewed-local-hook test_provider_common_flow_contract \
             --reviewed-local-hook test_quarantine_contract \
-            --costs "$GITHUB_WORKSPACE/tests/fixtures/installed-unit-log-delta-seconds.json" \
+            --costs "$GITHUB_WORKSPACE/tests/fixtures/installed-unit-seconds.json" \
             --report "$RUNNER_TEMP/installed-suite-timings.json"
           "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/downstream" -v
           # Exercise canonical custom-endpoint authority using the exact wheel
