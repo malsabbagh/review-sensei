@@ -40,6 +40,25 @@ class SourceRegistryTests(unittest.TestCase):
                 require_module_seal(disposition)
             require_module_seal(disposition)
 
+    def test_replaced_function_metadata_refuses_without_lookup_callback(self):
+        original = disposition.apply_session_command
+        metadata = original.__dict__
+        calls = []
+
+        class Hostile(dict):
+            def get(self, *args):
+                calls.append(True)
+                return super().get(*args)
+
+        try:
+            original.__dict__ = Hostile(metadata)
+            with self.assertRaisesRegex(ReviewInputError, "source changed"):
+                require_module_seal(disposition)
+            self.assertEqual(calls, [])
+        finally:
+            original.__dict__ = metadata
+        require_module_seal(disposition)
+
     def test_original_ledger_method_consumer_is_read_only_and_rejects_shadow(self):
         from review_sensei_github.review_run import ActionRunLedger, ReviewRunLedger
         from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
