@@ -8,6 +8,7 @@ import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
 
+from hot_original_entry import invoke_original
 from review_sensei_github.api_run_requests import ApiRunSessionLedger
 from review_sensei_github.approval import ReviewApprovalEligibility
 from review_sensei_github.native_union import native_union_frame_document
@@ -41,6 +42,7 @@ class BoundedSnapshotLifecycleTests(unittest.TestCase):
             patch.dict(BROKER_QUALIFICATIONS, {}, clear=True),
         ):
             f = BoundedLifecycleFixture(directory)
+            f.api_url = "https://api.github.com"
             old, registration = f.original_origins()
             old_accounting = copy.deepcopy(old.api_run_accounting)
             # Existing audited frozen profile; production defaults stay intact.
@@ -68,6 +70,7 @@ class BoundedSnapshotLifecycleTests(unittest.TestCase):
                     "line": 3,
                     "side": "RIGHT",
                     "body": f"Independent current human decision {i} needs assessment.",
+                    "evidence_id": f"bounded-current-assessment-{i}",
                     "severity": "high",
                     "blocking": False,
                     "needs_human": True,
@@ -119,7 +122,10 @@ class BoundedSnapshotLifecycleTests(unittest.TestCase):
                 registered_resource([registration]),
                 observe_batches(),
             ):
-                self.assertEqual(f.invoke(), 0, f.error)
+                # Populated grouped publication authenticates the original
+                # engine and admission owner; replace only synthetic HTTP.
+                result, _ = invoke_original(f)
+                self.assertEqual(result, 0, f.error)
                 provider_calls = f.provider_calls
                 index = parse_finding_index(
                     f.reviews[-1]["body"],
