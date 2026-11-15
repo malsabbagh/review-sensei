@@ -7,6 +7,7 @@ still reaches the existing charged transport and every source validator runs.
 from __future__ import annotations
 
 import re
+import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any
@@ -645,7 +646,11 @@ class _Observation:
 
 class _ClosedPublicationHttp(GitHubHttp):
     def __init__(self, observation, transport):
-        super().__init__(api_url=transport.api_url, timeout=transport.timeout)
+        super().__init__(
+            api_url=transport.api_url,
+            timeout=transport.timeout,
+            evidence_monotonic=getattr(transport, "evidence_monotonic", time.monotonic),
+        )
         self.observation, self.transport = observation, transport
         self.primed_issue_comments = transport.primed_issue_comments
 
