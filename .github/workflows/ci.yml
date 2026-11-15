@@ -196,12 +196,6 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require static quality checks
-        run: |
-          if [ "${{ needs.static-quality.result }}" != success ]; then
-            echo "Static quality checks result was ${{ needs.static-quality.result }}" >&2
-            exit 1
-          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -232,6 +226,13 @@ jobs:
           name: checkout-timings-quality
           path: ${{ runner.temp }}/checkout-timings.json
           if-no-files-found: warn
+      - name: Require static quality checks
+        if: always()
+        run: |
+          if [ "${{ needs.static-quality.result }}" != success ]; then
+            echo "Static quality checks result was ${{ needs.static-quality.result }}" >&2
+            exit 1
+          fi
 
   schemas:
     name: Schemas and Action pins
@@ -349,9 +350,25 @@ jobs:
         with:
           name: review-sensei-distributions
           path: dist/**
+
+  package-verify:
+    name: Verify distributions outside checkout
+    needs: package-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: Download the exact built distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: review-sensei-distributions
+          path: dist
       - name: Verify wheel, downstream and launcher suites outside checkout
         shell: bash
         run: |
+          sha256sum -c dist/SHA256SUMS
           wheel_venv="$RUNNER_TEMP/review-sensei-wheel-venv"
           python -m venv "$wheel_venv"
           "$wheel_venv/bin/python" -m pip install dist/*.whl
@@ -480,16 +497,10 @@ jobs:
 
   package:
     name: Build and verify package
-    needs: [package-build, installed-shard]
+    needs: [package-build, package-verify, installed-shard]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require built and verified distributions
-        run: |
-          if [ "${{ needs.package-build.result }}" != success ]; then
-            echo "Build distributions result was ${{ needs.package-build.result }}" >&2
-            exit 1
-          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -509,6 +520,15 @@ jobs:
           name: installed-suite-timings
           path: ${{ runner.temp }}/installed-suite-timings.json
           if-no-files-found: warn
+      - name: Require built and verified distributions
+        if: always()
+        run: |
+          for result in "Build distributions=${{ needs.package-build.result }}" "Verify distributions outside checkout=${{ needs.package-verify.result }}"; do
+            if [ "${result##*=}" != success ]; then
+              echo "${result%=*} result was ${result##*=}" >&2
+              exit 1
+            fi
+          done
 
   npm:
     name: Node launcher and npm package contracts
@@ -854,7 +874,7 @@ jobs:
   required-checks:
     name: Required checks
     if: ${{ !cancelled() }}
-    needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, native-candidate, candidate-npm, candidate-consumer, workers, codeql, compatibility-shard, static-quality, coverage-shard, package-build, installed-shard]
+    needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, native-candidate, candidate-npm, candidate-consumer, workers, codeql, compatibility-shard, static-quality, coverage-shard, package-build, package-verify, installed-shard]
     runs-on: ubuntu-latest
     steps:
       - name: Require every gate
@@ -883,4 +903,5 @@ jobs:
           require_success "${{ needs.static-quality.result }}"
           require_success "${{ needs.coverage-shard.result }}"
           require_success "${{ needs.package-build.result }}"
+          require_success "${{ needs.package-verify.result }}"
           require_success "${{ needs.installed-shard.result }}"

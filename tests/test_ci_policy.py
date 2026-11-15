@@ -51,7 +51,7 @@ REQUIRED_CHECKS_NEEDS = (
     "needs: [compatibility, quality, schemas, package, npm, linux-standalone, "
     "intel-standalone, native-candidate, candidate-npm, candidate-consumer, "
     "workers, codeql, compatibility-shard, static-quality, coverage-shard, "
-    "package-build, installed-shard]"
+    "package-build, package-verify, installed-shard]"
 )
 
 
