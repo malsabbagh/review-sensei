@@ -532,6 +532,15 @@ def definition_data(value, ancestors=()):
     if id(value) in ancestors:
         raise ValueError("cyclic independent-method definition data")
     ancestors = (*ancestors, id(value))
+    if kind is slice:
+        # Python 3.14 folds constant slicing into co_consts. Preserve every
+        # component; unsupported or cyclic default values still fail closed.
+        return [
+            "slice",
+            definition_data(value.start, ancestors),
+            definition_data(value.stop, ancestors),
+            definition_data(value.step, ancestors),
+        ]
     if kind is tuple or kind is list or kind is set or kind is frozenset:
         values = [definition_data(item, ancestors) for item in value]
         if kind is set or kind is frozenset:

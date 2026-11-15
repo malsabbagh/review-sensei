@@ -71,6 +71,15 @@ revokes splitting, and guard drift still fails closed. This source review and
 discovery-only package check do not execute or clear the historical held tests,
 qualify the complete installed suite, or demonstrate a sub-30-minute run.
 
+Discovery and planning against the rebuilt package also exposed Python 3.14
+constant `slice` objects in fixture bytecode. The fingerprint now serializes the
+exact start, stop and step, recursively rejecting unsupported or cyclic values.
+Synthetic controls check equal/different compiled slice fingerprints and refusal
+without invoking hostile component callbacks. With that correction, isolated
+Python 3.14 discovery and planning retains all 1,139 installed identities across
+78 units (68 before splitting), with both guarded contracts accepted and zero
+test bodies executed. This is planning evidence, not execution timing.
+
 The initial audit baseline is `c021eeb205d0ca3c5293d572ef2c2dc45c4b087b`.
 Discovery-only inspection found **6,969 test IDs in 833 classes**, and the initial
 audit working tree contained 6,975 IDs after removing two duplicates and adding
