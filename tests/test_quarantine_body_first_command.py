@@ -9,6 +9,7 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from review_sensei_github import application
+from review_sensei_github import quarantine_command_namespace as namespace
 from review_sensei_github import quarantine_historical_execution as closed
 from review_sensei_github.api_run_history import read_action_result
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
@@ -103,12 +104,36 @@ class BodyFirstCommandTests(unittest.TestCase):
                     if (
                         one_short
                         and event == "call"
+                        and frame.f_code is namespace.prepare.__code__
+                    ):
+                        # Spend the seven calls saved by complete-census
+                        # scheduling through original physical requests, leaving
+                        # the original one-short preparation case below.
+                        run = frame.f_locals["run"]
+                        self.assertEqual(
+                            run.caller.budget_view.ordinary_remaining(), 114
+                        )
+                        start = len(run.caller.observations)
+                        for _ in range(7):
+                            status, _ = run.http.request(
+                                "GET",
+                                run.http.repository_path(
+                                    run.identity.repository,
+                                    f"/pulls/{run.identity.pull_request}",
+                                ),
+                                token=run.ledger._quarantine_origin_reader.metadata_token,
+                            )
+                            self.assertEqual(status, 200)
+                        self.assertEqual(len(run.caller.observations), start + 7)
+                    if (
+                        one_short
+                        and event == "call"
                         and frame.f_code
                         is application.GitHubApplication._observe_quarantine_command_finalization.__code__
                     ):
                         run = frame.f_locals["run"]
                         self.assertEqual(
-                            run.caller.budget_view.ordinary_remaining(), 110
+                            run.caller.budget_view.ordinary_remaining(), 107
                         )
                         run.http.request(
                             "GET",
@@ -119,7 +144,7 @@ class BodyFirstCommandTests(unittest.TestCase):
                             token=run.ledger._quarantine_origin_reader.metadata_token,
                         )
                         self.assertEqual(
-                            run.caller.budget_view.ordinary_remaining(), 109
+                            run.caller.budget_view.ordinary_remaining(), 106
                         )
                         short.append(run)
                     if (
@@ -149,8 +174,9 @@ class BodyFirstCommandTests(unittest.TestCase):
                         )
                         self.assertEqual(minima["receipt"]["available"], 8)
                         self.assertEqual(
-                            run.caller.budget_view.ordinary_remaining(), 105
+                            run.caller.budget_view.ordinary_remaining(), 112
                         )
+                        self.assertEqual(len(f.trace), len(run.caller.observations))
                         self.assertEqual(
                             len(
                                 installed_capacity(
@@ -168,7 +194,7 @@ class BodyFirstCommandTests(unittest.TestCase):
                         stages = list(recipe["stages"])
                         stages[0] = (stages[0][0], stages[0][1] + 1)
                         with self.assertRaisesRegex(
-                            ReviewInputError, "local reservation"
+                            ReviewInputError, "guarded C5 source stages changed"
                         ):
                             _default_c5_prefix_headroom(
                                 stages,

@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from review_sensei_github import application
+from review_sensei_github import quarantine_command_namespace as namespace
 from review_sensei_github import quarantine_command_suffix as suffix
 from test_quarantine_historical_execution import GuardedHistoricalFixture
 from test_quarantine_journey import registered_resource
@@ -44,6 +45,30 @@ class HistoricalHeadroomTests(unittest.TestCase):
                 }
 
                 def observe(frame, event, result):
+                    if event == "call" and frame.f_code is namespace.prepare.__code__:
+                        # Complete-census scheduling now leaves seven more
+                        # original calls unused. Pay seven actual metadata reads
+                        # before the namespace baseline; retain the original
+                        # one-extra-read boundary during preparation below.
+                        run = frame.f_locals["run"]
+                        self.assertEqual(
+                            run.caller.budget_view.ordinary_remaining(), 114
+                        )
+                        start = len(run.caller.observations)
+                        for _ in range(7):
+                            status, _ = run.http.request(
+                                "GET",
+                                run.http.repository_path(
+                                    run.identity.repository,
+                                    f"/pulls/{run.identity.pull_request}",
+                                ),
+                                token=run.ledger._quarantine_origin_reader.metadata_token,
+                            )
+                            self.assertEqual(status, 200)
+                        self.assertEqual(len(run.caller.observations), start + 7)
+                        self.assertEqual(
+                            run.caller.budget_view.ordinary_remaining(), 107
+                        )
                     if (
                         event == "call"
                         and frame.f_code
@@ -54,7 +79,7 @@ class HistoricalHeadroomTests(unittest.TestCase):
                         )
                         run = frame.f_locals["run"]
                         self.assertEqual(
-                            run.caller.budget_view.ordinary_remaining(), 110
+                            run.caller.budget_view.ordinary_remaining(), 107
                         )
                         start = len(run.caller.observations)
                         status, _ = run.http.request(
@@ -68,7 +93,7 @@ class HistoricalHeadroomTests(unittest.TestCase):
                         self.assertEqual(status, 200)
                         self.assertEqual(len(run.caller.observations), start + 1)
                         self.assertEqual(
-                            run.caller.budget_view.ordinary_remaining(), 109
+                            run.caller.budget_view.ordinary_remaining(), 106
                         )
                     if (
                         event == "return"
@@ -77,7 +102,7 @@ class HistoricalHeadroomTests(unittest.TestCase):
                     ):
                         run = frame.f_locals["run"]
                         self.assertIsNone(result)
-                        self.assertEqual(frame.f_locals["ordinary_before"], 110)
+                        self.assertEqual(frame.f_locals["ordinary_before"], 107)
                         self.assertEqual(
                             run.caller.budget_view.ordinary_remaining(), 104
                         )
@@ -87,7 +112,7 @@ class HistoricalHeadroomTests(unittest.TestCase):
                         self.assertEqual(
                             len(run.caller.observations)
                             - frame.f_locals["before_preparation"],
-                            6,
+                            3,
                         )
                         state = run.caller.accounting
                         blocks = {b.block_id: b for b in state.blocks}

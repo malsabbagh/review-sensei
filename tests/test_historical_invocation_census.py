@@ -201,7 +201,7 @@ class HistoricalInvocationCensusTests(unittest.TestCase):
                         self.assertFalse(caller.accounting.action["execution_started"])
                     self.assertEqual(caller.accounting.action["phase"], "pending")
                     if fault != "event_id":
-                        self.assertEqual(caller.budget_view.ordinary_remaining(), 102)
+                        self.assertEqual(caller.budget_view.ordinary_remaining(), 109)
                     self.assertEqual(
                         next(
                             b.undispatched
