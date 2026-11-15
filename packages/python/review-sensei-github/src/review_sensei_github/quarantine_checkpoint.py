@@ -28,6 +28,7 @@ from .session_ledger import parse_session_comment
 
 _ISSUED: weakref.WeakSet[Any] = weakref.WeakSet()
 _CONFIRMED: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+_CLAIMABLE: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,7 @@ class _ConfirmedCheckpoint:
 def _remember_confirmation(snapshot, record):
     # Called only after the existing exact owned GET validated the complete
     # candidate. This is a process-local receipt, never serialized authority.
-    _CONFIRMED[snapshot.caller] = _ConfirmedCheckpoint(
+    receipt = _ConfirmedCheckpoint(
         weakref.ref(snapshot.ledger),
         snapshot.identity,
         snapshot.block,
@@ -51,6 +52,8 @@ def _remember_confirmation(snapshot, record):
         snapshot.comment_id,
         snapshot.candidate_body,
     )
+    _CONFIRMED[snapshot.caller] = receipt
+    _CLAIMABLE[snapshot.caller] = receipt
     return record
 
 
@@ -83,7 +86,10 @@ def confirmed_checkpoint_capacity(caller, ledger, identity):
 
 
 def take_confirmed_checkpoint(caller, ledger, identity, *, staging):
-    receipt = _CONFIRMED.pop(caller, None)
+    # Claiming native publication is single-use. The same owned GET remains
+    # available as read-only sizing evidence until its exact root/custody is
+    # stale; consuming a claim must not erase that already-confirmed evidence.
+    receipt = _CLAIMABLE.pop(caller, None)
     if (
         type(receipt) is not _ConfirmedCheckpoint
         or receipt.ledger_ref() is not ledger
@@ -93,6 +99,7 @@ def take_confirmed_checkpoint(caller, ledger, identity, *, staging):
         or caller._root != receipt.record.record_sha256
         or receipt.record.publication_staging != staging
         or ledger.caller is not caller
+        or receipt is not _CONFIRMED.get(caller)
     ):
         raise ReviewInputError(
             "native publication own checkpoint receipt is unavailable"
