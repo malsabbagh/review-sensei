@@ -127,11 +127,14 @@ def packed_request_bound(
     """
     rejected = MAX_PAGINATION_PAGES + 1
     framing_calls = 2 if closing_metadata_bytes is None else 1
-    if len(known) + len(unknown) > MAX_COMMENTS:
+    known_length, unknown_length = len(known), len(unknown)
+    if known_length + unknown_length > MAX_COMMENTS:
         return rejected
+    # Include each known node's fixed metadata once; every interval then has
+    # the same exact cost without repeating its multiplication at each state.
     prefix = [0]
     for bound in known:
-        prefix.append(prefix[-1] + bound)
+        prefix.append(prefix[-1] + bound + NODE_METADATA_BYTES)
     largest = sorted(unknown, reverse=True)
     upper = [0]
     for bound in largest:
@@ -145,31 +148,29 @@ def packed_request_bound(
     @lru_cache(maxsize=40_401)
     def pages(ki: int, ui: int) -> int:
         nonlocal work
-        if ki == len(known) and ui == len(unknown):
+        if ki == known_length and ui == unknown_length:
             return 0 if closing_metadata_bytes is None else 1
         worst = 0
-        for end_known in range(ki, len(known) + 1):
+        for end_known in range(ki, known_length + 1):
             work += 1
             if work > 500_000:
                 raise ProofWorkExceeded
             known_count = end_known - ki
             if known_count > 100:
                 break
-            known_cost = (
-                prefix[end_known] - prefix[ki] + NODE_METADATA_BYTES * known_count
-            )
+            known_cost = prefix[end_known] - prefix[ki]
             capacity = MAX_GITHUB_RESPONSE_BYTES - OUTER_BYTES - known_cost
             if capacity < 0:
                 break
             maximum = min(
-                len(unknown) - ui,
+                unknown_length - ui,
                 100 - known_count,
                 bisect_right(unknown_cost, capacity) - 1,
             )
             # Only maximal page boundaries recurse. Skip all prefixes for
             # which another known and unknown item would both still fit.
             minimum = maximum
-            if end_known < len(known):
+            if end_known < known_length:
                 minimum = min(
                     maximum,
                     bisect_right(
@@ -189,14 +190,14 @@ def packed_request_bound(
                 if not count:
                     continue
                 end_unknown = ui + added_unknown
-                terminal = end_known == len(known) and end_unknown == len(unknown)
+                terminal = end_known == known_length and end_unknown == unknown_length
                 next_known_fails = (
-                    end_known < len(known)
+                    end_known < known_length
                     and cost + NODE_METADATA_BYTES + known[end_known]
                     > MAX_GITHUB_RESPONSE_BYTES
                 )
                 next_unknown_fails = (
-                    end_unknown < len(unknown)
+                    end_unknown < unknown_length
                     and cost + NODE_METADATA_BYTES + largest[added_unknown]
                     > MAX_GITHUB_RESPONSE_BYTES
                 )
