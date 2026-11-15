@@ -30,6 +30,31 @@ class CommandNamespaceTests(unittest.TestCase):
                     len(canonical_bytes(projected)), len(canonical_bytes(generic))
                 )
                 self.assertEqual(projected["configuration"], generic["configuration"])
+                self.assertEqual(projected["completed"], generic["completed"])
+                for actual, bound in zip(
+                    state.blocks, projected["blocks"], strict=True
+                ):
+                    future = (
+                        actual.undispatched
+                        if actual.block_id in (caller._block, caller._terminal_block)
+                        else 0
+                    )
+                    self.assertEqual(
+                        bound["undispatched"], actual.undispatched - future
+                    )
+                    self.assertEqual(
+                        len(bound["pending"]),
+                        len(actual.pending) + future,
+                    )
+                    prior = {p.request_id: p.deadline_unix_ms for p in actual.pending}
+                    for pending in bound["pending"]:
+                        self.assertEqual(
+                            pending["deadline_unix_ms"],
+                            prior.get(
+                                pending["request_id"],
+                                namespace.MAX_COLD_DEADLINE_UNIX_MS,
+                            ),
+                        )
                 self.assertEqual(len(caller.observations), before)
                 with self.assertRaisesRegex(ReviewInputError, "copied or expired"):
                     namespace.require(copy.copy(arg), caller)
@@ -109,11 +134,18 @@ class CommandNamespaceTests(unittest.TestCase):
                 caller._sequence = sequence
 
     def test_sequence_and_deadline_edges_match_original_fence(self):
-        self.assertEqual(namespace._next_sequence(31, 32, MAX_API_REQUEST_LIMIT), 32)
+        self.assertEqual(
+            namespace._next_sequence(31, 32, namespace.MAX_COLD_DEADLINE_UNIX_MS),
+            32,
+        )
         for args in (
             (32, 32, 1),
             (33, 32, 1),
             (31, 32, MAX_API_REQUEST_LIMIT + 1),
+            (31, 32, MAX_API_REQUEST_LIMIT),
+            (31, 32, namespace.MAX_COLD_DEADLINE_UNIX_MS + 1),
+            (31, 32, -1),
+            (31, 32, True),
             (True, 32, 1),
         ):
             with (
@@ -122,7 +154,7 @@ class CommandNamespaceTests(unittest.TestCase):
             ):
                 namespace._next_sequence(*args)
 
-    def test_one_over_deadline_refuses_before_source_effect_or_dispatch(self):
+    def test_future_deadline_refuses_before_source_effect_or_dispatch(self):
         captured = []
         errors = []
 
@@ -139,7 +171,7 @@ class CommandNamespaceTests(unittest.TestCase):
                 captured.append(
                     (caller, caller._sequence, len(caller.observations), caller._clock)
                 )
-                caller._clock = lambda: MAX_API_REQUEST_LIMIT
+                caller._clock = lambda: (namespace.MAX_COLD_DEADLINE_UNIX_MS + 1) / 1000
 
         try:
             checkpoint_tests.CommandCheckpointTests().exercise(

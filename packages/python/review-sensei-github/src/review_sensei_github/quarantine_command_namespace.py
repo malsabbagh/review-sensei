@@ -16,6 +16,11 @@ from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
 from review_sensei.source_registry import require_instance_source, require_module_seal
 
+# A negative fence on new requests in this namespace, not a shorter timeout or
+# a rewrite of existing deadlines. The original caller enforces this before
+# dispatch, so detached sizing need not reserve sixteen digits for future dates.
+MAX_COLD_DEADLINE_UNIX_MS = 9_999_999_999_999
+
 
 def _owner(value):
     if (
@@ -53,7 +58,7 @@ def _next_sequence(sequence, ceiling, deadline):
         or type(ceiling) is not int
         or not 0 <= sequence < ceiling <= MAX_API_REQUEST_LIMIT
         or type(deadline) is not int
-        or not 0 <= deadline <= MAX_API_REQUEST_LIMIT
+        or not 0 <= deadline <= MAX_COLD_DEADLINE_UNIX_MS
     ):
         raise ReviewInputError("cold namespace sequence or deadline ceiling exceeded")
     return sequence + 1
@@ -545,7 +550,7 @@ def _registry():
                     key,
                     PendingApiRequest(
                         f"c-{state.owner.generation:x}-{sequence:x}",
-                        MAX_API_REQUEST_LIMIT,
+                        MAX_COLD_DEADLINE_UNIX_MS,
                     ),
                 )
         return projected.to_document()
@@ -784,7 +789,7 @@ def _registry():
                     block.block_id,
                     PendingApiRequest(
                         f"c-{reconstructed.owner.generation:x}-{sequence:x}",
-                        MAX_API_REQUEST_LIMIT,
+                        MAX_COLD_DEADLINE_UNIX_MS,
                     ),
                 )
         if sequence != entry["ceiling"]:

@@ -992,6 +992,16 @@ class SessionRecord:
             self, "api_run_accounting", _stored_api_accounting(self.api_run_accounting)
         )
         if self.api_run_accounting is not None:
+            # The normalizer just fully validated and constructed this fresh
+            # plain document. Exact owner/scalar types make the intervening
+            # identity checks callback-free; unusual subclasses retain the
+            # original second parse. This is local value reuse, not a cached
+            # validation or authority across calls.
+            plain_accounting_owner = (
+                type(self) is SessionRecord
+                and type(self._digest_shape) is str
+                and type(self.repository_id) is int
+            )
             if self._digest_shape != "current":
                 raise ReviewInputError(
                     "API accounting requires the current digest shape"
@@ -1005,9 +1015,13 @@ class SessionRecord:
                 raise ReviewInputError("API accounting repository identity conflicts")
             from .api_work import ApiRunAccounting
 
-            terminal = ApiRunAccounting.from_document(
-                self.api_run_accounting
-            ).terminal_transaction
+            terminal = (
+                self.api_run_accounting["terminal_transaction"]
+                if plain_accounting_owner
+                else ApiRunAccounting.from_document(
+                    self.api_run_accounting
+                ).terminal_transaction
+            )
             if terminal is not None and (
                 self.transaction is None
                 or self.transaction.transaction_id != terminal
