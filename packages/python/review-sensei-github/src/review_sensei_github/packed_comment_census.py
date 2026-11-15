@@ -102,6 +102,10 @@ class CommentAllocationPlan:
             tuple(self.known.values()),
             self.unknown,
             closing_metadata_bytes=2 * sum(metadata[:100]),
+            known_metadata=tuple(
+                self.metadata_known.get(key, NODE_METADATA_BYTES) for key in self.known
+            ),
+            unknown_metadata=self.metadata_unknown,
         )
 
 
@@ -110,6 +114,8 @@ def packed_request_bound(
     unknown: tuple[int, ...],
     *,
     closing_metadata_bytes: int | None = None,
+    known_metadata: tuple[int, ...] | None = None,
+    unknown_metadata: int = NODE_METADATA_BYTES,
 ) -> int:
     """Certify the actual prefix algorithm under every unknown interleaving.
 
@@ -130,16 +136,32 @@ def packed_request_bound(
     known_length, unknown_length = len(known), len(unknown)
     if known_length + unknown_length > MAX_COMMENTS:
         return rejected
+    if known_metadata is None:
+        known_metadata = (NODE_METADATA_BYTES,) * known_length
+    if (
+        type(known_metadata) is not tuple
+        or len(known_metadata) != known_length
+        or any(
+            type(value) is not int or not 0 < value <= NODE_METADATA_BYTES
+            for value in (*known_metadata, unknown_metadata)
+        )
+    ):
+        return rejected
     # Include each known node's fixed metadata once; every interval then has
     # the same exact cost without repeating its multiplication at each state.
+    # These are the original plan's envelopes, checked at opening and compared
+    # exactly on every body page. No metadata or unobserved slot is omitted.
+    known_costs = tuple(
+        body + metadata for body, metadata in zip(known, known_metadata)
+    )
     prefix = [0]
-    for bound in known:
-        prefix.append(prefix[-1] + bound + NODE_METADATA_BYTES)
+    for cost in known_costs:
+        prefix.append(prefix[-1] + cost)
     largest = sorted(unknown, reverse=True)
     upper = [0]
     for bound in largest:
         upper.append(upper[-1] + bound)
-    unknown_cost = [value + NODE_METADATA_BYTES * i for i, value in enumerate(upper)]
+    unknown_cost = [value + unknown_metadata * i for i, value in enumerate(upper)]
     work = 0
 
     class ProofWorkExceeded(Exception):
@@ -175,7 +197,7 @@ def packed_request_bound(
                     maximum,
                     bisect_right(
                         unknown_cost,
-                        capacity - NODE_METADATA_BYTES - known[end_known],
+                        capacity - known_costs[end_known],
                     ),
                 )
             # The candidate union is one inclusive interval: either the
@@ -193,12 +215,11 @@ def packed_request_bound(
                 terminal = end_known == known_length and end_unknown == unknown_length
                 next_known_fails = (
                     end_known < known_length
-                    and cost + NODE_METADATA_BYTES + known[end_known]
-                    > MAX_GITHUB_RESPONSE_BYTES
+                    and cost + known_costs[end_known] > MAX_GITHUB_RESPONSE_BYTES
                 )
                 next_unknown_fails = (
                     end_unknown < unknown_length
-                    and cost + NODE_METADATA_BYTES + largest[added_unknown]
+                    and cost + unknown_metadata + largest[added_unknown]
                     > MAX_GITHUB_RESPONSE_BYTES
                 )
                 if terminal or count == 100 or next_known_fails or next_unknown_fails:
@@ -544,7 +565,12 @@ def fetch_packed_comments(
             )
             bound = (
                 OUTER_BYTES
-                + NODE_METADATA_BYTES * count
+                + sum(
+                    plan.metadata_known.get(identifier, NODE_METADATA_BYTES)
+                    if identifier in plan.known
+                    else plan.metadata_unknown
+                    for identifier in identifiers
+                )
                 + sum(
                     plan.known[identifier]
                     for identifier in identifiers
