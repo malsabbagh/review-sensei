@@ -43,10 +43,17 @@ class ReceiptPageProjection:
     protocol: str = "rest"
     scope: tuple = ()
     first: int = 100
+    pages: tuple = ()
 
 
 def project_receipt_page(
-    rows, *, mutable_bounds=(), future_bounds=(), allow_graphql=False, identity=None
+    rows,
+    *,
+    mutable_bounds=(),
+    future_bounds=(),
+    allow_graphql=False,
+    identity=None,
+    max_reads=1,
 ):
     """Bound every complete body plus REST metadata and list framing.
 
@@ -54,6 +61,8 @@ def project_receipt_page(
     This projection does not release or reclassify any lifetime unknown slot.
     It describes a fixed-membership invocation whose growth must be rejected.
     """
+    if type(max_reads) is not int or max_reads not in (1, 2):
+        raise ReviewInputError("receipt read bound is unsupported")
     mutable = dict(mutable_bounds)
     if len(mutable) != len(mutable_bounds) or any(
         type(key) is not int or key <= 0 for key in mutable
@@ -94,11 +103,40 @@ def project_receipt_page(
         _graphql_request(scope, count + 1)
         maximum = 4096 + sum(known.values()) + sum(future_bounds) + count * 1024
         if maximum > MAX_GITHUB_RESPONSE_BYTES:
-            raise ReviewInputError("receipt complete GraphQL page exceeds wire bound")
+            if max_reads != 2:
+                raise ReviewInputError(
+                    "receipt complete GraphQL page exceeds wire bound"
+                )
+            pages = _two_page_schedule(tuple(known.values()) + future_bounds)
+            return ReceiptPageProjection(
+                tuple(known.items()),
+                future_bounds,
+                max(bound for _, bound in pages),
+                "graphql-two-page",
+                scope,
+                pages[0][0],
+                pages,
+            )
         return ReceiptPageProjection(
             tuple(known.items()), future_bounds, maximum, "graphql", scope, count + 1
         )
     return ReceiptPageProjection(tuple(known.items()), future_bounds, maximum)
+
+
+def _two_page_schedule(bounds):
+    """Any ordering must fit: each page uses the largest possible body subset."""
+    count = len(bounds)
+    largest = sorted(bounds, reverse=True)
+    choices = []
+    for first in range(1, count):
+        other = count - first
+        one = 4096 + sum(largest[:first]) + first * 1024
+        two = 4096 + sum(largest[:other]) + other * 1024
+        if max(one, two) <= MAX_GITHUB_RESPONSE_BYTES:
+            choices.append(((first, one), (other + 1, two)))
+    if not choices:
+        raise ReviewInputError("receipt complete two-page GraphQL exceeds wire bound")
+    return min(choices, key=lambda pages: (max(p[1] for p in pages), pages[0][0]))
 
 
 @dataclass(frozen=True)
@@ -114,6 +152,7 @@ class ReceiptMembership:
     protocol: str = "rest"
     scope: tuple = ()
     first: int = 100
+    pages: tuple = ()
 
 
 def _receipt_scope(identity):
@@ -164,7 +203,7 @@ def _protocol_fields(value):
     if protocol == "rest":
         if len(scope) != 0 or first != 100:
             raise ReviewInputError("receipt REST protocol changed")
-    elif protocol == "graphql":
+    elif protocol == "graphql" or protocol == "graphql-two-page":
         if (
             len(scope) != 3
             or type(scope[0]) is not str
@@ -174,11 +213,33 @@ def _protocol_fields(value):
             or scope[0].count("/") != 1
             or scope[1] <= 0
             or scope[2] <= 0
-            or not 2 <= first <= 100
+            or not 1 <= first <= 100
         ):
             raise ReviewInputError("receipt GraphQL protocol changed")
     else:
         raise ReviewInputError("receipt protocol is unsupported")
+    pages = value.pages
+    if type(pages) is not tuple:
+        raise ReviewInputError("receipt page schedule is invalid")
+    if protocol != "graphql-two-page":
+        if pages or (protocol == "graphql" and first < 2):
+            raise ReviewInputError("receipt single-page schedule changed")
+    elif (
+        len(pages) != 2
+        or any(
+            type(page) is not tuple
+            or len(page) != 2
+            or any(type(part) is not int for part in page)
+            for page in pages
+        )
+        or not 1 <= pages[0][0] < 99
+        or not 2 <= pages[1][0] <= 99
+        or pages[0][0] + pages[1][0] - 1 >= 100
+        or any(not 4096 < page[1] <= MAX_GITHUB_RESPONSE_BYTES for page in pages)
+        or first != pages[0][0]
+        or maximum != max(page[1] for page in pages)
+    ):
+        raise ReviewInputError("receipt two-page schedule changed")
     return protocol, scope, first, maximum
 
 
@@ -191,7 +252,7 @@ def _projection_binding(value):
         type(fields) is not dict
         or any(type(key) is not str for key in fields)
         or set(fields)
-        != {"known", "future", "maximum_bytes", "protocol", "scope", "first"}
+        != {"known", "future", "maximum_bytes", "protocol", "scope", "first", "pages"}
     ):
         raise ReviewInputError("receipt projection fields are invalid")
     _protocol_fields(value)
@@ -207,6 +268,8 @@ def _projection_binding(value):
         or any(type(part) is not int or part <= 0 for part in value.future)
     ):
         raise ReviewInputError("receipt projection bounds changed")
+    if len({identifier for identifier, _ in value.known}) != len(value.known):
+        raise ReviewInputError("receipt projection known identity is duplicated")
     count = len(value.known) + len(value.future)
     body = sum(bound for _, bound in value.known) + sum(value.future)
     expected = (
@@ -214,6 +277,13 @@ def _projection_binding(value):
         if value.protocol == "rest"
         else 4096 + body + count * 1024
     )
+    if value.protocol == "graphql-two-page":
+        pages = _two_page_schedule(
+            tuple(bound for _, bound in value.known) + value.future
+        )
+        if value.pages != pages:
+            raise ReviewInputError("receipt projection two-page geometry changed")
+        expected = max(bound for _, bound in pages)
     if (
         count >= 100
         or value.maximum_bytes != expected
@@ -227,6 +297,7 @@ def _projection_binding(value):
         value.protocol,
         value.scope,
         value.first,
+        value.pages,
     )
 
 
@@ -295,19 +366,24 @@ def freeze_receipt_membership(rows, *, projection, receipt_text, update_id, app_
         projection.protocol,
         projection.scope,
         projection.first,
+        projection.pages,
     )
 
 
 def read_receipt_page(
     http, *, path, token, membership, reconcile=False, ledger=None, identity=None
 ):
-    """Perform exactly one fresh charged read, or refuse without a retry."""
+    """Read the explicit complete schedule, with no extra closing read or retry."""
     if type(membership) is not ReceiptMembership or type(reconcile) is not bool:
         raise ReviewInputError("receipt census input is invalid")
     binding = _membership_binding(membership)
     if not isinstance(path, str) or "?" in path or not path.endswith("/comments"):
         raise ReviewInputError("receipt census path is invalid")
-    if membership.protocol == "graphql":
+    if membership.protocol == "graphql-two-page":
+        rows = _read_graphql_receipt_two(
+            http, path, token, membership, ledger, identity
+        )
+    elif membership.protocol == "graphql":
         rows = _read_graphql_receipt(http, path, token, membership, ledger, identity)
     elif (
         membership.protocol == "rest"
@@ -369,7 +445,7 @@ def read_receipt_page(
     return rows
 
 
-def _graphql_request(scope, first):
+def _graphql_request(scope, first, after=None):
     from . import quarantine_census
 
     require_module_seal(quarantine_census)
@@ -379,7 +455,7 @@ def _graphql_request(scope, first):
         "name": name,
         "number": scope[1],
         "first": first,
-        "after": None,
+        "after": after,
     }
     body = {"query": quarantine_census.QUERY, "variables": variables}
     if not quarantine_census._variables(variables) or _wire(body) > 8192:
@@ -454,6 +530,113 @@ def _read_graphql_receipt(http, path, token, membership, ledger, identity):
         raise ReviewInputError("receipt GraphQL response is malformed") from error
 
 
+def _read_graphql_receipt_two(http, path, token, membership, ledger, identity):
+    """At most two fresh charged reads; a partial first page is never evidence."""
+    from . import packed_comment_census, quarantine_census
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(packed_comment_census)
+    require_module_seal(quarantine_census)
+    binding = _membership_binding(membership)
+    scope = _receipt_scope(identity)
+    if (
+        ledger is None
+        or scope != membership.scope
+        or path != http.repository_path(scope[0], f"/issues/{scope[1]}/comments")
+    ):
+        raise ReviewInputError("receipt two-page source scope changed")
+    pages = membership.pages
+    maximum_count = pages[0][0] + pages[1][0] - 1
+    after = None
+    total = None
+    rows: list[dict[str, Any]] = []
+    observed = set()
+    for index, (first, maximum) in enumerate(pages):
+        # All source/query validation precedes the next external callback.
+        require_module_seal(sys.modules[__name__])
+        require_module_seal(quarantine_census)
+        if (
+            _membership_binding(membership) != binding
+            or _receipt_scope(identity) != scope
+        ):
+            raise ReviewInputError("receipt two-page custody changed before read")
+        body = _graphql_request(scope, first, after)
+        status, response = http.request("POST", "/graphql", token=token, body=body)
+        require_module_seal(sys.modules[__name__])
+        require_module_seal(packed_comment_census)
+        require_module_seal(quarantine_census)
+        packed_comment_census._single_plain(response)
+        if (
+            _membership_binding(membership) != binding
+            or _receipt_scope(identity) != scope
+        ):
+            raise ReviewInputError("receipt two-page custody changed during read")
+        try:
+            if (
+                status != 200
+                or type(response) is not dict
+                or response.get("errors")
+                or set(response) - {"data", "errors", "extensions"}
+                or _wire(response) > min(maximum, MAX_GITHUB_RESPONSE_BYTES)
+            ):
+                raise ReviewInputError("receipt two-page response exceeds bound")
+            repository = response["data"]["repository"]
+            quarantine_census._repository(repository, identity)
+            pr = repository["pullRequest"]
+            connection = pr["comments"]
+            nodes, page, current_total = (
+                connection["nodes"],
+                connection["pageInfo"],
+                connection["totalCount"],
+            )
+            if (
+                type(pr["number"]) is not int
+                or pr["number"] != scope[1]
+                or type(nodes) is not list
+                or len(nodes) > first
+                or type(current_total) is not int
+                or not 0 <= current_total <= maximum_count
+                or (total is not None and current_total != total)
+                or type(page) is not dict
+                or set(page) != {"hasNextPage", "endCursor"}
+                or type(page["hasNextPage"]) is not bool
+                or (nodes and not quarantine_census._cursor(page["endCursor"]))
+                or (not nodes and page["endCursor"] is not None)
+                or (after is not None and page["endCursor"] == after)
+                or _wire(response) - sum(_wire(node) for node in nodes) > 4096
+            ):
+                raise ReviewInputError("receipt two-page connection changed")
+            total = current_total
+            if index == 0 and page["hasNextPage"]:
+                if len(nodes) != first or total <= first:
+                    raise ReviewInputError("receipt first page is incomplete")
+            elif (
+                page["hasNextPage"]
+                or len(rows) + len(nodes) != total
+                or (index == 1 and len(nodes) >= first)
+            ):
+                raise ReviewInputError("receipt closing page is incomplete")
+            for node in nodes:
+                if (
+                    type(node) is not dict
+                    or _wire({k: v for k, v in node.items() if k != "body"}) > 1024
+                ):
+                    raise ReviewInputError("receipt two-page metadata exceeds bound")
+                row = quarantine_census._comment(node, ledger, identity)
+                if row["id"] in observed:
+                    raise ReviewInputError("receipt two-page duplicate identity")
+                observed.add(row["id"])
+                rows.append(row)
+            if page["hasNextPage"] is False:
+                return rows
+            after = page["endCursor"]
+        except ReviewInputError:
+            raise
+        except (KeyError, TypeError, ValueError) as error:
+            raise ReviewInputError("receipt two-page response is malformed") from error
+    raise ReviewInputError("receipt two-page census did not close")
+
+
 def _membership_binding(value):
     # Every comparison consumer receives only this finite primitive snapshot.
     # Seal before resolving the class export or traversing mutable instances.
@@ -471,6 +654,7 @@ def _membership_binding(value):
         "protocol",
         "scope",
         "first",
+        "pages",
     }
     if (
         type(fields) is not dict
@@ -552,6 +736,7 @@ def _membership_binding(value):
         fields["protocol"],
         fields["scope"],
         fields["first"],
+        fields["pages"],
     )
 
 
@@ -650,8 +835,9 @@ def _make_windows():
             entry = require(self)
             if entry["reads"] != 1 or entry["mutation"] is not None:
                 raise ReviewInputError("receipt confirmation bound is out of phase")
-            # One complete read and the unchanged two-read authority fence.
-            return 3
+            # Logical census count stays one; every scheduled physical page
+            # plus the unchanged two-read authority fence must be funded.
+            return 4 if entry["membership"].protocol == "graphql-two-page" else 3
 
         def before_write(self, *, method, target, observation_index):
             entry = require(self)
