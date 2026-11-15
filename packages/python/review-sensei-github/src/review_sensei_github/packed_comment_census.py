@@ -168,14 +168,19 @@ def packed_request_bound(
             )
             # Only maximal page boundaries recurse. Skip all prefixes for
             # which another known and unknown item would both still fit.
-            candidates = {maximum}
+            minimum = maximum
             if end_known < len(known):
-                minimum = bisect_right(
-                    unknown_cost,
-                    capacity - NODE_METADATA_BYTES - known[end_known],
+                minimum = min(
+                    maximum,
+                    bisect_right(
+                        unknown_cost,
+                        capacity - NODE_METADATA_BYTES - known[end_known],
+                    ),
                 )
-                candidates.update(range(minimum, maximum + 1))
-            for added_unknown in sorted(candidates):
+            # The candidate union is one inclusive interval: either the
+            # known-item boundary through maximum, or maximum alone. Preserve
+            # its original order and proof-work charges without set/sort work.
+            for added_unknown in range(minimum, maximum + 1):
                 work += 1
                 if work > 500_000:
                     raise ProofWorkExceeded
