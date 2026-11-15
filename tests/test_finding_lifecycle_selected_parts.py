@@ -95,24 +95,39 @@ class SelectedPartsTests(unittest.TestCase):
                 f = self.producer(directory)
                 caught = []
 
-                def run(ledger, identity, mutate, **kwargs):
+                def run(frame):
+                    ledger = frame.f_locals["self"]
                     before = copy.deepcopy(f.extra_comments)
+                    record = frame.f_locals["record"]
                     if fault == "clone":
-                        kwargs["record"] = copy.deepcopy(kwargs["record"])
+                        record = copy.deepcopy(record)
                     else:
-                        owned = ledger.caller._effect_record
-                        owned.api_run_accounting["configuration"]["limit"] += 1
+                        ledger.caller._effect_record.api_run_accounting[
+                            "configuration"
+                        ]["limit"] += 1
+                    # Exercise the unchanged method with the hostile input.
+                    # Its own refusal stops the outer invocation. Profiling is
+                    # suppressed inside this callback, so it cannot recurse.
                     try:
-                        return original(ledger, identity, mutate, **kwargs)
+                        original(
+                            ledger,
+                            frame.f_locals["identity"],
+                            frame.f_locals["mutate"],
+                            record=record,
+                            parts=frame.f_locals["parts"],
+                            retained_bytes=frame.f_locals["retained_bytes"],
+                            reserved_tail_calls=frame.f_locals["reserved_tail_calls"],
+                        )
+                        self.fail("hostile source-owned input was accepted")
                     finally:
                         caught.append(True)
                         self.assertEqual(f.extra_comments, before)
 
-                with patch.object(
-                    ApiRunSessionLedger, "replace_finding_lifecycle_parts", run
-                ):
+                with observe_original(original, entered=run):
                     self.assertNotEqual(f.invoke(), 0)
                 self.assertTrue(caught)
+                if fault == "clone":
+                    self.assertIn("selected input is not source-owned", f.error)
 
     def test_selected_capability_is_one_use_and_cannot_nest(self):
         from review_sensei.errors import ReviewInputError
