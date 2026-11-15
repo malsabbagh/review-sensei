@@ -308,7 +308,7 @@ class CommandEntryFixture(EntryFixture):
             "updated_at": self.SOURCE_STAMP,
             "user": {"login": "alice", "type": "User", "id": 42},
             "author_association": "OWNER",
-            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+            "issue_url": f"{self.api_url}/repos/owner/repo/issues/7",
         }
 
     def invoke_command(self, body=None, *, extra=(), event_override=None):
@@ -339,7 +339,7 @@ class CommandEntryFixture(EntryFixture):
             )
 
         def http_factory(**kwargs):
-            http = GitHubHttp(api_url="https://api.github.test", **kwargs)
+            http = GitHubHttp(api_url=fixture.api_url, **kwargs)
             fixture.http = http
             return http
 
