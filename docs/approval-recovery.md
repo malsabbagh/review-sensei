@@ -379,7 +379,10 @@ native receipts are recorded:
   (`pre_entry_abort_rollover`) only when an authenticated `analysis_abort`
   receipt, ceased owner, confirmed reservation release, clean caller dispatch
   (`uncertain == 0`), zero provider entry, and absence of late native effects
-  are proven. Any run that entered provider execution, held a live reservation,
+  are proven. Owner cessation requires a recognized terminal run conclusion and
+  a complete, nonempty attempt-job listing with distinct positive job IDs and
+  recognized terminal conclusions; absent or malformed evidence preserves the
+  hold. Any run that entered provider execution, held a live reservation,
   left an uncertain request, or lacks an abort receipt stays held under
   `no_transaction_provider_entered`, `no_transaction_active_reservation`,
   `no_transaction_unknown_dispatch`, or `no_transaction_unconfirmed_predecessor`,
