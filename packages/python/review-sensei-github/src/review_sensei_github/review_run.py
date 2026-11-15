@@ -875,9 +875,15 @@ def _prepare_review_input(
     """Reject locally invalid input before any durable caller enrollment.
 
     This is input validation, not an analysis/abort authority. The engine still
-    validates its input independently. Existing complete-diff preparation keeps
-    its default bounds; supplied large-change inputs keep their engine modes.
+    validates its input independently. Generated and supplied inputs use the
+    same configured engine mode and its existing input bounds.
     """
+    from review_sensei.diff import analyze_diff
+    from review_sensei.planning import DEFAULT_TOTAL_WORK_BUDGET, plan_change
+    from review_sensei.validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
+
+    work = load_configuration(configuration_path).advanced.review_work
+    orchestrate = bool(getattr(args, "orchestrate_large_changes", False))
     if args.diff is None:
         args.diff = directory / "review.patch"
         prepare_diff(
@@ -888,15 +894,8 @@ def _prepare_review_input(
             if head_repository != args.repository
             else None,
             output=args.diff,
+            aggregate_work=work.mode == "unified" or orchestrate,
         )
-        return
-
-    from review_sensei.diff import analyze_diff
-    from review_sensei.planning import DEFAULT_TOTAL_WORK_BUDGET, plan_change
-    from review_sensei.validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
-
-    work = load_configuration(configuration_path).advanced.review_work
-    orchestrate = bool(getattr(args, "orchestrate_large_changes", False))
     if work.mode == "unified" or orchestrate:
         budget = DEFAULT_TOTAL_WORK_BUDGET
         diff = read_bounded_utf8(
