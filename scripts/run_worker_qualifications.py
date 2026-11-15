@@ -83,18 +83,23 @@ def stop(process):
         process.wait()
 
 
-def run(plan, report):
+def run(plan, report, *, interruption=None):
     names = [name for name, _argv, _env in plan]
     if not names or len(names) != len(set(names)):
         raise ValueError("qualification names must be nonempty and unique")
     started = time.monotonic()
     active, results = {}, {}
+    stopped = []
     next_index = 0
     try:
         with tempfile.TemporaryDirectory(prefix="worker-qualification-") as directory:
             try:
                 while next_index < len(plan) or active:
+                    if interruption is not None and interruption[0] is not None:
+                        break
                     while next_index < len(plan) and len(active) < 2:
+                        if interruption is not None and interruption[0] is not None:
+                            break
                         index = next_index
                         next_index += 1
                         name, argv, overrides = plan[index]
@@ -139,14 +144,20 @@ def run(plan, report):
                     if active:
                         time.sleep(0.05)
             finally:
-                for process, stream, _path, _begin in active.values():
+                for index, (process, stream, _path, _begin) in active.items():
                     try:
                         stop(process)
+                        stopped.append(
+                            {"name": plan[index][0], "returncode": process.returncode}
+                        )
                     finally:
                         stream.close()
     finally:
-        complete = len(results) == len(plan) and all(
-            row["returncode"] is not None for row in results.values()
+        interrupt_signal = None if interruption is None else interruption[0]
+        complete = (
+            interrupt_signal is None
+            and len(results) == len(plan)
+            and all(row["returncode"] is not None for row in results.values())
         )
         document = {
             "schema_version": "worker-qualification-processes-v1",
@@ -158,6 +169,8 @@ def run(plan, report):
                 for name, argv, env in plan
             ],
             "results": [results[index] for index in sorted(results)],
+            "stopped": stopped,
+            "interrupted_signal": interrupt_signal,
             "complete": complete,
             "success": complete
             and all(row["returncode"] == 0 for row in results.values()),
@@ -171,7 +184,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
-    return run(commands(), args.report)
+    interruption = [None]
+
+    def request_stop(signum, _frame):
+        # Do not raise from the handler: interruption between Popen and storing
+        # its handle could otherwise leave a child outside the cleanup registry.
+        if interruption[0] is None:
+            interruption[0] = signum
+
+    previous = {}
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.signal(signum, request_stop)
+        code = run(commands(), args.report, interruption=interruption)
+        return code if interruption[0] is None else 128 + interruption[0]
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 if __name__ == "__main__":

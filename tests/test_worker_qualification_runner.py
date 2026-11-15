@@ -4,8 +4,12 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from collections import Counter
 from pathlib import Path
@@ -19,6 +23,71 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class WorkerQualificationRunnerTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group signal contract")
+    def test_sigterm_stops_owned_children_even_when_they_exit_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = (
+                "import os,signal,sys,time; from pathlib import Path; "
+                "signal.signal(signal.SIGTERM,lambda *_:sys.exit(0)); "
+                "Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
+            )
+            script = (
+                "import importlib.util,sys; from pathlib import Path; "
+                f"spec=importlib.util.spec_from_file_location('runner',{str(PATH)!r}); "
+                "runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner); "
+                "root=Path(sys.argv[1]); "
+                f"child={child!r}; "
+                "runner.commands=lambda:tuple((str(i),(sys.executable,'-c',child,str(root/f'{i}.pid')),{}) for i in range(3)); "
+                "sys.argv=['runner','--report',str(root/'report.json')]; "
+                "sys.exit(runner.main())"
+            )
+            with (root / "controller.log").open("w") as output:
+                process = subprocess.Popen(
+                    (sys.executable, "-c", script, str(root)),
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                )
+                ceased = set()
+                try:
+                    deadline = time.monotonic() + 10
+                    while not all((root / f"{i}.pid").exists() for i in range(2)):
+                        self.assertIsNone(
+                            process.poll(), "controller exited before children"
+                        )
+                        self.assertLess(
+                            time.monotonic(), deadline, "children did not start"
+                        )
+                        time.sleep(0.02)
+                    process.send_signal(signal.SIGTERM)
+                    self.assertEqual(process.wait(timeout=15), 128 + signal.SIGTERM)
+                    document = json.loads((root / "report.json").read_text())
+                    self.assertFalse(document["complete"])
+                    self.assertFalse(document["success"])
+                    self.assertEqual(document["interrupted_signal"], signal.SIGTERM)
+                    self.assertEqual(
+                        document["stopped"],
+                        [{"name": str(i), "returncode": 0} for i in range(2)],
+                    )
+                    self.assertFalse((root / "2.pid").exists())
+                    for i in range(2):
+                        pid = int((root / f"{i}.pid").read_text())
+                        with self.assertRaises(ProcessLookupError):
+                            os.kill(pid, 0)
+                        ceased.add(pid)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
+                    for path in root.glob("*.pid"):
+                        pid = int(path.read_text())
+                        if pid in ceased:
+                            continue
+                        try:
+                            os.killpg(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+
     def test_interrupted_controller_reaps_children_and_reports_incomplete(self):
         with tempfile.TemporaryDirectory() as directory:
             processes = []
