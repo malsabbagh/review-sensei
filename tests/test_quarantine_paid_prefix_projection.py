@@ -42,6 +42,20 @@ class PaidPrefixProjectionTests(unittest.TestCase):
                     sum(len(b["pending"]) for b in baseline["blocks"]), 164
                 )
                 self.assertEqual(caller.budget_view.ordinary_remaining(), 112)
+                prior = {
+                    p.request_id: p.deadline_unix_ms
+                    for b in caller.accounting.blocks
+                    for p in b.pending
+                }
+                for block in prepared["blocks"]:
+                    for pending in block["pending"]:
+                        self.assertEqual(
+                            pending["deadline_unix_ms"],
+                            prior.get(
+                                pending["request_id"],
+                                namespace.MAX_COLD_DEADLINE_UNIX_MS,
+                            ),
+                        )
                 self.assertEqual(caller.accounting.remaining, 190)
                 self.assertEqual(
                     next(

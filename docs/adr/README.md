@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0141](0141-cold-namespace-deadline-ceiling.md) | Proposed | Enforce a narrower future deadline representation in the original cold namespace | Issue pending; PR #462 | Existing receipts, funding and bounds unchanged; no execution authority |
 | [0140](0140-self-contained-lifecycle-prefix-codec.md) | Proposed | Self-contained immutable lifecycle prefix with independently bounded suffix | Issue pending; PR #462 | Pure codec only; runtime custody and activation remain pending |
 | [0139](0139-finite-grouped-publication-declarations.md) | Proposed | Preserve finite grouped publication declarations without dispatch authority | [PR #462](https://github.com/malsabbagh/review-sensei/pull/462) | Explicit v3, unchanged v2 and bounds; writer issuance remains disabled |
 | [0138](0138-bounded-shared-base-lifecycle-checkpoints.md) | Proposed | Compress complete pending lifecycle checkpoints against an authenticated immutable base | User-directed G10/G14/G16 qualification | No recursive bases, lost history, capacity increase or activation; exact-head qualification pending |
