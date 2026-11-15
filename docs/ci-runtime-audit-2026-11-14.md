@@ -362,3 +362,45 @@ The current-run class and quarantine method contracts now pin this newly used
 helper as well as the reviewed test_review_run source. Method inventories and
 module socket/environment guards remain unchanged. These checks neither replay
 nor settle historical held operations.
+
+### November 15 remote failure receipts
+
+PR #463 head `8578a7d99f0e67adca64f1d1947fa4deb1732c30` completed its
+[installed-package job](https://github.com/malsabbagh/review-sensei/actions/runs/43695252733/job/132754313183)
+with failures. Its
+[retained timing artifact](https://github.com/malsabbagh/review-sensei/actions/runs/43695252733/artifacts/14156612392)
+has SHA-256 `f05153289c0f6df260dc51ccda7e077380b1c964ef361ef1ea86c111526467e2`.
+All 1,139 assigned test IDs started once across the four workers; each worker
+reported execution complete and zero fixture skips. The suite's aggregate `complete` field
+remained false. Ten failing subcases covered close diagnostics, ordinary
+quarantine journeys, published-tail journeys and body-limit recovery. This is
+execution-inventory evidence, not a passing installed-consumer result.
+
+| Worker | Tests started | Elapsed seconds | Largest recorded scheduling unit |
+| --- | ---: | ---: | --- |
+| 0 | 358 | 4,174.995 | Ordinary quarantine journey: 1,858.190 s |
+| 1 | 334 | 5,210.708 | Current command entry class: 1,222.929 s |
+| 2 | 311 | 3,816.158 | Published-tail journey: 2,251.084 s |
+| 3 | 136 | 4,537.986 | Body-limit recovery: 1,400.564 s |
+
+Worker 3 also spent 1,046.109 seconds in quarantine capacity, 551.306 seconds
+in rollover, and 487.501 seconds in stored/lost checkpoint acknowledgements.
+The full suite reported 5,210.789 seconds. Recorded unit work totals
+17,732.468 seconds: even ideal scheduling over these same four workers would
+take 4,433.117 seconds (73 minutes 53 seconds) before overhead. Early failing
+journeys can omit later work, so this is not a forecast for a complete passing
+run. It demonstrates why scheduling alone cannot meet the 30-minute objective
+at these observed costs.
+
+The same head's
+[Worker qualification job](https://github.com/malsabbagh/review-sensei/actions/runs/43695252733/job/132754313338)
+ran all nine commands once: seven passed and two failed. The bounded controller
+elapsed 3,169.810 seconds. Body-limit recovery failed its complete-reader recipe;
+published-tail recovery reached the final command and rejected its additional
+native/checkpoint branch. Keeping the two failures distinct is necessary when
+assessing subsequent fixes. Neither that result nor a shorter partial local
+journey establishes complete recovery or sub-30-minute CI.
+
+Later source and fixture repairs require new exact-head CI after the current
+useful runs finish. These receipts do not authorize additional workers, retries,
+larger bounds, removal of platform/security/recovery tests, or release activation.
