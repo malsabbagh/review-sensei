@@ -473,14 +473,19 @@ class PublishedPartialCommandAdmissionTests(unittest.TestCase):
         # non-dispatch or a reconstruction of any deployed failure's cause.
         with ExitStack() as stack:
             if not closed:
-                stack.enter_context(
-                    patch.object(
+                from original_finish_interrupt import interrupt_original_finish
+
+                interrupted = stack.enter_context(
+                    interrupt_original_finish(
                         ApiRunRequestTransport,
-                        "finish_review_run",
-                        side_effect=ReviewInputError("synthetic close refusal"),
+                        run_id=f.run_id,
+                        attempt=f.attempt,
+                        exception=ReviewInputError("synthetic close refusal"),
                     )
                 )
             self.assertEqual(f.invoke(human=True), 0 if closed else 1, f.error)
+            if not closed:
+                self.assertEqual(interrupted, [True])
         result = json.loads((f.root / "review.json").read_text(encoding="utf-8"))
         self.assertEqual(result["review_status"], "partial")
         record = parse_session_comment(f.comment["body"], identity=IDENTITY)
