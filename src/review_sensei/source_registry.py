@@ -257,9 +257,10 @@ def _build_registry():
                 merged = {}
                 for namespace in reversed(namespaces):
                     merged.update(namespace)
-                names = dir(cls)
-                if all(name in merged for name in names):
-                    return {name: normalize(merged[name]) for name in names}
+                # With the exact built-in metaclass, type.__dir__ enumerates
+                # these same namespaces again and sorts their names. Neither
+                # a second traversal nor sorting contributes source evidence.
+                return {name: normalize(member) for name, member in merged.items()}
         return {name: normalize(inspect.getattr_static(cls, name)) for name in dir(cls)}
 
     def require_class(cls):
