@@ -122,11 +122,8 @@ def _build_registry():
     def normalize(value):
         # Never ask an untrusted replacement export to describe itself. These
         # exact built-in containers have non-overridable function storage.
-        if (
-            type(value) is MethodType
-            or type(value) is staticmethod
-            or type(value) is classmethod
-        ):
+        kind = type(value)
+        if kind is MethodType or kind is staticmethod or kind is classmethod:
             return value.__func__
         return value
 
@@ -282,8 +279,14 @@ def _build_registry():
                 )
             if (
                 current is not original
-                or getattr(current, "__code__", None) is not code
-                or (inspect.isfunction(current) and not function_unchanged(current))
+                # Functions cannot be subclassed. Their fresh definition check
+                # already checks code as well as globals/defaults/wrapper links.
+                # Keep the original code check for every other binding kind.
+                or (
+                    not function_unchanged(current)
+                    if type(current) is FunctionType
+                    else getattr(current, "__code__", None) is not code
+                )
             ):
                 raise ReviewInputError("original module source changed: " + name)
 
