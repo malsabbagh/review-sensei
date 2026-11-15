@@ -71,6 +71,21 @@ def _require_default_profile(caller):
         raise ReviewInputError("historical closed trust profile is unsupported")
 
 
+def _journal_phase_reader(expected=None):
+    from types import FunctionType
+
+    from . import quarantine_command_phase
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(quarantine_command_phase)
+    reader = vars(quarantine_command_phase).get("_optional_frame")
+    if type(reader) is not FunctionType or (
+        expected is not None and reader is not expected
+    ):
+        raise ReviewInputError("historical journal phase source changed")
+    return reader
+
+
 def _registry():
     active: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
     leases: WeakKeyDictionary[Any, Any] = WeakKeyDictionary()
@@ -602,10 +617,10 @@ def _registry():
     def journal_census_membership(ledger, identity, *, added_parts):
         """Original checkpoint-only reader premise; no admission or new funds."""
         from . import finding_lifecycle, historical_journal_census, quarantine_action
-        from .quarantine_command_phase import _optional_frame
 
         for module in (historical_journal_census, finding_lifecycle, quarantine_action):
             require_module_seal(module)
+        phase_reader = _journal_phase_reader()
         source = sys._getframe(1)
         if source.f_globals is not vars(
             historical_journal_census
@@ -622,7 +637,8 @@ def _registry():
         recipe = json.loads(entry["recipe"])
         if recipe["contract"] != "closed-inline-c5-r2-p2-no-verification-v1":
             return None
-        checkpoint = _optional_frame(
+        _journal_phase_reader(phase_reader)
+        checkpoint = phase_reader(
             finding_lifecycle, finding_lifecycle.FindingLifecycleJournal.checkpoint
         )
         if checkpoint is None:

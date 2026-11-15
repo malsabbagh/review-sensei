@@ -17,6 +17,14 @@ _ATTEMPTED: WeakSet = WeakSet()
 
 def project(lifetime, membership):
     """Pure geometry preserving every known positive-growth and metadata bound."""
+    from . import packed_comment_census
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(packed_comment_census)
+    if CommentAllocationPlan is not vars(packed_comment_census).get(
+        "CommentAllocationPlan"
+    ):
+        raise ReviewInputError("historical journal plan defining source changed")
     if type(lifetime) is not CommentAllocationPlan or type(membership) is not tuple:
         raise ReviewInputError("historical journal geometry is unsupported")
     if any(type(key) is not int or key <= 0 for key in membership):
@@ -87,6 +95,22 @@ def require_scope(scope):
         raise ReviewInputError("historical journal enumeration changed")
 
 
+def packed_reader(expected=None):
+    """Authenticate defining source before resolving an external-call target."""
+    from types import FunctionType
+
+    from . import packed_comment_census
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(packed_comment_census)
+    reader = vars(packed_comment_census).get("fetch_packed_comments")
+    if type(reader) is not FunctionType or (
+        expected is not None and reader is not expected
+    ):
+        raise ReviewInputError("historical packed reader source changed")
+    return reader
+
+
 def _reader_frame(scope):
     from . import quarantine_census
 
@@ -98,6 +122,7 @@ def _reader_frame(scope):
         or frame.f_locals.get("lifecycle") is not scope
     ):
         raise ReviewInputError("historical journal read lacks original source")
+    return frame
 
 
 def begin(scope):
@@ -109,7 +134,9 @@ def begin(scope):
 
 
 def finish(scope, rows):
-    _reader_frame(scope)
+    frame = _reader_frame(scope)
+    if frame.f_locals.get("rows") is not rows:
+        raise ReviewInputError("historical journal returned rows were substituted")
     require_scope(scope)
     if scope not in _ATTEMPTED or type(rows) is not list:
         raise ReviewInputError("historical journal read completion changed")

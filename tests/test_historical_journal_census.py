@@ -85,3 +85,69 @@ class HistoricalJournalGeometryTests(unittest.TestCase):
         self.assertEqual(selected.known[1], 66560)
         self.assertEqual(selected.metadata_known[1], 373)
         self.assertEqual(lifetime.unknown, (65536,))
+
+    def test_substituted_packed_export_never_called(self):
+        from unittest.mock import patch
+
+        from review_sensei_github import packed_comment_census
+
+        calls = []
+
+        def fake(*args, **kwargs):
+            calls.append(True)
+            return [{"id": 1}]
+
+        with patch.object(packed_comment_census, "fetch_packed_comments", fake):
+            with self.assertRaises(ReviewInputError):
+                census.packed_reader()()
+        self.assertEqual(calls, [])
+
+    def test_late_packed_export_replacement_refuses_without_callback(self):
+        from unittest.mock import patch
+
+        from review_sensei_github import packed_comment_census
+
+        original = census.packed_reader()
+        calls = []
+
+        def fake(*args, **kwargs):
+            calls.append(True)
+            return [{"id": 1}]
+
+        with patch.object(packed_comment_census, "fetch_packed_comments", fake):
+            with self.assertRaises(ReviewInputError):
+                census.packed_reader(original)
+        self.assertEqual(calls, [])
+        self.assertIs(census.packed_reader(original), original)
+
+    def test_substituted_phase_export_never_called(self):
+        from unittest.mock import patch
+
+        from review_sensei_github import quarantine_command_phase
+        from review_sensei_github import quarantine_historical_execution as historical
+
+        calls = []
+
+        def fake(*args, **kwargs):
+            calls.append(True)
+            return None
+
+        with patch.object(quarantine_command_phase, "_optional_frame", fake):
+            with self.assertRaises(ReviewInputError):
+                historical._journal_phase_reader()()
+        self.assertEqual(calls, [])
+
+    def test_substituted_geometry_method_never_called(self):
+        from unittest.mock import patch
+
+        plan = CommentAllocationPlan({1: 66560}, (65536,))
+        calls = []
+
+        def fake(*args, **kwargs):
+            calls.append(True)
+            return 3
+
+        with patch.object(CommentAllocationPlan, "worst_read_calls", fake):
+            with self.assertRaises(ReviewInputError):
+                census.project(plan, (1,))
+        self.assertEqual(calls, [])

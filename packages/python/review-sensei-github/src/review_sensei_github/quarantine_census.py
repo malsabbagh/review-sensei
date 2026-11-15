@@ -354,8 +354,6 @@ def fetch_comments(
 
     lifecycle = getattr(ledger, "_quarantine_lifecycle_capacity", None)
     if lifecycle is not None:
-        from .packed_comment_census import fetch_packed_comments
-
         if type(lifecycle) is not _LifecycleCapacity:
             raise ReviewInputError("quarantine lifecycle census scope is unissued")
         lifetime_plan = _LifecycleCapacity.require(lifecycle, ledger, identity)
@@ -365,8 +363,9 @@ def fetch_comments(
             from . import historical_journal_census
 
             require_module_seal(historical_journal_census)
+            packed_reader = historical_journal_census.packed_reader()
             historical_journal_census.begin(lifecycle)
-            rows = fetch_packed_comments(
+            rows = packed_reader(
                 ledger,
                 identity,
                 plan=lifetime_plan,
@@ -376,8 +375,11 @@ def fetch_comments(
                 observe_request=observe_request,
             )
             require_module_seal(historical_journal_census)
+            historical_journal_census.packed_reader(packed_reader)
             return historical_journal_census.finish(lifecycle, rows)
         if historical_reader is None:
+            from .packed_comment_census import fetch_packed_comments
+
             return fetch_packed_comments(
                 ledger,
                 identity,
