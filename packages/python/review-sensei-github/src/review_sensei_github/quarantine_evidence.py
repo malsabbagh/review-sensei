@@ -663,12 +663,12 @@ def _read_lifecycle_published_record(
             )
 
     stored = _decode_selected_lifecycle(HistoricalCarrierReader(), original)
-    if (
-        not isinstance(stored, dict)
-        or stored.get("schema_version") != "finding-lifecycle-packed-v3"
-    ):
+    if not isinstance(stored, dict) or stored.get("schema_version") not in {
+        "finding-lifecycle-packed-v3",
+        "finding-lifecycle-packed-v5",
+    }:
         raise ReviewInputError(
-            "quarantine lifecycle origin requires self-contained v3 evidence"
+            "quarantine lifecycle origin requires self-contained v3 or v5 evidence"
         )
     document = validate_journal(_unpack_journal(stored))
     state = decode_lifecycle_state(document["lifecycle"]).state

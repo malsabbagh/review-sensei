@@ -121,12 +121,9 @@ class CommandFinalizationPlan:
         import json
         from hashlib import sha256
 
-        from review_sensei.finding_lifecycle_store import (
-            DOCUMENT_VERSION,
-            normalize_reference,
-        )
+        from review_sensei.finding_lifecycle_store import normalize_reference
 
-        from .finding_lifecycle import _pack_journal
+        from .finding_lifecycle import _envelope_for_manifest
         from .finding_lifecycle_dictionary import pack
 
         self.require(self.journal, http=self.http, budget=self.budget)
@@ -134,14 +131,12 @@ class CommandFinalizationPlan:
         reference = normalize_reference(self.record.finding_lifecycle)
         if retained is None or reference is None or self in _DICTIONARY:
             raise ReviewInputError("command dictionary base custody is unavailable")
-        expected = {
-            "schema_version": DOCUMENT_VERSION,
-            "lifecycle": _pack_journal(json.loads(retained)),
-        }
         raw = canonical_bytes(base)
         manifest = reference["manifest"]
+        expected = _envelope_for_manifest(json.loads(retained), manifest)
         if (
-            raw != canonical_bytes(expected)
+            expected is None
+            or raw != canonical_bytes(expected)
             or sha256(raw).hexdigest() != manifest["sha256"]
         ):
             raise ReviewInputError(
@@ -274,24 +269,16 @@ def issue_plan(finalizer, *, payload, states, check_token, cleanup_instances=Non
     # Independently bind supplied in-memory journal bytes to the committed
     # evidence envelope. Legacy representations that do not re-encode exactly
     # retain their ordinary priced restore path.
-    from review_sensei.finding_lifecycle_store import (
-        DOCUMENT_VERSION,
-        normalize_reference,
-    )
+    from review_sensei.finding_lifecycle_store import normalize_reference
 
-    from .finding_lifecycle import _pack_journal
+    from .finding_lifecycle import _envelope_for_manifest
 
     try:
         reference = normalize_reference(journal._record.finding_lifecycle)
         document = journal._document()
-        envelope = {
-            "schema_version": DOCUMENT_VERSION,
-            "lifecycle": _pack_journal(document),
-        }
         if (
             reference is not None
-            and sha256(canonical_bytes(envelope)).hexdigest()
-            == reference["manifest"]["sha256"]
+            and _envelope_for_manifest(document, reference["manifest"]) is not None
         ):
             _RETAINED[plan] = canonical_bytes(document)
     except (ReviewInputError, AttributeError, TypeError):
@@ -634,7 +621,7 @@ def pack_authorized_pending(journal, logical_document):
     """Represent only exact admitted pending bytes under transferred custody."""
     import json
 
-    from .finding_lifecycle import _pack_journal
+    from .finding_lifecycle import _pack_current_journal
     from .finding_lifecycle_dictionary import pack
 
     try:
@@ -661,8 +648,11 @@ def pack_authorized_pending(journal, logical_document):
     pending = _PENDING.get(plan)
     if pending is None:
         raise ReviewInputError("command dictionary pending commitments are absent")
-    if canonical_bytes(_pack_journal(logical_document)) not in dict(pending).values():
-        return None  # Confirmed/final snapshots stay ordinary self-contained v3.
+    if (
+        canonical_bytes(_pack_current_journal(logical_document))
+        not in dict(pending).values()
+    ):
+        return None  # Confirmed/final snapshots stay self-contained, not v4.
     return pack(
         logical_document,
         base=json.loads(context[0]),

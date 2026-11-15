@@ -68,9 +68,10 @@ def _base(base, manifest, current_binding):
         or set(base) != {"schema_version", "lifecycle"}
         or base["schema_version"] != "finding-lifecycle-evidence-v2"
         or not isinstance(base["lifecycle"], dict)
-        or base["lifecycle"].get("schema_version") != "finding-lifecycle-packed-v3"
+        or base["lifecycle"].get("schema_version")
+        not in {"finding-lifecycle-packed-v3", "finding-lifecycle-packed-v5"}
     ):
-        _bad("base must be a nonrecursive full v3 snapshot")
+        _bad("base must be a nonrecursive full v3 or v5 snapshot")
     encoded = canonical_bytes(base)
     if (
         manifest["encoding"] != "inline-json-v1"

@@ -2,7 +2,8 @@
 
 The confirmed prefix is structurally separate from a scalar-independent v3
 remainder. Runtime callers must independently prove prefix immutability before
-using any capacity measurement. No existing serializer selects this format.
+using any prefix-specific capacity measurement. The current serializer selects
+this format only when it is smaller than the unchanged legacy representation.
 """
 
 import json

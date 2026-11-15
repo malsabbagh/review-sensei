@@ -772,7 +772,7 @@ def require_reply_native_request(journal, method, path, body):
         canonical_bytes(request) for request in payload["ordered_requests"]
     }:
         raise ReviewInputError("reply finalization native request was not priced")
-    from .finding_lifecycle import _digest, _pack_journal, _request_identity
+    from .finding_lifecycle import _digest, _pack_current_journal, _request_identity
 
     request = _request_identity(body)
     digest = _digest({"method": method, "path": path, "request": request})
@@ -791,7 +791,7 @@ def require_reply_native_request(journal, method, path, body):
                 "response": None,
             }
         )
-        if canonical_bytes(_pack_journal(document)) != expected:
+        if canonical_bytes(_pack_current_journal(document)) != expected:
             raise ReviewInputError("reply initial pending document changed")
     key = (journal.identity.repository_id, journal.identity.pull_request)
     state = (

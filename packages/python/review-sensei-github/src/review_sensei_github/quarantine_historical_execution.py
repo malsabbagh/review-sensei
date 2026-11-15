@@ -383,6 +383,89 @@ def _registry():
         entry = require(journal.ledger.caller)
         return entry is not None and entry["journal"] is journal
 
+    def retained_prefix_source(journal):
+        """Read exact inline bytes under the existing lease, without HTTP.
+
+        The mutable journal list and its confirmed flags are not provenance.
+        Reconstruct the selected complete carrier independently and match the
+        prefix captured at the original own-successor restore boundary.
+        """
+        from review_sensei import finding_lifecycle_store, session
+        from review_sensei.source_registry import require_instance_source
+
+        from . import finding_lifecycle, historical_prefix_sizing, review_run
+
+        require_module_seal(historical_prefix_sizing)
+        source = sys._getframe(1)
+        if (
+            source.f_code
+            is not historical_prefix_sizing.retained_for_candidate.__code__
+            or source.f_globals is not vars(historical_prefix_sizing)
+            or source.f_locals.get("journal") is not journal
+        ):
+            raise ReviewInputError("historical prefix requires original sizing source")
+        own = object.__getattribute__(journal, "__dict__")
+        if type(own) is not dict or any(type(key) is not str for key in own):
+            raise ReviewInputError("historical prefix journal namespace changed")
+        if type(own.get("ledger")) is not review_run.ActionRunLedger:
+            return None
+        _ledger, source_caller, _record = historical_prefix_sizing._owner_references(
+            journal
+        )
+        if active.get(source_caller) is None:
+            return None
+        ledger, caller, record, record_snapshot = (
+            historical_prefix_sizing._owned_inputs(journal)
+        )
+        # The snapshot rejects instance serializers and hostile nested values
+        # before require() traverses the existing successor's retained record.
+        entry = require(caller)
+        if entry is None:
+            return None
+        if (
+            entry["journal"] is not journal
+            or entry["phase"] != 3
+            or entry["ledger"] is not ledger
+            or entry["caller"] is not caller
+            or historical_prefix_sizing._identity_fields(journal.identity)
+            != historical_prefix_sizing._identity_fields(entry["identity"])
+            or record is not caller._effect_record
+            or record.record_sha256 != caller._root
+            or caller._checkpoint is not None
+        ):
+            raise ReviewInputError("historical retained prefix owner changed")
+        reference = record.finding_lifecycle
+        if reference is None or reference["manifest"]["encoding"] != "inline-json-v1":
+            return None
+        require_module_seal(session)
+        require_module_seal(finding_lifecycle_store)
+        require_module_seal(finding_lifecycle)
+        require_instance_source(ledger, methods=("evidence_producer",))
+        if historical_prefix_sizing._owned_inputs(journal)[
+            3
+        ] != record_snapshot or canonical_bytes(
+            session.SessionRecord.from_dict(record.to_dict()).to_dict()
+        ) != (canonical_bytes(record.to_dict())):
+            raise ReviewInputError("historical retained prefix root changed")
+        stored = finding_lifecycle_store._decode_selected_lifecycle(ledger, record)
+        if (
+            stored is None
+            or stored.get("schema_version") == "finding-lifecycle-packed-v4"
+        ):
+            return None
+        retained = finding_lifecycle._validate(
+            finding_lifecycle._unpack_journal(stored)
+        )
+        if canonical_bytes(retained["effects"]) != entry[
+            "journal_effects"
+        ] or canonical_bytes(
+            retained.get("guarded_publication_pair")
+        ) != canonical_bytes(journal._guarded_publication_pair):
+            raise ReviewInputError(
+                "historical retained prefix differs from owned evidence"
+            )
+        return retained
+
     def receipt_preparation(run, authority, target):
         from . import quarantine_command_execution
         from .session_ledger import parse_session_comment
@@ -593,6 +676,7 @@ def _registry():
         before_request,
         bind_journal,
         require_journal,
+        retained_prefix_source,
         lifecycle_execution_context,
         consume_lifecycle_execution_context,
         receipt_preparation,
@@ -608,6 +692,7 @@ def _registry():
     before_request,
     bind_journal,
     require_journal,
+    retained_prefix_source,
     lifecycle_execution_context,
     consume_lifecycle_execution_context,
     receipt_preparation,
