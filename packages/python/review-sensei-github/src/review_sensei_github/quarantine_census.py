@@ -364,12 +364,15 @@ def fetch_comments(
 
             require_module_seal(historical_journal_census)
             packed_reader = historical_journal_census.packed_reader()
+            complete_cap = historical_journal_census.complete_read_cap(
+                lifetime_plan.worst_read_calls(), max_requests
+            )
             historical_journal_census.begin(lifecycle)
             rows = packed_reader(
                 ledger,
                 identity,
                 plan=lifetime_plan,
-                max_requests=lifetime_plan.worst_read_calls(),
+                max_requests=complete_cap,
                 timeout_seconds=timeout_seconds,
                 before_read=before_read,
                 observe_request=observe_request,
@@ -672,6 +675,12 @@ class _LifecycleCapacity:
         return _LifecycleCapacity.enumeration_plan(self)
 
     def _seal(self):
+        issuer = self.read_issuer
+        if issuer is not None and (
+            type(issuer) is not str
+            or issuer not in ("materialized", "historical-journal")
+        ):
+            raise ReviewInputError("quarantine lifecycle reader issuer is unsupported")
         return (
             id(self.ledger),
             id(self.caller),

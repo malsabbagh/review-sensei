@@ -44,6 +44,21 @@ def project(lifetime, membership):
     return selected
 
 
+def complete_read_cap(required, supplied):
+    """Never increase a caller's physical ceiling to complete a census."""
+    if type(required) is not int or not 2 <= required <= 10:
+        raise ReviewInputError("historical journal complete read bound is invalid")
+    if supplied is None:
+        return required
+    if type(supplied) is not int or not 2 <= supplied <= 10:
+        raise ReviewInputError("packed comment physical request bound is invalid")
+    if supplied < required:
+        raise ReviewInputError(
+            "historical journal caller cap cannot fund complete census"
+        )
+    return required
+
+
 def choose(ledger, identity, *, plan, added_parts):
     from . import quarantine_census
     from . import quarantine_historical_execution as historical

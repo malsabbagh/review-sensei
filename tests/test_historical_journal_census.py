@@ -151,3 +151,41 @@ class HistoricalJournalGeometryTests(unittest.TestCase):
             with self.assertRaises(ReviewInputError):
                 census.project(plan, (1,))
         self.assertEqual(calls, [])
+
+    def test_stricter_physical_cap_is_not_raised(self):
+        self.assertEqual(census.complete_read_cap(3, None), 3)
+        self.assertEqual(census.complete_read_cap(3, 3), 3)
+        self.assertEqual(census.complete_read_cap(3, 10), 3)
+        for cap in (1, 2, True, 0, 11, "3"):
+            with self.subTest(cap=cap), self.assertRaises(ReviewInputError):
+                census.complete_read_cap(3, cap)
+
+    def test_hostile_issuer_refuses_before_seal_equality(self):
+        from review_sensei_github.quarantine_census import _LifecycleCapacity
+
+        calls = []
+
+        class Poison:
+            def __eq__(self, other):
+                calls.append(other)
+                raise AssertionError("issuer equality")
+
+        marker = object()
+        plan = CommentAllocationPlan({1: 66560}, ())
+        scope = _LifecycleCapacity(
+            marker,
+            marker,
+            marker,
+            marker,
+            "root",
+            b"",
+            b"",
+            plan,
+            0,
+            read_plan=plan,
+            read_issuer="historical-journal",
+        )
+        object.__setattr__(scope, "read_issuer", Poison())
+        with self.assertRaisesRegex(ReviewInputError, "issuer is unsupported"):
+            _LifecycleCapacity._seal(scope)
+        self.assertEqual(calls, [])
