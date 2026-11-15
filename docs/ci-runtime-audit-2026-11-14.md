@@ -345,3 +345,20 @@ relabelled as validation of the later combined runner candidate.
 This is an isolated test/tooling scheduling change, not a durable production
 contract change; no new ADR is required. The unchanged safety and runtime
 contracts remain the authority.
+
+### November 15 original close fault injection
+
+Three lifecycle diagnostic methods now interrupt the original caller at the
+selected close-method entry instead of replacing protected production methods.
+The test-only observer binds the original constructor's successful return, run,
+attempt and exact instance, chains the prior profiler, interrupts once, and
+restores the prior profiler on exit. Each diagnostic asserts that the original
+entry was reached; the existing accounting, publication and privacy assertions
+remain unchanged. All three methods passed in 87.553 seconds.
+
+The helper has no shared mutable fixture state. Its new optional exception and
+method arguments preserve the existing published-tail KeyboardInterrupt default.
+The current-run class and quarantine method contracts now pin this newly used
+helper as well as the reviewed test_review_run source. Method inventories and
+module socket/environment guards remain unchanged. These checks neither replay
+nor settle historical held operations.

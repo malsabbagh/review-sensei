@@ -180,6 +180,10 @@ INSTALLED_CLASS_SHARD_CONTRACT = (
             "c78d99bea62cfdee2b7a66ed20afb29af38c36a18f58149cd66700157f8cdfbc",
         ),
         (
+            "original_finish_interrupt.py",
+            "9dc08c0eaa96ff76246bfb4904970fd9819c64c9dc2f731250b1628ccc401f1c",
+        ),
+        (
             "packaging_guard.py",
             "5cfa7381343bd8a9d6d972f32d465771c159cfa26aaf0f3a8cd692f6fc430846",
         ),
@@ -209,7 +213,7 @@ INSTALLED_CLASS_SHARD_CONTRACT = (
         ),
         (
             "test_review_run.py",
-            "922502198c6ad42dcf6ca06a7b30fb6cdc9af13fa147682cb15b999e0059a620",
+            "15729836401e58acb754def3921aadbd80b44333073a0ca63ecf16b18044c43e",
         ),
         (
             "test_review_run_rescan.py",

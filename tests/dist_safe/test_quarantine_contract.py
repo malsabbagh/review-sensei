@@ -75,7 +75,7 @@ INSTALLED_METHOD_SHARD_CONTRACT = (
                 ),
                 (
                     "test_review_run.py",
-                    "922502198c6ad42dcf6ca06a7b30fb6cdc9af13fa147682cb15b999e0059a620",
+                    "15729836401e58acb754def3921aadbd80b44333073a0ca63ecf16b18044c43e",
                 ),
                 (
                     "test_api_work_lifecycle.py",
@@ -96,6 +96,10 @@ INSTALLED_METHOD_SHARD_CONTRACT = (
                 (
                     "quarantine_fixture_identity.py",
                     "b67d99ddb7b026b393c57b406f8690ee3b63a0411c5b4b5e3372dfeffda204a4",
+                ),
+                (
+                    "original_finish_interrupt.py",
+                    "9dc08c0eaa96ff76246bfb4904970fd9819c64c9dc2f731250b1628ccc401f1c",
                 ),
                 (
                     "fake_github_http.py",

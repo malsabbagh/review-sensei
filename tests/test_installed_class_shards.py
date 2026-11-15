@@ -481,6 +481,7 @@ class InstalledClassShardTests(unittest.TestCase):
         self.assertEqual(len(set(identifiers)), 87)
         pinned = (
             "fake_github_http.py",
+            "original_finish_interrupt.py",
             "packaging_guard.py",
             "session_fixture_clock.py",
             "test_action_reply_entry.py",
