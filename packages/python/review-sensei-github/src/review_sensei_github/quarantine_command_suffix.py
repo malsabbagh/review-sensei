@@ -321,6 +321,16 @@ def _registry():
             if descriptor is not None:
                 recipe["journal_enumeration"] = descriptor
                 recipe["contract"] = "closed-inline-c5-r2-p2-journal-c3-reserved105-v1"
+                if run.caller.budget_view.ordinary_remaining() < 105:
+                    quarantine_command_finalization.require_c3_101_observation(
+                        observation
+                    )
+                    recipe.update(
+                        quarantine_command_finalization.journal_c3_101_model()
+                    )
+                    recipe["contract"] = (
+                        "closed-inline-c5-r2-p2-journal-c3-reserved101-v1"
+                    )
         if run.caller.budget_view.ordinary_remaining() < recipe["ordinary_required"]:
             raise ReviewInputError(
                 "guarded suffix complete ordinary tail is unfunded "
@@ -349,6 +359,7 @@ def _registry():
             plan=guard.comment_plan,
             captured=captured,
             recipe=canonical_bytes(recipe),
+            c3_observation=observation,
             preparation_observations=tuple(
                 (item, canonical_bytes(item))
                 for item in run.caller.observations[before_preparation:]

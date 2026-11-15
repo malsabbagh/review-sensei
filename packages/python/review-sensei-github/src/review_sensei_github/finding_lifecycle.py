@@ -2930,6 +2930,14 @@ class FindingLifecycleJournal:
         )
 
     def _dispatch_effect(self, http, effect, method, path, *, token, body, **kwargs):
+        from review_sensei.source_registry import require_module_seal
+
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        quarantine_historical_execution.before_native_attempt(
+            self, effect, method, path, body
+        )
         from .errors import GitHubHTTPTransientError
         from .ordinary_native_recovery import native_attempt, recover
 

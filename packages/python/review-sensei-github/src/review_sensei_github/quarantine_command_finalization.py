@@ -783,6 +783,91 @@ def _default_c5_prefix_headroom(stages, *, terminal_comments, receipt_reads=1):
     return rows
 
 
+def journal_c3_101_model():
+    """Pure complete-prefix DATA; lifetime operation minima are unchanged."""
+    from . import api_run_plan
+
+    require_module_seal(api_run_plan)
+    overhead = (
+        api_run_plan.QUARANTINE_CHECKPOINT_REQUESTS
+        - api_run_plan.READ_OPERATION_REQUESTS
+    )
+    checkpoint = 4 + 5 + overhead
+    if overhead != 6 or api_run_plan.NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS != 34:
+        raise ReviewInputError("historical C3 original reservation constants changed")
+    stages = tuple(
+        (name, calls - 2 if name in ("pending-journal", "finish-journal") else calls)
+        for name, calls in _intermediate_stages(5, 2, 2, 0)
+    )
+    minima = {
+        "entry-checkpoint": 5 + overhead,
+        "own-cas-authority-and-checkpoint": checkpoint,
+        "pending-journal": 2 * checkpoint + 6,
+        "review-update": 1 + api_run_plan.NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS,
+        "finish-journal": checkpoint,
+        "receipt": 10,
+    }
+    losses = {
+        "entry-checkpoint",
+        "own-cas-authority-and-checkpoint",
+        "pending-journal",
+        "finish-journal",
+    }
+    remaining = 101
+    headroom = []
+    for name, calls in stages:
+        if name in minima:
+            headroom.append(
+                {"phase": name, "available": remaining, "minimum": minima[name]}
+            )
+            if remaining < minima[name]:
+                raise ReviewInputError("historical C3 local liquidity is insufficient")
+        remaining -= calls + int(name in losses) + (4 if name == "receipt" else 0)
+    # A transient PUT stops the noncompacted publisher before its R2/check/hold
+    # continuation. Pay recovery's GET even though PUT recovery then declines,
+    # AND finish's independent GET. Do not combine that stop with success reads.
+    put_available = next(
+        row["available"] for row in headroom if row["phase"] == "review-update"
+    )
+    stop_remaining = put_available - 1 - 1 - 1 - 12 - 10
+    if remaining != 1 or stop_remaining < 0:
+        raise ReviewInputError("historical C3 complete branch funding changed")
+    return {
+        "stages": stages,
+        "normal_calls": sum(n for _, n in stages),
+        "combined_loss_calls": 100,
+        "ordinary_required": 101,
+        "local_headroom": headroom,
+        "put_stop": {
+            "native": 1,
+            "recovery_readback": 1,
+            "independent_finish_readback": 1,
+            "finish_with_loss": 12,
+            "conservative_receipt_with_loss": 10,
+            "remaining": stop_remaining,
+        },
+    }
+
+
+def require_c3_101_observation(observation):
+    """Revalidate original prepared journal, not an observed numeric quote."""
+    from . import quarantine_historical_execution
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(quarantine_historical_execution)
+    require_observation(observation)
+    plan = _NATIVE_PLANS.get(observation)
+    if plan is None:
+        raise ReviewInputError("historical C3 native preparation is absent")
+    quarantine_historical_execution.require_no_ordinary_witness(plan.journal)
+    payload = json.loads(plan.payload)
+    _require_no_body_readback(plan.journal, payload["review_before"]["id"])
+    if payload.get("conditional_approval") is not None or payload.get(
+        "cleanup_requests"
+    ):
+        raise ReviewInputError("historical C3 native branch changed")
+
+
 def exact_intermediate_receipt(
     *,
     action,

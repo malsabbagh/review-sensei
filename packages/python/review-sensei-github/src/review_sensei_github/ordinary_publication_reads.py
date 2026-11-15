@@ -711,3 +711,8 @@ def observe_publication(publisher, journal, *, family="fresh"):
             _WITNESS_SHAPES.pop(issued, None)
         for owner, attr, old, wrapper, _ in reversed(observation.bindings):
             setattr(owner, attr, old)
+
+
+from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402
+
+_seal_original_source()

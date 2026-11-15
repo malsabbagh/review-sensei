@@ -71,6 +71,55 @@ def _require_default_profile(caller):
         raise ReviewInputError("historical closed trust profile is unsupported")
 
 
+def require_no_ordinary_witness(journal):
+    """Negative-only source check before any dynamic ordinary observer access."""
+    from review_sensei.source_registry import require_instance_source
+
+    from . import (
+        finding_lifecycle,
+        ordinary_native_recovery,
+        ordinary_publication_reads,
+        publication,
+    )
+
+    for module in (
+        sys.modules[__name__],
+        finding_lifecycle,
+        publication,
+        ordinary_publication_reads,
+        ordinary_native_recovery,
+    ):
+        require_module_seal(module)
+    if type(journal) is not finding_lifecycle.FindingLifecycleJournal:
+        raise ReviewInputError("historical C3 journal source changed")
+    require_instance_source(journal, methods=())
+    own = object.__getattribute__(journal, "__dict__")
+    if type(own) is not dict or any(type(key) is not str for key in own):
+        raise ReviewInputError("historical C3 journal fields changed")
+    reviewer = own.get("reviewer")
+    if type(reviewer) is not publication.ReviewPublisher:
+        raise ReviewInputError("historical C3 reviewer source changed")
+    require_instance_source(reviewer, methods=())
+    fields = object.__getattribute__(reviewer, "__dict__")
+    if type(fields) is not dict or any(type(key) is not str for key in fields):
+        raise ReviewInputError("historical C3 reviewer fields changed")
+    if fields.get("_ordinary_publication_observation") is not None:
+        raise ReviewInputError("historical C3 ordinary recovery is unsupported")
+    # The sealed original function can now only read the exact owned raw field.
+    if vars(ordinary_publication_reads)["issued_witness"](journal) is not None:
+        raise ReviewInputError("historical C3 ordinary witness is present")
+
+
+def require_last_effect(journal, effect):
+    """Use only the already source-validated journal's raw list container."""
+    fields = object.__getattribute__(journal, "__dict__")
+    if type(fields) is not dict or any(type(key) is not str for key in fields):
+        raise ReviewInputError("historical native journal fields changed")
+    effects = fields.get("effects")
+    if type(effects) is not list or not effects or effects[-1] is not effect:
+        raise ReviewInputError("historical native effects container changed")
+
+
 def _journal_phase_reader(expected=None):
     from types import FunctionType
 
@@ -198,7 +247,10 @@ def _registry():
 
         require_module_seal(historical_journal_census)
         descriptor = recipe.get("journal_enumeration")
-        if recipe["contract"] == "closed-inline-c5-r2-p2-journal-c3-reserved105-v1":
+        if recipe["contract"] in (
+            "closed-inline-c5-r2-p2-journal-c3-reserved105-v1",
+            "closed-inline-c5-r2-p2-journal-c3-reserved101-v1",
+        ):
             expected_descriptor = historical_journal_census.proposal_descriptor(
                 run, entry["guard"], entry["captured"], recipe
             )
@@ -208,6 +260,21 @@ def _registry():
                 raise ReviewInputError("historical C3 pre-effect proof changed")
         elif descriptor is not None:
             raise ReviewInputError("historical C3 descriptor has no opted-in contract")
+        required = 105
+        if recipe["contract"] == "closed-inline-c5-r2-p2-journal-c3-reserved101-v1":
+            from . import quarantine_command_finalization
+
+            require_module_seal(quarantine_command_finalization)
+            quarantine_command_finalization.require_c3_101_observation(
+                entry["c3_observation"]
+            )
+            model = quarantine_command_finalization.journal_c3_101_model()
+            if any(
+                canonical_bytes(recipe.get(key)) != canonical_bytes(value)
+                for key, value in model.items()
+            ):
+                raise ReviewInputError("historical C3 complete source model changed")
+            required = 101
         measured = recipe["root_measurement"]
         from . import quarantine_command_receipt as receipt_source
 
@@ -238,12 +305,13 @@ def _registry():
                 ("closed-inline-c5-original-no-verification-v1", 5, 3, 1, 105),
                 ("closed-inline-c5-r2-p2-no-verification-v1", 5, 2, 2, 104),
                 ("closed-inline-c5-r2-p2-journal-c3-reserved105-v1", 5, 2, 2, 104),
+                ("closed-inline-c5-r2-p2-journal-c3-reserved101-v1", 5, 2, 2, 100),
             }
-            or recipe.get("ordinary_required") != 105
+            or recipe.get("ordinary_required") != required
             or recipe.get("receipt_reads") != page_reads
             or (page_reads == 2 and recipe["source_review_reads"] != 2)
             or (recipe["comment_reads"] == 5 and not recipe.get("local_headroom"))
-            or run.caller.budget_view.ordinary_remaining() < 105
+            or run.caller.budget_view.ordinary_remaining() < required
             or any(block.pending for block in run.caller.accounting.blocks)
         ):
             raise ReviewInputError("historical closed source profile is unsupported")
@@ -328,6 +396,64 @@ def _registry():
             raise ReviewInputError("historical lease ledger changed")
         return True
 
+    def before_native_attempt(journal: Any, effect, method, path, body):
+        # Match owned identity without dereferencing an inactive generic journal.
+        if journal is None:
+            return
+        selected = None
+        for entry in leases.values():
+            if type(entry) is not dict or any(type(key) is not str for key in entry):
+                raise ReviewInputError("historical native lease fields changed")
+            if entry.get("journal") is journal:
+                selected = entry
+                break
+        if selected is None:
+            return
+        recipe = json.loads(selected["recipe"])
+        if recipe["contract"] != "closed-inline-c5-r2-p2-journal-c3-reserved101-v1":
+            return
+        from . import finding_lifecycle, historical_journal_census
+
+        require_module_seal(sys.modules[__name__])
+        require_module_seal(finding_lifecycle)
+        require_module_seal(historical_journal_census)
+        frame = sys._getframe(1)
+        if (
+            frame.f_code
+            is not finding_lifecycle.FindingLifecycleJournal._dispatch_effect.__code__
+            or frame.f_globals is not vars(finding_lifecycle)
+            or frame.f_locals.get("self") is not journal
+            or frame.f_locals.get("effect") is not effect
+            or frame.f_locals.get("method") is not method
+            or frame.f_locals.get("path") is not path
+            or frame.f_locals.get("body") is not body
+        ):
+            raise ReviewInputError("historical native attempt lacks original source")
+        require_no_ordinary_witness(journal)
+        if require(selected["caller"]) is not selected or selected["phase"] != 4:
+            raise ReviewInputError("historical native attempt phase changed")
+        historical_journal_census._plain_data(effect)
+        historical_journal_census._plain_data(body)
+        planned = recipe["review"]
+        require_last_effect(journal, effect)
+        if (
+            type(method) is not str
+            or type(path) is not str
+            or method != planned[0]
+            or path != planned[1]
+            or canonical_bytes(body) != canonical_bytes(planned[2])
+            or type(effect) is not dict
+            or effect.get("status") != "pending"
+            or effect.get("method") != method
+            or effect.get("path") != path
+            or "review_update_precondition" in effect
+            or canonical_bytes(effect.get("request"))
+            != canonical_bytes(finding_lifecycle._request_identity(body))
+        ):
+            raise ReviewInputError(
+                "historical native attempt differs from selected PUT"
+            )
+
     def before_request(caller):
         entry = require(caller)
         if entry is None:
@@ -352,7 +478,13 @@ def _registry():
             for p in b.pending
         )
         terminal = caller._terminal_reason is not None
-        key, ceiling = ("terminal", 50) if terminal else ("ordinary", 105)
+        recipe = json.loads(entry["recipe"])
+        ceiling = (
+            101
+            if recipe["contract"] == "closed-inline-c5-r2-p2-journal-c3-reserved101-v1"
+            else 105
+        )
+        key, ceiling = ("terminal", 50) if terminal else ("ordinary", ceiling)
         if entry[key] >= ceiling:
             raise ReviewInputError(
                 "historical source suffix has no remaining physical calls"
@@ -376,6 +508,11 @@ def _registry():
                     "historical closed source mutation order changed"
                 )
             if phase == "review":
+                if (
+                    recipe["contract"]
+                    == "closed-inline-c5-r2-p2-journal-c3-reserved101-v1"
+                ):
+                    require_no_ordinary_witness(entry["journal"])
                 method, path, body = recipe["review"]
                 if (
                     description.method != method
@@ -457,6 +594,11 @@ def _registry():
             )
         if entry["journal"] is None:
             entry["journal_effects"] = canonical_bytes(journal.effects)
+        if (
+            json.loads(entry["recipe"])["contract"]
+            == "closed-inline-c5-r2-p2-journal-c3-reserved101-v1"
+        ):
+            require_no_ordinary_witness(journal)
         entry["journal"] = journal
         return True
 
@@ -654,7 +796,11 @@ def _registry():
         recipe = json.loads(entry["recipe"])
         raw = entry["journal_enumeration"]
         if (
-            recipe["contract"] != "closed-inline-c5-r2-p2-journal-c3-reserved105-v1"
+            recipe["contract"]
+            not in (
+                "closed-inline-c5-r2-p2-journal-c3-reserved105-v1",
+                "closed-inline-c5-r2-p2-journal-c3-reserved101-v1",
+            )
             or type(raw) is not bytes
             or canonical_bytes(recipe.get("journal_enumeration")) != raw
         ):
@@ -682,7 +828,10 @@ def _registry():
         if entry is None:
             return None
         recipe = json.loads(entry["recipe"])
-        if recipe["contract"] != "closed-inline-c5-r2-p2-journal-c3-reserved105-v1":
+        if recipe["contract"] not in (
+            "closed-inline-c5-r2-p2-journal-c3-reserved105-v1",
+            "closed-inline-c5-r2-p2-journal-c3-reserved101-v1",
+        ):
             return None
         _journal_phase_reader(phase_reader)
         checkpoint = phase_reader(
@@ -877,6 +1026,7 @@ def _registry():
         require_closed,
         available,
         before_request,
+        before_native_attempt,
         bind_journal,
         require_journal,
         retained_prefix_source,
@@ -895,6 +1045,7 @@ def _registry():
     require_closed,
     available,
     before_request,
+    before_native_attempt,
     bind_journal,
     require_journal,
     retained_prefix_source,

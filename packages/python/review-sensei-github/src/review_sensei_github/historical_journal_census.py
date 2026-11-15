@@ -150,6 +150,7 @@ def proposal_descriptor(run, guard, captured, recipe):
     if recipe["contract"] not in (
         "closed-inline-c5-r2-p2-no-verification-v1",
         "closed-inline-c5-r2-p2-journal-c3-reserved105-v1",
+        "closed-inline-c5-r2-p2-journal-c3-reserved101-v1",
     ):
         return None
     measured = recipe["root_measurement"]
