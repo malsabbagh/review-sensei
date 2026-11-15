@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
 
@@ -11,6 +12,90 @@ from referencing import Registry, Resource
 from .errors import ReviewInputError
 
 SCHEMA_DIR = Path(__file__).parent / "schemas"
+
+
+def _inline_accounting_leaves(schema: dict) -> dict:
+    """Expand pure local leaf references in the cached accounting validator.
+
+    This derives validation code from the unchanged packaged schema, never
+    caches an instance or a successful validation. References with siblings,
+    nested scopes, external targets or references inside the target keep the
+    original resolver. Only schema-valued keywords are traversed: enum/const
+    data, examples and defaults are not schema programs.
+    """
+    definitions = schema.get("$defs", {})
+    if type(definitions) is not dict:
+        return schema
+
+    def scoped(value):
+        if type(value) is dict:
+            return any(
+                key
+                in {
+                    "$ref",
+                    "$dynamicRef",
+                    "$recursiveRef",
+                    "$schema",
+                    "$id",
+                    "$anchor",
+                    "$dynamicAnchor",
+                    "$recursiveAnchor",
+                }
+                or scoped(item)
+                for key, item in value.items()
+            )
+        return type(value) is list and any(scoped(item) for item in value)
+
+    leaves = {
+        "#/$defs/" + name: value
+        for name in ("owner", "request", "request-pair")
+        if type(value := definitions.get(name)) is dict and not scoped(value)
+    }
+
+    def expand(value, *, root=False):
+        if type(value) is not dict:
+            return value
+        if not root and any(
+            key in value
+            for key in (
+                "$schema",
+                "$id",
+                "$anchor",
+                "$dynamicAnchor",
+                "$recursiveAnchor",
+            )
+        ):
+            return value
+        if set(value) == {"$ref"} and type(value["$ref"]) is str:
+            target = leaves.get(value["$ref"])
+            if target is not None:
+                return deepcopy(target)
+        result = dict(value)
+        for key in ("$defs", "properties", "patternProperties", "dependentSchemas"):
+            children = value.get(key)
+            if type(children) is dict:
+                result[key] = {name: expand(child) for name, child in children.items()}
+        for key in ("allOf", "anyOf", "oneOf", "prefixItems"):
+            children = value.get(key)
+            if type(children) is list:
+                result[key] = [expand(child) for child in children]
+        for key in (
+            "items",
+            "additionalProperties",
+            "contains",
+            "not",
+            "if",
+            "then",
+            "else",
+            "propertyNames",
+            "unevaluatedProperties",
+            "unevaluatedItems",
+        ):
+            if key in value:
+                result[key] = expand(value[key])
+        return result
+
+    return expand(schema, root=True)
 
 
 def load_schema(name: str) -> dict[str, object]:
@@ -30,6 +115,8 @@ def _build_schema_registry() -> Registry:
     registry: Registry = Registry()
     for path in sorted(SCHEMA_DIR.glob("*.schema.json")):
         contents = json.loads(path.read_text(encoding="utf-8"))
+        if path.name == "api-run-accounting.schema.json":
+            contents = _inline_accounting_leaves(contents)
         resource = Resource.from_contents(contents)
         schema_id = resource.id()
         if not isinstance(schema_id, str):
@@ -48,6 +135,8 @@ def _schema_registry() -> Registry:
 @lru_cache(maxsize=None)
 def _validator(schema_name: str) -> Draft202012Validator:
     schema = load_schema(schema_name)
+    if schema_name == "api-run-accounting":
+        schema = _inline_accounting_leaves(schema)
     try:
         return Draft202012Validator(schema, registry=_schema_registry())
     except Exception as exc:
