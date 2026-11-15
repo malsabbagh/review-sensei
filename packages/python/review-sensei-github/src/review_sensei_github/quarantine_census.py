@@ -995,6 +995,48 @@ def _bind_lifecycle_activation(scope, capability):
     _LIFECYCLE_ACTIVE[scope] = (issued[0], None, capability)
 
 
+def _reservation_state_matches(seal, issued, active):
+    """Registry-state DATA decision; it never inserts or activates a scope."""
+    if issued is not None:
+        return active is None and type(issued) is tuple and issued == seal
+    return type(active) is tuple and len(active) == 3 and active[0] == seal
+
+
+def reservation_plan(scope):
+    """Preserve lifetime writer liquidity for the historical-only reader."""
+    import sys
+
+    from review_sensei.source_registry import require_module_seal
+
+    from . import packed_comment_census
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(packed_comment_census)
+    if type(scope) is not _LifecycleCapacity:
+        raise ReviewInputError("quarantine lifecycle reservation scope is unissued")
+    fields = vars(scope)
+    if any(type(key) is not str for key in fields):
+        raise ReviewInputError("quarantine lifecycle reservation fields changed")
+    issuer = fields.get("read_issuer")
+    if issuer is not None and (
+        type(issuer) is not str or issuer not in ("historical-journal", "materialized")
+    ):
+        raise ReviewInputError("quarantine lifecycle reservation issuer changed")
+    packed_comment_census._single_plan_snapshot(fields.get("plan"))
+    if fields.get("read_plan") is not None:
+        packed_comment_census._single_plan_snapshot(fields["read_plan"])
+    seal = _LifecycleCapacity._seal(scope)
+    issued = _LIFECYCLE_ISSUED.get(scope)
+    active = _LIFECYCLE_ACTIVE.get(scope)
+    if not _reservation_state_matches(seal, issued, active):
+        raise ReviewInputError("quarantine lifecycle reservation scope is unissued")
+    # Callers retain their original live scope/root/source validation. Pricing
+    # also uses this helper before activation, against the original issued seal.
+    if issuer == "historical-journal":
+        return fields["plan"]
+    return _LifecycleCapacity.enumeration_plan(scope)
+
+
 def lifecycle_checkpoint_operation(ledger, caller, identity):
     """Price only the active source-issued quarantine lifecycle checkpoint."""
     scope = getattr(ledger, "_quarantine_lifecycle_capacity", None)
@@ -1003,11 +1045,7 @@ def lifecycle_checkpoint_operation(ledger, caller, identity):
     if type(scope) is not _LifecycleCapacity or scope.caller is not caller:
         raise ReviewInputError("quarantine lifecycle checkpoint scope is unissued")
     _LifecycleCapacity._require_scope(scope, ledger, identity)
-    return (
-        _LifecycleCapacity.enumeration_plan(scope).worst_read_calls()
-        + 6
-        + 2 * scope.parts
-    )
+    return reservation_plan(scope).worst_read_calls() + 6 + 2 * scope.parts
 
 
 def lifecycle_checkpoint_pricing(
@@ -1118,7 +1156,7 @@ def lifecycle_checkpoint_pricing(
         added_bytes=added_bytes,
         checkpoint_parts=checkpoint_parts,
     )
-    pages = _LifecycleCapacity.enumeration_plan(scope).worst_read_calls()
+    pages = reservation_plan(scope).worst_read_calls()
     return factory(
         ledger,
         record,

@@ -3470,6 +3470,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
             from .quarantine_census import (
                 activate_lifecycle_capacity,
                 lifecycle_capacity_plan,
+                reservation_plan,
             )
 
             if record is not self.caller._effect_record:
@@ -3491,7 +3492,7 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
                 # action guard are funded before any guard/census dispatch.
                 assert self.evidence_budget is not None
                 self.evidence_budget.preflight(
-                    scope.enumeration_plan().worst_read_calls()
+                    reservation_plan(scope).worst_read_calls()
                     + 6
                     + 2 * parts
                     + business[0]
