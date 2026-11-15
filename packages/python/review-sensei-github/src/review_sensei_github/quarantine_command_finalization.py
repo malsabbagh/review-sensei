@@ -262,7 +262,14 @@ def measure_inline_branches(observation, *, _retain_manifest=False):
 
 
 def _root_growth_measurement(
-    record, accounting, witness, result_upper=None, grants=(), terminal_accounting=None
+    record,
+    accounting,
+    witness,
+    result_upper=None,
+    grants=(),
+    terminal_accounting=None,
+    *,
+    _diagnostic=False,
 ):
     """Validate and render inert full-width roots with original source machinery.
 
@@ -276,6 +283,38 @@ def _root_growth_measurement(
 
     require_module_seal(session)
     require_module_seal(session_ledger)
+    if type(_diagnostic) is not bool:
+        raise ReviewInputError("LAST root diagnostic selector changed")
+    if _diagnostic:
+        require_module_seal(sys.modules[__name__])
+        frame = sys._getframe(1)
+        origin = frame.f_back
+        if (
+            origin is not None
+            and origin.f_globals is globals()
+            and any(
+                type(code) is type(_measure_inline_branches.__code__)
+                and code.co_name == "<listcomp>"
+                and origin.f_code is code
+                for code in _measure_inline_branches.__code__.co_consts
+            )
+        ):
+            origin = origin.f_back
+        if (
+            frame.f_globals is not globals()
+            or not any(
+                type(code) is type(_measure_inline_branches.__code__)
+                and code.co_name == "growth_measurement"
+                and frame.f_code is code
+                for code in _measure_inline_branches.__code__.co_consts
+            )
+            or origin is None
+            or origin.f_code is not _measure_inline_branches.__code__
+            or origin.f_globals is not globals()
+            or origin.f_locals.get("_retain_manifest") is not True
+            or frame.f_locals.get("root") is not record
+        ):
+            raise ReviewInputError("LAST root diagnostic lacks original measurement")
     if result_upper is None:
         raise ReviewInputError("cold terminal root lacks its complete result shape")
     raw = record.to_dict()
@@ -300,7 +339,18 @@ def _root_growth_measurement(
             key: value for key, value in document.items() if key != "record_sha256"
         }
         document["record_sha256"] = session._digest_payload(payload)
-        candidate = session.SessionRecord.from_dict(document)
+        input_bytes = canonical_bytes(document) if _diagnostic else None
+        try:
+            candidate = session.SessionRecord.from_dict(document)
+        except ReviewInputError as error:
+            if not _diagnostic:
+                raise
+            from . import quarantine_last_manifest
+
+            require_module_seal(quarantine_last_manifest)
+            return quarantine_last_manifest.root_size_refusal(
+                error, document, input_bytes
+            )
         body = session_ledger.render_session_comment(
             repository_id=record.repository_id,
             pull_request=record.pull_request,
@@ -316,9 +366,13 @@ def _root_growth_measurement(
             candidate.to_dict()
         ):
             raise ReviewInputError("cold projected comment is not exactly readable")
-        return len(canonical_bytes(candidate.to_dict())), len(body.encode())
+        return {
+            "validated": True,
+            "root_bytes": len(canonical_bytes(candidate.to_dict())),
+            "comment_body_bytes": len(body.encode()),
+        }
 
-    ordinary, ordinary_body = render(raw)
+    ordinary_measurement = render(raw)
     terminal_raw = json.loads(canonical_bytes(raw))
     terminal_raw["generation"] = session.MAX_GENERATION
     if terminal_accounting is not None:
@@ -331,11 +385,21 @@ def _root_growth_measurement(
         result=result_upper,
         outcome={"kind": "explicit_noop", "reason": max(ACTION_NOOP_REASONS, key=len)},
     )
-    terminal, terminal_body = render(terminal_raw)
+    terminal_measurement = render(terminal_raw)
+    if _diagnostic:
+        return {
+            "ordinary": ordinary_measurement,
+            "terminal": terminal_measurement,
+            "all_roots_validated": ordinary_measurement["validated"]
+            and terminal_measurement["validated"],
+        }
     return {
-        "ordinary_root_bytes": ordinary,
-        "comment_body_bytes": max(ordinary_body, terminal_body),
-        "terminal_root_bytes": terminal,
+        "ordinary_root_bytes": ordinary_measurement["root_bytes"],
+        "comment_body_bytes": max(
+            ordinary_measurement["comment_body_bytes"],
+            terminal_measurement["comment_body_bytes"],
+        ),
+        "terminal_root_bytes": terminal_measurement["root_bytes"],
         "root_fits": True,
         "original_validated_and_rendered": True,
     }
@@ -541,12 +605,42 @@ def _measure_inline_branches(observation, *, _retain_manifest=False):
             **approval_fields,
         )
     grants = tuple(sorted(run.ledger._observed_consumed_grants))
-    growth_roots = [
-        _root_growth_measurement(
-            root, accounting_upper, witness, result_upper, grants, terminal_upper
+    conditional_data = None
+    if _retain_manifest:
+        conditional_data = quarantine_last_manifest.conditional_terminal_data(
+            run.caller.accounting,
+            ordinary=run.caller._block,
+            terminal=run.caller._terminal_block,
+            sequence=run.caller._sequence,
         )
-        for root in (record, prospective)
-    ]
+
+    def growth_measurement(root):
+        if not _retain_manifest:
+            return _root_growth_measurement(
+                root, accounting_upper, witness, result_upper, grants, terminal_upper
+            )
+        assert conditional_data is not None
+        return {
+            "full_reserved_projection": _root_growth_measurement(
+                root,
+                accounting_upper,
+                witness,
+                result_upper,
+                grants,
+                _diagnostic=True,
+            ),
+            "conditional_one_close_projection": _root_growth_measurement(
+                root,
+                accounting_upper,
+                witness,
+                result_upper,
+                grants,
+                conditional_data["accounting"],
+                _diagnostic=True,
+            ),
+        }
+
+    growth_roots = [growth_measurement(root) for root in (record, prospective)]
     branches = []
     retained = []
     for documents, _exact in alternatives:
@@ -571,14 +665,7 @@ def _measure_inline_branches(observation, *, _retain_manifest=False):
                 raise ReviewInputError(
                     "quarantine complete command requires a non-inline checkpoint"
                 )
-            growth = _root_growth_measurement(
-                candidate,
-                accounting_upper,
-                witness,
-                result_upper,
-                grants,
-                terminal_upper,
-            )
+            growth = growth_measurement(candidate)
             growth_roots.append(growth)
             checkpoints.append(
                 {
@@ -638,7 +725,13 @@ def _measure_inline_branches(observation, *, _retain_manifest=False):
             "conditional_approval"
         )
         is not None,
-        "all_growth_roots_fit": all(root["root_fits"] for root in growth_roots),
+        **(
+            {}
+            if _retain_manifest
+            else {
+                "all_growth_roots_fit": all(root["root_fits"] for root in growth_roots)
+            }
+        ),
         "max_checkpoints": max(len(branch) for branch in branches),
         "native_requests": requests,
         "prospective_root_bytes": len(canonical_bytes(prospective.to_dict())),
@@ -655,6 +748,8 @@ def _measure_inline_branches(observation, *, _retain_manifest=False):
             raise ReviewInputError("LAST sizing changed original state")
         result["last_manifest"] = {
             "admission": False,
+            "runtime_fence_installed": False,
+            "conditional_terminal_projection": conditional_data,
             "accounting": json.loads(initial_accounting),
             "record": json.loads(initial_record),
             "root": initial_root,

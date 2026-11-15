@@ -275,6 +275,140 @@ def require_inline_participants(ledger, caller, *, prospective=None):
     return None
 
 
+def root_size_refusal(error, document, input_bytes):
+    """Retain only the original render's final size refusal, never a record."""
+    require_module_seal(sys.modules[__name__])
+    from . import quarantine_command_finalization as source
+
+    require_module_seal(source)
+    frame = sys._getframe(1)
+    if (
+        frame.f_globals is not vars(source)
+        or not any(
+            type(code) is type(source._root_growth_measurement.__code__)
+            and code.co_name == "render"
+            and frame.f_code is code
+            for code in source._root_growth_measurement.__code__.co_consts
+        )
+        or frame.f_locals.get("error") is not error
+        or frame.f_locals.get("document") is not document
+        or frame.f_locals.get("input_bytes") is not input_bytes
+        or frame.f_locals.get("_diagnostic") is not True
+        or frame.f_back is None
+        or frame.f_back.f_code is not source._root_growth_measurement.__code__
+        or frame.f_back.f_globals is not vars(source)
+    ):
+        raise ReviewInputError("LAST size refusal lacks original render")
+    return _failed_size_data(error, document, input_bytes)
+
+
+def _failed_size_data(error, document, input_bytes):
+    """Pure consistency check; supplied bytes are DATA, not capture authority."""
+    require_module_seal(sys.modules[__name__])
+    from review_sensei import session
+
+    from . import packed_comment_census
+
+    require_module_seal(session)
+    require_module_seal(packed_comment_census)
+    packed_comment_census._single_plain(document)
+    if type(input_bytes) is not bytes or canonical_bytes(document) != input_bytes:
+        raise ReviewInputError("LAST size diagnostic input changed")
+    if type(error) is not ReviewInputError:
+        raise ReviewInputError("LAST size diagnostic exception type changed")
+    if (
+        type(error.args) is not tuple
+        or len(error.args) != 1
+        or type(error.args[0]) is not str
+        or error.args[0] != "session record exceeds the configured size limit"
+    ):
+        raise error
+    trace = error.__traceback__
+    if trace is None:
+        raise error
+    original_input = False
+    while trace is not None:
+        if (
+            trace.tb_frame.f_code is session.SessionRecord.from_dict.__func__.__code__
+            and trace.tb_frame.f_globals is vars(session)
+            and trace.tb_frame.f_locals.get("value") is document
+        ):
+            original_input = True
+        if trace.tb_next is None:
+            break
+        trace = trace.tb_next
+    if (
+        not original_input
+        or trace.tb_frame.f_code is not session.SessionRecord.__post_init__.__code__
+        or trace.tb_frame.f_globals is not vars(session)
+    ):
+        raise error
+    failed = trace.tb_frame.f_locals.get("self")
+    if record_bytes(failed) != input_bytes:
+        raise ReviewInputError("LAST size diagnostic failed record changed")
+    size = len(input_bytes)
+    if size <= session.MAX_SESSION_RECORD_BYTES:
+        raise error
+    return {
+        "validated": False,
+        "refusal": "original_session_record_size_limit",
+        "root_bytes": size,
+        "limit_bytes": session.MAX_SESSION_RECORD_BYTES,
+        "comment_body_bytes": None,
+    }
+
+
+def conditional_terminal_data(state, *, ordinary, terminal, sequence):
+    """Conditional representation only; no assertion of a feasible close."""
+    require_module_seal(sys.modules[__name__])
+    from . import historical_terminal_projection
+
+    require_module_seal(historical_terminal_projection)
+    from review_sensei import api_work
+
+    require_module_seal(api_work)
+    if (
+        type(ordinary) is not str
+        or type(terminal) is not str
+        or type(sequence) is not int
+        or not 0 <= sequence <= api_work.MAX_API_REQUEST_LIMIT
+        or ordinary == terminal
+        or api_work._NAME.fullmatch(ordinary) is None
+        or api_work._NAME.fullmatch(terminal) is None
+    ):
+        raise ReviewInputError("LAST conditional namespace parameters changed")
+    accounting_bytes(state)
+    if (
+        state.action is None
+        or state.action["phase"] != "pending"
+        or (state.action["execution_started"] is not False)
+    ):
+        raise ReviewInputError("LAST conditional projection requires unstarted action")
+    blocks = {block.block_id: block for block in state.blocks}
+    if terminal not in blocks or blocks[terminal].pending:
+        raise ReviewInputError("LAST conditional terminal tranche is not untouched")
+    projected = historical_terminal_projection.terminal_accounting_data(
+        state, ordinary=ordinary, terminal=terminal, sequence=sequence
+    )
+    return {
+        "admission": False,
+        "runtime_fence_installed": False,
+        "kind": "conditional_last_one_close_terminal16",
+        "reserved_terminal_slots": 50,
+        "maximum_terminal_attempts": 16,
+        "retained_terminal_undispatched": 34,
+        "unproved_premises": [
+            "distinct_original_source_issued_one_close_negative_fence",
+            "complete_terminal_census_and_no_extra_carrier_or_history_reads",
+            "inline_terminal_result_and_history",
+            "zero_trust_refresh_and_no_restart",
+            "census_plus_mutation_grant_calls_at_most_ten",
+            "one_original_reconciliation_only_and_unknown_preserving_stop",
+        ],
+        "accounting": projected,
+    }
+
+
 def measure(observation):
     """Retain original branch builders under the existing observation custody.
 
@@ -289,8 +423,6 @@ def measure(observation):
     preliminary_participants(observation)
     source.require_observation(observation)
     result = source.measure_inline_branches(observation, _retain_manifest=True)
-    if not result["all_growth_roots_fit"]:
-        raise ReviewInputError("LAST manifest growth roots do not fit")
     return LastManifest(canonical_bytes(result))
 
 
