@@ -13,7 +13,10 @@ from weakref import WeakKeyDictionary
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
-from review_sensei.source_registry import require_module_seal
+from review_sensei.source_registry import (
+    require_module_seal,
+    require_original_class_identity,
+)
 
 
 @dataclass(frozen=True, eq=False)
@@ -24,6 +27,36 @@ class HistoricalLease:
 @dataclass(frozen=True, eq=False)
 class LifecycleContext:
     pass
+
+
+def _callerless_classifier():
+    # This only declines an optional Action-run hook. It cannot issue a lease,
+    # read receipt, source waiver or funding authority to these generic ledgers.
+    seal = require_module_seal
+    classify = require_original_class_identity
+    module = sys.modules[__name__]
+
+    def original_callerless_ledger(value):
+        seal(module)
+        for module_name, name in (
+            ("review_sensei.session", "LocalSessionLedger"),
+            ("review_sensei_github.session_ledger", "GitHubIssueCommentSessionLedger"),
+        ):
+            defining = sys.modules.get(module_name)
+            if defining is None:
+                continue
+            try:
+                classify(value, module=defining, name=name)
+            except ReviewInputError:
+                continue
+            return True
+        return False
+
+    return original_callerless_ledger
+
+
+_original_callerless_ledger = _callerless_classifier()
+del _callerless_classifier
 
 
 def _require_default_profile(caller):
@@ -367,6 +400,8 @@ def _registry():
         entry[key] += 1
 
     def bind_journal(journal):
+        if _original_callerless_ledger(journal.ledger):
+            return False
         entry = require(journal.ledger.caller)
         if entry is None:
             return False
@@ -393,6 +428,8 @@ def _registry():
         return True
 
     def require_journal(journal):
+        if _original_callerless_ledger(journal.ledger):
+            return False
         entry = require(journal.ledger.caller)
         return entry is not None and entry["journal"] is journal
 

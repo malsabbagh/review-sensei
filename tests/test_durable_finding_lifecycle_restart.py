@@ -304,6 +304,10 @@ def _worker(root: Path, mode: str, action: str, evidence: dict):
                 {
                     "error": error,
                     "applied": getattr(outcome, "applied", None),
+                    "evaluation_failed": getattr(outcome, "evaluation_failed", None),
+                    "summary": getattr(outcome, "summary", None),
+                    "action": getattr(outcome, "action", None),
+                    "operator_paused": getattr(outcome, "operator_paused", None),
                     "state": _state_observation(publisher, mode),
                     "before_record": before,
                     "record": (
@@ -839,6 +843,7 @@ class DurableFindingRestartTests(unittest.TestCase):
                 command = self.run_phase(root, mode, "command", rows["auth"])
                 self.assertIsNone(command["error"])
                 self.assertTrue(command["applied"])
+                self.assertIs(command["evaluation_failed"], False, command["summary"])
                 self.assertIsNotNone(command["state"])
                 carried = {o["symbol"]: o for o in command["state"]["obligations"]}
                 self.assertEqual(carried["auth"]["status"], "authorized-override")
