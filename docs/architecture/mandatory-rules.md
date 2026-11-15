@@ -151,3 +151,5 @@ Hosted-only reuse requires core-input proof and per-package signed provenance (A
 Only confirmed archives enable narrative excerpts; all finding prose and authority stay intact.
 
 Never execute inactive selection.
+
+On failure, revoke own grant only; preserve shared epochs.
