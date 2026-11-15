@@ -109,8 +109,31 @@ class NativeBatchTests(unittest.TestCase):
             self.assertEqual(value.effects, before)
 
     def test_actual_core_checks_cumulative_retention_before_any_part_or_effect(self):
+        from dataclasses import replace
+
+        from review_sensei.active_finding_window import evaluate_active_window_round
+        from tests.test_finding_lifecycle_codec import comment, result
+
         with tempfile.TemporaryDirectory() as root:
             value = self.journal(root, RetentionLedger)
+            # A complete admitted payload genuinely exceeds the inline carrier;
+            # do not replace the protected serializer to force this branch.
+            large = replace(
+                comment(),
+                body="".join(
+                    hashlib.sha256(f"retained:{i}".encode()).hexdigest()
+                    for i in range(200)
+                ),
+            )
+            value.plan(
+                evaluate_active_window_round(
+                    result(large),
+                    head_sha=f.HEAD,
+                    base_sha=f.BASE,
+                    max_active_findings=1,
+                ),
+                f.INPUT,
+            )
             seen = []
 
             def retention(identity, **kwargs):
@@ -123,13 +146,7 @@ class NativeBatchTests(unittest.TestCase):
             before = {
                 str(p): p.read_bytes() for p in Path(root).rglob("*") if p.is_file()
             }
-            with (
-                patch(
-                    "review_sensei.finding_lifecycle_store.inline_manifest",
-                    return_value=None,
-                ),
-                patch.object(value.ledger.evidence_budget, "preflight"),
-            ):
+            with patch.object(value.ledger.evidence_budget, "preflight"):
                 with self.assertRaisesRegex(
                     ReviewInputError, "aggregate retained frontier"
                 ):
