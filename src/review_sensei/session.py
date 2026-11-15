@@ -275,10 +275,10 @@ def _stored_api_accounting(value: object) -> dict[str, object] | None:
     return ApiRunAccounting.from_document(value).to_document()
 
 
-def _stored_convergence_history(
+def _copied_convergence_history(
     value: object,
 ) -> dict[str, object] | None:
-    """Return one closed, bounded history envelope safe for durable storage."""
+    """Copy the bounded JSON envelope; this is not semantic validation."""
 
     if value is None:
         return None
@@ -297,6 +297,16 @@ def _stored_convergence_history(
         )
     if not isinstance(normalized, dict):
         raise ReviewInputError("session convergence history is invalid")
+    return cast(dict[str, object], normalized)
+
+
+def _stored_convergence_history(
+    value: object,
+) -> dict[str, object] | None:
+    """Return one closed, bounded history envelope safe for durable storage."""
+    normalized = _copied_convergence_history(value)
+    if normalized is None:
+        return None
     allowed = {"state", "baseline", "progress", "provenance"}
     if set(normalized) - allowed or not {"state", "progress", "provenance"}.issubset(
         normalized
@@ -1362,7 +1372,16 @@ class SessionRecord:
             payload["reservation_owner"] = dict(normalized_owner)
         if transaction is not None:
             payload["transaction"] = transaction.to_dict()
-        normalized_history = _stored_convergence_history(convergence_history)
+        # The exact constructor below still performs every semantic history
+        # check before verifying the digest or accepting the record. Its input
+        # is a fresh bounded JSON copy so payload sizing/digest construction do
+        # not share the caller's mutable graph. Subclass constructors keep the
+        # original prevalidation in addition to their own post-init behavior.
+        normalized_history = (
+            _copied_convergence_history(convergence_history)
+            if cls is SessionRecord
+            else _stored_convergence_history(convergence_history)
+        )
         if normalized_history is not None:
             payload["convergence_history"] = normalized_history
         if rescan_state is not None:
