@@ -76,6 +76,27 @@ those raw bytes. The runner pins LF-normalized text, so it correctly fell back t
 the original root. The tests now pin the same canonical digest. Under simulated
 Windows newline translation, the old tests fail 26 times and the new ones pass.
 
+### Measured: run 43756386148 and the coverage interpreter
+
+With those changes, run
+[43756386148](https://github.com/malsabbagh/review-sensei/actions/runs/43756386148)
+on `35ff7df6` took 66 minutes. The slowest Linux 3.11 shard fell from 64 to 59
+minutes and Windows from 73 to 65, but per-class times varied by 50–100%
+between the two runs, and the coverage lane did 30% more work (87,259 class
+seconds) and became the long pole at 64 minutes. Its body-limit class alone
+took 3,333 seconds. The run held 40 jobs in progress, so the installed shards
+waited 12–16 minutes for runners; more shards would only queue.
+
+The coverage lane's cost came from Python 3.11, not from coverage: under
+coverage it did about as much work as the uncovered Linux 3.11 lane, twice the
+work of Linux 3.14. Locally, one 65-second test took 72 s on 3.11, 84 s on 3.11
+under coverage, and 65 s on 3.14 both without coverage and with
+`COVERAGE_CORE=sysmon`. Both coverage runs recorded the same 15,868 branches
+and 1,969 partial branches (29.94% and 29.96%). Branch coverage now runs and is
+combined on Python 3.14 with `sys.monitoring`, using the Linux 3.14 class
+timings as weights. The 80% floor and every test are unchanged, and Linux 3.11
+keeps its full compatibility lane.
+
 ## November 15 Worker process scheduling
 
 The Worker lane now runs its original Python qualification entry points in at
@@ -333,7 +354,7 @@ was established.
 | Gate | Required platforms/runtime | Distinct contract |
 | --- | --- | --- |
 | Checkout compatibility | Linux 3.11 and 3.14, Windows 3.12, macOS 3.13 | Complete discovered checkout inventory, controller hook once, four disjoint workers |
-| Quality | Linux 3.11 | Complete branch coverage, **80% floor**, Ruff, mypy, compile and quarantine-registry continuity |
+| Quality | Linux 3.14 coverage, Linux 3.11 static checks | Complete branch coverage, **80% floor**, Ruff, mypy, compile and quarantine-registry continuity |
 | Schemas/Action pins | Linux 3.11 | Public JSON, immutable legacy readers, corpus, site, protection policy, seeded CodeQL and fixture evaluation |
 | Package | Linux 3.11 | Built wheel/sdist, clean core-only/hosted installs, dist-safe and downstream suites, installed publication and launcher qualification |
 | npm contracts | Linux Node 22 / Python 3.11 | Launcher/package contracts and lifecycle-disabled packing |

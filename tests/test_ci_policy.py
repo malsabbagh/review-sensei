@@ -1548,6 +1548,22 @@ class ActionPinPolicyTests(InstalledAccountingChecks, unittest.TestCase):
             "tests/fixtures/checkout-class-seconds-coverage.json",
         )
         self.assertFalse(shard_coverage.get("continue-on-error", False))
+        self.assertEqual(shard_coverage["env"], {"COVERAGE_CORE": "sysmon"})
+        # Branch data is measured and reported by the same interpreter.
+        for job in ("coverage-shard", "quality"):
+            setup = next(
+                step
+                for step in jobs[job]["steps"]
+                if "actions/setup-python@" in step.get("uses", "")
+            )
+            self.assertEqual(setup["with"]["python-version"], "3.14", job)
+        self.assertIn(
+            ("ubuntu-latest", "3.11"),
+            [
+                (item["os"], item["python-version"])
+                for item in jobs["compatibility-shard"]["strategy"]["matrix"]["include"]
+            ],
+        )
         coverage = next(
             step
             for step in jobs["quality"]["steps"]
