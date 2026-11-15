@@ -237,7 +237,9 @@ def _registry():
             future_bounds=(event_wire, 65536),
             allow_graphql=True,
             identity=run.identity,
+            max_reads=2,
         )
+        page_binding = _projection_binding(page)
         from .quarantine_command_finalization import intermediate_suffix_recipe
 
         app = frame.f_locals["app"]
@@ -269,10 +271,12 @@ def _registry():
         from .quarantine_command_namespace import capture_paid_prefix
 
         capture_paid_prefix(run.caller)
-        recipe = intermediate_suffix_recipe(observation, comment_rows=rows)
+        recipe = intermediate_suffix_recipe(
+            observation, comment_rows=rows, receipt_page=page
+        )
         recipe["event_exact_body"] = event_body
         recipe["event_wire_bound"] = event_wire
-        if run.caller.budget_view.ordinary_remaining() < recipe["combined_loss_calls"]:
+        if run.caller.budget_view.ordinary_remaining() < recipe["ordinary_required"]:
             raise ReviewInputError("guarded suffix complete ordinary tail is unfunded")
         token = SuffixProposal()
         require_module_seal(receipt_source)
@@ -297,7 +301,7 @@ def _registry():
             ),
             preparation_calls=preparation_calls,
             page=page,
-            page_binding=_projection_binding(page),
+            page_binding=page_binding,
             accounting=canonical_bytes(project_current(run.caller)),
         )
         return token

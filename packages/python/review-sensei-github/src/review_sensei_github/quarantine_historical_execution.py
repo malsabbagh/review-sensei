@@ -147,6 +147,11 @@ def _registry():
         _require_default_profile(run.caller)
         recipe = json.loads(entry["recipe"])
         measured = recipe["root_measurement"]
+        from . import quarantine_command_receipt as receipt_source
+
+        require_module_seal(receipt_source)
+        receipt_source._projection_binding(entry["page"])
+        page_reads = 2 if entry["page"].protocol == "graphql-two-page" else 1
         terminal_projection = measured.get("terminal_projection")
         if terminal_projection is not None:
             from . import historical_terminal_projection
@@ -159,14 +164,22 @@ def _registry():
                 row["original_validated_and_rendered"]
                 for row in measured["growth_roots"]
             )
-            or recipe["combined_loss_calls"] != 105
-            or (recipe.get("contract"), recipe["comment_reads"])
+            or (
+                recipe.get("contract"),
+                recipe["comment_reads"],
+                recipe["review_reads"],
+                recipe.get("receipt_reads"),
+                recipe["combined_loss_calls"],
+            )
             not in {
-                ("closed-inline-c4-reserved-verification-v1", 4),
-                ("closed-inline-c5-original-no-verification-v1", 5),
+                ("closed-inline-c4-reserved-verification-v1", 4, 3, 1, 105),
+                ("closed-inline-c5-original-no-verification-v1", 5, 3, 1, 105),
+                ("closed-inline-c5-r2-p2-no-verification-v1", 5, 2, 2, 104),
             }
+            or recipe.get("ordinary_required") != 105
+            or recipe.get("receipt_reads") != page_reads
+            or (page_reads == 2 and recipe["source_review_reads"] != 2)
             or (recipe["comment_reads"] == 5 and not recipe.get("local_headroom"))
-            or recipe["review_reads"] != 3
             or run.caller.budget_view.ordinary_remaining() < 105
             or any(block.pending for block in run.caller.accounting.blocks)
         ):

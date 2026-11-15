@@ -579,7 +579,38 @@ def _require_no_body_readback(journal, review_id):
         )
 
 
-def _default_c5_prefix_headroom(stages, *, terminal_comments):
+def _intermediate_stages(C, R, receipt_reads, trust_calls):
+    """Closed source call bounds, not a refund or an execution grant."""
+    values = (C, R, receipt_reads, trust_calls)
+    if any(type(value) is not int for value in values) or values not in {
+        (4, 3, 1, 7),
+        (5, 3, 1, 0),
+        (5, 2, 2, 0),
+    }:
+        raise ReviewInputError("guarded intermediate source recipe is unsupported")
+    return (
+        ("entry-authority", 2),
+        ("entry-checkpoint", C + 5),
+        ("complete-inventory", C),
+        ("event-authority-and-echo", 6),
+        ("own-cas-authority-and-checkpoint", 4 + C + 5),
+        ("post-cas-authority", 4),
+        ("review-capability", 1),
+        ("initial-reviews", R),
+        ("carried-hold", C + 1),
+        ("pre-update-reviews", R),
+        ("pending-journal", 4 + C + 4),
+        ("review-update", 1),
+        ("post-update-reviews", R),
+        ("check-capability-and-replay", 3),
+        ("final-hold", C + 1),
+        ("finish-journal", 4 + C + 4),
+        ("receipt", 4 + receipt_reads),
+        ("trust-verifications", trust_calls),
+    )
+
+
+def _default_c5_prefix_headroom(stages, *, terminal_comments, receipt_reads=1):
     """Local reservation liquidity under all four ordinary root read losses."""
     from . import api_run_plan
 
@@ -590,6 +621,21 @@ def _default_c5_prefix_headroom(stages, *, terminal_comments):
     )
     if overhead != 6 or api_run_plan.READ_OPERATION_REQUESTS != 10:
         raise ReviewInputError("guarded C5 checkpoint source constants changed")
+    if type(receipt_reads) is not int or receipt_reads not in (1, 2):
+        raise ReviewInputError("guarded C5 receipt reader is unsupported")
+    expected = _intermediate_stages(5, 3 if receipt_reads == 1 else 2, receipt_reads, 0)
+    if (
+        type(stages) is not tuple
+        or any(
+            type(row) is not tuple
+            or len(row) != 2
+            or type(row[0]) is not str
+            or type(row[1]) is not int
+            for row in stages
+        )
+        or stages != expected
+    ):
+        raise ReviewInputError("guarded C5 source stages changed")
     C = 5
     checkpoint = 4 + C + overhead
     minima = {
@@ -598,7 +644,7 @@ def _default_c5_prefix_headroom(stages, *, terminal_comments):
         "pending-journal": checkpoint + checkpoint + 6,
         "review-update": 1 + api_run_plan.NATIVE_COMMAND_UPDATE_CONFIRMATION_REQUESTS,
         "finish-journal": checkpoint,
-        "receipt": 8,
+        "receipt": 2 * receipt_reads + 6,
     }
     losses = {
         "entry-checkpoint",
@@ -614,13 +660,22 @@ def _default_c5_prefix_headroom(stages, *, terminal_comments):
             rows.append({"phase": name, "available": remaining, "minimum": required})
             if remaining < required:
                 raise ReviewInputError("guarded C5 local reservation is unfunded")
-        remaining -= calls + int(name in losses) + (3 if name == "receipt" else 0)
-    if remaining != 0 or terminal_comments + overhead > 50:
+        remaining -= (
+            calls
+            + int(name in losses)
+            + (receipt_reads + 2 if name == "receipt" else 0)
+        )
+    if (
+        remaining != receipt_reads - 1
+        or type(terminal_comments) is not int
+        or not 1 <= terminal_comments <= 10
+        or terminal_comments + overhead > 50
+    ):
         raise ReviewInputError("guarded C5 complete prefix accounting changed")
     return rows
 
 
-def intermediate_suffix_recipe(observation, *, comment_rows):
+def intermediate_suffix_recipe(observation, *, comment_rows, receipt_page):
     """Derive the closed intermediate recipe; data, not an execution lease."""
     from copy import copy, deepcopy
 
@@ -630,6 +685,7 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
         finding_lifecycle,
         quarantine_action,
         quarantine_capacity,
+        quarantine_command_receipt,
         quarantine_command_suffix,
     )
     from .quarantine_creation import _body
@@ -640,11 +696,20 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
         frame.f_code is not quarantine_command_suffix.prepare.__code__
         or frame.f_globals is not vars(quarantine_command_suffix)
         or frame.f_locals.get("observation") is not observation
+        or frame.f_locals.get("page") is not receipt_page
         or frame.f_locals.get("rows") is not comment_rows
         or frame.f_locals.get("captured", {}).get("rows")
         != canonical_bytes(comment_rows)
     ):
         raise ReviewInputError("guarded suffix cache prefix lacks original paid census")
+    require_module_seal(quarantine_command_receipt)
+    if (
+        type(receipt_page) is not quarantine_command_receipt.ReceiptPageProjection
+        or quarantine_command_receipt._projection_binding(receipt_page)
+        != frame.f_locals.get("page_binding")
+    ):
+        raise ReviewInputError("guarded suffix receipt projection changed")
+    receipt_reads = 2 if receipt_page.protocol == "graphql-two-page" else 1
     saved = require_observation(observation)
     plan = _NATIVE_PLANS.get(observation)
     if plan is None or saved["guard"] is None:
@@ -846,32 +911,26 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
         # The authentic body route currently needs two pages. Keep the larger
         # three-page source ceiling paid at every walk; this is not a refund.
         R = 3
+    if receipt_reads == 2:
+        if C != 5 or source_review_reads != 2:
+            raise ReviewInputError(
+                "two-page receipt needs the closed two-read review source"
+            )
+        contract = "closed-inline-c5-r2-p2-no-verification-v1"
+        R = 2
+        # Only this complete prospective two-read certificate funds the extra
+        # receipt reads. Prior spending, lifetime promises and the ordinary105
+        # requirement stay unchanged. The noncompacted native-loss branch stops
+        # before receipt and independently reconciles through journal.finish().
     # Original source branches: coalescence saves only two pre-mutation GETs.
     # Four post-mutation lost GETs and receipt's one complete fresh reconciliation
     # remain paid. These quantities alone cannot authorize any dispatch.
-    stages = (
-        ("entry-authority", 2),
-        ("entry-checkpoint", C + 5),
-        ("complete-inventory", C),
-        ("event-authority-and-echo", 6),
-        ("own-cas-authority-and-checkpoint", 4 + C + 5),
-        ("post-cas-authority", 4),
-        ("review-capability", 1),
-        ("initial-reviews", R),
-        ("carried-hold", C + 1),
-        ("pre-update-reviews", R),
-        ("pending-journal", 4 + C + 4),
-        ("review-update", 1),
-        ("post-update-reviews", R),
-        ("check-capability-and-replay", 3),
-        ("final-hold", C + 1),
-        ("finish-journal", 4 + C + 4),
-        ("receipt", 5),
-        ("trust-verifications", trust_calls),
-    )
+    stages = _intermediate_stages(C, R, receipt_reads, trust_calls)
     normal = sum(count for _, count in stages)
     local_headroom = (
-        _default_c5_prefix_headroom(stages, terminal_comments=terminal_comments)
+        _default_c5_prefix_headroom(
+            stages, terminal_comments=terminal_comments, receipt_reads=receipt_reads
+        )
         if C == 5
         else None
     )
@@ -880,7 +939,9 @@ def intermediate_suffix_recipe(observation, *, comment_rows):
         "local_headroom": local_headroom,
         "stages": stages,
         "normal_calls": normal,
-        "combined_loss_calls": normal + 3 + 4,
+        "combined_loss_calls": normal + receipt_reads + 2 + 4,
+        "ordinary_required": 105,
+        "receipt_reads": receipt_reads,
         "comment_reads": C,
         "cache_prefix_known": len(cache_plan.known),
         "cache_prefix_unknown": len(cache_plan.unknown),
