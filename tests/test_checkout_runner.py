@@ -115,12 +115,13 @@ class CheckoutRunnerTests(CheckoutAccountingChecks, unittest.TestCase):
         jobs = yaml.safe_load(
             (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         )["jobs"]
-        compatibility = jobs["compatibility"]
+        compatibility = jobs["compatibility-shard"]
+        lanes = {
+            (item["os"], item["python-version"])
+            for item in compatibility["strategy"]["matrix"]["include"]
+        }
         for version in ("3.11", "3.14"):
-            self.assertIn(
-                {"os": "ubuntu-latest", "python-version": version},
-                compatibility["strategy"]["matrix"]["include"],
-            )
+            self.assertIn(("ubuntu-latest", version), lanes)
         routes = [
             step
             for step in compatibility["steps"]
@@ -140,6 +141,8 @@ class CheckoutRunnerTests(CheckoutAccountingChecks, unittest.TestCase):
                 "test_provider_common_flow",
                 "--costs",
                 "tests/fixtures/checkout-class-seconds-linux.json",
+                "--shard",
+                "${{ matrix.shard }}/${{ matrix.shards }}",
                 "--report",
                 "${{ runner.temp }}/checkout-timings.json",
             ],
@@ -167,7 +170,7 @@ class CheckoutRunnerTests(CheckoutAccountingChecks, unittest.TestCase):
         )["jobs"]
         windows = next(
             step
-            for step in jobs["compatibility"]["steps"]
+            for step in jobs["compatibility-shard"]["steps"]
             if step.get("if") == "runner.os == 'Windows'"
         )
         command = shlex.split(windows["run"])
@@ -180,7 +183,7 @@ class CheckoutRunnerTests(CheckoutAccountingChecks, unittest.TestCase):
         self.assertFalse(windows.get("continue-on-error", False))
         coverage = next(
             step
-            for step in jobs["quality"]["steps"]
+            for step in jobs["coverage-shard"]["steps"]
             if step.get("name") == "Branch coverage"
         )
         coverage_command = next(
@@ -363,10 +366,13 @@ else:
         jobs = yaml.safe_load(
             (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         )["jobs"]
-        compatibility = jobs["compatibility"]
+        compatibility = jobs["compatibility-shard"]
         self.assertIn(
-            {"os": "macos-latest", "python-version": "3.13"},
-            compatibility["strategy"]["matrix"]["include"],
+            ("macos-latest", "3.13"),
+            {
+                (item["os"], item["python-version"])
+                for item in compatibility["strategy"]["matrix"]["include"]
+            },
         )
         macos = next(
             step

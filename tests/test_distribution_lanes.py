@@ -157,6 +157,8 @@ class DistributionLaneTests(unittest.TestCase):
                 "test_quarantine_contract",
                 "--costs",
                 "$GITHUB_WORKSPACE/tests/fixtures/installed-unit-seconds.json",
+                "--shard",
+                "${{ matrix.shard }}/6",
                 "--report",
                 "$RUNNER_TEMP/installed-suite-timings.json",
             ],

@@ -1646,9 +1646,40 @@ def select_method(suite, expected):
     return suite if describe(suite) == expected else None
 
 
-def partition_units(units, descriptions, workers, costs=None):
-    if workers < 1 or workers > 16:
-        raise ValueError("workers must be between 1 and 16")
+MAX_SHARDS = 16
+
+
+def parse_shard(value):
+    index, separator, count = value.partition("/")
+    if (
+        separator != "/"
+        or not index.isdigit()
+        or not count.isdigit()
+        or index.startswith("0")
+        or count.startswith("0")
+    ):
+        raise argparse.ArgumentTypeError("shard must be INDEX/COUNT")
+    index, count = int(index), int(count)
+    if index > count or count > MAX_SHARDS:
+        raise argparse.ArgumentTypeError(
+            f"shard index must be within 1..COUNT and COUNT at most {MAX_SHARDS}"
+        )
+    return index, count
+
+
+def plan_digest(mode, units, groups):
+    document = {
+        "mode": mode,
+        "groups": [[units[index]["key"] for index in group] for group in groups],
+    }
+    return hashlib.sha256(
+        json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def partition_units(units, descriptions, workers, costs=None, *, limit=16):
+    if workers < 1 or workers > limit:
+        raise ValueError(f"workers must be between 1 and {limit}")
     if not units:
         raise ValueError("discovery must contain test modules")
     if costs is not None and (
@@ -1868,6 +1899,12 @@ def main() -> int:
     )
     parser.add_argument("--costs", type=Path, help="Measured scheduling weights")
     parser.add_argument("--report", type=Path)
+    parser.add_argument(
+        "--shard",
+        type=parse_shard,
+        help="Run INDEX/COUNT of the complete plan on this runner; "
+        "scripts/verify_test_shards.py proves the shards cover the inventory",
+    )
     parser.add_argument("--worker-manifest", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--worker-report", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -1926,16 +1963,52 @@ def main() -> int:
             else:
                 units = class_units
                 fallback = False
-        groups = partition_units(units, descriptions, args.workers, costs)
+        shard_index, shard_count = args.shard or (1, 1)
+        groups = partition_units(
+            units,
+            descriptions,
+            args.workers * shard_count,
+            costs,
+            limit=16 * shard_count,
+        )
         if fallback:
             groups = [list(range(len(units)))]
     except (ValueError, OSError, ImportError, json.JSONDecodeError) as error:
         print(f"Installed suite discovery failed: {error}", file=sys.stderr)
         return 1
 
+    hook_mode = (
+        "original-root"
+        if fallback
+        else ("reviewed-local" if hook_snapshot is not None else "hook-free")
+    )
+    plan_sha256 = plan_digest(hook_mode, units, groups)
+    plan_buckets = list(range(len(groups)))
+    bucket_ids = [
+        bucket for bucket in plan_buckets if bucket % shard_count == shard_index - 1
+    ]
+    groups = [groups[bucket] for bucket in bucket_ids]
+    if not groups and not fallback:
+        print(
+            f"Shard {shard_index}/{shard_count} owns no units in {hook_mode} mode; "
+            "use fewer shards",
+            file=sys.stderr,
+        )
+        return 1
+    if not groups:
+        # Drift revokes splitting, not coverage: shard 1 runs the original root.
+        print(
+            f"Shard {shard_index}/{shard_count} owns no units: shard 1 runs the "
+            f"original root because {fallback_reason or 'hooks are unreviewed'}",
+            file=sys.stderr,
+            flush=True,
+        )
     expected = [leaf for description in descriptions for leaf in leaves(description)]
+    shard_label = (
+        f" (shard {shard_index}/{shard_count})" if args.shard is not None else ""
+    )
     print(
-        f"Discovered {len(expected)} tests in {len(files)} modules and {len(units)} fixture-safe units; running {len(groups)} isolated workers",
+        f"Discovered {len(expected)} tests in {len(files)} modules and {len(units)} fixture-safe units; running {len(groups)} isolated workers{shard_label}",
         flush=True,
     )
     started = time.monotonic()
@@ -2010,7 +2083,9 @@ def main() -> int:
             elapsed[index] = time.monotonic() - start
             return code
 
-        if fallback:
+        if not groups:
+            results = []
+        elif fallback:
             results = [run_worker(0)]
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(groups)) as pool:
@@ -2095,10 +2170,33 @@ def main() -> int:
             item["execution_complete"] for item in reports
         )
         if args.report:
+            shard = (
+                {
+                    "shard": {
+                        "index": shard_index,
+                        "count": shard_count,
+                        "plan_sha256": plan_sha256,
+                        "plan_buckets": plan_buckets,
+                        "buckets": bucket_ids,
+                        "assigned": sum(
+                            len(unit_leaves(units[index], descriptions))
+                            for group in groups
+                            for index in group
+                        )
+                        if not fallback
+                        else len(expected)
+                        if groups
+                        else 0,
+                    }
+                }
+                if args.shard is not None
+                else {}
+            )
             args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(
                 json.dumps(
                     {
+                        **shard,
                         "inventory_sha256": hashlib.sha256(
                             "\n".join(sorted(leaf["id"] for leaf in expected)).encode()
                         ).hexdigest(),
@@ -2124,13 +2222,7 @@ def main() -> int:
                         if costs is not None
                         else [],
                         "complete": complete,
-                        "hook_mode": "original-root"
-                        if fallback
-                        else (
-                            "reviewed-local"
-                            if hook_snapshot is not None
-                            else "hook-free"
-                        ),
+                        "hook_mode": hook_mode,
                         "fallback_reason": fallback_reason,
                         "elapsed_seconds": round(time.monotonic() - started, 3),
                         "workers": reports,

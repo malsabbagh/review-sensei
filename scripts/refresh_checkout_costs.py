@@ -46,8 +46,10 @@ def extract_costs(report: object, *, allow_failing_tests: bool = False) -> dict:
     if not entries:
         raise ValueError("Timing receipt has no executed phases")
     costs: dict[str, float] = {}
+    controller_classes: set[str] = set()
+    worker_classes: set[str] = set()
     assigned = 0
-    for entry in entries:
+    for index, entry in enumerate(entries):
         if (
             not isinstance(entry, dict)
             or entry.get("timing_error") is not None
@@ -70,12 +72,21 @@ def extract_costs(report: object, *, allow_failing_tests: bool = False) -> dict:
         for name, seconds in entry["class_seconds"].items():
             if not isinstance(name, str) or not name or not _seconds(seconds):
                 raise ValueError("Class timings must be finite nonnegative seconds")
-            if name in costs:
+            # Sharded runs may split a fixture-free class across workers; its
+            # cost is the sum. The controller never shares a class with them.
+            is_controller = controller is not None and index == len(entries) - 1
+            owners = controller_classes if is_controller else worker_classes
+            others = worker_classes if is_controller else controller_classes
+            if name in others:
                 raise ValueError("Class timing occurs in multiple execution phases")
-            # The runner requires positive costs. Do not round a fast test to zero.
-            costs[name] = max(float(seconds), 0.000001)
+            owners.add(name)
+            costs[name] = costs.get(name, 0.0) + float(seconds)
+            if not _seconds(costs[name]):
+                raise ValueError("Class timings must be finite nonnegative seconds")
     if assigned != report["discovered"]:
         raise ValueError("Timing phases do not account for the discovered inventory")
+    # The runner requires positive costs. Do not round a fast test to zero.
+    costs = {name: max(seconds, 0.000001) for name, seconds in costs.items()}
     if not costs:
         raise ValueError("Timing receipt contains no measured classes")
     return dict(sorted(costs.items()))

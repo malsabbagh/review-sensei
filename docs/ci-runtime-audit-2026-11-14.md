@@ -1,5 +1,48 @@
 # ReviewSensei test and CI runtime audit, November 14, 2026
 
+## November 15 runner-level sharding
+
+Run [43723162022](https://github.com/malsabbagh/review-sensei/actions/runs/43723162022)
+on `9aafc4ce` showed that one four-worker runner per lane takes hours. Its
+compatibility lanes ran for 2 h 24 min (macOS) to 3 h 45 min (Windows), with
+every worker failing. Linux 3.11 and coverage were still running after four
+hours. The installed lane ran in original-root mode for 12,892 seconds because
+`test_quarantine_contract.py` still pinned the pre-November 15 revision of
+`test_action_run.py`. The current-run class contract had already been
+re-reviewed and updated for that revision (`c8c925b3`). The same two changes
+reach the checkpoint methods only through `test_quarantine_journey`'s use of
+`CommandEntryFixture`. Their API origin comes from the existing per-instance
+fixture, and `original_finish_interrupt` was already pinned. They add no
+module or class fixture, shared state or hook, so that pin now names the same
+reviewed revision. The seven method units and their guards are unchanged.
+
+CI now splits each heavy lane across runners. Every shard computes the same
+complete plan from the same discovery and costs, then executes only the
+buckets where `bucket % count == index - 1`. The controller phase runs only in
+shard 1. Each lane keeps its original job name as an aggregate job, which runs
+`scripts/verify_test_shards.py`. That check requires one inventory digest and
+plan digest across all shards, every bucket exactly once, full per-worker
+accounting, and success. Coverage data from all ten shards is combined before
+the unchanged 80% floor. The installed shards download the exact distributions
+built by `Build distributions` and verify their SHA-256 sums. A sharded plan may
+split a class across workers only if neither the class nor its module defines
+fixtures. Unsharded runs keep intact classes.
+
+| Lane | Shards × workers | Total class seconds (run 43723162022) | Planned largest worker |
+| --- | ---: | ---: | ---: |
+| Linux 3.11 / 3.14 | 8 × 4 each | 45,842 (3.14) | about 1,650 s |
+| macOS 3.13 | 5 × 4 | 31,970 | about 1,600 s |
+| Windows 3.12 | 5 × 4 | 43,728 | about 2,190 s |
+| Coverage (Linux 3.11) | 10 × 4 | not yet measured | — |
+| Installed dist-safe | 6 × 4 | 12,892 (one worker) | about 1,620 s (published-tail unit) |
+
+These measurements come from failing runs, so a passing run may take longer.
+The sum of work does not change; the expected wall time depends on how many
+GitHub-hosted runners the account runs at once. At 20 concurrent jobs, shared
+with other pull requests, the heavy lanes alone need roughly an hour of runner
+throughput. Reaching 30 minutes therefore still requires lower test CPU cost.
+Only exact-head remote CI can measure the result.
+
 ## November 15 Worker process scheduling
 
 The Worker lane now runs its original Python qualification entry points in at

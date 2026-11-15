@@ -127,13 +127,21 @@ its exact inventory, and
 waits for every worker even when a test fails. Separate worker logs are replayed
 in worker order with inventory counts and exit codes so failures are attributable.
 Discovery errors, empty inventories
-and failed workers fail the lane. Module/class fixtures run inside each worker;
+and failed workers fail the lane. CI splits each lane's plan across runners
+with `--shard INDEX/COUNT`: every shard computes the same complete plan and runs
+only its own worker buckets (the controller phase runs in shard 1), and the lane
+job runs `scripts/verify_test_shards.py` to prove that the shards agreed on one
+inventory and plan, ran every bucket exactly once, accounted for every test and
+passed. Sharded plans may split a class with no class or module fixtures across
+workers. If hooks force original-root execution, shard 1 runs the original root
+and the other shards run nothing. Module/class fixtures run inside each worker;
 cross-class mutable state must not be shared. Release-preparation fixtures clone
 one precommitted, normalized source seed into independent object stores instead
 of repeatedly copying, hashing and committing the same tree. No live repository
-or production release preparation is cached. The quality lane runs the same complete inventory in four processes with
-isolated branch-coverage data, combines every worker file, and retains the 80%
-floor. Missing worker coverage or incomplete execution fails the lane.
+or production release preparation is cached. The coverage shards run the same complete inventory in four processes each with
+isolated branch-coverage data; Quality gates verifies the shards, combines every
+shard's data, and retains the 80% floor. Missing worker coverage or incomplete
+execution fails the lane.
 Measured class costs in `tests/fixtures/checkout-class-seconds.json` affect only
 scheduling; unknown classes receive a conservative per-method estimate. Refresh
 these estimates from archived per-worker timing receipts, never by excluding

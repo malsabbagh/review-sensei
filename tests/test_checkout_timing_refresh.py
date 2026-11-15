@@ -105,8 +105,19 @@ class CheckoutTimingRefreshTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     extract_costs(data, allow_failing_tests=True)
         data = receipt()
-        data["workers"][1]["class_seconds"] = {"m.Slow": 1}
+        data["controller"] = data["workers"].pop()
+        data["controller"]["class_seconds"] = {"m.Slow": 1}
+        data["effective_worker_count"] = 1
         with self.assertRaisesRegex(ValueError, "multiple"):
+            extract_costs(data)
+
+    def test_a_class_split_across_shard_workers_costs_the_sum(self):
+        data = receipt()
+        data["workers"][1]["class_seconds"] = {"m.Slow": 1.5}
+        self.assertEqual(extract_costs(data), {"m.Slow": 4.5})
+        data["workers"][1]["class_seconds"] = {"m.Slow": sys.float_info.max}
+        data["workers"][0]["class_seconds"] = {"m.Slow": sys.float_info.max}
+        with self.assertRaisesRegex(ValueError, "finite"):
             extract_costs(data)
 
     def test_obsolete_hints_do_not_remove_unknown_tests(self):
