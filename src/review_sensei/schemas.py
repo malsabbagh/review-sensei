@@ -49,8 +49,61 @@ def _accounting_pair_prefix(validator, prefixes, instance, schema):
     )
 
 
+def _accounting_pair_items(validator, items, instance, schema):
+    """Validate the unchanged completed vector without per-pair validators.
+
+    This only completes the items keyword for wholly valid plain pairs. Every
+    sibling keyword still runs; any other schema, value or keyword program
+    retains the original traversal, including its exact error locations.
+    """
+    pattern = "^[A-Za-z0-9_.:-]{1,128}$"
+    if (
+        type(instance) is list
+        and "prefixItems" not in schema
+        and type(items) is dict
+        and set(items) - {"description"}
+        == {"type", "prefixItems", "items", "minItems", "maxItems"}
+        and items["type"] == "array"
+        and items["items"] is False
+        and items["minItems"] == items["maxItems"] == 2
+        and items["prefixItems"]
+        == [
+            {"type": "string", "pattern": pattern},
+            {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        ]
+        and validator.TYPE_CHECKER is Draft202012Validator.TYPE_CHECKER
+        and validator.VALIDATORS.get("prefixItems") is _accounting_pair_prefix
+        and "description" not in validator.VALIDATORS
+        and all(
+            validator.VALIDATORS.get(name) is Draft202012Validator.VALIDATORS[name]
+            for name in (
+                "type",
+                "minItems",
+                "maxItems",
+                "pattern",
+                "minimum",
+                "maximum",
+            )
+        )
+        and all(
+            type(pair) is list
+            and len(pair) == 2
+            and type(pair[0]) is str
+            and type(pair[1]) is int
+            and 1 <= pair[1] <= 9007199254740991
+            and re.search(pattern, pair[0]) is not None
+            for pair in instance
+        )
+    ):
+        return
+    yield from Draft202012Validator.VALIDATORS["items"](
+        validator, items, instance, schema
+    )
+
+
 _AccountingValidator = extend(
-    Draft202012Validator, {"prefixItems": _accounting_pair_prefix}
+    Draft202012Validator,
+    {"prefixItems": _accounting_pair_prefix, "items": _accounting_pair_items},
 )
 
 
