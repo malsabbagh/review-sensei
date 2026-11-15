@@ -422,6 +422,45 @@ class SourceRegistryTests(unittest.TestCase):
 
 
 class OriginalDefaultSnapshotTests(unittest.TestCase):
+    def test_failed_wrapper_registration_leaves_no_reusable_partial_chain(self):
+        def closure(function):
+            return dict(
+                zip(
+                    function.__code__.co_freevars,
+                    (cell.cell_contents for cell in function.__closure__),
+                )
+            )
+
+        remember = closure(seal_module)["remember_function"]
+        definitions = closure(remember)["function_definitions"]
+        bindings = closure(require_module_seal)["require_bindings"]
+        unchanged = closure(bindings)["function_unchanged"]
+
+        def outer():
+            pass
+
+        def inner():
+            pass
+
+        outer.__wrapped__ = inner
+        inner.__wrapped__ = outer
+        try:
+            with self.assertRaisesRegex(ReviewInputError, "wrapper chain is invalid"):
+                remember(outer)
+            self.assertNotIn(outer, definitions)
+            self.assertNotIn(inner, definitions)
+            del inner.__wrapped__
+            remember(outer)
+            self.assertTrue(unchanged(outer))
+            # A late cycle must refuse before following any changed live link.
+            inner.__wrapped__ = outer
+            self.assertFalse(unchanged(outer))
+            del inner.__wrapped__
+            self.assertTrue(unchanged(outer))
+        finally:
+            definitions.pop(outer, None)
+            definitions.pop(inner, None)
+
     def _readers(self):
         def closure(function):
             return dict(
