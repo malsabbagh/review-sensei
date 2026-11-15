@@ -89,6 +89,36 @@ class PackedBackend(CensusBackend):
 
 
 class PackedCommentCensusTests(unittest.TestCase):
+    def test_known_only_certificate_keeps_byte_node_and_closing_boundaries(self):
+        from review_sensei_github.packed_comment_census import (
+            MAX_GITHUB_RESPONSE_BYTES,
+            NODE_METADATA_BYTES,
+            OUTER_BYTES,
+        )
+
+        full = MAX_GITHUB_RESPONSE_BYTES - OUTER_BYTES - NODE_METADATA_BYTES
+        cases = (
+            ((), None, 2),
+            ((), 0, 2),
+            ((1,) * 100, None, 3),
+            ((1,) * 101, None, 4),
+            ((1,) * 200, None, 4),
+            ((1,) * 201, None, 11),
+            ((full,), None, 3),
+            ((full,), 0, 2),
+            ((full,), 1, 3),
+            ((full + 1,), 0, 11),
+            ((full, full), 0, 3),
+            ((full,) * 9, 0, 10),
+            ((full,) * 10, 0, 11),
+        )
+        for known, closing, expected in cases:
+            with self.subTest(count=len(known), closing=closing, expected=expected):
+                self.assertEqual(
+                    packed_request_bound(known, (), closing_metadata_bytes=closing),
+                    expected,
+                )
+
     def test_validated_metadata_bounds_fund_the_complete_combined_page(self):
         for known_count in (0, 30, 60):
             backend = PackedBackend(["x" * (7200 - wire({"body": ""}))] * 60)

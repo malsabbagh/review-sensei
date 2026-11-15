@@ -157,6 +157,38 @@ def packed_request_bound(
     prefix = [0]
     for cost in known_costs:
         prefix.append(prefix[-1] + cost)
+    if not unknown and all(type(cost) is int and cost > 0 for cost in known_costs):
+        # With no unknown slots there is exactly one ordered greedy packing,
+        # not a family of interleavings. Find each original maximal boundary
+        # directly. The unchanged 200-node bound makes this at most200 steps;
+        # it cannot reach the exhaustive proof's 500000-work refusal threshold.
+        # This never removes unknown slots from a caller's supplied plan.
+        if not known:
+            return 2  # Opening and fresh closing, including an empty census.
+        start = body_pages = 0
+        while start < known_length:
+            end = min(
+                start + 100,
+                bisect_right(
+                    prefix,
+                    prefix[start] + MAX_GITHUB_RESPONSE_BYTES - OUTER_BYTES,
+                    lo=start + 1,
+                )
+                - 1,
+            )
+            if end <= start:
+                return rejected
+            body_pages += 1
+            if end == known_length:
+                cost = OUTER_BYTES + prefix[end] - prefix[start]
+                if closing_metadata_bytes is not None:
+                    body_pages += int(
+                        cost + closing_metadata_bytes > MAX_GITHUB_RESPONSE_BYTES
+                    )
+                return min(rejected, framing_calls + body_pages)
+            if framing_calls + body_pages > MAX_PAGINATION_PAGES:
+                return rejected
+            start = end
     largest = sorted(unknown, reverse=True)
     upper = [0]
     for bound in largest:
