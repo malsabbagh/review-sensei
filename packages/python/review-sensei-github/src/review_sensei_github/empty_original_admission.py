@@ -19,7 +19,44 @@ from weakref import ref
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
-from review_sensei.source_registry import require_instance_source, require_module_seal
+from review_sensei.source_registry import (
+    require_instance_source,
+    require_module_seal,
+    require_original_class_identity,
+)
+
+
+def _ledger_classifier():
+    # Captured validators authenticate our exports before any mutable helper is
+    # consulted. Classification is DATA only; the reader retains every source,
+    # caller, selected-root and one-use receipt check after this gate.
+    seal = require_module_seal
+    classify = require_original_class_identity
+    module = sys.modules[__name__]
+
+    def original_hosted_ledger(value):
+        seal(module)
+        for module_name, name in (
+            ("review_sensei_github.session_ledger", "GitHubIssueCommentSessionLedger"),
+            ("review_sensei_github.api_run_requests", "ApiRunSessionLedger"),
+            ("review_sensei_github.review_run", "ReviewRunLedger"),
+            ("review_sensei_github.review_run", "ActionRunLedger"),
+        ):
+            defining = sys.modules.get(module_name)
+            if defining is None:
+                continue
+            try:
+                classify(value, module=defining, name=name)
+            except ReviewInputError:
+                continue
+            return True
+        return False
+
+    return original_hosted_ledger
+
+
+original_hosted_ledger = _ledger_classifier()
+del _ledger_classifier
 
 
 def _build():
@@ -53,6 +90,8 @@ def _build():
 
         require_module_seal(session_ledger)
         hosted_ledger = session_ledger.GitHubIssueCommentSessionLedger
+        admission_source_seal = require_module_seal
+        admission_module = sys.modules[__name__]
 
         module = sys.modules[cls.__module__]
         decode, source = cls._decode, cls._source
@@ -189,9 +228,12 @@ def _build():
             # This observer grants only original hosted caller/root custody.
             # A successful local/custom decode must not depend on unrelated
             # hosted metadata, even when it exposes lookalike instance fields.
-            if type(ledger) is not hosted_ledger:
-                return result
             try:
+                admission_source_seal(admission_module)
+                if type(ledger) is not hosted_ledger and not original_hosted_ledger(
+                    ledger
+                ):
+                    return result
                 intact()
                 from review_sensei import models
 
