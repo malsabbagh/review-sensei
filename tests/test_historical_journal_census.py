@@ -189,3 +189,48 @@ class HistoricalJournalGeometryTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "issuer is unsupported"):
             _LifecycleCapacity._seal(scope)
         self.assertEqual(calls, [])
+
+    def test_capacity_definition_is_original_installed_inner_body(self):
+        import inspect
+
+        from review_sensei_github import quarantine_census
+
+        exported = quarantine_census.lifecycle_capacity_plan
+        original = census.capacity_definition()
+        self.assertIsNot(exported, original)
+        self.assertIs(original, inspect.unwrap(exported))
+        self.assertIs(original.__globals__, vars(quarantine_census))
+        self.assertIsNone(original.__closure__)
+        self.assertNotIn("__wrapped__", vars(quarantine_census.fetch_comments))
+
+    def test_capacity_wrapper_chain_substitution_refuses_without_callback(self):
+        from unittest.mock import patch
+
+        from review_sensei_github import quarantine_census
+
+        calls = []
+
+        def fake(*args, **kwargs):
+            calls.append(True)
+
+        exported = quarantine_census.lifecycle_capacity_plan
+        with patch.object(exported, "__wrapped__", fake):
+            with self.assertRaises(ReviewInputError):
+                census.capacity_definition()
+        self.assertEqual(calls, [])
+
+    def test_capacity_inner_code_mutation_refuses_without_callback(self):
+        original = census.capacity_definition()
+        calls = []
+
+        def fake(*args, **kwargs):
+            return None
+
+        code = original.__code__
+        try:
+            original.__code__ = fake.__code__
+            with self.assertRaises(ReviewInputError):
+                census.capacity_definition()
+        finally:
+            original.__code__ = code
+        self.assertEqual(calls, [])

@@ -59,6 +59,30 @@ def complete_read_cap(required, supplied):
     return required
 
 
+def capacity_definition():
+    """Resolve the sealed installed wrapper's exact original defining body."""
+    import inspect
+    from types import FunctionType
+
+    from . import quarantine_census
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(quarantine_census)
+    exported = vars(quarantine_census).get("lifecycle_capacity_plan")
+    if type(exported) is not FunctionType:
+        raise ReviewInputError("historical journal capacity export changed")
+    # The module seal covers the wrapper chain identity, code, globals,
+    # defaults and __wrapped__ metadata before inspect follows that chain.
+    original = inspect.unwrap(exported)
+    if (
+        type(original) is not FunctionType
+        or original.__globals__ is not vars(quarantine_census)
+        or original.__closure__ is not None
+    ):
+        raise ReviewInputError("historical journal capacity definition changed")
+    return original
+
+
 def choose(ledger, identity, *, plan, added_parts):
     from . import quarantine_census
     from . import quarantine_historical_execution as historical
@@ -66,12 +90,15 @@ def choose(ledger, identity, *, plan, added_parts):
     require_module_seal(sys.modules[__name__])
     require_module_seal(quarantine_census)
     require_module_seal(historical)
+    original = capacity_definition()
     frame = sys._getframe(1)
     if (
-        frame.f_code is not quarantine_census.lifecycle_capacity_plan.__code__
+        frame.f_code is not original.__code__
         or frame.f_globals is not vars(quarantine_census)
         or frame.f_locals.get("ledger") is not ledger
         or frame.f_locals.get("plan") is not plan
+        or frame.f_locals.get("identity") is not identity
+        or frame.f_locals.get("added_parts") != added_parts
     ):
         raise ReviewInputError("historical journal plan lacks original capacity frame")
     membership = historical.journal_census_membership(
