@@ -43,6 +43,30 @@ class GuardedLifecycleCapacityTests(unittest.TestCase):
                 for key, amount in plan.known.items():
                     self.assertGreaterEqual(proof.plan.known[key], amount)
                 self.assertEqual(proof.plan.metadata_unknown, plan.metadata_unknown)
+                aliases = {
+                    ledger.app_slug.casefold(),
+                    ledger.app_slug.removesuffix("[bot]").casefold(),
+                }
+                for row in ledger._cached_comments():
+                    identifier, author = row["id"], row.get("user")
+                    if identifier in plan.metadata_known:
+                        self.assertEqual(
+                            proof.plan.metadata_known[identifier],
+                            plan.metadata_known[identifier],
+                        )
+                    elif (
+                        isinstance(author, dict)
+                        and author.get("type") == "Bot"
+                        and isinstance(author.get("login"), str)
+                        and author["login"].isascii()
+                        and author["login"].casefold() in aliases
+                    ):
+                        self.assertEqual(
+                            proof.plan.metadata_known[identifier],
+                            plan.metadata_unknown,
+                        )
+                    else:
+                        self.assertNotIn(identifier, proof.plan.metadata_known)
                 self.assertEqual(guard.comment_plan, plan)
                 self.assertEqual(capacity._guard_state(guard), state)
                 # Packing depends on authenticated insertion order, not just

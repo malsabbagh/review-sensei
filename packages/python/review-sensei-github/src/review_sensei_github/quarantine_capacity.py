@@ -1156,10 +1156,32 @@ def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
         identifier: max(old.known.get(identifier, 0), amount)
         for identifier, amount in known.items()
     }
+    metadata_known = dict(old.metadata_known)
+    # A complete lifecycle census can introduce exact IDs for our previously
+    # unknown allocations. Keep the original configured-Bot envelope for those
+    # members, rather than silently replacing it with the generic author bound.
+    # This grants no ownership/content authority: every subsequent fresh walk
+    # checks the declared envelope and the complete opening/closing metadata.
+    slug = ledger.app_slug
+    if not isinstance(slug, str) or not slug.isascii():
+        raise ReviewInputError("quarantine comment metadata capacity is unsupported")
+    aliases = {slug.casefold(), slug.removesuffix("[bot]").casefold()}
+    for row in ledger._cached_comments():
+        identifier, author = row.get("id"), row.get("user")
+        if (
+            identifier in merged
+            and identifier not in metadata_known
+            and isinstance(author, dict)
+            and author.get("type") == "Bot"
+            and isinstance(author.get("login"), str)
+            and author["login"].isascii()
+            and author["login"].casefold() in aliases
+        ):
+            metadata_known[identifier] = old.metadata_unknown
     plan = CommentAllocationPlan(
         merged,
         (*old.unknown, *bounds),
-        metadata_known=old.metadata_known,
+        metadata_known=metadata_known,
         metadata_unknown=old.metadata_unknown,
     )
     if (
