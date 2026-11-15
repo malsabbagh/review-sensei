@@ -258,3 +258,67 @@ class PrefixCodecTests(unittest.TestCase):
             with self.assertRaises(ReviewInputError):
                 codec.pack(value, prefix_count=10)
         self.assertEqual(calls, [])
+
+    def test_plain_malformed_prefix_fields_refuse_as_review_input(self):
+        from review_sensei.bounded_evidence import decode_evidence, encode_evidence
+        from review_sensei.errors import ReviewInputError
+
+        baseline = codec.pack(fixture(11), prefix_count=10)
+        for index in (0, 1, 2, 4):
+            for field in (
+                "method",
+                "path",
+                "request",
+                "response",
+                "status",
+                "request_sha256",
+                "check_update_precondition",
+                "review_update_precondition",
+            ):
+                for bad in (False, 3, "wrong", [], {}, None):
+                    # Some strings/dicts are structurally legitimate; use only
+                    # malformed field container/domain cases in this control.
+                    if (
+                        field in ("method", "path", "status", "request_sha256")
+                        and type(bad) is str
+                    ):
+                        continue
+                    if (
+                        field
+                        in (
+                            "request",
+                            "check_update_precondition",
+                            "review_update_precondition",
+                        )
+                        and type(bad) is dict
+                    ):
+                        continue
+                    if field == "response" and bad is None:
+                        continue
+                    changed = copy.deepcopy(baseline)
+                    prefix = decode_evidence(
+                        changed["prefix"],
+                        max_encoded_bytes=1048576,
+                        max_decoded_bytes=1048576,
+                    )
+                    prefix["effects"][index][field] = copy.deepcopy(bad)
+                    changed["prefix"] = encode_evidence(
+                        prefix, max_decoded_bytes=1048576
+                    )
+                    with (
+                        self.subTest(index=index, field=field, bad=bad),
+                        self.assertRaises(ReviewInputError),
+                    ):
+                        codec.unpack(changed)
+        for index in (0, 1, 2, 4):
+            for bad in (None, False, 1, "bad", []):
+                changed = copy.deepcopy(baseline)
+                prefix = decode_evidence(
+                    changed["prefix"],
+                    max_encoded_bytes=1048576,
+                    max_decoded_bytes=1048576,
+                )
+                prefix["effects"][index] = bad
+                changed["prefix"] = encode_evidence(prefix, max_decoded_bytes=1048576)
+                with self.assertRaises(ReviewInputError):
+                    codec.unpack(changed)

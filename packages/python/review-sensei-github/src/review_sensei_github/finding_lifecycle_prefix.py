@@ -86,10 +86,47 @@ def _request_hash(effect, journal):
     )
 
 
+def _effect_shapes(effects, *, omitted_hash=False):
+    """Reject plain but malformed containers before original validators index them."""
+    if type(effects) is not list or len(effects) > 32:
+        raise ReviewInputError("prefix effects container is invalid")
+    for effect in effects:
+        if type(effect) is not dict:
+            raise ReviewInputError("prefix effect container is invalid")
+        for field in ("method", "path", "status"):
+            if type(effect.get(field)) is not str:
+                raise ReviewInputError("prefix effect scalar is invalid")
+        if type(effect.get("request")) is not dict:
+            raise ReviewInputError("prefix request container is invalid")
+        for field in ("event", "status"):
+            if field in effect["request"] and type(effect["request"][field]) is not str:
+                raise ReviewInputError("prefix request scalar is invalid")
+        if "request_sha256" in effect:
+            if type(effect["request_sha256"]) is not str:
+                raise ReviewInputError("prefix request digest is invalid")
+        elif not omitted_hash:
+            raise ReviewInputError("prefix request digest is missing")
+        for field in ("check_update_precondition", "review_update_precondition"):
+            if field in effect and type(effect[field]) is not dict:
+                raise ReviewInputError("prefix precondition container is invalid")
+        if "response" not in effect:
+            raise ReviewInputError("prefix response is missing")
+        response = effect["response"]
+        if response is not None and (
+            type(response) is not list
+            or len(response) != 2
+            or type(response[0]) is not int
+        ):
+            raise ReviewInputError("prefix response container is invalid")
+
+
 def pack(document, *, prefix_count):
     """Encode validated DATA with a fixed nonempty suffix; never issue custody."""
     journal, pair = _sources()
     document = _plain(document)
+    if type(document) is not dict or type(document.get("schema_version")) is not str:
+        raise ReviewInputError("prefix logical document shape is invalid")
+    _effect_shapes(document.get("effects"))
     journal._validate(document)
     effects = document["effects"]
     if (
@@ -153,6 +190,7 @@ def _decode(stored):
         or len(prefix["effects"]) != stored["prefix_count"]
     ):
         raise ReviewInputError("prefix effect count or shape changed")
+    _effect_shapes(prefix["effects"], omitted_hash=True)
     for effect in prefix["effects"]:
         if type(effect) is not dict or not {
             "method",
@@ -231,6 +269,7 @@ def unpack(stored):
     journal, _pair = _sources()
     stored = _plain(stored)
     document = _decode(stored)
+    _effect_shapes(document["effects"])
     journal._validate(document)
     if pack(document, prefix_count=stored["prefix_count"]) != stored:
         raise ReviewInputError("prefix carrier is noncanonical")
