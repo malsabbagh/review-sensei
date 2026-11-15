@@ -1,6 +1,7 @@
 """Pure representation compatibility, not historical command admission."""
 
 import copy
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +15,72 @@ from tests.test_finding_lifecycle_prefix_codec import fixture
 
 
 class PrefixIntegrationTests(unittest.TestCase):
+    def test_exact_current_pending_commitment_reaches_preflight_without_dispatch(self):
+        from tests.test_finding_lifecycle_journal import FakeHTTP
+        from tests.test_finding_lifecycle_journal import journal as data_journal
+
+        class ReachedPreflight(Exception):
+            pass
+
+        raw = {"body": "New exact synthetic receipt-independent review body."}
+        path = "/repos/owner/repo/pulls/1/reviews/100"
+        request = journal._request_identity(raw)
+        digest = journal._digest({"method": "PUT", "path": path, "request": request})
+        effect = dict(
+            method="PUT",
+            path=path,
+            request=request,
+            request_sha256=digest,
+            status="pending",
+            response=None,
+        )
+        for format_name in ("current", "legacy", "changed"):
+            value = data_journal(retained=fixture(10))
+            before = copy.deepcopy(value.effects)
+            document = value._document(effects=[*value.effects, effect])
+            current = canonical_bytes(journal._pack_current_journal(document))
+            legacy = canonical_bytes(journal._pack_journal(document))
+            self.assertNotEqual(current, legacy)
+            value._command_prepriced_request_keys = {digest}
+            value._command_prepriced_pending_documents = {
+                digest: current
+                if format_name == "current"
+                else legacy
+                if format_name == "legacy"
+                else current + b" "
+            }
+            http = FakeHTTP((200, {}))
+            previous = sys.getprofile()
+            reached = []
+
+            def observe(frame, event, arg):
+                if previous is not None:
+                    previous(frame, event, arg)
+                if (
+                    event == "call"
+                    and frame.f_code
+                    is journal.FindingLifecycleJournal._preflight_effect.__code__
+                ):
+                    reached.append(True)
+                    raise ReachedPreflight
+
+            try:
+                sys.setprofile(observe)
+                with (
+                    self.subTest(format=format_name),
+                    self.assertRaises(
+                        ReachedPreflight
+                        if format_name == "current"
+                        else ReviewInputError
+                    ),
+                ):
+                    value.request(http, "PUT", path, token="synthetic", body=raw)
+            finally:
+                sys.setprofile(previous)
+            self.assertEqual(reached, [True] if format_name == "current" else [])
+            self.assertEqual(value.effects, before)
+            self.assertEqual(http.calls, [])
+
     def test_current_encoding_is_lossless_and_never_larger_than_legacy(self):
         for count in (4, 11, 26, 32):
             value = fixture(count)

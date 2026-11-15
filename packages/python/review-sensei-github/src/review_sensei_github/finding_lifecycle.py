@@ -2893,7 +2893,7 @@ class FindingLifecycleJournal:
         if (
             expected is not None
             and canonical_bytes(
-                _pack_journal(self._document(effects=[*self.effects, effect]))
+                _pack_current_journal(self._document(effects=[*self.effects, effect]))
             )
             != expected
         ):
