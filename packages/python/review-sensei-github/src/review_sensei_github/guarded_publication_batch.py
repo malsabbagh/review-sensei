@@ -412,3 +412,8 @@ def validate_review_receipt(journal, effect, receipt):
         raise ReviewInputError(
             "guarded publication review numeric producer is unconfirmed"
         )
+
+
+from review_sensei.source_registry import seal_module as _seal_source  # noqa: E402
+
+_seal_source()
