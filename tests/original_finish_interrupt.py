@@ -7,7 +7,9 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def interrupt_original_finish(caller_class, *, run_id, attempt):
+def interrupt_original_finish(
+    caller_class, *, run_id, attempt, method="finish_review_run", exception=None
+):
     """Observe original construction, then interrupt exactly that instance once.
 
     This deliberately raises at a profile event; it does not replace production
@@ -16,7 +18,7 @@ def interrupt_original_finish(caller_class, *, run_id, attempt):
     on context exit, not continuously during the interrupt's unwind.
     """
     constructor = inspect.unwrap(caller_class.__init__)
-    finish = inspect.unwrap(caller_class.finish_review_run)
+    finish = inspect.unwrap(getattr(caller_class, method))
     constructor_code, constructor_globals = (
         constructor.__code__,
         constructor.__globals__,
@@ -61,7 +63,7 @@ def interrupt_original_finish(caller_class, *, run_id, attempt):
             if interrupted:
                 raise AssertionError("duplicate original finish interruption")
             interrupted.append(True)
-            raise KeyboardInterrupt
+            raise KeyboardInterrupt if exception is None else exception
 
     sys.setprofile(observe)
     try:
