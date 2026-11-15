@@ -20,8 +20,6 @@ def _build_registry():
 
     classes: dict[type, Any] = {}
     module_classes: dict[ModuleType, tuple[type, ...]] = {}
-    function_defaults: dict[Any, Any] = {}
-    function_wrappers: dict[Any, Any] = {}
     function_definitions: dict[Any, Any] = {}
     no_wrapper = object()
     immutable_default = object()
@@ -136,42 +134,46 @@ def _build_registry():
         # inspect.unwrap follows mutable function metadata. Pin each original
         # link and inner definition, not just the visible wrapper's code.
         seen = set()
+        pending = {}
         while True:
             if not inspect.isfunction(function) or function in seen:
                 raise ReviewInputError("original source wrapper chain is invalid")
             seen.add(function)
-            if function in function_defaults:
-                return  # Never replace an earlier defining-module snapshot.
+            if function in function_definitions:
+                break  # Never replace an earlier defining-module snapshot.
             wrapped = vars(function).get("__wrapped__", no_wrapper)
-            function_defaults[function] = defaults(function)
-            function_wrappers[function] = wrapped
-            function_definitions[function] = (
+            pending[function] = (
                 function.__code__,
                 function.__globals__,
+                defaults(function),
+                wrapped,
             )
             if wrapped is no_wrapper:
-                return
+                break
             function = wrapped
+        # A refused definition must not leave a partial/cyclic chain available
+        # for a later module to reuse. No snapshot commits until all links pass.
+        function_definitions.update(pending)
 
     def function_unchanged(function):
-        seen = set()
-        while function not in seen:
-            seen.add(function)
+        # Definition-time registration proves the stored wrapper chain acyclic.
+        # Follow only those pinned links after checking each current link; a
+        # changed/cyclic live wrapper refuses before it can be followed. Every
+        # code, namespace and default is still checked on every invocation.
+        while True:
             definition = function_definitions.get(function)
             if (
                 definition is None
                 or function.__code__ is not definition[0]
                 or function.__globals__ is not definition[1]
-                or not defaults_unchanged(function, function_defaults[function])
-                or vars(function).get("__wrapped__", no_wrapper)
-                is not function_wrappers[function]
+                or not defaults_unchanged(function, definition[2])
+                or vars(function).get("__wrapped__", no_wrapper) is not definition[3]
             ):
                 return False
-            wrapped = function_wrappers[function]
+            wrapped = definition[3]
             if wrapped is no_wrapper:
                 return True
             function = wrapped
-        return False
 
     def seal_module():
         current = inspect.currentframe()
