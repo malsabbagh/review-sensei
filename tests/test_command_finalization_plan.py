@@ -296,7 +296,7 @@ class CommandFinalizationPlanTests(unittest.TestCase):
                 new_run=True,
             )
             observed = []
-            mutations, readbacks, stopped = [], [], []
+            mutations, readbacks, stopped, forbidden_entries = [], [], [], []
             journals = []
             external = fixture.external
             dispatch = inspect.unwrap(FindingLifecycleJournal._dispatch_effect)
@@ -322,8 +322,11 @@ class CommandFinalizationPlanTests(unittest.TestCase):
                 ):
                     payload = json.loads(request.data)
                     if payload.get("operationName") == "ResolveReviewThread":
-                        self.assertEqual(mutations, [], "later cleanup mutation")
                         identifier = payload["variables"]["input"]["threadId"]
+                        # Retain every attempt before an assertion can be
+                        # normalized by the command's exception handling.
+                        mutations.append(identifier)
+                        self.assertEqual(len(mutations), 1, "later cleanup mutation")
                         frame = sys._getframe(1)
                         while frame is not None and not (
                             frame.f_code is dispatch_code
@@ -332,7 +335,6 @@ class CommandFinalizationPlanTests(unittest.TestCase):
                             frame = frame.f_back
                         self.assertIsNotNone(frame, "original journal dispatch absent")
                         journals.append(frame.f_locals["self"])
-                        mutations.append(identifier)
                         fixture._meter(request)
                         observed.append(
                             copy.deepcopy((fixture.reviews, fixture.check_runs))
@@ -350,8 +352,7 @@ class CommandFinalizationPlanTests(unittest.TestCase):
                             }
                         )
                     if payload.get("operationName") == "ResolutionReadback":
-                        self.assertEqual(mutations, [payload["variables"]["id"]])
-                        readbacks.append(payload["variables"]["id"])
+                        readbacks.append((payload["variables"]["id"], len(mutations)))
                 # Original readback owns its own metering and unchanged state.
                 return external(request, timeout)
 
@@ -369,14 +370,17 @@ class CommandFinalizationPlanTests(unittest.TestCase):
                     and frame.f_locals.get("journal") is journals[0]
                 ):
                     stopped.append(True)
-                if event == "call" and stopped:
-                    self.assertFalse(
-                        any(
-                            frame.f_code is code and frame.f_globals is namespace
-                            for code, namespace in forbidden
-                        ),
-                        "approval lookup/finalize after authenticated cleanup stop",
+                if (
+                    event == "call"
+                    and stopped
+                    and any(
+                        frame.f_code is code and frame.f_globals is namespace
+                        for code, namespace in forbidden
                     )
+                ):
+                    # Record without changing execution: a raised assertion
+                    # could be swallowed as the command's expected failure.
+                    forbidden_entries.append(frame.f_code.co_name)
 
             fixture.external = nonconfirming_cleanup
             sys.setprofile(observe)
@@ -387,7 +391,16 @@ class CommandFinalizationPlanTests(unittest.TestCase):
                 fixture.external = external
             self.assertEqual(len(mutations), 1)
             self.assertTrue(readbacks, "original cleanup readback was not reached")
+            self.assertTrue(
+                all(item == (mutations[0], 1) for item in readbacks),
+                "cleanup readback did not follow the same attempted mutation",
+            )
             self.assertTrue(stopped, "authenticated cleanup stop was not reached")
+            self.assertEqual(
+                forbidden_entries,
+                [],
+                "approval lookup/finalize after authenticated cleanup stop",
+            )
             self.assertEqual(len(observed), 1)
             self.assertEqual((fixture.reviews, fixture.check_runs), observed[0])
             self.assertIn("gate re-evaluation failed", fixture.error)
