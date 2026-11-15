@@ -10,6 +10,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 from jsonschema.validators import extend
 from referencing import Registry, Resource
+from referencing.jsonschema import DRAFT202012
 
 from .errors import ReviewInputError
 
@@ -171,6 +172,33 @@ def _schema_registry() -> Registry:
     return _SCHEMA_REGISTRY
 
 
+def _accounting_reference_registry(registry: Registry) -> Registry:
+    """Compile the known referenced program under its identical fixed dialect.
+
+    An explicit Resource specification retains Draft202012 reference semantics.
+    Omitting only the redundant dialect selector from this private program lets
+    descendant validators retain the equivalent accounting specialization.
+    Public schema bytes, IDs, reference scopes and the shared registry stay
+    unchanged. Unknown dialects keep the original resource and validator.
+    """
+    uri = "https://reviewsensei.dev/schemas/v1/api-run-accounting.schema.json"
+    try:
+        source = registry.contents(uri)
+    except KeyError:
+        return registry
+    if (
+        type(source) is not dict
+        or source.get("$schema") != "https://json-schema.org/draft/2020-12/schema"
+        or source.get("$id") != uri
+    ):
+        return registry
+    program = _inline_accounting_leaves(deepcopy(source))
+    program.pop("$schema")
+    return registry.with_resource(
+        uri, Resource.from_contents(program, default_specification=DRAFT202012)
+    )
+
+
 @lru_cache(maxsize=None)
 def _validator(schema_name: str) -> Draft202012Validator:
     schema = load_schema(schema_name)
@@ -179,10 +207,13 @@ def _validator(schema_name: str) -> Draft202012Validator:
     try:
         validator = (
             _AccountingValidator
-            if schema_name == "api-run-accounting"
+            if schema_name in {"api-run-accounting", "session-record"}
             else Draft202012Validator
         )
-        return validator(schema, registry=_schema_registry())
+        registry = _schema_registry()
+        if schema_name == "session-record":
+            registry = _accounting_reference_registry(registry)
+        return validator(schema, registry=registry)
     except Exception as exc:
         raise ReviewInputError(
             f"schema '{schema_name}' is not a valid JSON Schema"
