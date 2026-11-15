@@ -18,6 +18,101 @@ from review_sensei.errors import ReviewInputError
 from tests.test_api_work import accounting
 
 
+class OriginalAccountingGraphTests(unittest.TestCase):
+    def graph(self, value, *, models=True):
+        from review_sensei_github.guarded_pending_publication import (
+            _original_accounting_graph,
+        )
+
+        return _original_accounting_graph(value, models=models)
+
+    def test_every_original_model_field_is_visited_without_changing_accounting(self):
+        from dataclasses import fields
+
+        value = state()
+        original = canonical_bytes(value.to_document())
+        self.graph(value)
+        self.assertEqual(canonical_bytes(value.to_document()), original)
+        models = {}
+
+        def collect(item):
+            if type(item) in (tuple, list):
+                for child in item:
+                    collect(child)
+            elif hasattr(type(item), "__dataclass_fields__"):
+                models.setdefault(type(item), item)
+                for field in fields(item):
+                    collect(getattr(item, field.name))
+
+        collect(value)
+        self.assertEqual(len(models), 8)
+        for model, instance in models.items():
+            for field in fields(model):
+                with self.subTest(model=model.__name__, field=field.name):
+                    before = vars(instance)[field.name]
+                    try:
+                        object.__setattr__(instance, field.name, object())
+                        with self.assertRaises(ReviewInputError):
+                            self.graph(value)
+                    finally:
+                        object.__setattr__(instance, field.name, before)
+        self.graph(value)
+        self.assertEqual(canonical_bytes(value.to_document()), original)
+
+    def test_mutable_dataclass_metadata_cannot_hide_a_hostile_field(self):
+        item = PendingApiRequest("pending", 1)
+        object.__setattr__(item, "request_id", object())
+        metadata = PendingApiRequest.__dataclass_fields__
+        with patch.dict(
+            metadata, {"deadline_unix_ms": metadata["deadline_unix_ms"]}, clear=True
+        ):
+            with self.assertRaises(ReviewInputError):
+                self.graph(item)
+
+    def test_hostile_type_and_source_replacement_never_receive_callbacks(self):
+        calls = []
+
+        class Meta(type):
+            def __eq__(cls, other):
+                calls.append("equality")
+                return False
+
+            def __hash__(cls):
+                calls.append("hash")
+                return 0
+
+        class Foreign(metaclass=Meta):
+            def __getattribute__(self, name):
+                calls.append(name)
+                raise AssertionError(name)
+
+        for models in (False, True):
+            with self.assertRaises(ReviewInputError):
+                self.graph({"nested": [Foreign()]}, models=models)
+        value = state()
+        self.graph(value)
+        with patch.object(
+            PendingApiRequest, "__post_init__", lambda self: calls.append("source")
+        ):
+            with self.assertRaises(ReviewInputError):
+                self.graph(value)
+        self.graph(value)
+        self.assertEqual(calls, [])
+
+    def test_original_node_depth_and_cycle_bounds_remain_enforced(self):
+        cycle = []
+        cycle.append(cycle)
+        deep = None
+        for _ in range(34):
+            deep = [deep]
+        for value in (cycle, deep, [None] * 20000):
+            with self.assertRaises(ReviewInputError):
+                self.graph(value, models=False)
+        self.graph([None] * 19999, models=False)
+        with self.assertRaises(ReviewInputError):
+            self.graph(state(), models=False)
+
+
 def state():
     value = accounting(limit=512).reserve("old", 3)
     value = value.dispatch("old", PendingApiRequest("old-unknown", 99))
