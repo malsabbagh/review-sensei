@@ -60,3 +60,40 @@ class SessionHistoryNormalizationTests(unittest.TestCase):
             ObservingRecord.from_dict(original.to_dict()).to_dict(), original.to_dict()
         )
         self.assertEqual(entered, [True])
+
+    def test_create_and_evolve_keep_full_history_validation_and_fresh_values(self):
+        history = SessionRecordTests()._history()
+        record = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, convergence_history=history
+        )
+        expected = deepcopy(record.to_dict())
+        history["baseline"]["findings"].clear()
+        self.assertEqual(record.to_dict(), expected)
+        for change in (
+            lambda h: h["baseline"]["findings"][0].update(extra=True),
+            lambda h: h["baseline"]["findings"][0].update(blocking="yes"),
+            lambda h: h["progress"][0].update(generation=True),
+            lambda h: h["provenance"].update(ledger_digest="invalid"),
+        ):
+            history = deepcopy(record.convergence_history)
+            change(history)
+            with self.assertRaises(ReviewInputError):
+                SessionRecord.create(
+                    IDENTITY, now=FIXED_NOW, convergence_history=history
+                )
+            with self.assertRaises(ReviewInputError):
+                record.evolve(now=FIXED_NOW, convergence_history=history)
+
+    def test_subclass_create_prevalidation_still_precedes_constructor_callbacks(self):
+        entered = []
+
+        class ObservingRecord(SessionRecord):
+            def __post_init__(self, digest_shape):
+                entered.append(True)
+                super().__post_init__(digest_shape)
+
+        history = SessionRecordTests()._history()
+        history["baseline"]["findings"][0]["blocking"] = "invalid"
+        with self.assertRaises(ReviewInputError):
+            ObservingRecord.create(IDENTITY, now=FIXED_NOW, convergence_history=history)
+        self.assertEqual(entered, [])
