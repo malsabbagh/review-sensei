@@ -839,6 +839,108 @@ class FreshStaticMemberSnapshotTests(unittest.TestCase):
         require_module_seal(session)
 
 
+class IdentityTableReaderTests(unittest.TestCase):
+    """The identity tables refuse exactly as the original row reader does."""
+
+    @staticmethod
+    def _closure(function):
+        return dict(
+            zip(
+                function.__code__.co_freevars,
+                (cell.cell_contents for cell in function.__closure__),
+            )
+        )
+
+    @staticmethod
+    def _seal_outcome(module):
+        try:
+            require_module_seal(module)
+        except ReviewInputError as refused:
+            return str(refused)
+        return None
+
+    def _original_reader_outcome(self, module):
+        tables = self._closure(require_module_seal)["binding_tables"]
+        # A table whose first identity never matches always reruns the
+        # original reader over every row.
+        miss = (("\0missing",), (object(),), (), (), (), (), (), (), ())
+        with patch.dict(tables, dict.fromkeys(tables, miss)):
+            return self._seal_outcome(module)
+
+    def _changes(self, owner, name, original):
+        missing = object()
+
+        def other():
+            return None
+
+        class Metadata(dict):
+            def get(self, *args):
+                raise AssertionError("metadata lookup callback")
+
+        def attribute(field, replacement):
+            saved = vars(original).get(field, missing)
+            if field != "__wrapped__":
+                saved = getattr(original, field)
+            setattr(original, field, replacement)
+            try:
+                yield field
+            finally:
+                if saved is missing:
+                    delattr(original, field)
+                else:
+                    setattr(original, field, saved)
+
+        yield from attribute("__code__", original.__code__.replace(co_name="changed"))
+        yield from attribute("__defaults__", (object(),))
+        yield from attribute("__kwdefaults__", {"changed": None})
+        yield from attribute("__dict__", Metadata(vars(original)))
+        yield from attribute("__wrapped__", other)
+        namespace = vars(owner)
+        if namespace.get(name) is original:
+            rebound = types.FunctionType(
+                original.__code__,
+                dict(original.__globals__),
+                original.__name__,
+                original.__defaults__,
+                original.__closure__,
+            )
+            setattr(owner, name, rebound)
+            try:
+                yield "__globals__"
+            finally:
+                setattr(owner, name, original)
+
+    def test_function_changes_match_the_original_reader_outcome(self):
+        from review_sensei_github import http
+
+        seal = self._closure(require_module_seal)
+        classes = self._closure(seal["require_class"])["classes"]
+        checked = set()
+        for module in (disposition, http):
+            self.assertIsNone(self._original_reader_outcome(module))
+            self.assertIsNone(self._seal_outcome(module))
+            owners = [(module, seal["registered"][module])]
+            owners.extend(
+                (cls, classes[cls][4]) for cls in seal["module_classes"][module]
+            )
+            for owner, rows in owners:
+                for row_owner, name, original, _code in rows:
+                    if (
+                        row_owner is not owner
+                        or type(original) is not types.FunctionType
+                        or original in checked
+                    ):
+                        continue
+                    checked.add(original)
+                    for change in self._changes(owner, name, original):
+                        with self.subTest(owner=owner, name=name, change=change):
+                            expected = self._original_reader_outcome(module)
+                            self.assertIsNotNone(expected)
+                            self.assertEqual(self._seal_outcome(module), expected)
+            self.assertIsNone(self._seal_outcome(module))
+        self.assertGreater(len(checked), 20)
+
+
 class OriginalClassExportIdentityTests(unittest.TestCase):
     def test_original_export_returns_class_without_instantiation(self):
         from review_sensei import session
