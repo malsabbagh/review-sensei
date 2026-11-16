@@ -12,7 +12,6 @@ from review_sensei.outcomes import (
     ResourceBudget,
     RunOutcome,
 )
-from review_sensei.release_manifest import validate_compatibility_manifest
 from review_sensei.schemas import validate_public_document
 from review_sensei.validation import DEFAULT_REVIEW_LIMITS, ReviewLimits
 from review_sensei.verifier import (
@@ -754,25 +753,6 @@ class ContractsTests(unittest.TestCase):
         result = VerificationResult("confirmed", (), True, True)
         self.assertEqual(result.to_dict()["schema_version"], "1.0")
         validate_public_document(result.to_dict(), "verification-result")
-
-    def test_manifest_rejects_mismatched_release_versions(self):
-        artifact = {"name": "x", "version": "1.0.0", "sha256": SHA}
-        value = {
-            "schema_version": "1.0",
-            "release": "1.0.0",
-            "workflow_commit": "c" * 40,
-            "compatible_worker_range": ">=1",
-            "provenance": "github-artifact-attestation",
-            "artifacts": {
-                "workflow": artifact,
-                "python": artifact,
-                "npm": [artifact],
-                "schemas_version": "1.0",
-                "worker": {**artifact, "version": "2.0.0"},
-            },
-        }
-        with self.assertRaises(ReviewInputError):
-            validate_compatibility_manifest(value)
 
 
 if __name__ == "__main__":

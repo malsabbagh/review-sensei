@@ -631,12 +631,12 @@ def load_tests(loader,tests,pattern): return tests
         ]
         commands = [
             step["run"]
-            for step in workflow["compatibility"]["steps"]
+            for step in workflow["compatibility-shard"]["steps"]
             if "scripts/run_checkout_tests.py" in step.get("run", "")
         ]
         commands += [
             line
-            for step in workflow["quality"]["steps"]
+            for step in workflow["coverage-shard"]["steps"]
             for line in step.get("run", "").splitlines()
             if "scripts/run_checkout_tests.py" in line
         ]

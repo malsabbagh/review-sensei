@@ -1,6 +1,8 @@
 """Production broker transfer controls run in the dependency-complete Worker lane."""
 
 import ast
+import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
@@ -33,12 +35,35 @@ class QuarantineTransferLaneTests(unittest.TestCase):
         )
         workflow = (root / ".github/workflows/ci.yml").read_text()
         worker = workflow.split("  workers:\n", 1)[1].split("\n  codeql:\n", 1)[0]
-        command = (
-            "python -W error::ResourceWarning -m unittest "
-            "tests.quarantine_worker_qualification "
-            f"tests.{module} -v"
+        spec = importlib.util.spec_from_file_location(
+            "worker_qualification_transfer_plan",
+            root / "scripts/run_worker_qualifications.py",
         )
-        self.assertEqual(workflow.count(f"tests.{module}"), 1)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        plan = runner.commands()
+        matching = [entry for entry in plan if f"tests.{module}" in entry[1]]
+        self.assertEqual(
+            matching,
+            [
+                (
+                    "quarantine",
+                    (
+                        sys.executable,
+                        "-W",
+                        "error::ResourceWarning",
+                        "-m",
+                        "unittest",
+                        "tests.quarantine_worker_qualification",
+                        f"tests.{module}",
+                        "-v",
+                    ),
+                    {},
+                )
+            ],
+        )
+        command = "python scripts/run_worker_qualifications.py --report"
+        self.assertEqual(workflow.count(command), 1)
         self.assertIn(command, worker)
         self.assertLess(worker.index("run: npm ci"), worker.index(command))
         self.assertIn('node-version: "22"', worker)

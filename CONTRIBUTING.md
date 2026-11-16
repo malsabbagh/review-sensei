@@ -127,13 +127,21 @@ its exact inventory, and
 waits for every worker even when a test fails. Separate worker logs are replayed
 in worker order with inventory counts and exit codes so failures are attributable.
 Discovery errors, empty inventories
-and failed workers fail the lane. Module/class fixtures run inside each worker;
+and failed workers fail the lane. CI splits each lane's plan across runners
+with `--shard INDEX/COUNT`: every shard computes the same complete plan and runs
+only its own worker buckets (the controller phase runs in shard 1), and the lane
+job runs `scripts/verify_test_shards.py` to prove that the shards agreed on one
+inventory and plan, ran every bucket exactly once, accounted for every test and
+passed. Sharded plans may split a class with no class or module fixtures across
+workers. If hooks force original-root execution, shard 1 runs the original root
+and the other shards run nothing. Module/class fixtures run inside each worker;
 cross-class mutable state must not be shared. Release-preparation fixtures clone
 one precommitted, normalized source seed into independent object stores instead
 of repeatedly copying, hashing and committing the same tree. No live repository
-or production release preparation is cached. The quality lane runs the same complete inventory in four processes with
-isolated branch-coverage data, combines every worker file, and retains the 80%
-floor. Missing worker coverage or incomplete execution fails the lane.
+or production release preparation is cached. The coverage shards run the same complete inventory in four processes each with
+isolated branch-coverage data; Quality gates verifies the shards, combines every
+shard's data, and retains the 80% floor. Missing worker coverage or incomplete
+execution fails the lane.
 Measured class costs in `tests/fixtures/checkout-class-seconds.json` affect only
 scheduling; unknown classes receive a conservative per-method estimate. Refresh
 these estimates from archived per-worker timing receipts, never by excluding
@@ -147,6 +155,17 @@ Unreadable counts are explicit `executed: null` with empty `class_seconds`; a
 valid zero count remains distinguishable and cannot match a nonempty assignment.
 Combined checkout coverage is saved as `.coverage` in the runner working
 directory, the public handoff consumed by the next `coverage report` command.
+
+Use `scripts/refresh_checkout_costs.py` to refresh scheduling hints from a complete
+checkout timing receipt and a JSON list of currently discovered class names.
+It does not discover or run tests. The helper rejects damaged or incomplete
+accounting; failed-but-fully-executed receipts require `--allow-failing-tests`
+and are explicitly reported as failures. Such timings can understate successful
+paths and never qualify a candidate. Obsolete cost hints are reported and omitted;
+unmeasured classes remain in normal discovery with the runner's fallback estimate.
+Keep the artifact, source, platform and inventory provenance with a refresh.
+See [the November 14 runtime audit](docs/ci-runtime-audit-2026-11-14.md) for the
+current measurement limits and preserved CI contracts.
 
 CI's Python jobs cache public pip downloads using all pinned requirements
 and both package manifests as cache inputs; they reinstall the current checkout and

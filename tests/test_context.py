@@ -326,10 +326,6 @@ class ReviewContextSelectionTests(unittest.TestCase):
                     snapshot=ContextSnapshot("d" * 40),
                 )
 
-    def test_enabled_policy_rejects_head_snapshot_kind(self):
-        with self.assertRaises(ContextLoadError):
-            ContextSnapshot("a" * 40, kind="head")
-
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

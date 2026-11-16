@@ -1,0 +1,32 @@
+{
+  "cost_fixture": "tests/fixtures/installed-unit-seconds.json",
+  "cost_fixture_sha256": "0b6ebb134a0deaecfb61bc55421e8c0eb77a0a8e24577dc463d7c6cd55be55cd",
+  "cost_fixture_sha256_encoding": "Canonical-LF UTF-8 (universal-newline text encoded as UTF-8); timing_json_sha256 remains the raw archived receipt byte hash",
+  "run_url": "https://github.com/malsabbagh/review-sensei/actions/runs/43626273898",
+  "job_url": "https://github.com/malsabbagh/review-sensei/actions/runs/43626273898/job/132542807638",
+  "artifact_id": 14131367317,
+  "run_id": 43626273898,
+  "job_id": 132542807638,
+  "measurement_kind": "Per-unit test-body time from all four complete-accounted workers, not completion-log deltas",
+  "timing_json_sha256": "0bab73ad0e5e83a8bdbaa7317337bfbc78f8992212c5df30a7fe7b73e2acc2eb",
+  "inventory_sha256": "feb197d68ba235820232fc83be6b5e00b3888654bcf04f0ba57ff143189c4fc6",
+  "discovered": 1139,
+  "modules": 45,
+  "measured_units": 68,
+  "all_workers_execution_complete": true,
+  "worker_exits": [
+    1,
+    1,
+    1,
+    1
+  ],
+  "complete": false,
+  "tests_passed": false,
+  "elapsed_seconds": 8207.605,
+  "scheduling_only": true,
+  "caveat": "Historical advisory costs only. Failed paths may understate passing runtime; no current qualification or wall-time improvement is implied.",
+  "refresh_command": "python scripts/refresh_installed_costs.py installed-suite-timings.json --allow-failing-tests --output tests/fixtures/installed-unit-seconds.json",
+  "inventory_policy": "All 68 historical measurements retained. These are scheduling weights, never a selected-test inventory. Unknown units retain runner fallback.",
+  "method_shard_policy": "The checkpoint parent cost is measured; its seven method costs are not. The reviewed runner temporarily divides this parent hint equally and reports those methods as uncosted until actual method receipts exist.",
+  "qualification_policy": "The historical run failed. No current green gate, per-method measurement, end-to-end speedup or sub-30-minute completion is claimed."
+}

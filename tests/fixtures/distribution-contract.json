@@ -218,6 +218,7 @@
         "tests/__init__.py",
         "tests/test_ci_policy.py",
         "tests/test_checkout_runner.py",
+        "tests/test_checkout_timing_refresh.py",
         "tests/test_cloudflare_package.py",
         "tests/test_github_conversation.py",
         "tests/test_github_publication.py",

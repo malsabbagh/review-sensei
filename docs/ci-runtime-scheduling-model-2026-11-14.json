@@ -1,0 +1,234 @@
+[
+  {
+    "platform": "macos",
+    "inventory_sha256": "289266f1465064086bde3354d41ca04bc9bdffd80662bbd1ec9f4ef6e3e39928",
+    "discovered": 6813,
+    "original_assignment_hashes_reproduced": true,
+    "all_test_ids_retained": true,
+    "measured_wall_seconds": 9561.497,
+    "recorded_total_worker_class_seconds": 32972.18342603799,
+    "model_original_critical_worker_seconds": 9552.801738121989,
+    "model_refreshed_critical_worker_seconds": 8243.599630004997,
+    "modeled_reduction_seconds": 1309.2021081169914,
+    "modeled_reduction_percent": 13.70490191262329,
+    "old_assignments": [
+      {
+        "assigned": 1724,
+        "inventory_sha256": "66d3adb8279fedeca7d1d78808a73752ddb217931eda2d5b5f9d76dc37e67a4e",
+        "model_seconds": 7424.639983607001
+      },
+      {
+        "assigned": 1689,
+        "inventory_sha256": "459cb77fd330a6535c13041af84d234efbe1be4416067acd0fd75a32284a46f3",
+        "model_seconds": 8337.065499849989
+      },
+      {
+        "assigned": 1555,
+        "inventory_sha256": "8ac4279a67b9d691694bf1659df5e790065bbda224d270b298bc8206c4fc7b80",
+        "model_seconds": 9552.801738121989
+      },
+      {
+        "assigned": 1729,
+        "inventory_sha256": "7e3c5ef2e4158b364d89d8e55a1fe2b7e6feab594c87588f0b4dcf9605338d28",
+        "model_seconds": 7657.676204459009
+      }
+    ],
+    "new_assignments": [
+      {
+        "assigned": 1726,
+        "inventory_sha256": "11b21ea46d923d4a7e527255dbe83636826ae415ea59cdb998662f8263241074",
+        "model_seconds": 8242.652620287983
+      },
+      {
+        "assigned": 1449,
+        "inventory_sha256": "d9e907e2124b332f949b11bbedcb067cc3c054ff746153cc16cca65292f00bf2",
+        "model_seconds": 8242.359758073002
+      },
+      {
+        "assigned": 1783,
+        "inventory_sha256": "0f6e28412dd95d550af00e74bbb6b7a5c3ffb06d0c639c488ee24c0eff750fde",
+        "model_seconds": 8243.571417672005
+      },
+      {
+        "assigned": 1739,
+        "inventory_sha256": "125347eddc0ade297b3f2153bf836f46cfe723485f05f2eb4b49ecc779a85c1b",
+        "model_seconds": 8243.599630004997
+      }
+    ],
+    "caveat": "Counterfactual replay at fixed historical class times; not an observed new wall time. All historical workers failed; no full suite rerun."
+  },
+  {
+    "platform": "linux",
+    "inventory_sha256": "289266f1465064086bde3354d41ca04bc9bdffd80662bbd1ec9f4ef6e3e39928",
+    "discovered": 6813,
+    "original_assignment_hashes_reproduced": true,
+    "all_test_ids_retained": true,
+    "measured_wall_seconds": 8988.009,
+    "recorded_total_worker_class_seconds": 31053.007638504037,
+    "model_original_critical_worker_seconds": 8982.469164925016,
+    "model_refreshed_critical_worker_seconds": 7763.759980014018,
+    "modeled_reduction_seconds": 1218.7091849109984,
+    "modeled_reduction_percent": 13.567641174543036,
+    "old_assignments": [
+      {
+        "assigned": 1724,
+        "inventory_sha256": "66d3adb8279fedeca7d1d78808a73752ddb217931eda2d5b5f9d76dc37e67a4e",
+        "model_seconds": 7033.967493773002
+      },
+      {
+        "assigned": 1689,
+        "inventory_sha256": "459cb77fd330a6535c13041af84d234efbe1be4416067acd0fd75a32284a46f3",
+        "model_seconds": 7879.130816316017
+      },
+      {
+        "assigned": 1555,
+        "inventory_sha256": "8ac4279a67b9d691694bf1659df5e790065bbda224d270b298bc8206c4fc7b80",
+        "model_seconds": 8982.469164925016
+      },
+      {
+        "assigned": 1729,
+        "inventory_sha256": "7e3c5ef2e4158b364d89d8e55a1fe2b7e6feab594c87588f0b4dcf9605338d28",
+        "model_seconds": 7157.440163490002
+      }
+    ],
+    "new_assignments": [
+      {
+        "assigned": 1751,
+        "inventory_sha256": "2dd0400309f1c4ce292b5fb6b720a20e07d72eccc33379f0912227cfc66f4bd5",
+        "model_seconds": 7763.759980014018
+      },
+      {
+        "assigned": 1686,
+        "inventory_sha256": "391d3efffbec357ed1936584424b00e282e38ed3009f416f75f124e8bb4c235d",
+        "model_seconds": 7762.4953484880225
+      },
+      {
+        "assigned": 1702,
+        "inventory_sha256": "6ae49d21c2ea3b237e2756d43643eed6bd6bb38f885f4f513d98de478171257f",
+        "model_seconds": 7763.575659448988
+      },
+      {
+        "assigned": 1558,
+        "inventory_sha256": "677109c4550bd50d47c00c6b1b136b0333e778b6314cb3735470d09af23c04f9",
+        "model_seconds": 7763.1766505530095
+      }
+    ],
+    "caveat": "Counterfactual replay at fixed historical class times; not an observed new wall time. All historical workers failed; no full suite rerun."
+  },
+  {
+    "platform": "coverage",
+    "inventory_sha256": "f711a3ba0659cf99ff44c6055bfb673a6b4933ad551e381a4630e95a1328aea5",
+    "discovered": 6352,
+    "original_assignment_hashes_reproduced": true,
+    "all_test_ids_retained": true,
+    "measured_wall_seconds": 8632.589,
+    "recorded_total_worker_class_seconds": 29920.773879583012,
+    "model_original_critical_worker_seconds": 8620.932260884003,
+    "model_refreshed_critical_worker_seconds": 7480.671372244005,
+    "modeled_reduction_seconds": 1140.2608886399976,
+    "modeled_reduction_percent": 13.226654080252262,
+    "old_assignments": [
+      {
+        "assigned": 1639,
+        "inventory_sha256": "66a855ce54e054c3a7be5cb4b6d4d7f5f2899c82c168786b3460c56c72a80623",
+        "model_seconds": 5816.491549558996
+      },
+      {
+        "assigned": 1370,
+        "inventory_sha256": "39346d431ba26295ace3173e3e9a9cd53b07f1578a87622adec6f0b8a663bbd4",
+        "model_seconds": 7963.329990172002
+      },
+      {
+        "assigned": 1614,
+        "inventory_sha256": "77c2082f4c3bdf65f544e6bdc1cae91d52f749a177ec6642c92c6897024bf409",
+        "model_seconds": 8620.932260884003
+      },
+      {
+        "assigned": 1613,
+        "inventory_sha256": "99adeeb6f66660981008bc3e0b667cd3275de00c2543dfcad0a007e61346d2e1",
+        "model_seconds": 7520.020078968011
+      }
+    ],
+    "new_assignments": [
+      {
+        "assigned": 1573,
+        "inventory_sha256": "dc057bf37c0e9130882e8000574da1a720141e653168fe00762b6e66c390d6bb",
+        "model_seconds": 7480.63656471
+      },
+      {
+        "assigned": 1276,
+        "inventory_sha256": "3247f5cd0b5c1f22bb067858d811546aba84ec901d9d2a4bfe9cdbd87b99e7d6",
+        "model_seconds": 7479.553519070007
+      },
+      {
+        "assigned": 1605,
+        "inventory_sha256": "8315b09aee0d675b1ec1cd3af63d334e832c1aadbea7c654b626892adf2f80eb",
+        "model_seconds": 7479.912423559
+      },
+      {
+        "assigned": 1782,
+        "inventory_sha256": "dcab3d89277902b1d4e61472a181c9f29a1da4b88397665781cf739b679cb000",
+        "model_seconds": 7480.671372244005
+      }
+    ],
+    "caveat": "Counterfactual replay at fixed historical class times; not an observed new wall time. All historical workers failed; no full suite rerun."
+  },
+  {
+    "platform": "windows",
+    "inventory_sha256": "f711a3ba0659cf99ff44c6055bfb673a6b4933ad551e381a4630e95a1328aea5",
+    "discovered": 6352,
+    "original_assignment_hashes_reproduced": true,
+    "all_test_ids_retained": true,
+    "measured_wall_seconds": 2444.625,
+    "recorded_total_worker_class_seconds": 9094.252,
+    "model_original_critical_worker_seconds": 2384.125000000001,
+    "model_refreshed_critical_worker_seconds": 2283.221,
+    "modeled_reduction_seconds": 100.9040000000009,
+    "modeled_reduction_percent": 4.232328422377218,
+    "old_assignments": [
+      {
+        "assigned": 1617,
+        "inventory_sha256": "61e9a3bd2e0bb661c253eb1835157d64fe638c217a0aee40671cb69823910ba4",
+        "model_seconds": 2384.125000000001
+      },
+      {
+        "assigned": 1443,
+        "inventory_sha256": "a1ece7fa0165f8043cbd92a2c7bf37100e3418b7bd71d45a3b6e85f1c9da0f58",
+        "model_seconds": 2185.173
+      },
+      {
+        "assigned": 1447,
+        "inventory_sha256": "b77d978a01c6dc1abb012964301df93c1fc638a9a005cf69f5d17e355a848bf1",
+        "model_seconds": 2363.47
+      },
+      {
+        "assigned": 1729,
+        "inventory_sha256": "6abcbecfcfa9815e0d6d14a510213efeb55b881e3b691301a0417695a46ca885",
+        "model_seconds": 2161.484
+      }
+    ],
+    "new_assignments": [
+      {
+        "assigned": 1530,
+        "inventory_sha256": "cdf7744b4c5d81eb7b88b9b2ba42cf32d5b455796d0975a0c719cc4c9d7832eb",
+        "model_seconds": 2283.221
+      },
+      {
+        "assigned": 2022,
+        "inventory_sha256": "d77d9cb5ec0eb8251a1611cbec74d1472d229e23aaa403b9c59742e54fdffd72",
+        "model_seconds": 2268.203000000001
+      },
+      {
+        "assigned": 1371,
+        "inventory_sha256": "bb748a23b608ff5b56508bde48386276a6237ee6b1a0441b3fe8d3aaf86a3072",
+        "model_seconds": 2267.682
+      },
+      {
+        "assigned": 1313,
+        "inventory_sha256": "7c4d643092317a94dab029b197a354fa7aa7f206456f51d6d945e2313e3576cb",
+        "model_seconds": 2275.1459999999993
+      }
+    ],
+    "caveat": "Counterfactual replay at fixed historical class times; not an observed new wall time. All historical workers failed; no full suite rerun."
+  }
+]
