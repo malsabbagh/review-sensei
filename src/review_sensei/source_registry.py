@@ -9,6 +9,8 @@ from __future__ import annotations
 import copyreg
 import inspect
 import sys
+from itertools import compress, repeat
+from operator import attrgetter, is_, methodcaller, or_
 from types import FunctionType, MethodType, ModuleType
 from typing import Any
 
@@ -21,6 +23,7 @@ def _build_registry():
     classes: dict[type, Any] = {}
     module_classes: dict[ModuleType, tuple[type, ...]] = {}
     function_definitions: dict[Any, Any] = {}
+    binding_tables: dict[Any, Any] = {}
     no_wrapper = object()
     immutable_default = object()
     ancestor_default = object()
@@ -188,6 +191,80 @@ def _build_registry():
                 return True
             function = wrapped
 
+    def binding_table(bindings, owner):
+        # Index immutable definitions for one owner's original function rows:
+        # names, identities and every pinned wrapper link's code, namespace,
+        # defaults and unwrap target. Never a record of a validation result.
+        names, originals, links = [], [], {}
+        others = []
+        for row in bindings:
+            row_owner, name, original, _code = row
+            if row_owner is not owner or type(original) is not FunctionType:
+                others.append(row)
+                continue
+            names.append(name)
+            originals.append(original)
+            function = original
+            while function not in links:
+                definition = function_definitions[function]
+                links[function] = definition
+                if definition[3] is no_wrapper:
+                    break
+                function = definition[3]
+        functions = tuple(links)
+        definitions = tuple(links.values())
+        return (
+            tuple(names),
+            tuple(originals),
+            functions,
+            tuple(definition[0] for definition in definitions),
+            tuple(definition[1] for definition in definitions),
+            tuple(
+                function
+                for function, definition in links.items()
+                if definition[2] is empty_defaults
+            ),
+            tuple(
+                (function, definition[2])
+                for function, definition in links.items()
+                if definition[2] is not empty_defaults
+            ),
+            tuple(definition[3] for definition in definitions),
+            tuple(others),
+        )
+
+    current_code = attrgetter("__code__")
+    current_globals = attrgetter("__globals__")
+    current_positional = attrgetter("__defaults__")
+    current_keywords = attrgetter("__kwdefaults__")
+    current_metadata = attrgetter("__dict__")
+    current_wrapped = methodcaller("get", "__wrapped__", no_wrapper)
+
+    def functions_unchanged(table, namespace):
+        # The same identity checks as require_bindings/function_unchanged for
+        # every original function row and link, run by C iteration. Exact
+        # FunctionType attributes and identity comparison invoke no callbacks;
+        # metadata is read only after every dictionary is exactly dict.
+        names, originals, functions, codes, globals_, plain, defaulted, wrapped = table[
+            :8
+        ]
+        if not (
+            all(map(is_, map(namespace.get, names), originals))
+            and all(map(is_, map(current_code, functions), codes))
+            and all(map(is_, map(current_globals, functions), globals_))
+            and all(map(is_, map(current_positional, plain), repeat(None)))
+            and all(map(is_, map(current_keywords, plain), repeat(None)))
+            and all(
+                defaults_unchanged(function, snapshot)
+                for function, snapshot in defaulted
+            )
+        ):
+            return False
+        metadata = tuple(map(current_metadata, functions))
+        return all(map(is_, map(type, metadata), repeat(dict))) and all(
+            map(is_, map(current_wrapped, metadata), wrapped)
+        )
+
     def seal_module():
         current = inspect.currentframe()
         frame = current.f_back if current is not None else None
@@ -280,6 +357,9 @@ def _build_registry():
         # a cached successful validation: every request rechecks current source.
         registered[module] = tuple(row for row in bindings if row[0] is module)
         module_classes[module] = tuple(defined_classes)
+        binding_tables[module] = binding_table(registered[module], module)
+        for cls in defined_classes:
+            binding_tables[cls] = binding_table(classes[cls][4], cls)
 
     def require_bindings(bindings, *, owner_snapshot=None):
         for owner, name, original, code in bindings:
@@ -319,7 +399,7 @@ def _build_registry():
                 if type(base) is not type:
                     break
                 namespace = vars(base)
-                if any(type(name) is not str for name in namespace):
+                if not all(map(is_, map(type, namespace), repeat(str))):
                     break
                 namespaces.append(namespace)
             else:
@@ -329,7 +409,19 @@ def _build_registry():
                 # With the exact built-in metaclass, type.__dir__ enumerates
                 # these same namespaces again and sorts their names. Neither
                 # a second traversal nor sorting contributes source evidence.
-                return {name: normalize(member) for name, member in merged.items()}
+                kinds = tuple(map(type, merged.values()))
+                wrapped = map(
+                    or_,
+                    map(
+                        or_,
+                        map(is_, kinds, repeat(MethodType)),
+                        map(is_, kinds, repeat(staticmethod)),
+                    ),
+                    map(is_, kinds, repeat(classmethod)),
+                )
+                for name in tuple(compress(merged, wrapped)):
+                    merged[name] = merged[name].__func__
+                return merged
         return {name: normalize(inspect.getattr_static(cls, name)) for name in dir(cls)}
 
     def require_class(cls):
@@ -357,16 +449,28 @@ def _build_registry():
         # successful source check is cached between requests. Preserve the
         # original early metadata refusals before enumerating any members.
         members = static_members(cls)
+        values = tuple(members.values())
         if (
             frozenset(
-                name
-                for name, member in members.items()
-                if callable(member) or issubclass(type(member), property)
+                compress(
+                    members,
+                    map(
+                        or_,
+                        map(callable, values),
+                        map(issubclass, map(type, values), repeat(property)),
+                    ),
+                )
             )
             != executable
         ):
             raise ReviewInputError("original class source changed")
-        require_bindings(bindings, owner_snapshot=(cls, members))
+        # Any difference reruns the original per-row reader, so refusal order
+        # and messages are unchanged. Other rows always use that reader.
+        table = binding_tables[cls]
+        if not functions_unchanged(table, members):
+            require_bindings(bindings, owner_snapshot=(cls, members))
+        elif table[8]:
+            require_bindings(table[8], owner_snapshot=(cls, members))
 
     def require_module_seal(module):
         if type(module) is not ModuleType:
@@ -384,7 +488,11 @@ def _build_registry():
         # values directly: normalizing a replacement bound method/descriptor
         # could incorrectly accept changed call semantics as the same function.
         # Reuse this invocation's live namespace, never a prior acceptance.
-        require_bindings(bindings, owner_snapshot=(module, namespace))
+        table = binding_tables[module]
+        if not functions_unchanged(table, namespace):
+            require_bindings(bindings, owner_snapshot=(module, namespace))
+        elif table[8]:
+            require_bindings(table[8], owner_snapshot=(module, namespace))
         for cls in module_classes[module]:
             require_class(cls)
 

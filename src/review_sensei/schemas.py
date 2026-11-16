@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import re
 from collections.abc import Iterable
 from copy import deepcopy
@@ -273,17 +275,67 @@ def _validator(schema_name: str) -> Draft202012Validator:
         ) from exc
 
 
-def validate_public_document(instance: object, schema_name: str) -> None:
-    """Validate one public document, raising ``ReviewInputError`` on failure."""
+_VALID_DOCUMENT_LIMIT = 4096
+_VALID_DOCUMENT_DEPTH = 64
+_valid_documents: dict[tuple[str, bytes], object] = {}
 
+
+def _exact_json(value: object, depth: int = 0) -> bool:
+    if depth > _VALID_DOCUMENT_DEPTH:
+        return False
+    kind = type(value)
+    if value is None or kind is str or kind is bool or kind is int:
+        return True
+    if kind is float:
+        return math.isfinite(value)  # type: ignore[arg-type]
+    if kind is list:
+        return all(_exact_json(item, depth + 1) for item in value)  # type: ignore[attr-defined]
+    if kind is dict:
+        return all(
+            type(key) is str and _exact_json(item, depth + 1)
+            for key, item in value.items()  # type: ignore[attr-defined]
+        )
+    return False
+
+
+def _document_digest(instance: object) -> bytes | None:
+    # Subclasses can present a validator different content than the encoder
+    # serializes, so only exact JSON types share an outcome by content.
+    if not _exact_json(instance):
+        return None
+    try:
+        text = json.dumps(
+            instance, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (ValueError, RecursionError):
+        return None
+    return hashlib.sha256(text.encode("utf-8")).digest()
+
+
+def validate_public_document(instance: object, schema_name: str) -> None:
+    """Validate one public document, raising ``ReviewInputError`` on failure.
+
+    A document whose exact JSON content already validated against the same
+    validator is accepted without a second traversal. Invalid documents are
+    never remembered, so every failure reports its complete error count.
+    """
+
+    validator = _validator(schema_name)
+    digest = _document_digest(instance)
+    if digest is not None and _valid_documents.get((schema_name, digest)) is validator:
+        return
     errors = sorted(
-        _validator(schema_name).iter_errors(instance),
+        validator.iter_errors(instance),
         key=lambda error: list(error.path),
     )
     if errors:
         raise ReviewInputError(
             f"{schema_name} document failed schema validation ({len(errors)} error(s))"
         )
+    if digest is not None:
+        if len(_valid_documents) >= _VALID_DOCUMENT_LIMIT:
+            _valid_documents.clear()
+        _valid_documents[schema_name, digest] = validator
 
 
 def validate_public_documents(instances: Iterable[object], schema_name: str) -> None:
