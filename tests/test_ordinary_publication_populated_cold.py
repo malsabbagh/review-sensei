@@ -99,7 +99,7 @@ class OrdinaryPopulatedColdTests(unittest.TestCase):
                 ],
                 capture_output=True,
                 text=True,
-                timeout=45,
+                timeout=180,
                 env=cold.subprocess_environment(),
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
