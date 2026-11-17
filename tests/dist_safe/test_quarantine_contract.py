@@ -71,7 +71,7 @@ INSTALLED_METHOD_SHARD_CONTRACT = (
                 ),
                 (
                     "test_action_run.py",
-                    "e7f669481eae0347d6c2cb0a34bce369cfce6949a59e7b9de840c905fe808e77",
+                    "d704283ef492fe3daefaa3eb4797fdfa95dfbfba03c1d1d57c850307177109c7",
                 ),
                 (
                     "test_review_run.py",
@@ -79,7 +79,7 @@ INSTALLED_METHOD_SHARD_CONTRACT = (
                 ),
                 (
                     "test_api_work_lifecycle.py",
-                    "51e015928f8b4298d3553a885223699cefaf45e4be675c15295b78c9cccadffa",
+                    "1634e38f532b05e4cf90c4c7d8332b9b3b2c7e1addd096127a2dfa48605cb61a",
                 ),
                 (
                     "test_api_work_public_review.py",
@@ -100,6 +100,10 @@ INSTALLED_METHOD_SHARD_CONTRACT = (
                 (
                     "original_finish_interrupt.py",
                     "9dc08c0eaa96ff76246bfb4904970fd9819c64c9dc2f731250b1628ccc401f1c",
+                ),
+                (
+                    "original_source_observation.py",
+                    "d3ca86402609a9d8b8f48df0d46b322f6b0c70f9a1a6c08fe11398e0a34cfc5b",
                 ),
                 (
                     "fake_github_http.py",

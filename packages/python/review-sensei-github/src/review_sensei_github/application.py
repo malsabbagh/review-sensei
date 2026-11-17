@@ -18,7 +18,7 @@ from review_sensei.active_finding_window import (
     assert_no_deferred_leakage,
 )
 from review_sensei.baseline import ReviewBaseline
-from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from review_sensei.convergence import (
@@ -2844,6 +2844,19 @@ class GitHubApplication:
                                 "finding lifecycle prior effect requires reconciliation"
                             )
                         carried_document = None
+                    caller = getattr(ledger, "caller", None)
+                    owned = getattr(caller, "_effect_record", None)
+                    journal_record = (
+                        owned
+                        if owned is not None
+                        and type(owned) is type(lifecycle_loaded.record)
+                        and getattr(caller, "_root", None)
+                        == lifecycle_loaded.record.record_sha256
+                        and owned.record_sha256 == lifecycle_loaded.record.record_sha256
+                        and canonical_bytes(owned.to_dict())
+                        == canonical_bytes(lifecycle_loaded.record.to_dict())
+                        else lifecycle_loaded.record
+                    )
                     reviewer._finding_lifecycle_journal = FindingLifecycleJournal(
                         reviewer,
                         ledger,
@@ -2855,7 +2868,7 @@ class GitHubApplication:
                         configuration_digest=lifecycle_configuration_digest,
                         document=carried_document,
                         app_slug=app_slug,
-                        record=lifecycle_loaded.record,
+                        record=journal_record,
                         review_token=token,
                         check_token=capability.token,
                     )
@@ -4789,6 +4802,7 @@ class GitHubApplication:
         from .finding_lifecycle import FindingLifecycleJournal
         from .quarantine_command_finalization import (
             prepare,
+            replay_installed_tail_observation,
             require_finalizer_copy_source,
         )
         from .quarantine_lifecycle_transfer import sizing_snapshot
@@ -4809,6 +4823,12 @@ class GitHubApplication:
         existing = finalizer.evidence_budget or finalizer._operation_budget
         if existing is not None and existing is not budget:
             raise ReviewInputError("quarantine finalizer sizing budget changed")
+        # Re-entering sizing from the installed-tail gate must not buy another
+        # check exchange. The paid observation already on this caller is enough,
+        # and that re-entry withdraws closed-suffix custody as lifecycle proof.
+        replay = replay_installed_tail_observation(run)
+        if replay is not None:
+            return replay
         finalizer = copy(finalizer)
         finalizer.evidence_budget = budget
         reference = record.finding_lifecycle
@@ -5597,6 +5617,12 @@ class GitHubApplication:
                 evidence_budget=shared_evidence_budget,
                 human_inventory_reader_factory=operation_owner._human_inventory_reader,
                 human_inventory_read_token=read_token,
+            )
+            assessor.finalizer.quarantine_reader_factory = (
+                replier.finalizer.quarantine_reader_factory
+            )
+            assessor.finalizer.historical_assessment_reader_factory = (
+                replier.finalizer.historical_assessment_reader_factory
             )
             if finding_consumer is not None:
                 finding_consumer.bind(assessor.finalizer)

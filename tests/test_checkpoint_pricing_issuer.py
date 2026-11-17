@@ -158,7 +158,12 @@ class CheckpointPricingIssuerTests(unittest.TestCase):
                     fixture.ledger.preflight_finding_lifecycle_checkpoint_pricing(
                         record, added_parts=1, added_bytes=100, checkpoint_parts=(1,)
                     )
-                self.assertIsNone(core._qualified_checkpoint_pricer(fixture.ledger))
+                with self.assertRaisesRegex(
+                    ReviewInputError,
+                    "original module source changed: "
+                    "preflight_finding_lifecycle_checkpoint_pricing",
+                ):
+                    core._qualified_checkpoint_pricer(fixture.ledger)
             self.assertEqual(len(fixture.service.trace), count)
 
     def test_inherited_unknown_adapter_retains_generic_plain_and_staging_guards(self):

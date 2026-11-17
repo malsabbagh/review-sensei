@@ -878,6 +878,7 @@ class GitHubIssueCommentSessionLedger:
         from review_sensei.disposition_snapshot import (
             DISPOSITION_PAGE_ITEMS,
             _prepared_page_reference,
+            pack_page_index,
             read_paged_snapshot,
             validate_page_index,
         )
@@ -1007,8 +1008,25 @@ class GitHubIssueCommentSessionLedger:
                 "state_manifest": {"binding": binding, "item_count": len(values)},
             },
         )
+        use_packed_index = getattr(record, "finding_lifecycle", None) is not None
+        sizing_index_document = index_document
+        if use_packed_index:
+            packed_candidate = pack_page_index(index_document, binding=binding)
+            if packed_candidate is not None:
+                packed_inline = inline_manifest(
+                    packed_candidate, binding=binding, item_count=len(values)
+                )
+                if (
+                    packed_inline is not None
+                    and len(canonical_bytes(packed_inline)) <= max_manifest_bytes
+                ):
+                    sizing_index_document = packed_candidate
+                else:
+                    use_packed_index = False
+            else:
+                use_packed_index = False
         bounds = _disposition_index_bounds(
-            index_document,
+            sizing_index_document,
             binding=binding,
             item_count=len(values),
             max_manifest_bytes=max_manifest_bytes,
@@ -1150,7 +1168,16 @@ class GitHubIssueCommentSessionLedger:
                     "hosted disposition page exceeded prepared bound"
                 )
             actual_references.append(manifest)
-        actual_document = {**index_document, "pages": actual_references}
+        raw_actual_document = {**index_document, "pages": actual_references}
+        if use_packed_index:
+            packed_actual = pack_page_index(raw_actual_document, binding=binding)
+            if packed_actual is None:
+                raise ReviewInputError(
+                    "hosted disposition packed index failed validation"
+                )
+            actual_document = packed_actual
+        else:
+            actual_document = raw_actual_document
         if len(canonical_bytes(actual_document)) > bounds.decoded_bytes:
             raise ReviewInputError(
                 "hosted disposition index exceeded prepared raw bound"
@@ -1701,7 +1728,9 @@ class GitHubIssueCommentSessionLedger:
         finally:
             self._finding_lifecycle_page_size = None
 
-    def _bounded_comments(self, identity: SessionIdentity) -> list[Any]:
+    def _bounded_comments(
+        self, identity: SessionIdentity, *, full_census: bool = False
+    ) -> list[Any]:
         assert self.evidence_budget is not None
         lifecycle_page_size = getattr(self, "_finding_lifecycle_page_size", None)
         if lifecycle_page_size is not None:
@@ -1741,9 +1770,14 @@ class GitHubIssueCommentSessionLedger:
             return self._history_pages(identity)
         if self._fencing():
             return self._fence_scan(identity)
-        if self._inventory_complete and not self._list_refresh:
+        if not full_census and self._inventory_complete and not self._list_refresh:
             return self._cached_comments()
-        if self._list_refresh and self._inventory_complete and self._list_anchor:
+        if (
+            not full_census
+            and self._list_refresh
+            and self._inventory_complete
+            and self._list_anchor
+        ):
             self._list_refresh = False
             changed = self._fetch_pages(identity, since=self._list_anchor)
             self._merge_comments(changed)
@@ -1971,15 +2005,22 @@ class GitHubIssueCommentSessionLedger:
         self, identity: SessionIdentity, *, now: datetime | None = None
     ) -> tuple[int | None, SessionRecord | None]:
         self._observed_consumed_grants = set()
-        if getattr(self, "_quarantine_full_discovery", False) or getattr(
-            self, "_quarantine_required", False
-        ):
-            self._inventory_complete = False
+        # Quarantine rediscovery still reads a full comment list. Leave
+        # `_inventory_complete` with the census that already set it until that
+        # list is installed, so a nested lifecycle plan does not observe a
+        # cleared inventory.
+        full_census = bool(
+            getattr(self, "_quarantine_full_discovery", False)
+            or getattr(self, "_quarantine_required", False)
+        )
+        if full_census:
             self._list_refresh = True
+            if self.evidence_budget is None:
+                self._inventory_complete = False
         repository_id = self._require_identity(identity)
         try:
             items = (
-                self._bounded_comments(identity)
+                self._bounded_comments(identity, full_census=full_census)
                 if self.evidence_budget is not None
                 else self.http.paginate(
                     path=self._comments_path(identity), token=self.token
@@ -2129,6 +2170,14 @@ class GitHubIssueCommentSessionLedger:
                     SessionLoadReason.INTEGRITY_FAILED,
                     "partition session requires shared read budget",
                 )
+            reuse_listed = (
+                full_census and self._inventory_complete and not self._fencing()
+            )
+            prior_reuse = self._reuse_listed_parts
+            prior_complete_read = self._quarantine_complete_read
+            if reuse_listed:
+                self._reuse_listed_parts = True
+                self._quarantine_complete_read = True
             try:
                 self._part_owner(
                     next(
@@ -2146,6 +2195,10 @@ class GitHubIssueCommentSessionLedger:
                     SessionLoadReason.INTEGRITY_FAILED,
                     "partition authority is unreadable",
                 ) from exc
+            finally:
+                if reuse_listed:
+                    self._reuse_listed_parts = prior_reuse
+                    self._quarantine_complete_read = prior_complete_read
         return found[0]
 
     def load(
@@ -3300,9 +3353,38 @@ class GitHubIssueCommentSessionLedger:
 
         from review_sensei.models import ReviewResult, ReviewTransaction
 
-        from .publication_recovery import _event_key, _store
+        from .api_run_requests import ApiRunSessionLedger
+        from .publication_recovery import _event_key, _publication_transport, _store
+        from .quarantine_origin import has_paged_v2_disposition_snapshot
 
+        paged_v2_reuse = False
+        authenticated = (
+            getattr(self, "_quarantine_authenticated", None)
+            if isinstance(self, ApiRunSessionLedger) and self._quarantine_required
+            else None
+        )
+        if (
+            isinstance(self, ApiRunSessionLedger)
+            and self._quarantine_required
+            and authenticated is not None
+            and self._inventory_complete
+            and self.caller._checkpoint is None
+            and self.caller._effect_record is not None
+            and self.caller._effect_record.record_sha256
+            == authenticated.record_sha256
+            == self.caller._root
+        ):
+            paged_v2_reuse = (
+                type(self.caller.accounting.configuration.limit) is int
+                and self.caller.accounting.configuration.limit >= 1152
+                and has_paged_v2_disposition_snapshot(self.caller._effect_record)
+            )
         target_tx = transaction if isinstance(transaction, ReviewTransaction) else None
+        if target_tx is None and paged_v2_reuse:
+            assert isinstance(self, ApiRunSessionLedger)
+            assert self.caller._effect_record is not None
+            self.caller._require_ledger(self, identity)
+            target_tx = self.caller._effect_record.transaction
         if target_tx is None:
             loaded = self.load(identity)
             if loaded.status in {"ok", "migrated"} and loaded.record is not None:
@@ -3318,6 +3400,45 @@ class GitHubIssueCommentSessionLedger:
         )
         from .publication_recovery import publication_http
 
+        primed_comments = None
+        if (
+            isinstance(self, ApiRunSessionLedger)
+            and self._quarantine_required
+            and authenticated is not None
+            and self._inventory_complete
+            and self.caller._checkpoint is None
+            and self.caller._effect_record is not None
+            and self.caller._effect_record.record_sha256
+            == authenticated.record_sha256
+            == self.caller._root
+        ):
+            cached_comments = self._cached_comments()
+            cached_body_wire = sum(
+                len(canonical_bytes({"body": item["body"]}))
+                for item in cached_comments
+                if isinstance(item, dict) and isinstance(item.get("body"), str)
+            )
+            is_unguarded = (
+                getattr(
+                    _publication_transport(self.http),
+                    "_quarantine_capacity_guard",
+                    None,
+                )
+                is None
+            )
+            if (
+                (not is_unguarded and cached_body_wire > 512 * 1024)
+                or (
+                    is_unguarded
+                    and (cached_body_wire > 512 * 1024 or len(cached_comments) >= 50)
+                )
+                or (
+                    type(self.caller.accounting.configuration.limit) is int
+                    and self.caller.accounting.configuration.limit >= 1152
+                    and has_paged_v2_disposition_snapshot(self.caller._effect_record)
+                )
+            ):
+                primed_comments = list(cached_comments)
         store = _store(
             publication_http(self.http, self.evidence_budget)
             if self.evidence_budget is not None
@@ -3329,6 +3450,7 @@ class GitHubIssueCommentSessionLedger:
             head_sha=target_tx.head_sha,
             transaction=target_tx,
             source_app_id=self.authenticated_app_id,
+            primed_comments=primed_comments,
         )
         available = store.read_available(
             event_key=_event_key(effective_identity, target_tx)

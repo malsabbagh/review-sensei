@@ -318,17 +318,95 @@ def append_history(previous, identity, intent, before, after, *, target_base_sha
 
 def capture_selected(ledger, identity, *, include_historical=True):
     from review_sensei.finding_lifecycle import decode_lifecycle_state
-    from review_sensei.finding_lifecycle_store import select_finding_lifecycle
+    from review_sensei.finding_lifecycle_store import (
+        read_finding_lifecycle,
+        select_finding_lifecycle,
+    )
+    from review_sensei.session import SessionLoadResult
 
+    from . import current_command_execution
+    from .api_run_requests import ApiRunRequestTransport, ApiRunSessionLedger
+    from .application import GitHubApplication
     from .finding_lifecycle import _require_effect_scope, _unpack_journal, _validate
+    from .finding_lifecycle_dictionary import resolve_stored
+    from .publication_recovery import _publication_transport
+    from .quarantine_origin import (
+        has_paged_v2_disposition_snapshot,
+        rebind_same_lineage_owner,
+    )
 
-    selected, packed = select_finding_lifecycle(ledger, identity)
+    selected: Any = None
+    packed: Any = None
+    if getattr(ledger, "_quarantine_required", False) is True and isinstance(
+        ledger, ApiRunSessionLedger
+    ):
+        caller = getattr(ledger, "caller", None)
+        authenticated = getattr(ledger, "_quarantine_authenticated", None)
+        effect_record = (
+            getattr(caller, "_effect_record", None)
+            if type(caller) is ApiRunRequestTransport
+            else None
+        )
+        guard = getattr(
+            _publication_transport(ledger.http), "_quarantine_capacity_guard", None
+        )
+        if (
+            caller is not None
+            and getattr(ledger, "_inventory_complete", False) is True
+            and (
+                (guard is None and len(ledger._cached_comments()) >= 80)
+                or (
+                    type(caller.accounting.configuration.limit) is int
+                    and caller.accounting.configuration.limit >= 1152
+                    and has_paged_v2_disposition_snapshot(effect_record)
+                    and caller.accounting.action is not None
+                    and caller.accounting.action.get("phase") == "pending"
+                    and caller.accounting.action.get("execution_started") is True
+                    and (
+                        guard is None
+                        or current_command_execution._frame(
+                            GitHubApplication.apply_maintainer_command
+                        )
+                        is not None
+                    )
+                )
+            )
+            and caller._checkpoint is None
+            and effect_record is not None
+            and effect_record.record_sha256 == caller._root
+            and authenticated is not None
+            and effect_record.quarantine_lineage is not None
+            and canonical_bytes(effect_record.quarantine_lineage)
+            == authenticated.lineage_bytes
+        ):
+            try:
+                rebind_same_lineage_owner(
+                    authenticated, ledger, caller, identity, effect_record
+                )
+            except ReviewInputError:
+                pass
+            else:
+                selected = SessionLoadResult(status="ok", record=effect_record)
+                if effect_record.finding_lifecycle is None:
+                    packed = None
+                else:
+                    prior_reuse = getattr(ledger, "_reuse_listed_parts", False)
+                    ledger._reuse_listed_parts = True
+                    try:
+                        packed = read_finding_lifecycle(
+                            ledger, effect_record, _selected_load=selected
+                        )
+                        packed = resolve_stored(ledger, effect_record, packed)
+                    finally:
+                        ledger._reuse_listed_parts = prior_reuse
+    resolved = selected is not None
+    if not resolved:
+        selected, packed = select_finding_lifecycle(ledger, identity)
     if selected.record is None or packed is None:
         _hold("complete_inventory_required")
     record = selected.record
-    from .finding_lifecycle_dictionary import resolve_stored
-
-    packed = resolve_stored(ledger, record, packed)
+    if not resolved:
+        packed = resolve_stored(ledger, record, packed)
     document = _validate(_unpack_journal(packed))
     state = decode_lifecycle_state(document["lifecycle"]).state
     binding = record.finding_lifecycle["manifest"]["binding"]

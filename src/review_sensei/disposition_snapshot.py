@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
+import struct
+import zlib
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from .bounded_evidence import (
     INLINE_ENCODING,
     MAX_MANIFEST_BYTES,
+    MAX_PARTITION_DECODED_BYTES,
+    MAX_PARTS,
+    PART_FRAMING_RESERVE,
+    PARTITION_ENCODING,
     canonical_bytes,
     evidence_manifest,
     inline_manifest,
@@ -24,6 +31,7 @@ from .errors import ReviewInputError
 MAX_DISPOSITION_SNAPSHOT_ROOT_BYTES = 8192
 DISPOSITION_PAGE_ITEMS = 8
 MAX_DISPOSITION_PAGES = 512
+PACKED_PAGE_INDEX_VERSION = "disposition-pages-packed-v1"
 
 
 def snapshot_document(
@@ -98,6 +106,315 @@ def validate_snapshot_identity(
         )
 
 
+_PACKED_TAIL_REQUIRED = frozenset(
+    {"fingerprint", "action", "reason", "actor", "head_sha", "expires_at"}
+)
+_PACKED_TAIL_OPTIONAL = frozenset(
+    {
+        "actor_role",
+        "finding_reference",
+        "recorded_at",
+        "policy_digest",
+        "provenance",
+        "resolution_kind",
+        "target_kind",
+        "incomplete_coverage",
+    }
+)
+_PACKED_TAIL_ALLOWED = _PACKED_TAIL_REQUIRED | _PACKED_TAIL_OPTIONAL
+
+
+def pack_page_index(
+    document: Mapping[str, Any], *, binding: Mapping[str, object]
+) -> dict[str, Any] | None:
+    """Compact one validated page index while leaving part IDs uncompressed."""
+    if (
+        not isinstance(document, Mapping)
+        or document.get("schema_version") != "disposition-pages-v1"
+        or not isinstance(document.get("result_digest"), str)
+        or re.fullmatch(r"[a-f0-9]{64}", document["result_digest"]) is None
+        or not isinstance(document.get("pages"), list)
+        or len(document["pages"]) > MAX_DISPOSITION_PAGES
+        or not isinstance(document.get("tail"), list)
+        or len(document["tail"]) > 4096
+    ):
+        return None
+    ids: list[list[str]] = []
+    # Keep high-entropy SHA-256 digests uncompressed in binary and deflate only
+    # structured metadata so small indexes stay compact under Base85 framing.
+    hashes = bytearray()
+    meta_buf = bytearray()
+    hashes += bytes.fromhex(document["result_digest"])
+    meta_buf += struct.pack(">HH", len(document["pages"]), len(document["tail"]))
+    for page in document["pages"]:
+        if (
+            not isinstance(page, Mapping)
+            or page.get("encoding") != PARTITION_ENCODING
+            or not isinstance(page.get("binding"), Mapping)
+            or any(
+                page["binding"].get(key) != binding.get(key)
+                for key in binding
+                if key != "generation"
+            )
+            or page.get("item_count") != DISPOSITION_PAGE_ITEMS
+            or type(page["binding"].get("generation")) is not int
+            or not 0 <= page["binding"]["generation"] <= 0xFFFFFFFF
+            or type(page.get("decoded_bytes")) is not int
+            or not 0 <= page["decoded_bytes"] <= 0xFFFFFFFF
+            or type(page.get("encoded_bytes")) is not int
+            or not 0 <= page["encoded_bytes"] <= 0xFFFFFFFF
+            or not isinstance(page.get("sha256"), str)
+            or re.fullmatch(r"[a-f0-9]{64}", page["sha256"]) is None
+            or not isinstance(page.get("parts"), list)
+            or not 1 <= len(page["parts"]) <= MAX_PARTS
+        ):
+            return None
+        page_ids: list[str] = []
+        meta_buf += struct.pack(
+            ">IIH",
+            page["binding"]["generation"],
+            page["decoded_bytes"],
+            len(page["parts"]),
+        )
+        hashes += bytes.fromhex(page["sha256"])
+        expected_encoded = 0
+        for part in page["parts"]:
+            if (
+                not isinstance(part, Mapping)
+                or not isinstance(part.get("storage_id"), str)
+                or type(part.get("bytes")) is not int
+                or not 0 <= part["bytes"] <= 0xFFFFFFFF
+                or not isinstance(part.get("sha256"), str)
+                or re.fullmatch(r"[a-f0-9]{64}", part["sha256"]) is None
+            ):
+                return None
+            page_ids.append(part["storage_id"])
+            expected_encoded += part["bytes"] + PART_FRAMING_RESERVE
+            meta_buf += struct.pack(">I", part["bytes"])
+            hashes += bytes.fromhex(part["sha256"])
+        if page["encoded_bytes"] != expected_encoded:
+            return None
+        ids.append(page_ids)
+    tail_meta: list[list[Any]] = []
+    for item in document["tail"]:
+        if (
+            not isinstance(item, Mapping)
+            or not _PACKED_TAIL_REQUIRED <= set(item) <= _PACKED_TAIL_ALLOWED
+            or not isinstance(item["fingerprint"], str)
+            or re.fullmatch(r"[a-f0-9]{64}", item["fingerprint"]) is None
+            or any(item[key] is None for key in set(item) - _PACKED_TAIL_REQUIRED)
+        ):
+            return None
+        fp = item["fingerprint"]
+        hashes += bytes.fromhex(fp)
+        fref = item.get("finding_reference")
+        if fref == "RS-" + fp[:12].upper():
+            fref_meta: object = 1
+        elif fref == "RS-" + fp[:12].lower():
+            fref_meta = 2
+        else:
+            if type(fref) is int:
+                return None
+            fref_meta = fref
+        hsha = item["head_sha"]
+        if isinstance(hsha, str) and hsha == binding.get("head_sha"):
+            hsha_meta: object = 0
+        else:
+            if type(hsha) is int:
+                return None
+            hsha_meta = hsha
+        pdig = item.get("policy_digest")
+        if isinstance(pdig, str) and pdig == binding.get("policy_digest"):
+            pdig_meta: object = 0
+        else:
+            if type(pdig) is int:
+                return None
+            pdig_meta = pdig
+        tail_meta.append(
+            [
+                item["action"],
+                item["reason"],
+                item["actor"],
+                hsha_meta,
+                item["expires_at"],
+                item.get("actor_role"),
+                fref_meta,
+                item.get("recorded_at"),
+                pdig_meta,
+                item.get("provenance"),
+                item.get("resolution_kind"),
+                item.get("target_kind"),
+                item.get("incomplete_coverage"),
+            ]
+        )
+    meta_buf += canonical_bytes(tail_meta)
+    if len(hashes) > 0xFFFF or len(meta_buf) > MAX_PARTITION_DECODED_BYTES:
+        return None
+    comp_meta = zlib.compress(bytes(meta_buf), level=9)
+    wire = struct.pack(">HI", len(hashes), len(meta_buf)) + bytes(hashes) + comp_meta
+    packed = {
+        "schema_version": PACKED_PAGE_INDEX_VERSION,
+        "ids": ids,
+        "d": base64.b85encode(wire).decode("ascii"),
+    }
+    try:
+        unpacked = _unpack_page_index(packed, expected_binding=binding)
+    except ReviewInputError:
+        return None
+    if canonical_bytes(unpacked) != canonical_bytes(document):
+        return None
+    return packed
+
+
+def _unpack_page_index(
+    value: object, *, expected_binding: Mapping[str, object]
+) -> object:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != PACKED_PAGE_INDEX_VERSION
+    ):
+        return value
+    if (
+        set(value) != {"schema_version", "ids", "d"}
+        or not isinstance(value["ids"], list)
+        or len(value["ids"]) > MAX_DISPOSITION_PAGES
+        or type(value["d"]) is not str
+        or len(value["d"]) > 2 * MAX_PARTITION_DECODED_BYTES
+    ):
+        raise ReviewInputError("disposition page index does not match root")
+    try:
+        wire = base64.b85decode(value["d"].encode("ascii"))
+        if len(wire) < 6:
+            raise ReviewInputError("disposition page index does not match root")
+        hashes_len, meta_len = struct.unpack_from(">HI", wire, 0)
+        if (
+            not 32 <= hashes_len <= len(wire) - 6
+            or not 4 <= meta_len <= MAX_PARTITION_DECODED_BYTES
+        ):
+            raise ReviewInputError("disposition page index does not match root")
+        hashes = wire[6 : 6 + hashes_len]
+        decomp = zlib.decompressobj()
+        meta_buf = decomp.decompress(wire[6 + hashes_len :], meta_len + 1)
+        meta_buf += decomp.flush(1)
+        if not decomp.eof or decomp.unconsumed_tail or len(meta_buf) != meta_len:
+            raise ReviewInputError("disposition page index does not match root")
+        result_digest = hashes[:32].hex()
+        hpos = 32
+        page_count, tail_count = struct.unpack_from(">HH", meta_buf, 0)
+        mpos = 4
+        if page_count != len(value["ids"]) or tail_count > 4096:
+            raise ReviewInputError("disposition page index does not match root")
+        pages: list[dict[str, Any]] = []
+        for id_list in value["ids"]:
+            if (
+                not isinstance(id_list, list)
+                or mpos + 10 > meta_len
+                or hpos + 32 > hashes_len
+            ):
+                raise ReviewInputError("disposition page index does not match root")
+            gen, dec_bytes, part_count = struct.unpack_from(">IIH", meta_buf, mpos)
+            mpos += 10
+            sha = hashes[hpos : hpos + 32].hex()
+            hpos += 32
+            if (
+                not 1 <= part_count == len(id_list) <= MAX_PARTS
+                or mpos + 4 * part_count > meta_len
+                or hpos + 32 * part_count > hashes_len
+            ):
+                raise ReviewInputError("disposition page index does not match root")
+            parts: list[dict[str, object]] = []
+            encoded_bytes = 0
+            for sid in id_list:
+                if type(sid) is not str:
+                    raise ReviewInputError("disposition page index does not match root")
+                (size,) = struct.unpack_from(">I", meta_buf, mpos)
+                mpos += 4
+                psha = hashes[hpos : hpos + 32].hex()
+                hpos += 32
+                encoded_bytes += size + PART_FRAMING_RESERVE
+                parts.append({"storage_id": sid, "bytes": size, "sha256": psha})
+            pages.append(
+                {
+                    "encoding": PARTITION_ENCODING,
+                    "binding": {**expected_binding, "generation": gen},
+                    "item_count": DISPOSITION_PAGE_ITEMS,
+                    "decoded_bytes": dec_bytes,
+                    "sha256": sha,
+                    "encoded_bytes": encoded_bytes,
+                    "parts": parts,
+                }
+            )
+        if hpos + 32 * tail_count != hashes_len:
+            raise ReviewInputError("disposition page index does not match root")
+        tail_fps = [
+            hashes[hpos + 32 * index : hpos + 32 * (index + 1)].hex()
+            for index in range(tail_count)
+        ]
+        tail_meta = json.loads(meta_buf[mpos:].decode("utf-8"))
+        if not isinstance(tail_meta, list) or len(tail_meta) != tail_count:
+            raise ReviewInputError("disposition page index does not match root")
+        tail: list[dict[str, Any]] = []
+        for fp, row in zip(tail_fps, tail_meta):
+            if not isinstance(row, list) or len(row) != 13:
+                raise ReviewInputError("disposition page index does not match root")
+            (
+                act,
+                rsn,
+                actor,
+                hsha_meta,
+                exp,
+                arole,
+                fref_meta,
+                rec_at,
+                pdig_meta,
+                prov,
+                rkind,
+                tkind,
+                inc_cov,
+            ) = row
+            item_dict: dict[str, Any] = {
+                "fingerprint": fp,
+                "action": act,
+                "reason": rsn,
+                "actor": actor,
+                "head_sha": expected_binding.get("head_sha")
+                if type(hsha_meta) is int and hsha_meta == 0
+                else hsha_meta,
+                "expires_at": exp,
+            }
+            if arole is not None:
+                item_dict["actor_role"] = arole
+            if type(fref_meta) is int and fref_meta == 1:
+                item_dict["finding_reference"] = "RS-" + fp[:12].upper()
+            elif type(fref_meta) is int and fref_meta == 2:
+                item_dict["finding_reference"] = "RS-" + fp[:12].lower()
+            elif fref_meta is not None:
+                item_dict["finding_reference"] = fref_meta
+            if rec_at is not None:
+                item_dict["recorded_at"] = rec_at
+            if type(pdig_meta) is int and pdig_meta == 0:
+                item_dict["policy_digest"] = expected_binding.get("policy_digest")
+            elif pdig_meta is not None:
+                item_dict["policy_digest"] = pdig_meta
+            if prov is not None:
+                item_dict["provenance"] = prov
+            if rkind is not None:
+                item_dict["resolution_kind"] = rkind
+            if tkind is not None:
+                item_dict["target_kind"] = tkind
+            if inc_cov is not None:
+                item_dict["incomplete_coverage"] = inc_cov
+            tail.append(item_dict)
+    except (ValueError, zlib.error, struct.error, UnicodeError) as error:
+        raise ReviewInputError("disposition page index does not match root") from error
+    return {
+        "schema_version": "disposition-pages-v1",
+        "result_digest": result_digest,
+        "pages": pages,
+        "tail": tail,
+    }
+
+
 def validate_page_index(
     value: object, *, root: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
@@ -115,6 +432,7 @@ def validate_page_index(
         raise ReviewInputError("disposition page root is invalid")
     count = manifest["item_count"]
     expected = validate_binding(manifest.get("binding"))
+    value = _unpack_page_index(value, expected_binding=expected)
     if (
         not isinstance(value, dict)
         or set(value) != {"schema_version", "result_digest", "pages", "tail"}
@@ -219,7 +537,11 @@ def read_paged_snapshot(
         )
         values.extend(validated)
     assert isinstance(document, dict)
-    values.extend(document["tail"])
+    unpacked = _unpack_page_index(
+        document, expected_binding=validate_binding(root["state_manifest"]["binding"])
+    )
+    assert isinstance(unpacked, dict)
+    values.extend(unpacked["tail"])
     return _stored_dispositions(values, snapshot=True)
 
 
@@ -323,6 +645,7 @@ def prepare_local_paged_snapshot(
     values: tuple[Mapping[str, object], ...],
     result_digest: str,
     max_manifest_bytes: int,
+    allow_packed_index: bool = False,
 ) -> PreparedLocalDispositionSnapshot:
     """Prepare pages, their complete index and the future root before writes."""
     parts: dict[str, dict[str, object]] = {}
@@ -378,7 +701,24 @@ def prepare_local_paged_snapshot(
         "pages": references,
         "tail": list(values[len(pages) * DISPOSITION_PAGE_ITEMS :]),
     }
-    manifest = prepare(document, len(values), max_manifest_bytes)
+    if allow_packed_index:
+        packed_doc = pack_page_index(document, binding=binding)
+        packed_inline = (
+            inline_manifest(packed_doc, binding=binding, item_count=len(values))
+            if packed_doc is not None
+            else None
+        )
+        if (
+            packed_doc is not None
+            and packed_inline is not None
+            and len(canonical_bytes(packed_inline)) <= max_manifest_bytes
+        ):
+            document = packed_doc
+            manifest = packed_inline
+        else:
+            manifest = prepare(document, len(values), max_manifest_bytes)
+    else:
+        manifest = prepare(document, len(values), max_manifest_bytes)
     root = {
         "schema_version": "2.0",
         "result_digest": result_digest,

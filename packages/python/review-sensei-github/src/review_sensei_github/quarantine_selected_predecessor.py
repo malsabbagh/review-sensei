@@ -147,10 +147,23 @@ def _build():
         )
         archive = authenticated.archive
         isolation = archive["target_isolation"]
+        isolation_body = (
+            isolation.get("execution_isolation", isolation)
+            if isinstance(isolation, dict)
+            else None
+        )
         lineage = authenticated.lineage
         # Other contracts retain exact frozen predecessor matching. This receipt
         # was authenticated by the original reader's executor/isolation census.
-        if isolation.get("schema_version") != "quarantine-published-tail-isolation-v1":
+        if (
+            not isinstance(isolation_body, dict)
+            or isolation_body.get("schema_version")
+            not in {
+                "quarantine-target-isolation-v1",
+                "quarantine-published-tail-isolation-v1",
+            }
+            or isolation_body.get("disposition") != "unresolved-isolated"
+        ):
             return
         if caller is None:
             return  # Model readers cannot issue hosted native-target custody.
@@ -170,9 +183,21 @@ def _build():
         old_id = lineage["predecessor_comment_id"]
         selected_id = frame.f_locals["selected_id"]
         if (
-            isolation.get("disposition") != "unresolved-isolated"
-            or isolation.get("predecessor_comment_id") != old_id
-            or isolation.get("predecessor_record_sha256") != predecessor.record_sha256
+            isolation_body.get("schema_version")
+            == "quarantine-published-tail-isolation-v1"
+        ):
+            isolated_comment_id = isolation_body.get("predecessor_comment_id")
+        else:
+            targets = isolation_body.get("targets")
+            isolated_comment_id = (
+                targets.get("root_comment_id") if isinstance(targets, dict) else None
+            )
+        if (
+            isolation_body.get("disposition") != "unresolved-isolated"
+            or type(isolated_comment_id) is not int
+            or isolated_comment_id != old_id
+            or isolation_body.get("predecessor_record_sha256")
+            != predecessor.record_sha256
             or lineage["predecessor_record_sha256"] != predecessor.record_sha256
             or authenticated.record_sha256 != selected.record_sha256
             or len(found) != 2
@@ -244,10 +269,122 @@ def _build():
         # This digest is only the observed old native target, not a new archive.
         return entry[6], entry[5]
 
-    return capture, selected_digest
+    def _rebind(
+        ledger: Any,
+        identity: Any,
+        before: Any,
+        after: Any,
+        *,
+        frame: Any,
+        expected_code: Any,
+        allow_decision_advance: bool,
+    ) -> None:
+        from . import quarantine_origin
+
+        require_module_seal(quarantine_origin)
+        if (
+            frame.f_code is not expected_code
+            or frame.f_globals is not vars(quarantine_origin)
+            or frame.f_locals.get("authenticated") is not before
+            or frame.f_locals.get("ledger") is not ledger
+            or frame.f_locals.get("identity") is not identity
+            or frame.f_locals.get("rebound") is not after
+        ):
+            raise ReviewInputError("isolated predecessor requires original rebind")
+        ledger = cast(Any, ledger)
+        entry = issued.get(ledger)
+        if entry is None:
+            return
+        identity_snapshot, before_snapshot = validate_models(before, identity)
+        _, after_snapshot = validate_models(after, identity)
+        caller = ledger.caller
+        original_identity = entry[7]()
+        entry_auth = entry[2]()
+        if entry_auth is None:
+            raise ReviewInputError("isolated predecessor selection custody changed")
+        _, entry_auth_snapshot = validate_models(entry_auth, identity)
+        if allow_decision_advance:
+            # Confirmed own-decision CAS updates root/lineage/state hashes while
+            # immutable origin archives, inventories, and source docs stay fixed.
+            snapshot_ok = (
+                before_snapshot[2] == after_snapshot[2]
+                and before_snapshot[3] == after_snapshot[3]
+                and before_snapshot[5] == after_snapshot[5]
+                and after.lineage["predecessor_comment_id"] == entry[4]
+                and after.lineage["predecessor_record_sha256"]
+                == before.lineage["predecessor_record_sha256"]
+            )
+        else:
+            snapshot_ok = before_snapshot[1:] == after_snapshot[1:]
+        if (
+            original_identity is None
+            or _raw_fields(entry_auth)["original_identity"] is not original_identity
+            or _raw_fields(before)["original_identity"] is not original_identity
+            or _raw_fields(after)["original_identity"] is not original_identity
+            or _identity_snapshot(original_identity) != entry[1]
+            or entry[0]() is not caller
+            or entry[1] != identity_snapshot
+            or entry_auth_snapshot != before_snapshot
+            or entry[3] != before_snapshot
+            or not snapshot_ok
+        ):
+            raise ReviewInputError("isolated predecessor selection custody changed")
+        quarantine_origin.require_authenticated_read_owner(
+            entry_auth, ledger, caller, identity
+        )
+        quarantine_origin.require_authenticated_read_owner(
+            before, ledger, caller, identity
+        )
+        quarantine_origin.require_authenticated_read_owner(
+            after, ledger, caller, identity
+        )
+        issued[ledger] = (
+            entry[0],
+            entry[1],
+            weakref.ref(after),
+            after_snapshot,
+            entry[4],
+            entry[5],
+            entry[6],
+            entry[7],
+        )
+
+    def rebind_same_lineage(
+        ledger: Any, identity: Any, before: Any, after: Any
+    ) -> None:
+        """Advance isolated predecessor custody across a non-lineage root write."""
+        from . import quarantine_origin
+
+        _rebind(
+            ledger,
+            identity,
+            before,
+            after,
+            frame=sys._getframe(1),
+            expected_code=quarantine_origin.rebind_same_lineage_owner.__code__,
+            allow_decision_advance=False,
+        )
+
+    def rebind_decision_lineage(
+        ledger: Any, identity: Any, before: Any, after: Any
+    ) -> None:
+        """Advance isolated predecessor custody across an own-decision CAS."""
+        from . import quarantine_origin
+
+        _rebind(
+            ledger,
+            identity,
+            before,
+            after,
+            frame=sys._getframe(1),
+            expected_code=quarantine_origin.advance_confirmed_decision_owner.__code__,
+            allow_decision_advance=True,
+        )
+
+    return capture, selected_digest, rebind_same_lineage, rebind_decision_lineage
 
 
-capture, selected_digest = _build()
+capture, selected_digest, rebind_same_lineage, rebind_decision_lineage = _build()
 del _build
 
 from review_sensei.source_registry import seal_module as _seal_original_source  # noqa: E402

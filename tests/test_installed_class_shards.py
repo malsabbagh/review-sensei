@@ -487,6 +487,7 @@ class InstalledClassShardTests(unittest.TestCase):
         pinned = (
             "fake_github_http.py",
             "original_finish_interrupt.py",
+            "original_source_observation.py",
             "packaging_guard.py",
             "session_fixture_clock.py",
             "test_action_reply_entry.py",

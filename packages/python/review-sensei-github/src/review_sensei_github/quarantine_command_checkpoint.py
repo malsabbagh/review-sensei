@@ -24,7 +24,7 @@ def _matches_census_plan(plan, lifetime, read_plan, issuer):
     """
     return plan is lifetime or (
         type(issuer) is str
-        and issuer == "historical-journal"
+        and issuer in ("historical-journal", "plain-command-journal")
         and read_plan is not None
         and plan is read_plan
     )

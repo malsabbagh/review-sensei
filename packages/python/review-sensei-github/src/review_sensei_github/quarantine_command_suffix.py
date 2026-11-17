@@ -181,10 +181,15 @@ def _registry():
         ):
             return None
         guard = installed_capacity(run.ledger, run.identity)
-        if guard.complete_tail:
+        require_module_seal(quarantine_action)
+        if (
+            guard.complete_tail
+            or quarantine_action._is_funded_grouped_historical_command(run, guard)
+        ):
             # Existing complete-tail routes retain their original admission.
             # This experimental proposal concerns only the previously held
             # incomplete command envelope and cannot broaden that envelope.
+            completed.pop(run.ledger, None)
             return None
         captured = completed.pop(run.ledger, None)
         state = run.caller.accounting
@@ -255,26 +260,6 @@ def _registry():
             raise ReviewInputError(
                 "guarded suffix original packed census order changed"
             )
-        page = project_receipt_page(
-            rows,
-            mutable_bounds=(
-                (
-                    roots[0]["id"],
-                    plain_session_comment_json_bound(
-                        repository_id=run.identity.repository_id,
-                        pull_request=run.identity.pull_request,
-                        consumed_grants=grants,
-                    )
-                    + 9,
-                ),
-            ),
-            future_bounds=(event_wire, receipt_data[1]),
-            allow_graphql=True,
-            identity=run.identity,
-            max_reads=2,
-            ordered_known=ordered_known,
-        )
-        page_binding = _projection_binding(page)
         from .quarantine_command_finalization import intermediate_suffix_recipe
 
         app = frame.f_locals["app"]
@@ -306,6 +291,42 @@ def _registry():
         from .quarantine_command_namespace import capture_paid_prefix
 
         capture_paid_prefix(run.caller)
+        default_root_wire = (
+            plain_session_comment_json_bound(
+                repository_id=run.identity.repository_id,
+                pull_request=run.identity.pull_request,
+                consumed_grants=grants,
+            )
+            + 9
+        )
+        root_wire_bound = default_root_wire
+        try:
+            measured_inline = quarantine_command_finalization.measure_inline_branches(
+                observation
+            )
+        except ReviewInputError:
+            measured_inline = None
+        if measured_inline is not None and measured_inline.get("growth_roots"):
+            root_wire_bound = min(
+                default_root_wire,
+                max(
+                    len(canonical_bytes({"body": roots[0]["body"]})),
+                    *(
+                        row["ordinary_comment_wire_bytes"]
+                        for row in measured_inline["growth_roots"]
+                    ),
+                ),
+            )
+        page = project_receipt_page(
+            rows,
+            mutable_bounds=((roots[0]["id"], root_wire_bound),),
+            future_bounds=(event_wire, receipt_data[1]),
+            allow_graphql=True,
+            identity=run.identity,
+            max_reads=2,
+            ordered_known=ordered_known,
+        )
+        page_binding = _projection_binding(page)
         recipe = intermediate_suffix_recipe(
             observation, comment_rows=rows, receipt_page=page
         )

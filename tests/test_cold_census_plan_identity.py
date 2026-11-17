@@ -12,30 +12,25 @@ class ColdCensusPlanIdentityTests(unittest.TestCase):
     def test_lifetime_and_exact_historical_reader_only(self):
         lifetime = CommentAllocationPlan({1: 66560}, (65536,) * 16)
         selected = CommentAllocationPlan(lifetime.known, ())
-        self.assertTrue(
-            checkpoint._matches_census_plan(
-                lifetime, lifetime, selected, "historical-journal"
-            )
-        )
-        self.assertTrue(
-            checkpoint._matches_census_plan(
-                selected, lifetime, selected, "historical-journal"
-            )
-        )
-        self.assertEqual(lifetime.unknown, (65536,) * 16)
         copied = CommentAllocationPlan(selected.known, ())
-        self.assertFalse(
-            checkpoint._matches_census_plan(
-                copied, lifetime, selected, "historical-journal"
+        for issuer in ("historical-journal", "plain-command-journal"):
+            self.assertTrue(
+                checkpoint._matches_census_plan(lifetime, lifetime, selected, issuer)
             )
-        )
+            self.assertTrue(
+                checkpoint._matches_census_plan(selected, lifetime, selected, issuer)
+            )
+            self.assertFalse(
+                checkpoint._matches_census_plan(copied, lifetime, selected, issuer)
+            )
+            self.assertFalse(
+                checkpoint._matches_census_plan(None, lifetime, None, issuer)
+            )
+        self.assertEqual(lifetime.unknown, (65536,) * 16)
         for issuer in (None, "materialized", "foreign"):
             self.assertFalse(
                 checkpoint._matches_census_plan(selected, lifetime, selected, issuer)
             )
-        self.assertFalse(
-            checkpoint._matches_census_plan(None, lifetime, None, "historical-journal")
-        )
 
     def test_hostile_equality_is_never_called(self):
         class Poison:
@@ -46,6 +41,11 @@ class ColdCensusPlanIdentityTests(unittest.TestCase):
         self.assertFalse(
             checkpoint._matches_census_plan(
                 Poison(), lifetime, selected, "historical-journal"
+            )
+        )
+        self.assertFalse(
+            checkpoint._matches_census_plan(
+                Poison(), lifetime, selected, "plain-command-journal"
             )
         )
         self.assertFalse(

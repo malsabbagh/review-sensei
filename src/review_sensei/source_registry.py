@@ -403,7 +403,7 @@ def _build_registry():
                     break
                 namespaces.append(namespace)
             else:
-                merged = {}
+                merged: dict[str, Any] = {}
                 for namespace in reversed(namespaces):
                     merged.update(namespace)
                 # With the exact built-in metaclass, type.__dir__ enumerates

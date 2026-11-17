@@ -31,7 +31,7 @@ from review_sensei_github.quarantine_published_tail import (
 from review_sensei_github.session_ledger import parse_session_comment
 from test_api_work_lifecycle import forbid_replacement_phase_budget
 from test_quarantine_activation import event, registered_resource
-from test_quarantine_evidence import original_objects
+from test_quarantine_evidence import git, original_objects
 from test_quarantine_journey import JourneyFixture
 from test_quarantine_published_tail_isolation import contract_fixture
 
@@ -493,11 +493,18 @@ class NativePublishedTailJourneyFixture(PublishedTailJourneyFixture):
                     snapshot.change = close_frames
                 return snapshot.opened(request, timeout)
         before = len(self.inline)
+        before_threads = len(self.threads)
         response = super().external(request, timeout)
         if request.get_method() == "POST" and path.endswith("/pulls/7/reviews"):
             payload = json.loads(request.data)
-            for comment in self.inline[before:]:
+            for comment, thread in zip(
+                self.inline[before:],
+                self.threads[before_threads:],
+                strict=True,
+            ):
                 comment["commit_id"] = payload["commit_id"]
+                thread["id"] = "PRRT_" + str(comment["id"])
+                thread["comments"]["nodes"][0]["commit"]["oid"] = payload["commit_id"]
             if payload["event"] == "REQUEST_CHANGES":
                 self.reviews[-1]["state"] = "CHANGES_REQUESTED"
         return response
@@ -562,6 +569,24 @@ class PublishedTailJourneyTests(unittest.TestCase):
             fixture = NativePublishedTailJourneyFixture(directory)
             fixture.api_url = "https://api.github.com"
             old, registration = fixture.original_origins()
+            fixture.config_bytes = fixture.config_bytes.replace(
+                b"api_request_limit: 512", b"api_request_limit: 1152"
+            )
+            (fixture.root / ".reviewsensei.yml").write_bytes(fixture.config_bytes)
+            fixture.limit = 1152
+            git(fixture.root, "add", ".reviewsensei.yml")
+            git(
+                fixture.root,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                "Offline bounded profile",
+            )
+            fixture.policy = fixture.policy_ref = git(fixture.root, "rev-parse", "HEAD")
+            fixture.creation_metadata = fixture.creator()
             fixture.provider_comments = [
                 {
                     "path": "src/app.py",
@@ -611,14 +636,23 @@ class PublishedTailJourneyTests(unittest.TestCase):
                     for inventory in authenticated.inventories.values()
                     for a in inventory["assessments"]
                 ]
-                self.assertTrue(
+                self.assertEqual(len(historical), 14)
+                self.assertFalse(
                     any(a["instance"] == fresh.instance for a in historical)
+                )
+                self.assertFalse(
+                    any(a["concern"] == fresh.lifecycle for a in historical)
                 )
                 self.assertTrue(
                     any(
-                        a["instance"] != fresh.instance
-                        and a["concern"] == fresh.lifecycle
-                        for a in historical
+                        entry.lifecycle == fresh.lifecycle
+                        for review in fixture.old_reviews
+                        for entry in parse_finding_index(
+                            review["body"],
+                            repository_id=123,
+                            pull_request=7,
+                            head_sha=review["commit_id"],
+                        ).entries
                     )
                 )
                 original_dispositions = fixture.current_record().dispositions
@@ -627,6 +661,7 @@ class PublishedTailJourneyTests(unittest.TestCase):
                 self.assertNotIn(fresh_thread, original_threads)
                 for number, pending in enumerate(view["pending"]):
                     fixture.quarantine_predecessor_comment_id = None
+                    fixture.SOURCE_ID += 1
                     fixture.select_command(
                         (
                             "@reviewsensei dismiss "
@@ -680,16 +715,8 @@ class PublishedTailJourneyTests(unittest.TestCase):
                     ][-1]["conclusion"],
                     "action_required",
                 )
-                fixture.select_command(fixture.command_body, new_run=True)
-                self.assertEqual(
-                    fixture.invoke_command(), 0, fixture.error or str(fixture.exception)
-                )
-                self.assertEqual(
-                    fixture.selected.ledger._quarantine_authenticated.state[
-                        "settlements"
-                    ],
-                    settlements,
-                )
+                last_historical_command = fixture.command_body
+                fixture.SOURCE_ID += 1
                 fixture.select_command("@reviewsensei verify", new_run=True)
                 self.assertEqual(
                     fixture.invoke_command(), 0, fixture.error or str(fixture.exception)
@@ -701,6 +728,7 @@ class PublishedTailJourneyTests(unittest.TestCase):
                     )
                 )
                 self.assertIsNone(old.api_run_accounting["terminal_transaction"])
+                fixture.SOURCE_ID += 1
                 fixture.select_command(
                     "@reviewsensei dismiss "
                     + fresh.instance
@@ -709,6 +737,24 @@ class PublishedTailJourneyTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     fixture.invoke_command(), 0, fixture.error or str(fixture.exception)
+                )
+                self.assertEqual(
+                    sum(
+                        r["state"] == "APPROVED" and r["commit_id"] == fixture.live_head
+                        for r in fixture.reviews
+                    ),
+                    1,
+                )
+                fixture.SOURCE_ID += 1
+                fixture.select_command(last_historical_command, new_run=True)
+                self.assertEqual(
+                    fixture.invoke_command(), 0, fixture.error or str(fixture.exception)
+                )
+                self.assertEqual(
+                    fixture.selected.ledger._quarantine_authenticated.state[
+                        "settlements"
+                    ],
+                    settlements,
                 )
                 self.assertEqual(
                     sum(

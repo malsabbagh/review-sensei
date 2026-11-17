@@ -6,6 +6,7 @@ once after ordinary non-business field validation.
 """
 
 import inspect
+import json
 import sys
 from copy import copy
 from dataclasses import asdict, dataclass
@@ -144,7 +145,8 @@ def _history(ledger, identity):
 
     value = ledger._quarantine_authenticated
     require_authenticated_read_owner(value, ledger, ledger.caller, identity)
-    if not value.pending:
+    limit = ledger.caller.accounting.configuration.limit
+    if not value.pending and not (type(limit) is int and limit >= 1152):
         raise ReviewInputError(
             "current held route requires unresolved historical holds"
         )
@@ -316,6 +318,60 @@ def frontier(finalizer, *, eligibility, index, reviews):
         scope=auth.lineage["scope_sha256"],
         fresh_human_pending=eligibility.fresh_human_pending,
     )
+    if eligibility.native_union is not None:
+        from .default_human_reader import DefaultHumanInventoryReader
+        from .native_union import native_union_frame_document
+        from .publication import ReviewApprovalFinalizer, _ScopedHumanInventoryReader
+
+        frame = sys._getframe(1)
+        scope = finalizer._scoped_human_inventory_reader
+        verified_eligibility = eligibility
+        if (
+            frame.f_code
+            is not ReviewApprovalFinalizer._refinalize_with_dispositions_impl.__code__
+            or frame.f_locals.get("self") is not finalizer
+            or frame.f_locals.get("eligibility") is not eligibility
+            or frame.f_locals.get("index") is not index
+            or frame.f_locals.get("reviews") is not reviews
+            or not isinstance(scope, _ScopedHumanInventoryReader)
+            or type(scope) is not _ScopedHumanInventoryReader
+            or not isinstance(scope.reader, DefaultHumanInventoryReader)
+            or type(scope.reader) is not DefaultHumanInventoryReader
+            or verified_eligibility.partitioned_root is not None
+            or verified_eligibility.quarantine_assessments != view
+            or verified_eligibility.historical_assessments is not None
+            or not isinstance(reviews, (list, tuple))
+            or not 0 < len(reviews) < 100
+        ):
+            raise ReviewInputError("current held native frontier is unsupported")
+        require_instance_source(
+            scope, methods=("_reader", "confirmed_native_root", "native_union_reader")
+        )
+        require_instance_source(
+            scope.reader, methods=("confirmed_native_root", "native_union_reader")
+        )
+        root = scope.confirmed_native_root(verified_eligibility)
+        body = root.get("body") if isinstance(root, dict) else None
+        if (
+            not isinstance(root, dict)
+            or not isinstance(body, str)
+            or sum(canonical_bytes(row) == canonical_bytes(root) for row in reviews)
+            != 1
+            or canonical_bytes(
+                native_union_frame_document(body, verified_eligibility.native_union)
+            )
+            != canonical_bytes(verified_eligibility.to_dict())
+            or parse_finding_index(
+                body,
+                repository_id=record.repository_id,
+                pull_request=record.pull_request,
+                head_sha=saved["journal"].head_sha,
+            )
+            != index
+        ):
+            raise ReviewInputError("current held original native frame is ambiguous")
+        _selected_review_id(root)
+        return canonical_bytes(list(reviews))
     if (
         eligibility.native_union is not None
         or eligibility.human_inventory_reference is not None
@@ -357,40 +413,57 @@ def frontier(finalizer, *, eligibility, index, reviews):
 
 
 def issue_plan(finalizer, *, payload, **arguments):
-    from .api_run_plan import READ_OPERATION_REQUESTS
+    from . import api_run_plan
     from .command_finalization_plan import issue_plan as original_issue
     from .publication import ReviewApprovalFinalizer
 
     frame = sys._getframe(1)
     proof = finalizer._current_quarantine_preparation
     saved = require(proof, finalizer)
+    possible_approval = frame.f_locals.get("possible_approval")
+    limit = saved["ledger"].caller.accounting.configuration.limit
+    settled_approval = (
+        payload["conditional_approval"] is not None
+        and possible_approval is not None
+        and possible_approval.approved
+        and not saved["ledger"]._quarantine_authenticated.pending
+        and type(limit) is int
+        and limit >= 1152
+    )
+    withheld_approval = (
+        payload["conditional_approval"] is None
+        and possible_approval is not None
+        and not possible_approval.approved
+    )
     if (
         frame.f_code
         is not ReviewApprovalFinalizer._refinalize_with_dispositions_impl.__code__
         or frame.f_locals.get("self") is not finalizer
-        or payload["conditional_approval"] is not None
-        or frame.f_locals.get("possible_approval") is None
-        or frame.f_locals["possible_approval"].approved
+        or not (settled_approval or withheld_approval)
         or payload["read_contract"] != "closed-plain-single-complete-page-v1"
     ):
         raise ReviewInputError("current held plan is not the original withheld route")
+    execution_read_tail = {
+        **payload["execution_read_tail"],
+        # attach_carried and finalize.require each call the genuine native
+        # load (physically capped at ten), then scope.require's fresh PR.
+        # No adjacent-read reuse is assumed and no reservation is enlarged.
+        "unchanged_historical_holds": 2 * (api_run_plan.READ_OPERATION_REQUESTS + 1),
+    }
     payload = {
         **payload,
         "read_contract": CONTRACT,
-        "execution_read_tail": {
-            **payload["execution_read_tail"],
-            # attach_carried and finalize.require each call the genuine native
-            # load (physically capped at ten), then scope.require's fresh PR.
-            # No adjacent-read reuse is assumed and no reservation is enlarged.
-            "unchanged_historical_holds": 2 * (READ_OPERATION_REQUESTS + 1),
-        },
+        "execution_read_tail": execution_read_tail,
     }
     plan = original_issue(finalizer, payload=payload, **arguments)
     from .command_result_capacity import command_result_capacity_bound
 
     selected_id = _selected_review_id(payload["review_before"])
     terminal = _TERMINAL_REPORTS[saved["terminal_preview"]]
-    domain = {"source_review_id": selected_id, "approval_review_id": None}
+    domain = {
+        "source_review_id": selected_id,
+        "approval_review_id": 2**63 - 1 if settled_approval else None,
+    }
     bound = command_result_capacity_bound(terminal[10], **terminal[12], **domain)
     _PLANS[plan] = (proof, plan.payload, domain, bound)
     return plan
@@ -729,6 +802,16 @@ def capture_completed_preview(
         item_count=item_count,
         quote=quote,
         accounting_upper=accounting_upper,
+        accounting_context=(
+            caller.accounting,
+            sequence,
+            caller._block,
+            caller._terminal_block,
+            ordinary,
+            terminal,
+            census,
+            json.loads(plan.payload)["conditional_approval"] is not None,
+        ),
         result_manifest=manifest,
     )
     require_plan(plan, journal, preview_record, details)

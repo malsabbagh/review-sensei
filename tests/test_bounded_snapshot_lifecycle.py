@@ -1,14 +1,13 @@
 """Complete candidate journey; 28 is a measured profile, not a publication cap."""
 
 import copy
-import dis
-import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
 
 from hot_original_entry import invoke_original
+from original_source_observation import watch_code
 from review_sensei_github.api_run_requests import ApiRunSessionLedger
 from review_sensei_github.approval import ReviewApprovalEligibility
 from review_sensei_github.native_union import native_union_frame_document
@@ -84,11 +83,6 @@ class BoundedSnapshotLifecycleTests(unittest.TestCase):
             def observe_batches():
                 frames = {}
                 code = original_batch.__code__
-                returns = {
-                    item.offset
-                    for item in dis.get_instructions(code)
-                    if item.opname in {"RETURN_VALUE", "RETURN_CONST"}
-                }
 
                 def count():
                     return sum(
@@ -96,27 +90,17 @@ class BoundedSnapshotLifecycleTests(unittest.TestCase):
                         for row in f.extra_comments.values()
                     )
 
-                def observe(frame, event, arg):
-                    if previous is not None:
-                        previous(frame, event, arg)
-                    if frame.f_code is not code:
-                        return
-                    if event == "call":
-                        frames[id(frame)] = count()
-                    elif event == "return":
-                        before = frames.pop(id(frame))
-                        if frame.f_lasti not in returns:
-                            return
-                        added = count() - before
-                        batches.append((len(frame.f_locals["kwargs"]["values"]), added))
-                        self.assertLessEqual(added, 1)
+                def entered(frame):
+                    frames[id(frame)] = count()
 
-                previous = sys.getprofile()
-                try:
-                    sys.setprofile(observe)
+                def returned(frame, _value):
+                    before = frames.pop(id(frame))
+                    added = count() - before
+                    batches.append((len(frame.f_locals["kwargs"]["values"]), added))
+                    self.assertLessEqual(added, 1)
+
+                with watch_code(code, entered=entered, returned=returned):
                     yield
-                finally:
-                    sys.setprofile(previous)
 
             with (
                 registered_resource([registration]),

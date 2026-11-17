@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 import weakref
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping, cast
 from urllib.parse import quote
 
 from review_sensei.bounded_evidence import (
@@ -29,7 +30,11 @@ from review_sensei.quarantine_state import assessment_cursor, next_assessment_ev
 
 from .approval import ReviewApprovalEligibility
 from .default_human_reader import transaction_publication_digest
-from .publication import approval_eligibility_from_body, parse_finding_index
+from .publication import (
+    APPROVAL_ELIGIBILITY_MARKER_PREFIX,
+    approval_eligibility_from_body,
+    parse_finding_index,
+)
 from .run_authority import VerifiedRunAction
 
 
@@ -331,6 +336,234 @@ def _current_collision_pairs(retained, state, head_sha):
     return pairs
 
 
+def _state_before_post_publication_overrides(state, document, record, head_sha):
+    """Project the round's initial publication state before command overrides."""
+    from dataclasses import replace
+
+    from review_sensei.active_finding_window import (
+        ActiveWindowRoundState,
+        AuthoritativeDecisionInventory,
+        select_display_active_window,
+    )
+    from review_sensei.finding_drift import (
+        BODY_PLACEMENT,
+        INLINE_PLACEMENT,
+        DriftActiveEntry,
+        DriftInventory,
+        _recompute_drift_verdict,
+    )
+
+    is_window = isinstance(state, ActiveWindowRoundState)
+    obligations = (
+        state.authoritative_decision_inventory.obligations
+        if is_window
+        else state.inventory.obligations
+    )
+    current_generation = max(0, state.round_number - 1)
+    receipt_threads = {
+        receipt["thread_id"]
+        for receipt in document.get("native_receipts", ())
+        if isinstance(receipt, dict)
+        and receipt.get("head_sha") == head_sha
+        and isinstance(receipt.get("thread_id"), str)
+        and receipt["thread_id"]
+    }
+    actors = {
+        item["actor"].strip()
+        for item in record.dispositions
+        if isinstance(item, dict)
+        and isinstance(item.get("actor"), str)
+        and item["actor"].strip()
+    }
+    overridden_ids: set[str] = set()
+    for ob in obligations:
+        if ob.lifecycle_state != "authorized-override":
+            continue
+        target_thread = (
+            ob.native_target
+            if is_window
+            else (
+                ob.thread_binding.thread_id if ob.thread_binding is not None else None
+            )
+        )
+        matched = ob.generation == current_generation or (
+            target_thread is not None and target_thread in receipt_threads
+        )
+        if not matched and actors and ob.resolution_proof_sha256 is not None:
+            for actor in actors:
+                for slot_released in (True, False):
+                    if is_window:
+                        proof = hashlib.sha256(
+                            canonical_bytes(
+                                {
+                                    "kind": "command-override",
+                                    "obligation_id": ob.obligation_id,
+                                    "actor": actor,
+                                    "head_sha": head_sha,
+                                    "slot_released": slot_released,
+                                }
+                            )
+                        ).hexdigest()
+                    else:
+                        proof = hashlib.sha256(
+                            b"reviewsensei:drift-command-override:v1:"
+                            + canonical_bytes(
+                                {
+                                    "obligation_id": ob.obligation_id,
+                                    "actor": actor,
+                                    "head_sha": head_sha,
+                                    "slot_released": slot_released,
+                                }
+                            )
+                        ).hexdigest()
+                    if ob.resolution_proof_sha256 == proof:
+                        matched = True
+                        break
+                if matched:
+                    break
+        if matched:
+            overridden_ids.add(ob.obligation_id)
+    if not overridden_ids:
+        return state
+    if is_window:
+        restored_window_obs = tuple(
+            replace(
+                ob,
+                lifecycle_state="active-unresolved",
+                resolution_proof_sha256=None,
+                target_state=("active" if ob.native_target is not None else None),
+            )
+            if ob.obligation_id in overridden_ids
+            else ob
+            for ob in obligations
+        )
+        restored_targets = {
+            ob.native_target
+            for ob in restored_window_obs
+            if ob.obligation_id in overridden_ids and ob.native_target is not None
+        }
+        restored_window_slots = tuple(
+            replace(slot, state="active") if slot.target in restored_targets else slot
+            for slot in state.display_active_findings.slots
+        )
+        restored_window_inv = AuthoritativeDecisionInventory(
+            obligations=restored_window_obs
+        )
+        restored_win = select_display_active_window(
+            restored_window_inv,
+            slots=restored_window_slots,
+            max_active_findings=state.display_active_findings.max_active_findings,
+        )
+        return replace(
+            state,
+            authoritative_decision_inventory=restored_window_inv,
+            display_active_findings=restored_win,
+        )
+    restored_drift_obs = tuple(
+        replace(
+            ob,
+            lifecycle_state="active-unresolved",
+            resolution_proof_sha256=None,
+            thread_binding=(
+                replace(
+                    ob.thread_binding, slot_state="active", host_marked_resolved=False
+                )
+                if ob.thread_binding is not None
+                else None
+            ),
+        )
+        if ob.obligation_id in overridden_ids
+        else ob
+        for ob in obligations
+    )
+    restored_drift_inv = DriftInventory(obligations=restored_drift_obs)
+    restored_drift_slots = tuple(
+        ob.thread_binding.to_slot()
+        for ob in restored_drift_obs
+        if ob.thread_binding is not None
+    )
+    existing_by_id = {entry.obligation_id: entry for entry in state.active_entries}
+    reserved_count = sum(slot.reserved for slot in restored_drift_slots)
+    incumbents = [
+        item
+        for item in sorted(
+            restored_drift_inv.unresolved_obligations, key=lambda o: o.priority_key
+        )
+        if item.thread_binding is not None
+        and item.thread_binding.slot_state in {"active", "contingent"}
+    ]
+    challengers = [
+        item
+        for item in sorted(
+            restored_drift_inv.unresolved_obligations, key=lambda o: o.priority_key
+        )
+        if item.thread_binding is None
+        or item.thread_binding.slot_state not in {"active", "contingent", "uncertain"}
+    ]
+    selected: list[Any] = list(incumbents)
+    for item in challengers:
+        if reserved_count >= state.max_active_findings:
+            break
+        selected.append(item)
+        reserved_count += 1
+    entries: list[DriftActiveEntry] = []
+    for item in selected:
+        existing = existing_by_id.get(item.obligation_id)
+        if existing is not None:
+            entries.append(existing)
+            continue
+        if item.thread_binding is not None:
+            placement = item.thread_binding.placement
+            body_reason = item.thread_binding.body_reason
+            thread_id: str | None = item.thread_binding.thread_id
+            thread_action = "update"
+        else:
+            can_inline = (
+                item.present_anchor.inline_anchorable
+                and item.present_anchor.path is not None
+                and item.present_anchor.line is not None
+                and item.present_anchor.side in {"LEFT", "RIGHT"}
+                and not document.get("native_receipts")
+            )
+            placement = INLINE_PLACEMENT if can_inline else BODY_PLACEMENT
+            body_reason = None if can_inline else "unanchored-file"
+            thread_id = None
+            thread_action = "body-only"
+        entries.append(
+            DriftActiveEntry(
+                obligation_id=item.obligation_id,
+                original_fingerprint=item.criterion.original_fingerprint,
+                origin_path=item.criterion.origin_path,
+                present_path=item.present_anchor.path,
+                present_line=item.present_anchor.line,
+                present_side=item.present_anchor.side,
+                drift_kind=item.present_anchor.drift_kind,
+                lifecycle_state=item.lifecycle_state,
+                placement=placement,
+                body_reason=body_reason,
+                thread_id=thread_id,
+                thread_action=thread_action,
+            )
+        )
+    restored_entries = tuple(entries)
+    approved, reasons, steps = _recompute_drift_verdict(
+        coverage_state=state.changed_file_coverage,
+        review_complete=state.review_complete,
+        inventory=restored_drift_inv,
+        active_entries=restored_entries,
+        slots=restored_drift_slots,
+    )
+    return replace(
+        state,
+        inventory=restored_drift_inv,
+        active_entries=restored_entries,
+        slots=restored_drift_slots,
+        approved=approved,
+        withheld_reasons=reasons,
+        recovery_steps=steps,
+    )
+
+
 def _current_publication_digest(
     ledger, record, *, _collision_pairs=None, _capture=None, _transfer_capture=None
 ):
@@ -355,7 +588,9 @@ def _current_publication_digest(
     from review_sensei.finding_lifecycle import decode_lifecycle_state
     from review_sensei.finding_lifecycle_store import read_finding_lifecycle
     from review_sensei.models import ReviewResult
+    from review_sensei.session import SessionLoadResult
 
+    from .api_run_requests import ApiRunRequestTransport
     from .finding_lifecycle import _require_effect_scope, _unpack_journal, _validate
     from .finding_lifecycle_dictionary import resolve_stored
     from .publication import review_result_digest
@@ -381,8 +616,84 @@ def _current_publication_digest(
         for name in ("head_sha", "base_sha", "policy_digest", "configuration_digest")
     ):
         raise ReviewInputError("current quarantine lifecycle source scope conflicts")
-    stored = read_finding_lifecycle(ledger, record)
-    document = _validate(_unpack_journal(resolve_stored(ledger, record, stored)))
+    from .publication_recovery import _publication_transport
+
+    caller = getattr(ledger, "caller", None)
+    is_quarantine = bool(getattr(ledger, "_quarantine_required", False))
+    is_partitioned = (
+        isinstance(record.finding_lifecycle, dict)
+        and isinstance(record.finding_lifecycle.get("manifest"), dict)
+        and record.finding_lifecycle["manifest"].get("encoding") != "inline-json-v1"
+    )
+    cached_comments = (
+        ledger._cached_comments()
+        if is_quarantine and getattr(ledger, "_inventory_complete", False)
+        else ()
+    )
+    cached_body_wire = (
+        sum(
+            len(canonical_bytes({"body": item["body"]}))
+            for item in cached_comments
+            if isinstance(item, dict) and isinstance(item.get("body"), str)
+        )
+        if cached_comments
+        else 0
+    )
+    ledger_http = getattr(ledger, "http", None)
+    is_unguarded = (
+        getattr(_publication_transport(ledger_http), "_quarantine_capacity_guard", None)
+        is None
+        if is_quarantine and ledger_http is not None
+        else True
+    )
+    authenticated = getattr(ledger, "_quarantine_authenticated", None)
+    is_v3_guarded = (
+        is_quarantine
+        and not is_unguarded
+        and authenticated is not None
+        and isinstance(authenticated.archive.get("target_isolation"), dict)
+        and authenticated.archive["target_isolation"].get("contract")
+        == "failed-published-tail-isolation-v1"
+    )
+    reuse_selected_load = (
+        not is_quarantine
+        or is_partitioned
+        or (not is_unguarded and cached_body_wire > 512 * 1024)
+        or is_v3_guarded
+        or (is_unguarded and len(cached_comments) >= 80)
+    )
+    resolved_stored = None
+    if (
+        reuse_selected_load
+        and isinstance(caller, ApiRunRequestTransport)
+        and type(caller) is ApiRunRequestTransport
+        and caller._effect_record is not None
+        and record is caller._effect_record
+        and record.record_sha256 == caller._root
+        and getattr(ledger, "_inventory_complete", False)
+        and caller._checkpoint is None
+    ):
+        selected_load = SessionLoadResult(status="ok", record=record)
+        if is_quarantine:
+            prior_reuse = getattr(ledger, "_reuse_listed_parts", False)
+            ledger._reuse_listed_parts = True
+            try:
+                stored = read_finding_lifecycle(
+                    ledger, record, _selected_load=selected_load
+                )
+                if is_v3_guarded or (is_unguarded and len(cached_comments) >= 80):
+                    resolved_stored = resolve_stored(ledger, record, stored)
+            finally:
+                ledger._reuse_listed_parts = prior_reuse
+        else:
+            stored = read_finding_lifecycle(
+                ledger, record, _selected_load=selected_load
+            )
+    else:
+        stored = read_finding_lifecycle(ledger, record)
+    if resolved_stored is None:
+        resolved_stored = resolve_stored(ledger, record, stored)
+    document = _validate(_unpack_journal(resolved_stored))
     _require_effect_scope(document, record.identity(), transaction.head_sha)
     state = decode_lifecycle_state(document["lifecycle"]).state
     if state.head_sha != transaction.head_sha or state.base_sha != transaction.base_sha:
@@ -393,11 +704,14 @@ def _current_publication_digest(
         )
     if _transfer_capture is not None:
         _transfer_capture(document)
+    publication_state = _state_before_post_publication_overrides(
+        state, document, record, transaction.head_sha
+    )
     original = replace(retained, transaction=transaction)
     projected = (
-        project_display_review_result(original, state)
-        if isinstance(state, ActiveWindowRoundState)
-        else project_drift_review_result(original, state)
+        project_display_review_result(original, publication_state)
+        if isinstance(publication_state, ActiveWindowRoundState)
+        else project_drift_review_result(original, publication_state)
     )
     # Decoding native placement state may reconstruct internal comment values
     # differently while preserving every canonical result field. The producer
@@ -432,6 +746,7 @@ def prepare_quarantine_target(run, authority, command, app, permission):
     require_module_seal(body_census_hint)
     with body_census_hint.window():
         authenticated = reader.read(head_sha=run.head_sha)
+        read_observations_stop = len(run.caller.observations)
         archive = authenticated.archive
         require_module_seal(body_census_hint)
         body_census_hint.enable(archive)
@@ -479,7 +794,10 @@ def prepare_quarantine_target(run, authority, command, app, permission):
             raise ReviewInputError(
                 "current quarantine assessment publication is unavailable"
             )
-        selected = max(candidates, key=lambda r: r["id"])
+        marked = [
+            r for r in candidates if APPROVAL_ELIGIBILITY_MARKER_PREFIX in r["body"]
+        ]
+        selected = max(marked or candidates, key=lambda r: r["id"])
         human_reader = app._human_inventory_reader(
             token=run.ledger.token,
             repository=run.identity.repository,
@@ -500,8 +818,84 @@ def prepare_quarantine_target(run, authority, command, app, permission):
             raise ReviewInputError(
                 "current review has no explicit quarantine assessment marker"
             )
-        reader.require(eligibility, head_sha=run.head_sha)
-        record = reader.record_after_read()
+        from .publication_recovery import _publication_transport
+
+        cached_comments = (
+            run.ledger._cached_comments()
+            if getattr(run.ledger, "_inventory_complete", False)
+            else ()
+        )
+        cached_body_wire = sum(
+            len(canonical_bytes({"body": item["body"]}))
+            for item in cached_comments
+            if isinstance(item, dict) and isinstance(item.get("body"), str)
+        )
+        unmutated_since_read = not any(
+            item.get("mutation")
+            for item in run.caller.observations[read_observations_stop:]
+        )
+        heavy_guarded_read_reuse = (
+            bool(cached_comments)
+            and cached_body_wire > 512 * 1024
+            and isinstance(archive.get("target_isolation"), dict)
+            and archive["target_isolation"].get("contract")
+            in {"body-limit-prepublication-v1", "published-tail-reply-isolation-v1"}
+        )
+        v3_guarded_read_reuse = (
+            bool(cached_comments)
+            and isinstance(archive.get("target_isolation"), dict)
+            and archive["target_isolation"].get("contract")
+            == "failed-published-tail-isolation-v1"
+        )
+        plain_high_comment_read_reuse = (
+            len(cached_comments) >= 80
+            and getattr(
+                _publication_transport(run.http), "_quarantine_capacity_guard", None
+            )
+            is None
+            and isinstance(archive.get("target_isolation"), dict)
+            and archive["target_isolation"].get("schema_version")
+            == "quarantine-target-isolation-v1"
+        )
+        if unmutated_since_read and (
+            heavy_guarded_read_reuse
+            or v3_guarded_read_reuse
+            or plain_high_comment_read_reuse
+        ):
+            from dataclasses import replace
+
+            from review_sensei.quarantine_assessments import assessment_view
+
+            record = reader.record_after_read()
+            run.ledger._quarantine_origin_reader.current_scope.require()
+            view = assessment_view(
+                authenticated.archive["assessment_origins"],
+                authenticated.inventories,
+                authenticated.state,
+                scope=authenticated.lineage["scope_sha256"],
+                fresh_human_pending=eligibility.fresh_human_pending,
+            )
+            actual = replace(
+                eligibility,
+                quarantine_assessments=view,
+                facts=replace(
+                    eligibility.facts,
+                    has_human_adjudication_findings=(
+                        eligibility.fresh_human_pending
+                        or bool(view["pending"])
+                        or bool(
+                            (eligibility.historical_assessments or {}).get("pending")
+                        )
+                    ),
+                ),
+            )
+            if actual.to_dict() != eligibility.to_dict():
+                raise ReviewInputError(
+                    "quarantine assessment current publication is unconfirmed"
+                )
+        else:
+            reader.require(eligibility, head_sha=run.head_sha)
+            record = reader.record_after_read()
         collision_pairs: list[tuple[str, str | None]] = []
         lifecycle_capture: list[Any] = []
         if (
@@ -585,6 +979,53 @@ def prepare_quarantine_target(run, authority, command, app, permission):
     return target
 
 
+_GROUPED_HISTORICAL_LEASES: weakref.WeakKeyDictionary[Any, Any] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _is_funded_grouped_historical_command(run, guard) -> bool:
+    """Return True when a grouped-native historical command is fully funded."""
+    caller = run.caller
+    state = caller.accounting
+    terminal = next(
+        (b for b in state.blocks if b.block_id == caller._terminal_block),
+        None,
+    )
+    return (
+        not guard.complete_tail
+        and guard.native_profile is not None
+        and type(state.configuration.limit) is int
+        and state.configuration.limit >= 1152
+        and caller.budget_view.ordinary_remaining() >= 220
+        and terminal is not None
+        and terminal.undispatched >= 50
+        and not state.prior_nonstartup_liability
+    )
+
+
+def has_grouped_historical_lease(ledger, identity) -> bool:
+    """Verify an active grouped-native historical lease for this ledger and caller."""
+    from review_sensei.source_registry import require_module_seal
+
+    from .quarantine_capacity import installed_capacity
+
+    require_module_seal(sys.modules[__name__])
+    caller = getattr(ledger, "caller", None)
+    if caller is None:
+        return False
+    try:
+        saved = _GROUPED_HISTORICAL_LEASES.get(caller)
+    except TypeError:
+        return False
+    if saved is None:
+        return False
+    return (
+        saved == (ledger, identity, installed_capacity(ledger, identity))
+        and caller._terminal_reason is None
+    )
+
+
 def _require_installed_command_tail(run, authenticated):
     """Reject a known unsupported finalizer before entering a decision effect.
 
@@ -611,6 +1052,13 @@ def _require_installed_command_tail(run, authenticated):
     require_module_seal(quarantine_historical_execution)
     closed = quarantine_historical_execution.available(run.caller, run.ledger)
     if not guard.complete_tail and not closed:
+        if _is_funded_grouped_historical_command(run, guard):
+            _GROUPED_HISTORICAL_LEASES[run.caller] = (
+                run.ledger,
+                run.identity,
+                guard,
+            )
+            return
         raise ReviewInputError(
             "quarantine command finalization capacity unavailable before business "
             "writes: installed command tail has no complete lifecycle proof"
@@ -784,8 +1232,40 @@ def apply_quarantine_target(run, authority, command, target, app):
             run, authority, command, target.instance, target.permission
         )
 
-        loaded = run.ledger.load(run.identity)
-        current = getattr(run.ledger, "_quarantine_authenticated", None)
+        from review_sensei.session import SessionLoadResult
+
+        from .publication_recovery import _publication_transport
+        from .quarantine_origin import rebind_same_lineage_owner
+
+        active_authenticated = getattr(run.ledger, "_quarantine_authenticated", None)
+        if (
+            getattr(
+                _publication_transport(run.http), "_quarantine_capacity_guard", None
+            )
+            is None
+            and getattr(run.ledger, "_inventory_complete", False)
+            and len(run.ledger._cached_comments()) >= 80
+            and run.caller._checkpoint is None
+            and run.caller._effect_record is not None
+            and run.caller._effect_record.record_sha256 == run.caller._root
+            and run.caller._effect_record.quarantine_lineage is not None
+            and active_authenticated is not None
+            and active_authenticated.lineage_bytes == before.lineage_bytes
+            and active_authenticated.state_bytes == before.state_bytes
+            and canonical_bytes(run.caller._effect_record.quarantine_lineage)
+            == before.lineage_bytes
+        ):
+            loaded = SessionLoadResult(status="ok", record=run.caller._effect_record)
+            current = rebind_same_lineage_owner(
+                active_authenticated,
+                run.ledger,
+                run.caller,
+                run.identity,
+                run.caller._effect_record,
+            )
+        else:
+            loaded = run.ledger.load(run.identity)
+            current = getattr(run.ledger, "_quarantine_authenticated", None)
         if (
             loaded.record is None
             or current is None
@@ -796,9 +1276,14 @@ def apply_quarantine_target(run, authority, command, target, app):
             raise ReviewInputError(
                 "quarantine current complete state changed before event"
             )
-        current_manifest = loaded.record.quarantine_lineage["assessment_state_manifest"]
+        assert loaded.record.quarantine_lineage is not None
+        current_manifest = cast(
+            dict[str, Any],
+            loaded.record.quarantine_lineage["assessment_state_manifest"],
+        )
         cursor = read_inline_evidence(
-            current_manifest, expected_binding=current_manifest["binding"]
+            current_manifest,
+            expected_binding=cast(Mapping[str, object], current_manifest["binding"]),
         )
         event = next_assessment_event(cursor, decision)
         binding = _decision_binding(loaded.record, run)
@@ -869,8 +1354,12 @@ def _confirmed_own_decision(run, target, confirmed, *, decision):
     from review_sensei.source_registry import require_module_seal
 
     from . import quarantine_candidate_receipt, quarantine_lifecycle_transfer
+    from .publication_recovery import _publication_transport
     from .quarantine_command_projection import require_projection_source
-    from .quarantine_origin import require_authenticated_read_owner
+    from .quarantine_origin import (
+        advance_confirmed_decision_owner,
+        require_authenticated_read_owner,
+    )
 
     current = inspect.currentframe()
     frame = current.f_back if current is not None else None
@@ -910,6 +1399,22 @@ def _confirmed_own_decision(run, target, confirmed, *, decision):
     quarantine_candidate_receipt.consume(
         run.caller, run.ledger, run.identity, confirmed
     )
+    active_authenticated = getattr(run.ledger, "_quarantine_authenticated", None)
+    if (
+        getattr(_publication_transport(run.http), "_quarantine_capacity_guard", None)
+        is None
+        and getattr(run.ledger, "_inventory_complete", False)
+        and len(cast(Any, run.ledger)._cached_comments()) >= 80
+        and active_authenticated is not None
+    ):
+        advance_confirmed_decision_owner(
+            active_authenticated,
+            run.ledger,
+            run.caller,
+            run.identity,
+            confirmed,
+            decision=decision,
+        )
     return quarantine_lifecycle_transfer.confirmed_transfer(
         target, run, confirmed, decision_permit=permit
     )

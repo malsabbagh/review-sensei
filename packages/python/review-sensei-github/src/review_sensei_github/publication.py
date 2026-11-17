@@ -2462,7 +2462,14 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         app_slug: str,
     ) -> Callable[[HumanInventoryReference], PendingHumanReview] | None:
-        if self._command_capacity_requested or self._closed_command_reads:
+        current_prepared = self._current_quarantine_preparation is not None
+        if current_prepared:
+            from .current_quarantine_finalization import require
+
+            require(self._current_quarantine_preparation, self)
+        if (
+            self._command_capacity_requested or self._closed_command_reads
+        ) and not current_prepared:
             # The issued closed-plain contract admits no external references.
             # Decode without a reader so any changed native/part frame refuses;
             # do not invoke even the default factory for an inline document.
@@ -4397,6 +4404,23 @@ class ReviewApprovalFinalizer:
         )
         if check_token and not command_cleanup_stopped:
             assert check_outcome is not None
+            target_check_outcome = check_outcome
+            journal = getattr(self, "_finding_lifecycle_journal", None)
+            closed_suffix_replay = False
+            if journal is not None and check_outcome.conclusion == "success":
+                from review_sensei.source_registry import require_module_seal
+
+                from . import quarantine_historical_execution
+
+                require_module_seal(quarantine_historical_execution)
+                replay = quarantine_historical_execution.closed_suffix_check_outcome(
+                    journal
+                )
+                if replay is not None:
+                    # Closed dismiss suffix funds only the quoted check replay.
+                    # Approval remains a later, independently proved write.
+                    check_outcome = replay
+                    closed_suffix_replay = True
             self._observe_stage("check.publication")
             try:
                 check_result = ReviewCheckPublisher(http=self.http).complete(
@@ -4415,6 +4439,52 @@ class ReviewApprovalFinalizer:
                 if self._operation_observer is not None:
                     self._operation_observer.exception(exc)
                 check_failed = True
+            if (
+                closed_suffix_replay
+                and not check_failed
+                and check_result is not None
+                and check_result.status in {"created", "updated"}
+            ):
+                from review_sensei.source_registry import require_module_seal
+
+                from . import quarantine_historical_execution
+
+                require_module_seal(quarantine_historical_execution)
+                quarantine_historical_execution.release_closed_suffix_for_approval(
+                    journal
+                )
+                if (
+                    target_check_outcome.conclusion == "success"
+                    and check_outcome.conclusion != "success"
+                ):
+                    from . import quarantine_native_scope
+
+                    require_module_seal(quarantine_native_scope)
+                    if (
+                        quarantine_native_scope.native_scope(
+                            self.http, repository=repository, head_sha=head_sha
+                        )
+                        is not None
+                    ):
+                        try:
+                            check_result = ReviewCheckPublisher(
+                                http=self.http
+                            ).complete(
+                                token=check_token,
+                                repository=repository,
+                                head_sha=head_sha,
+                                app_slug=app_slug,
+                                outcome=target_check_outcome,
+                            )
+                        except (
+                            GitHubHTTPError,
+                            GitHubHTTPTransientError,
+                            GitHubPublicationError,
+                            ReviewInputError,
+                        ) as exc:
+                            if self._operation_observer is not None:
+                                self._operation_observer.exception(exc)
+                            check_failed = True
         if resolution is None:
             resolution = reconcile_cleanup()
             if resolution.unconfirmed:

@@ -26,6 +26,7 @@ from .quarantine_lifecycle_transfer import sizing_snapshot
 _PREPARED: WeakKeyDictionary = WeakKeyDictionary()
 _OBSERVATIONS: WeakKeyDictionary = WeakKeyDictionary()
 _NATIVE_PLANS: WeakKeyDictionary = WeakKeyDictionary()
+_OBSERVATION_BY_CALLER: WeakKeyDictionary = WeakKeyDictionary()
 
 
 @dataclass(frozen=True, eq=False)
@@ -67,7 +68,7 @@ def observe_plan(finalizer, *, payload, states, check_token, cleanup_instances=N
         )
     if finalizer is None or states is None:
         raise ReviewInputError("quarantine sizing original inputs are unavailable")
-    require(finalizer._quarantine_capacity_preparation, finalizer=finalizer)
+    saved = require(finalizer._quarantine_capacity_preparation, finalizer=finalizer)
     if (
         payload.get("read_contract") != "quarantine-sizing-observation-only-v1"
         or payload.get("execution_read_tail") is not None
@@ -80,24 +81,66 @@ def observe_plan(finalizer, *, payload, states, check_token, cleanup_instances=N
         canonical_bytes(payload),
         canonical_bytes([encode_lifecycle_state(state) for state in states]),
     )
+    # Observation bytes retain possible approval for hold sizing. The native
+    # branch source used by intermediate_suffix_recipe stays dismiss-only and
+    # must keep an authenticated check replay when eligibility would approve.
+    from . import command_finalization_plan
+
+    require_module_seal(command_finalization_plan)
+    sizing_finalizer = _detached_sizing_finalizer(finalizer)
+    dismiss_only = _dismiss_only_payload_dict(
+        saved,
+        payload,
+        journal=sizing_finalizer._finding_lifecycle_journal,
+    )
+    native_payload = dismiss_only if dismiss_only is not None else payload
     _OBSERVATIONS[observed] = (
         finalizer._quarantine_capacity_preparation,
         observed.payload,
         observed.state_bytes,
     )
+    _OBSERVATION_BY_CALLER[saved["run"].caller] = observed
     # This private source plan is only an input to the existing pure branch
     # generator. Its nonadmitting contract still cannot enter ordinary execution.
-    from . import command_finalization_plan
-
-    require_module_seal(command_finalization_plan)
-    sizing_finalizer = _detached_sizing_finalizer(finalizer)
     _NATIVE_PLANS[observed] = command_finalization_plan.issue_plan(
         sizing_finalizer,
-        payload=payload,
+        payload=native_payload,
         states=states,
         check_token=check_token,
         cleanup_instances=cleanup_instances,
     )
+    return observed
+
+
+def replay_installed_tail_observation(run):
+    """Return the paid sizing observation when the tail gate is re-entered.
+
+    The installed-tail check is the last proof before a business write. A second
+    observation there is sizing only: it must not spend another check exchange,
+    and the closed suffix already activated for that caller is not lifecycle
+    proof once sizing has been re-entered.
+    """
+    from . import quarantine_action, quarantine_historical_execution
+
+    require_module_seal(quarantine_action)
+    require_module_seal(quarantine_historical_execution)
+    code = quarantine_action._require_installed_command_tail.__code__
+    frame: FrameType | None = sys._getframe(1)
+    inside = False
+    while frame is not None:
+        if frame.f_code is code and frame.f_globals is vars(quarantine_action):
+            inside = True
+            break
+        frame = frame.f_back
+    if not inside:
+        return None
+    observed = _OBSERVATION_BY_CALLER.get(getattr(run, "caller", None))
+    if type(observed) is not QuarantineFinalizerObservation:
+        return None
+    saved = _OBSERVATIONS.get(observed)
+    if saved is None or require(saved[0]).get("run") is not run:
+        return None
+    quarantine_historical_execution.note_installed_tail_reentry(run.caller)
     return observed
 
 
@@ -118,6 +161,76 @@ def require_observation(observation):
             "quarantine finalizer observation is unissued or changed"
         )
     return require(saved[0])
+
+
+def _dismiss_only_payload_dict(saved, payload, *, journal=None):
+    from . import finding_lifecycle, quarantine_action
+
+    require_module_seal(quarantine_action)
+    require_module_seal(finding_lifecycle)
+    command = saved["target"].command
+    if (
+        type(command) is not quarantine_action.QuarantineCommand
+        or command.action not in ("dismiss", "accept-risk")
+        or not saved["projection"].creates_event
+        or payload.get("conditional_approval") is None
+    ):
+        return None
+    result = {**payload, "conditional_approval": None}
+    check = result.get("check_request")
+    if check is None or journal is None or not hasattr(journal, "effects"):
+        return result
+    method, path, raw = check
+    keys = {
+        finding_lifecycle._digest({"method": method, "path": path, "request": value})
+        for value in (raw, finding_lifecycle._request_identity(raw))
+    }
+    if any(
+        effect.get("request_sha256") in keys and effect.get("status") == "confirmed"
+        for effect in journal.effects
+    ):
+        return result
+    # Last dismiss can plan a new success conclusion; keep the retained
+    # authenticated check mutation so the closed suffix stays a replay.
+    for effect in reversed(journal.effects):
+        if (
+            effect.get("status") != "confirmed"
+            or effect.get("method") not in {"POST", "PATCH"}
+            or "/check-runs" not in str(effect.get("path", ""))
+            or not isinstance(effect.get("request"), dict)
+        ):
+            continue
+        request = effect["request"]
+        if set(request) == {"$body_sha256", "utf8_bytes"}:
+            continue
+        result = {
+            **result,
+            "check_request": [effect["method"], effect["path"], dict(request)],
+        }
+        break
+    return result
+
+
+def _dismiss_only_native_payload(observation):
+    """Native branch source for dismiss suffix recipes; not the observation view."""
+    saved = require_observation(observation)
+    plan = _NATIVE_PLANS.get(observation)
+    journal = None if plan is None else plan.journal
+    payload = _dismiss_only_payload_dict(
+        saved, json.loads(observation.payload), journal=journal
+    )
+    if payload is None:
+        return None
+    return canonical_bytes(payload)
+
+
+def _observation_native_payload_match(observation, plan):
+    if plan.state_bytes != observation.state_bytes:
+        return False
+    if plan.payload == observation.payload:
+        return True
+    dismiss_only = _dismiss_only_native_payload(observation)
+    return dismiss_only is not None and plan.payload == dismiss_only
 
 
 def require_finalizer_copy_source(finalizer):
@@ -370,6 +483,7 @@ def _root_growth_measurement(
             "validated": True,
             "root_bytes": len(canonical_bytes(candidate.to_dict())),
             "comment_body_bytes": len(body.encode()),
+            "comment_wire_bytes": len(canonical_bytes({"body": body})),
         }
 
     ordinary_measurement = render(raw)
@@ -395,6 +509,7 @@ def _root_growth_measurement(
         }
     return {
         "ordinary_root_bytes": ordinary_measurement["root_bytes"],
+        "ordinary_comment_wire_bytes": ordinary_measurement["comment_wire_bytes"],
         "comment_body_bytes": max(
             ordinary_measurement["comment_body_bytes"],
             terminal_measurement["comment_body_bytes"],
@@ -446,10 +561,7 @@ def _measure_inline_branches(observation, *, _retain_manifest=False):
     plan = _NATIVE_PLANS.get(observation)
     if plan is None:
         raise ReviewInputError("quarantine native branch source is unavailable")
-    if (
-        plan.payload != observation.payload
-        or plan.state_bytes != observation.state_bytes
-    ):
+    if not _observation_native_payload_match(observation, plan):
         raise ReviewInputError("quarantine native branch observation changed")
     require_module_seal(finding_lifecycle_store)
     require_module_seal(finding_lifecycle)
@@ -604,6 +716,50 @@ def _measure_inline_branches(observation, *, _retain_manifest=False):
             source_review_id=selected["id"],
             **approval_fields,
         )
+    elif target.command.action in ("dismiss", "accept-risk"):
+        # A repeated decision writes no new event, but the terminal root still
+        # carries the already-recorded command result.
+        import hashlib
+
+        from .api_run_history import action_result_binding
+        from .command_result_capacity import command_result_capacity_upper
+
+        selected = json.loads(target.native_review_bytes)
+        existing = next(
+            (
+                item
+                for item in target.authenticated.state["settlements"]
+                if (item["origin_scope_sha256"], item["instance"])
+                == (target.command.scope, target.instance)
+            ),
+            None,
+        )
+        if (
+            existing is None
+            or type(selected.get("id")) is not int
+            or not 0 < selected["id"] <= 2**63 - 1
+            or len(run.head_sha) != 40
+        ):
+            raise ReviewInputError("cold terminal root lacks its complete result shape")
+        base_result = quarantine_action.historical_command_result(
+            target.command,
+            target,
+            record,
+            existing=existing,
+            actor=saved["authority"].document["actor"],
+        )
+        result_upper = command_result_capacity_upper(
+            base_result,
+            binding=action_result_binding(
+                run.identity, run.caller.accounting, run.ledger.evidence_producer()
+            ),
+            intent_sha256=hashlib.sha256(canonical_bytes(action["intent"])).hexdigest(),
+            outcome={"kind": "applied", "reason": None},
+            call_limit=run.caller.accounting.configuration.limit,
+            reference_history=True,
+            source_review_id=selected["id"],
+            approval_review_id=None,
+        )
     grants = tuple(sorted(run.ledger._observed_consumed_grants))
     conditional_data = None
     if _retain_manifest:
@@ -721,9 +877,11 @@ def _measure_inline_branches(observation, *, _retain_manifest=False):
         "branches": tuple(branches),
         "growth_roots": tuple(growth_roots),
         "result_manifest_bound": len(canonical_bytes(result_upper)),
-        "future_approval_domain_requires_execution_proof": json.loads(plan.payload).get(
-            "conditional_approval"
-        )
+        # Observation bytes retain possible approval for hold sizing; the native
+        # dismiss plan may intentionally omit it for the closed suffix recipe.
+        "future_approval_domain_requires_execution_proof": json.loads(
+            observation.payload
+        ).get("conditional_approval")
         is not None,
         **(
             {}
@@ -742,8 +900,7 @@ def _measure_inline_branches(observation, *, _retain_manifest=False):
             or quarantine_last_manifest.accounting_bytes(run.caller.accounting)
             != initial_accounting
             or canonical_bytes(record.to_dict()) != initial_record
-            or plan.payload != observation.payload
-            or plan.state_bytes != observation.state_bytes
+            or not _observation_native_payload_match(observation, plan)
         ):
             raise ReviewInputError("LAST sizing changed original state")
         result["last_manifest"] = {
@@ -1138,18 +1295,46 @@ def intermediate_suffix_recipe(observation, *, comment_rows, receipt_page):
         full_known[identifier] = bound
     if set(guard.comment_plan.known) - set(full_known):
         raise ReviewInputError("guarded suffix retained known member disappeared")
+    installed_known = guard.comment_plan.known
 
     def full_cache_plan():
         # Exact-echo guard refinement is optional and can decline a C increase.
         # A later lifecycle scope still sees the actual cached immutable ID.
-        # Price that appended known member independently, retaining every old
-        # unknown allocation and both roots' original closure wire ceilings.
-        return CommentAllocationPlan(
-            full_known,
-            guard.comment_plan.unknown,
-            metadata_known=guard.comment_plan.metadata_known,
-            metadata_unknown=guard.comment_plan.metadata_unknown,
+        # Members priced after installation, including the event and receipt,
+        # are writes the unknown tail already reserved. Consume the smallest
+        # slot that covers each of those wires instead of stacking the known
+        # body on the full unknown tuple. A 65536 slot is removed only when it
+        # is that smallest covering slot. Keep the stacked plan unless the
+        # consumed plan needs strictly fewer physical reads.
+        metadata_known = guard.comment_plan.metadata_known
+        metadata_unknown = guard.comment_plan.metadata_unknown
+        stacked = guard.comment_plan.unknown
+
+        def build(slots):
+            return CommentAllocationPlan(
+                full_known,
+                slots,
+                metadata_known=metadata_known,
+                metadata_unknown=metadata_unknown,
+            )
+
+        future_wires = tuple(
+            full_known[identifier]
+            for identifier in full_known
+            if identifier not in installed_known
         )
+        if not future_wires:
+            return build(stacked)
+        consumed = tuple(
+            quarantine_capacity._spend_fitting_slots(stacked, future_wires)
+        )
+        if consumed == stacked:
+            return build(stacked)
+        classic = build(stacked)
+        priced = build(consumed)
+        if priced.worst_read_calls() < classic.worst_read_calls():
+            return priced
+        return classic
 
     cache_plan = full_cache_plan()
     prefixes = []

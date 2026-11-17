@@ -1114,6 +1114,7 @@ class _InMemoryPreviewLedger:
             values=values,
             result_digest=result_digest,
             max_manifest_bytes=max_manifest_bytes,
+            allow_packed_index=getattr(record, "finding_lifecycle", None) is not None,
         )
         for part_id, part_doc in prepared.parts.items():
             if part_id not in self._preloaded_parts:

@@ -12,7 +12,6 @@ import hashlib
 import io
 import json
 import os
-import sys
 import tempfile
 import unittest
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
@@ -22,6 +21,7 @@ from urllib.parse import urlsplit
 
 import test_review_run as review_run_fixtures
 from fake_github_http import json_response
+from original_source_observation import watch_code
 from review_sensei_github import action_run, review_run
 from review_sensei_github import cli as package_cli
 from review_sensei_github.api_run_requests import ApiRunRequestTransport
@@ -345,27 +345,21 @@ class CommandEntryFixture(EntryFixture):
 
         @contextmanager
         def capture_scope():
-            previous = sys.getprofile()
+            if original_code is None:
+                yield
+                return
 
-            def observe(frame, event, arg):
-                if (
-                    event == "return"
-                    and frame.f_code is original_code
-                    and frame.f_globals is original_globals
-                    and isinstance(arg, review_run.ReviewRun)
-                ):
+            def selected(frame, arg):
+                if isinstance(arg, review_run.ReviewRun):
                     fixture.selected = arg
                     after_bootstrap = getattr(fixture, "after_action_bootstrap", None)
                     if after_bootstrap is not None:
                         after_bootstrap(arg)
-                if previous is not None:
-                    previous(frame, event, arg)
 
-            try:
-                sys.setprofile(observe)
+            with watch_code(
+                original_code, namespace=original_globals, returned=selected
+            ):
                 yield
-            finally:
-                sys.setprofile(previous)
 
         environment = {
             **fixture_process_environment(),

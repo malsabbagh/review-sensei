@@ -388,12 +388,33 @@ def _registry():
             raise ReviewInputError("historical lease is copied or foreign")
         require(run.caller)
 
+    def note_installed_tail_reentry(caller):
+        """Closed suffix is not lifecycle proof after sizing is re-entered."""
+        require_module_seal(sys.modules[__name__])
+        lease = active.get(caller)
+        entry = None if lease is None else leases.get(lease)
+        if type(entry) is not dict or entry.get("caller") is not caller:
+            return False
+        entry["installed_tail_reentry"] = True
+        return True
+
     def available(caller, ledger):
         entry = require(caller)
         if entry is None:
             return False
         if entry["ledger"] is not ledger:
             raise ReviewInputError("historical lease ledger changed")
+        if entry.get("installed_tail_reentry") is True:
+            from . import quarantine_action
+
+            require_module_seal(quarantine_action)
+            frame = sys._getframe(1)
+            if (
+                frame.f_code
+                is quarantine_action._require_installed_command_tail.__code__
+                and frame.f_globals is vars(quarantine_action)
+            ):
+                return False
         return True
 
     def before_native_attempt(journal: Any, effect, method, path, body):
@@ -566,6 +587,17 @@ def _registry():
                     raise ReviewInputError(
                         "historical checkpoint exceeds its complete root projection"
                     )
+                if phase != "terminal":
+                    original = cast(Any, frame.f_back)
+                    request_payload = json.loads(original.f_locals["request"].data)
+                    max_wire = max(
+                        row["ordinary_comment_wire_bytes"]
+                        for row in recipe["root_measurement"]["growth_roots"]
+                    )
+                    if len(canonical_bytes(request_payload)) > max_wire:
+                        raise ReviewInputError(
+                            "historical checkpoint exceeds its complete root projection"
+                        )
             entry["phase"] += 1
         entry[key] += 1
 
@@ -1021,6 +1053,85 @@ def _registry():
         ):
             raise ReviewInputError("historical lifecycle execution context changed")
 
+    def closed_suffix_check_outcome(journal):
+        """Quoted closed-suffix check replay DATA for gate publication, or None.
+
+        Last dismiss may evaluate as success/approval for hold sizing, but the
+        closed intermediate recipe only funds the already confirmed check
+        mutation. Return that exact outcome so publication can replay it before
+        an independently proved approval write.
+        """
+        from .checks import CheckOutcome
+
+        require_module_seal(sys.modules[__name__])
+        if not require_journal(journal):
+            return None
+        entry = require(journal.ledger.caller)
+        if entry is None or entry["journal"] is not journal:
+            return None
+        check = json.loads(entry["recipe"]).get("check")
+        if (
+            type(check) is not list
+            or len(check) != 3
+            or check[0] not in {"POST", "PATCH"}
+            or "/check-runs" not in str(check[1])
+            or type(check[2]) is not dict
+        ):
+            return None
+        from . import finding_lifecycle
+
+        require_module_seal(finding_lifecycle)
+        method, path, raw = check
+        identity = finding_lifecycle._request_identity(raw)
+        key = finding_lifecycle._digest(
+            {"method": method, "path": path, "request": identity}
+        )
+        matches = [
+            effect
+            for effect in journal.effects
+            if effect.get("request_sha256") == key
+            and effect.get("status") == "confirmed"
+        ]
+        if len(matches) != 1:
+            return None
+        body = identity if isinstance(identity, dict) else raw
+        output = body.get("output") if isinstance(body, dict) else None
+        conclusion = body.get("conclusion") if isinstance(body, dict) else None
+        if (
+            type(output) is not dict
+            or type(output.get("title")) is not str
+            or type(output.get("summary")) is not str
+            or type(conclusion) is not str
+        ):
+            return None
+        return CheckOutcome(
+            conclusion=conclusion,
+            title=output["title"],
+            summary=output["summary"],
+        )
+
+    def release_closed_suffix_for_approval(journal):
+        """End quoted suffix custody before an independently proved approval write."""
+        require_module_seal(sys.modules[__name__])
+        if not require_journal(journal):
+            return False
+        entry = require(journal.ledger.caller)
+        if entry is None or entry["journal"] is not journal:
+            return False
+        journal.finish()
+        own = object.__getattribute__(journal, "__dict__")
+        if type(own) is not dict or "_armed" not in own:
+            raise ReviewInputError("historical closed suffix journal fields changed")
+        own["_armed"] = False
+        # Drop the closed-suffix lease so approval is ordinary publication, not an
+        # unquoted historical native mutation after journal-finish.
+        caller = journal.ledger.caller
+        lease = active.get(caller)
+        if lease is not None and leases.get(lease) is entry:
+            active.pop(caller, None)
+            leases.pop(lease, None)
+        return True
+
     return (
         activate,
         require_closed,
@@ -1037,6 +1148,9 @@ def _registry():
         receipt_preparation,
         observe_census,
         take_final_census,
+        closed_suffix_check_outcome,
+        release_closed_suffix_for_approval,
+        note_installed_tail_reentry,
     )
 
 
@@ -1056,6 +1170,9 @@ def _registry():
     receipt_preparation,
     observe_census,
     take_final_census,
+    closed_suffix_check_outcome,
+    release_closed_suffix_for_approval,
+    note_installed_tail_reentry,
 ) = _registry()
 del _registry
 

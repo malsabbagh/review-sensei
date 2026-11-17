@@ -212,6 +212,7 @@ _FIELDS: dict[type, tuple[str, ...]] = {
         "body_placement_note",
     ),
 }
+_FIELD_HINTS: dict[type, dict[str, Any]] = {cls: get_type_hints(cls) for cls in _FIELDS}
 
 
 @dataclass(frozen=True)
@@ -267,7 +268,7 @@ def _decode(value: object, expected: Any) -> Any:
         if tuple(f.name for f in fields(expected)) != names:
             raise _invalid()
         obj = _closed(value, names)
-        hints = get_type_hints(expected)
+        hints = _FIELD_HINTS.get(expected) or get_type_hints(expected)
         return expected(**{name: _decode(obj[name], hints[name]) for name in names})
     if expected is type(None):
         if value is not None:

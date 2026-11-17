@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from copy import deepcopy
 from dataclasses import replace
+from unittest.mock import patch
 
 from review_sensei_github.publication import (
     approval_eligibility_from_body,
@@ -18,10 +19,15 @@ from review_sensei.errors import ReviewInputError
 
 class CarriedHumanProgressTests(unittest.TestCase):
     def test_application_reassessment_keeps_pending_and_settled_historical_holds(self):
+        from review_sensei_github.application import GitHubApplication
         from review_sensei_github.session_ledger import parse_session_comment
         from test_action_reply_entry import ReplyEntryFixture
-        from test_action_run import historical_body, historical_command_case
-        from test_review_run import IDENTITY, _CompletionFixture
+        from test_action_run import HistoricalCommandFixture, historical_body
+        from test_review_run import (
+            IDENTITY,
+            ConsecutiveReviewRunTests,
+            _CompletionFixture,
+        )
 
         class HistoricalReplyFixture(ReplyEntryFixture, _CompletionFixture):
             """Reply endpoints followed by original historical metadata endpoints.
@@ -51,12 +57,42 @@ class CarriedHumanProgressTests(unittest.TestCase):
                         return json_response(value)
                 return response
 
+            def invoke_reply(self):
+                if self.legacy_publication_fixture:
+                    with patch.object(
+                        GitHubApplication,
+                        "_bind_finding_lifecycle_finalizer",
+                        return_value=None,
+                    ):
+                        return super().invoke_reply()
+                return super().invoke_reply()
+
         for pending in (False, True):
             with (
                 self.subTest(pending=pending),
                 tempfile.TemporaryDirectory() as directory,
             ):
-                fixture = historical_command_case(directory, complete=True)
+                fixture = ConsecutiveReviewRunTests.historical_case(
+                    directory,
+                    lambda path, mode: HistoricalCommandFixture(
+                        path,
+                        mode,
+                        comments=[
+                            {
+                                "path": "src/app.py",
+                                "line": 2,
+                                "side": "RIGHT",
+                                "body": "Confirm the earlier historical migration invariant.",
+                                "evidence_id": "historical-migration-contract",
+                                "severity": "high",
+                                "blocking": False,
+                                "needs_human": True,
+                            }
+                        ],
+                    ),
+                )
+                fixture.provider_comments = None
+                self.assertEqual(fixture.invoke(human=True), 0, fixture.error)
                 record = parse_session_comment(
                     fixture.comment["body"], identity=IDENTITY
                 )

@@ -50,12 +50,14 @@ def _current():
     return current
 
 
-def _record_fields(record, *, lifecycle=False):
+def _record_fields(record, *, lifecycle=False, snapshot=False):
     value = record.to_dict()
     for name in ("generation", "updated_at", "record_sha256", "api_run_accounting"):
         value.pop(name, None)
     if lifecycle:
         value.pop("finding_lifecycle", None)
+    if snapshot:
+        value.pop("disposition_snapshot", None)
     return canonical_bytes(value)
 
 
@@ -180,12 +182,17 @@ def namespace(caller, deadline):
     current = _current()
     if sys._getframe(1).f_code is not current.validate_namespace_request.__code__:
         raise ReviewInputError("current namespace callback source changed")
-    from review_sensei.api_work import MAX_API_REQUEST_LIMIT
+    from . import api_run_requests, quarantine_checkpoint, quarantine_command_namespace
+    from .quarantine_command_namespace import (
+        MAX_COLD_DEADLINE_UNIX_MS,
+        observed_sequence,
+    )
 
-    from . import api_run_requests, quarantine_checkpoint
-    from .quarantine_command_namespace import observed_sequence
-
-    for module in (api_run_requests, quarantine_checkpoint):
+    for module in (
+        api_run_requests,
+        quarantine_checkpoint,
+        quarantine_command_namespace,
+    ):
         require_module_seal(module)
     entry = _require(caller)
     original = _frame(api_run_requests.ApiRunRequestTransport.open)
@@ -195,7 +202,7 @@ def namespace(caller, deadline):
     phase = "terminal" if terminal else "ordinary"
     if (
         type(deadline) is not int
-        or not 0 <= deadline <= MAX_API_REQUEST_LIMIT
+        or not 0 <= deadline <= MAX_COLD_DEADLINE_UNIX_MS
         or caller._block != entry[phase + "_block"]
         or observed_sequence(caller) != entry["start"] + sum(entry["used"].values())
         or entry["used"][phase] >= entry["limits"][phase]
@@ -254,10 +261,17 @@ def namespace(caller, deadline):
             from .application import GitHubApplication
 
             applying = _frame(GitHubApplication.apply_maintainer_command)
+            preview_matches = (
+                _record_fields(candidate, snapshot=True)
+                == _record_fields(entry["preview"], snapshot=True)
+                and candidate.disposition_snapshot is not None
+                if entry["staged_part_count"] > 0
+                else _record_fields(candidate) == _record_fields(entry["preview"])
+            )
             if (
                 applying is None
                 or id(applying) != entry["apply_frame"]
-                or _record_fields(candidate) != _record_fields(entry["preview"])
+                or not preview_matches
             ):
                 raise ReviewInputError(
                     "current own decision differs from source preview"
@@ -379,10 +393,23 @@ def before_terminal(caller, run, proof):
     from review_sensei import finding_lifecycle_store, session
     from review_sensei.api_work import ApiRunAccounting
 
-    from . import action_run, api_run_requests
-    from .current_command_projection import pending_accounting
+    from . import (
+        action_run,
+        api_run_requests,
+        current_command_projection,
+        quarantine_command_namespace,
+    )
+    from .current_command_projection import terminal_pending_accounting
+    from .quarantine_command_namespace import MAX_COLD_DEADLINE_UNIX_MS
 
-    for module in (action_run, api_run_requests, finding_lifecycle_store, session):
+    for module in (
+        action_run,
+        api_run_requests,
+        current_command_projection,
+        quarantine_command_namespace,
+        finding_lifecycle_store,
+        session,
+    ):
         require_module_seal(module)
     frame = sys._getframe(2)
     entry = _require(caller)
@@ -435,13 +462,16 @@ def before_terminal(caller, run, proof):
     # This second, defensive projection starts from the confirmed runtime
     # successor. Never demote already confirmed charges to the initial
     # all-pending shape merely to measure the remaining terminal suffix.
-    document = pending_accounting(
+    document = terminal_pending_accounting(
         caller.accounting,
         sequence=caller._sequence,
         ordinary_id=entry["ordinary_block"],
         terminal_id=entry["terminal_block"],
         ordinary=0,
         terminal=entry["limits"]["terminal"],
+        uncertain_ordinary=0,
+        uncertain_terminal=1,
+        deadline_ceiling=MAX_COLD_DEADLINE_UNIX_MS,
     )
     document["action"].update(
         phase="terminal", result=proof.manifest, outcome=proof.outcome
@@ -513,8 +543,8 @@ def issue(plan):
         or caller in _ACTIVE
         or caller in _EXPIRED
         or getattr(caller, "_current_command_execution", None) is not None
-        or saved["details"]["staged_parts"]
-        or saved["preview_record"].disposition_snapshot is not None
+        or not isinstance(saved["details"]["staged_parts"], tuple)
+        or len(saved["details"]["staged_parts"]) > 16
         or caller._active_operation is not None
         or caller._checkpoint is not None
         or caller._terminal_reason is not None
@@ -573,8 +603,14 @@ def issue(plan):
         "initial_unknown": projected[7].unknown,
         "parts": complete[5]["added_parts"],
         "allocated_parts": 0,
-        "census": future_census_bound(full, complete[5]["added_parts"]),
-        "own_confirmed": False,
+        "census": future_census_bound(
+            full, complete[5]["added_parts"] + len(saved["details"]["staged_parts"])
+        ),
+        "staged_part_count": len(saved["details"]["staged_parts"]),
+        "own_confirmed": (
+            saved["preview_record"].record_sha256 == saved["record"].record_sha256
+            and not saved["details"]["staged_parts"]
+        ),
         "pending": None,
         "journal": None,
         "terminal_ready": False,
@@ -709,7 +745,8 @@ def consume_context(token, proof, operation, known, added_parts):
     if (
         set(original.known) - set(proof.plan.known)
         or any(proof.plan.known[key] > value for key, value in original.known.items())
-        or len(set(proof.plan.known) - set(original.known)) > entry["allocated_parts"]
+        or len(set(proof.plan.known) - set(original.known))
+        > entry["allocated_parts"] + entry["staged_part_count"]
         or any(
             value > MAX_PART_BYTES + 512
             for key, value in proof.plan.known.items()
@@ -720,8 +757,15 @@ def consume_context(token, proof, operation, known, added_parts):
             *entry["initial_unknown"],
             *((MAX_PART_BYTES + 512,) * (entry["allocated_parts"] + added_parts)),
         )
-        or tuple(proof.plan.metadata_known.items())
-        != tuple(original.metadata_known.items())
+        or any(
+            proof.plan.metadata_known.get(key) != value
+            for key, value in original.metadata_known.items()
+        )
+        or any(
+            key in original.known or value != original.metadata_unknown
+            for key, value in proof.plan.metadata_known.items()
+            if key not in original.metadata_known
+        )
         or proof.plan.metadata_unknown != original.metadata_unknown
     ):
         raise ReviewInputError("current lifecycle full lifetime allocation changed")

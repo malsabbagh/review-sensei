@@ -137,7 +137,9 @@ class ReviewStartupInputTests(unittest.TestCase):
             fixture.next_run()
             self.assertNotEqual(fixture.run_id, refused_run)
             (fixture.root / "review.patch").write_text(
-                transactions.HostedAnalysisCliTests.ANALYSIS_DIFF, encoding="utf-8"
+                transactions.HostedAnalysisCliTests.ANALYSIS_DIFF,
+                encoding="utf-8",
+                newline="\n",
             )
             self.assertEqual(fixture.invoke(), 0, fixture.error)
             self.assertEqual(fixture.provider_calls, 1)
@@ -161,7 +163,7 @@ class ReviewStartupInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "review.patch"
-            source.write_text(diff, encoding="utf-8")
+            source.write_text(diff, encoding="utf-8", newline="\n")
             for mode, orchestrate in (
                 ("legacy", False),
                 ("legacy", True),

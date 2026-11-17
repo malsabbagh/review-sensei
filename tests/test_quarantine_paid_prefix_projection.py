@@ -106,9 +106,9 @@ class PaidPrefixProjectionTests(unittest.TestCase):
                 observation = frame.f_locals["observation"]
                 if json.loads(observation.payload)["conditional_approval"] is None:
                     return
-                # Source-fixed native IDs now let this small two-obligation
-                # fixture fit. Complete sizing still grants no final-command
-                # lease: the original application must retain its hold below.
+                # Observation retains possible approval for hold sizing while the
+                # dismiss native plan stays recipe-compatible. Measuring that
+                # approval domain must not authorize an APPROVE mutation.
                 result = finalization.measure_inline_branches(observation)
                 self.assertTrue(result["all_growth_roots_fit"])
                 self.assertTrue(
@@ -154,18 +154,23 @@ class PaidPrefixProjectionTests(unittest.TestCase):
                     finally:
                         sys.setprofile(previous)
                     self.assertEqual(code, index, fixture.error)
+                    # The last dismiss can settle the historical effect before
+                    # gate re-evaluation refuses finalization/approval.
                     self.assertEqual(
                         len(
                             fixture.selected.ledger._quarantine_authenticated.state[
                                 "settlements"
                             ]
                         ),
-                        1,
+                        index + 1,
                     )
                     self.assertFalse(
                         any(r["state"] == "APPROVED" for r in fixture.reviews)
                     )
-                self.assertIn("one update and check replay only", fixture.error)
+                self.assertIn(
+                    "command effect or required finalization remains unconfirmed",
+                    fixture.error,
+                )
         self.assertEqual(len(captured), 2)
         self.assertEqual(len(measured), 1)
 

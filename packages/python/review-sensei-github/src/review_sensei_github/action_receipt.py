@@ -32,13 +32,53 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
             run.identity.repository, f"/issues/{run.identity.pull_request}/comments"
         )
         app_id = run.ledger._evidence_author_id
+        from .publication_recovery import _publication_transport
 
-        def matching():
-            values = (
-                run.http.paginate(path=path, token=token)
-                if bounded_receipt is None
-                else bounded_receipt.read(path=path, token=token)
-            )
+        guard = getattr(
+            _publication_transport(run.http), "_quarantine_capacity_guard", None
+        )
+
+        def matching(live_readback: bool = False):
+            if bounded_receipt is not None:
+                values = bounded_receipt.read(path=path, token=token)
+            elif (
+                guard is None
+                and getattr(run.ledger, "_quarantine_required", False)
+                and getattr(run.ledger, "_quarantine_lifecycle_capacity", None) is None
+            ):
+                values = None
+                if (
+                    not live_readback
+                    and getattr(run.ledger, "_inventory_complete", False) is True
+                    and len(run.ledger._cached_comments()) >= 98
+                ):
+                    from .quarantine_origin import rebind_same_lineage_owner
+
+                    authenticated = getattr(
+                        run.ledger, "_quarantine_authenticated", None
+                    )
+                    effect_record = getattr(run.caller, "_effect_record", None)
+                    if authenticated is not None and effect_record is not None:
+                        try:
+                            rebind_same_lineage_owner(
+                                authenticated,
+                                run.ledger,
+                                run.caller,
+                                run.identity,
+                                effect_record,
+                            )
+                        except ReviewInputError:
+                            pass
+                        else:
+                            values = run.ledger._cached_comments()
+                if values is None:
+                    from .quarantine_census import fetch_comments
+
+                    run.caller._require_ledger(run.ledger, run.identity)
+                    run.caller._quarantine_census_api_url = run.ledger.http.api_url
+                    values = fetch_comments(run.ledger, run.identity)
+            else:
+                values = run.http.paginate(path=path, token=token)
             return [
                 item
                 for item in values
@@ -52,11 +92,6 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
             ]
 
         previous = matching()
-        from .publication_recovery import _publication_transport
-
-        guard = getattr(
-            _publication_transport(run.http), "_quarantine_capacity_guard", None
-        )
         update_id = getattr(guard, "command_receipt_update_id", None)
         if update_id is not None and (
             len(previous) != 1 or previous[0]["id"] != update_id
@@ -135,7 +170,7 @@ def publish_command_receipt(run: Any, authority: Any, body: str, result: Any) ->
                 or echoed["user"].get("id") != app_id
                 or echoed["user"].get("type") != "Bot"
             ):
-                matches = matching()
+                matches = matching(live_readback=True)
                 if len(matches) != 1 or matches[0]["body"] != text:
                     raise ReviewInputError("current command receipt is unconfirmed")
                 authority.fence()

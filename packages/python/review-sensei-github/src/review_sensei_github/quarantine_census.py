@@ -14,6 +14,7 @@ import re
 import time
 import weakref
 from dataclasses import dataclass
+from types import FrameType
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -301,7 +302,7 @@ def _page_hint(ledger, seen_ids):
     # bounded attempt; they never receive an exemption from the HTTP cap.
     costs = list(
         (
-            len(json.dumps(item.get("body", "")).encode()) + 1024
+            len(json.dumps(item.get("body", "")).encode()) + 384
             for item in ledger._cached_comments()
             if isinstance(item, dict)
             and type(item.get("id")) is int
@@ -311,10 +312,13 @@ def _page_hint(ledger, seen_ids):
     size, amount = 0, 4096
     for cost in costs[:100]:
         if amount + cost > MAX_GITHUB_RESPONSE_BYTES:
-            break
+            return max(1, size)
         size += 1
         amount += cost
-    return max(1, size) if costs else 100
+    if not costs or size >= 100:
+        return 100
+    extra = (MAX_GITHUB_RESPONSE_BYTES - amount) // 66560
+    return min(100, max(1, size + max(1, extra)))
 
 
 def fetch_comments(
@@ -380,6 +384,11 @@ def fetch_comments(
             require_module_seal(historical_journal_census)
             historical_journal_census.packed_reader(packed_reader)
             return historical_journal_census.finish(lifecycle, rows)
+        if (
+            lifecycle.read_issuer == "plain-command-journal"
+            and historical_reader is not None
+        ):
+            raise ReviewInputError("plain command journal reader scope conflicts")
         if historical_reader is None:
             from .packed_comment_census import fetch_packed_comments
 
@@ -446,7 +455,7 @@ def fetch_comments(
         60 if timeout_seconds is None else min(timeout_seconds, 60)
     )
     for _attempt in range(requests):
-        if not certified:
+        if historical_reader is None:
             first = min(first, profiles.get(after, 100))
         variables = {
             "owner": owner,
@@ -600,6 +609,186 @@ _LIFECYCLE_ISSUED: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictiona
 _LIFECYCLE_ACTIVE: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
 
 
+def _is_plain_command_journal(ledger, caller, record, *, added_parts):
+    """Return True only when an authenticated ActionRunLedger refinalizes inline."""
+    from review_sensei.bounded_evidence import MAX_STORED_PARTS
+
+    if (
+        type(added_parts) is not int
+        or not 0 <= added_parts <= MAX_STORED_PARTS
+        or caller is None
+    ):
+        return False
+
+    import inspect
+    import sys
+
+    from review_sensei.source_registry import (
+        require_instance_source,
+        require_module_seal,
+        require_original_class_export,
+        require_original_class_identity,
+    )
+
+    from . import api_run_requests, application, finding_lifecycle, review_run
+
+    original_action_ledger = require_original_class_export(
+        module=review_run, name="ActionRunLedger"
+    )
+    if type(ledger) is not original_action_ledger:
+        return False
+    require_module_seal(api_run_requests)
+    require_module_seal(application)
+    require_module_seal(finding_lifecycle)
+    require_original_class_identity(ledger, module=review_run, name="ActionRunLedger")
+    require_instance_source(ledger, methods=("evidence_producer", "replace"))
+    require_original_class_identity(
+        caller, module=api_run_requests, name="ApiRunRequestTransport"
+    )
+    require_instance_source(caller, methods=())
+    if (
+        ledger.caller is not caller
+        or caller._terminal_reason is not None
+        or caller._checkpoint is not None
+        or caller._effect_record is not record
+        or caller._root != record.record_sha256
+    ):
+        return False
+    action = caller.accounting.action
+    if not isinstance(action, dict) or action.get("phase") != "pending":
+        return False
+    target_code = inspect.unwrap(
+        application.GitHubApplication._refinalize_command
+    ).__code__
+    target_globals = vars(application)
+    matched = None
+    frame: FrameType | None = sys._getframe(1)
+    while frame is not None:
+        if frame.f_code is target_code and frame.f_globals is target_globals:
+            if matched is not None:
+                return False
+            matched = frame
+        frame = frame.f_back
+    if matched is None:
+        return False
+    app = matched.f_locals.get("self")
+    journal = matched.f_locals.get("journal")
+    if (
+        type(app) is not application.GitHubApplication
+        or matched.f_locals.get("ledger") is not ledger
+        or type(journal) is not finding_lifecycle.FindingLifecycleJournal
+        or journal.ledger is not ledger
+        or journal._record is not record
+        or journal._initial_record is not matched.f_locals.get("record")
+    ):
+        return False
+    require_instance_source(app, methods=("_refinalize_command",))
+    require_instance_source(journal, methods=("checkpoint", "finish"))
+    return True
+
+
+def _plain_command_lifetime_unknown(known, tail, added_parts):
+    from review_sensei.bounded_evidence import MAX_PART_BYTES
+
+    from .packed_comment_census import MAX_COMMENTS
+
+    available_tail = max(0, MAX_COMMENTS - len(known) - added_parts)
+    effective_tail = (
+        tail
+        if len(tail) <= available_tail
+        else tuple(sorted(tail, reverse=True)[:available_tail])
+    )
+    return (*effective_tail, *((MAX_PART_BYTES + 512,) * added_parts))
+
+
+def _plain_command_metadata_known(ledger, identity):
+    from .packed_comment_census import NODE_METADATA_BYTES, wire
+
+    slug = getattr(ledger, "app_slug", None)
+    if not isinstance(slug, str) or not slug.isascii():
+        return {}
+    metadata_bound = wire(
+        {
+            "fullDatabaseId": "9" * 16,
+            "createdAt": "x" * 64,
+            "updatedAt": "x" * 64,
+            "author": {
+                "__typename": "Bot",
+                "login": slug,
+                "databaseId": "9" * 16,
+            },
+            "pullRequest": {
+                "number": identity.pull_request,
+                "repository": {
+                    "databaseId": identity.repository_id,
+                    "nameWithOwner": identity.repository,
+                },
+            },
+        }
+    )
+    aliases = {slug.casefold(), slug.removesuffix("[bot]").casefold()}
+    metadata_known: dict[int, int] = {}
+    for row in ledger._cached_comments():
+        identifier = row.get("id") if isinstance(row, dict) else None
+        if (
+            type(identifier) is not int
+            or identifier <= 0
+            or identifier in metadata_known
+        ):
+            continue
+        author = row.get("user")
+        metadata_known[identifier] = (
+            metadata_bound
+            if isinstance(author, dict)
+            and author.get("type") == "Bot"
+            and isinstance(author.get("login"), str)
+            and author["login"].isascii()
+            and author["login"].casefold() in aliases
+            else NODE_METADATA_BYTES
+        )
+    return metadata_known
+
+
+def _plain_command_read_unknown(added_parts):
+    from review_sensei.bounded_evidence import MAX_PART_BYTES
+
+    return (*((MAX_PART_BYTES + 512,) * added_parts),)
+
+
+def _require_plain_command_journal_scope(scope):
+    from .packed_comment_census import MAX_COMMENTS, CommentAllocationPlan
+    from .quarantine_capacity import full_review_comment_tail
+
+    if scope.extension is not None or not _is_plain_command_journal(
+        scope.ledger, scope.caller, scope.record, added_parts=scope.parts
+    ):
+        raise ReviewInputError("quarantine lifecycle plain command scope changed")
+    tail = full_review_comment_tail()
+    promised_exceeded = (
+        len(scope.plan.known)
+        + len(tail)
+        + scope.parts
+        + 2 * len(scope.ledger._quarantine_authenticated.pending)
+        + 5
+        > MAX_COMMENTS
+    )
+    expected_unknown = _plain_command_read_unknown(scope.parts)
+    if (
+        type(scope.plan) is not CommentAllocationPlan
+        or (
+            scope.plan.worst_read_calls() <= MAX_PAGINATION_PAGES
+            and not promised_exceeded
+            and len(scope.plan.known) < 80
+        )
+        or type(scope.read_plan) is not CommentAllocationPlan
+        or dict(scope.read_plan.known) != dict(scope.plan.known)
+        or scope.read_plan.unknown != expected_unknown
+        or dict(scope.read_plan.metadata_known)
+        != _plain_command_metadata_known(scope.ledger, scope.identity)
+    ):
+        raise ReviewInputError("quarantine lifecycle plain command plan changed")
+
+
 @dataclass(frozen=True, eq=False)
 class _LifecycleCapacity:
     ledger: Any
@@ -647,6 +836,8 @@ class _LifecycleCapacity:
 
                 require_module_seal(historical_journal_census)
                 historical_journal_census.require_scope(self)
+            elif self.read_issuer == "plain-command-journal":
+                _require_plain_command_journal_scope(self)
             else:
                 raise ReviewInputError("quarantine lifecycle reader issuer changed")
         elif self.read_issuer is not None:
@@ -678,7 +869,8 @@ class _LifecycleCapacity:
         issuer = self.read_issuer
         if issuer is not None and (
             type(issuer) is not str
-            or issuer not in ("materialized", "historical-journal")
+            or issuer
+            not in ("materialized", "historical-journal", "plain-command-journal")
         ):
             raise ReviewInputError("quarantine lifecycle reader issuer is unsupported")
         return (
@@ -744,10 +936,14 @@ def _lifecycle_profile(ledger):
 
 def lifecycle_capacity_plan(ledger, identity, *, added_parts):
     """Pure full-frontier capacity from the already authenticated two-root scope."""
-    from review_sensei.bounded_evidence import MAX_PART_BYTES, canonical_bytes
+    from review_sensei.bounded_evidence import (
+        MAX_PART_BYTES,
+        MAX_STORED_PARTS,
+        canonical_bytes,
+    )
 
     from .api_run_requests import ApiRunSessionLedger
-    from .packed_comment_census import CommentAllocationPlan, wire
+    from .packed_comment_census import MAX_COMMENTS, CommentAllocationPlan, wire
     from .quarantine_capacity import full_review_comment_tail, native_reserve
     from .quarantine_origin import (
         _AUTHENTICATED,
@@ -898,6 +1094,7 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         _publication_transport(ledger.http), "_quarantine_capacity_guard", None
     )
     extension = None
+    plain_journal_capped = False
     if guard is not None:
         from .quarantine_capacity import lifecycle_capacity_extension
 
@@ -906,7 +1103,11 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         extension = lifecycle_capacity_extension(
             ledger, identity, known=known, added_parts=added_parts
         )
-        plan = extension.plan
+        plan = (
+            extension.census_plan
+            if extension.census_plan is not None
+            else extension.plan
+        )
     else:
         if (
             isolation.get("schema_version") != "quarantine-target-isolation-v1"
@@ -917,10 +1118,26 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
             )
         # Every original event/archive and native tail remains reserved.
         promised_parts = 2 * len(authenticated.pending) + 5
-        plan = CommentAllocationPlan(
-            known,
-            (*tail, *((MAX_PART_BYTES + 512,) * (added_parts + promised_parts))),
+        plain_journal_capped = (
+            type(added_parts) is int
+            and 0 <= added_parts <= MAX_STORED_PARTS
+            and len(known) + len(tail) + added_parts + promised_parts > MAX_COMMENTS
+            and _is_plain_command_journal(
+                ledger, caller, record, added_parts=added_parts
+            )
         )
+        if plain_journal_capped:
+            base_unknown = _plain_command_lifetime_unknown(known, tail, added_parts)
+            extra_promised = max(0, MAX_COMMENTS - len(known) - len(base_unknown))
+            plan = CommentAllocationPlan(
+                known,
+                (*base_unknown, *((MAX_PART_BYTES + 512,) * extra_promised)),
+            )
+        else:
+            plan = CommentAllocationPlan(
+                known,
+                (*tail, *((MAX_PART_BYTES + 512,) * (added_parts + promised_parts))),
+            )
     from review_sensei.source_registry import require_module_seal
 
     from . import materialized_publication_phase
@@ -940,6 +1157,27 @@ def lifecycle_capacity_plan(ledger, identity, *, added_parts):
         if read_plan is not None:
             raise ReviewInputError("quarantine lifecycle reader issuers conflict")
         read_plan, read_issuer = historical_plan, "historical-journal"
+    if (
+        guard is None
+        and isolation.get("schema_version") == "quarantine-target-isolation-v1"
+        and native_reserve(isolation) is None
+        and type(added_parts) is int
+        and 0 <= added_parts <= MAX_STORED_PARTS
+        and read_plan is None
+        and historical_plan is None
+        and (
+            plan.worst_read_calls() > MAX_PAGINATION_PAGES
+            or plain_journal_capped
+            or len(known) >= 80
+        )
+        and _is_plain_command_journal(ledger, caller, record, added_parts=added_parts)
+    ):
+        read_plan = CommentAllocationPlan(
+            known,
+            _plain_command_read_unknown(added_parts),
+            metadata_known=_plain_command_metadata_known(ledger, identity),
+        )
+        read_issuer = "plain-command-journal"
     enumeration = plan if read_plan is None else read_plan
     if enumeration.worst_read_calls() > MAX_PAGINATION_PAGES:
         raise ReviewInputError(
@@ -1019,7 +1257,8 @@ def reservation_plan(scope):
         raise ReviewInputError("quarantine lifecycle reservation fields changed")
     issuer = fields.get("read_issuer")
     if issuer is not None and (
-        type(issuer) is not str or issuer not in ("historical-journal", "materialized")
+        type(issuer) is not str
+        or issuer not in ("historical-journal", "materialized", "plain-command-journal")
     ):
         raise ReviewInputError("quarantine lifecycle reservation issuer changed")
     packed_comment_census._single_plan_snapshot(fields.get("plan"))

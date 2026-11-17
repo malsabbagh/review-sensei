@@ -61,6 +61,19 @@ def _plain_accounting(state):
     visit(state, 0)
 
 
+def _admitted_terminal_shape(state, terminal_block) -> tuple[int, int, str] | None:
+    if terminal_block is None:
+        return None
+    if state.configuration.limit == 512 and terminal_block.undispatched == 50:
+        return (50, 34, "historical-original-512-50-terminal16-v1")
+    if state.configuration.limit == 612 and terminal_block.undispatched == 68:
+        from .api_run_host import review_startup_plan
+
+        if state.startup == review_startup_plan("command", quarantine_v3=True):
+            return (68, 52, "historical-v3-612-68-terminal16-v1")
+    return None
+
+
 def terminal_accounting_data(state, *, ordinary, terminal, sequence):
     """Pure original transitions; every old receipt remains, 34 slots unissued."""
     from review_sensei import api_work
@@ -80,13 +93,17 @@ def terminal_accounting_data(state, *, ordinary, terminal, sequence):
     ):
         raise ReviewInputError("terminal DATA namespace is invalid")
     selected = {b.block_id: b for b in state.blocks}
+    shape = (
+        None
+        if terminal not in selected
+        else _admitted_terminal_shape(state, selected[terminal])
+    )
     if (
         ordinary not in selected
         or terminal not in selected
         or selected[ordinary].issued_by != state.owner
         or selected[terminal].issued_by != state.owner
-        or selected[terminal].undispatched != 50
-        or state.configuration.limit != 512
+        or shape is None
     ):
         raise ReviewInputError("terminal DATA requires original 512/50 tranches")
     projected = state
@@ -140,8 +157,15 @@ def _derive(run):
         terminal=caller._terminal_block,
         sequence=caller._sequence,
     )
+    shape = _admitted_terminal_shape(
+        current,
+        next((b for b in current.blocks if b.block_id == caller._terminal_block), None),
+    )
+    if shape is None:
+        raise ReviewInputError("terminal DATA requires original 512/50 tranches")
+    reserved, retained_undispatched, protocol = shape
     binding = {
-        "protocol": "historical-original-512-50-terminal16-v1",
+        "protocol": protocol,
         "state": _digest(current.to_document()),
         "full_failure": _digest(full),
         "terminal": _digest(document),
@@ -149,9 +173,9 @@ def _derive(run):
         "sequence": caller._sequence,
         "ordinary": caller._block,
         "terminal_block": caller._terminal_block,
-        "reserved": 50,
+        "reserved": reserved,
         "maximum_attempts": 16,
-        "retained_undispatched": 34,
+        "retained_undispatched": retained_undispatched,
     }
     return document, binding, full
 
@@ -197,7 +221,7 @@ def prepare(observation, full_upper):
     block = next(
         (b for b in state.blocks if b.block_id == run.caller._terminal_block), None
     )
-    if state.configuration.limit != 512 or block is None or block.undispatched != 50:
+    if _admitted_terminal_shape(state, block) is None:
         return None
     document, binding, full = _derive(run)
     if canonical_bytes(full_upper) != canonical_bytes(full):

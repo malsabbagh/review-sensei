@@ -268,6 +268,10 @@ class ActionRunLedger(ApiRunSessionLedger):
         self.enable_disposition_snapshot_writes = True
         self.enable_finding_lifecycle_writes = True
 
+    @property
+    def supports_paged_disposition_snapshot_writes(self) -> bool:
+        return bool(self._quarantine_required)
+
     def replace(self, identity, mutate, *, now=None):
         if self.business_guard is not None:
             self.business_guard()

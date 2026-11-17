@@ -6,7 +6,6 @@ import copy
 import io
 import json
 import os
-import sys
 import tempfile
 import unittest
 from collections import Counter
@@ -19,6 +18,7 @@ from urllib.parse import urlsplit
 import test_api_work_public_review as fixture_module
 import test_review_transaction as tx
 from fake_github_http import json_response
+from original_source_observation import watch_code
 from review_sensei_github import GitHubApplication, GitHubWriteOptions, ReviewPublisher
 from review_sensei_github.api_run_host import HOSTED_API_STARTUP_PLAN, ApiRunReviewHooks
 from review_sensei_github.api_run_plan import (
@@ -43,20 +43,12 @@ from review_sensei.models import ProviderResponse, ReviewResult
 @contextmanager
 def forbid_replacement_phase_budget():
     """Observe only this invocation; leave audited constructors intact."""
-    original = EvidenceReadBudget.__init__.__code__
-    previous = sys.getprofile()
 
-    def observe(frame, event, arg):
-        if event == "call" and frame.f_code is original:
-            raise AssertionError("no replacement phase budget")
-        if previous is not None:
-            previous(frame, event, arg)
+    def refuse(frame):
+        raise AssertionError("no replacement phase budget")
 
-    try:
-        sys.setprofile(observe)
+    with watch_code(EvidenceReadBudget.__init__.__code__, entered=refuse):
         yield
-    finally:
-        sys.setprofile(previous)
 
 
 # Retain the existing modest fixture allocation, not a shipping default/minimum.

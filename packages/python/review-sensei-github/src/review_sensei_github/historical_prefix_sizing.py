@@ -318,11 +318,12 @@ def retained_for_candidate(journal, document):
 
     if observation is None or source_plan is None:
         raise ReviewInputError("fixed update sizing source plan is unavailable")
-    plan_payload, observation_payload = source_plan.payload, observation.payload
     if (
         quarantine_command_finalization._NATIVE_PLANS.get(observation)
         is not source_plan
-        or plan_payload != observation_payload
+        or not quarantine_command_finalization._observation_native_payload_match(
+            observation, source_plan
+        )
     ):
         raise ReviewInputError("fixed update sizing source plan changed")
     payload = json.loads(observation.payload)

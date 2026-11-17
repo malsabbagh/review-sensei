@@ -10,8 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 import weakref
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from review_sensei.api_work import ApiRunAccounting
 from review_sensei.bounded_evidence import (
@@ -145,6 +148,150 @@ def require_authenticated_read_owner(authenticated, ledger, caller, identity):
         or authenticated.lineage_bytes != issued[4]
     ):
         raise ReviewInputError("quarantine authenticated read custody changed")
+
+
+def has_paged_v2_disposition_snapshot(record: Any) -> bool:
+    """Return True iff record carries a paged v2 disposition snapshot with >= 8 items."""
+    snapshot = (
+        getattr(record, "disposition_snapshot", None) if record is not None else None
+    )
+    manifest = snapshot.get("state_manifest") if isinstance(snapshot, Mapping) else None
+    item_count = manifest.get("item_count") if isinstance(manifest, Mapping) else None
+    return (
+        isinstance(snapshot, Mapping)
+        and snapshot.get("schema_version") == "2.0"
+        and isinstance(manifest, Mapping)
+        and type(item_count) is int
+        and item_count >= 8
+    )
+
+
+def _refresh_cached_root_from_confirmed(caller, ledger, identity, record):
+    from .quarantine_checkpoint import confirmed_checkpoint_capacity
+
+    receipt = confirmed_checkpoint_capacity(caller, ledger, identity)
+    if (
+        receipt.record is not record
+        or receipt.record.record_sha256 != record.record_sha256
+    ):
+        raise ReviewInputError("quarantine authenticated read custody changed")
+    existing_item = ledger._comments_by_id.get(receipt.comment_id)
+    if not isinstance(existing_item, dict):
+        raise ReviewInputError("quarantine authenticated read custody changed")
+    ledger._part_owner(existing_item, identity)
+    ledger._comments_by_id[receipt.comment_id] = {
+        **existing_item,
+        "body": receipt.body,
+    }
+
+
+def _register_rebound_authenticated(ledger, caller, identity, rebound):
+    from .quarantine_native_scope import bind_native_scope
+
+    _AUTHENTICATED.add(rebound)
+    bind_native_scope(ledger, identity, rebound)
+    _AUTHENTICATED_OWNERS[rebound] = (
+        weakref.ref(ledger),
+        weakref.ref(caller),
+        identity,
+        rebound.record_sha256,
+        rebound.lineage_bytes,
+    )
+    ledger._quarantine_authenticated = rebound
+
+
+def rebind_same_lineage_owner(authenticated, ledger, caller, identity, record):
+    """Advance process read custody across a non-lineage own-root update."""
+    from review_sensei.source_registry import require_module_seal
+
+    from . import quarantine_selected_predecessor
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(quarantine_selected_predecessor)
+    require_authenticated_read_owner(authenticated, ledger, caller, identity)
+    if (
+        caller._checkpoint is not None
+        or caller._effect_record is not record
+        or record.record_sha256 != caller._root
+        or record.quarantine_lineage is None
+        or canonical_bytes(record.quarantine_lineage) != authenticated.lineage_bytes
+    ):
+        raise ReviewInputError("quarantine authenticated read custody changed")
+    if authenticated.record_sha256 != record.record_sha256:
+        _refresh_cached_root_from_confirmed(caller, ledger, identity, record)
+    rebound = AuthenticatedQuarantine(
+        record.record_sha256,
+        authenticated.lineage_bytes,
+        authenticated.archive_bytes,
+        authenticated.inventories_bytes,
+        authenticated.state_bytes,
+        authenticated.source_documents_bytes,
+        authenticated.original_caller,
+        authenticated.original_identity,
+        authenticated.original_ledger,
+    )
+    _register_rebound_authenticated(ledger, caller, identity, rebound)
+    quarantine_selected_predecessor.rebind_same_lineage(
+        ledger, identity, authenticated, rebound
+    )
+    return rebound
+
+
+def advance_confirmed_decision_owner(
+    authenticated, ledger, caller, identity, record, *, decision
+):
+    """Advance process read custody across a confirmed own-decision CAS."""
+    from review_sensei.source_registry import require_module_seal
+
+    from . import quarantine_action, quarantine_selected_predecessor
+    from .quarantine_command_projection import successor_state
+
+    require_module_seal(sys.modules[__name__])
+    require_module_seal(quarantine_action)
+    require_module_seal(quarantine_selected_predecessor)
+    frame = sys._getframe(1)
+    if (
+        frame.f_code is not quarantine_action._confirmed_own_decision.__code__
+        or frame.f_globals is not vars(quarantine_action)
+    ):
+        raise ReviewInputError("quarantine own decision requires its original caller")
+    require_authenticated_read_owner(authenticated, ledger, caller, identity)
+    if (
+        caller._checkpoint is not None
+        or caller._effect_record is not record
+        or record.record_sha256 != caller._root
+        or record.quarantine_lineage is None
+    ):
+        raise ReviewInputError("quarantine authenticated read custody changed")
+    _refresh_cached_root_from_confirmed(caller, ledger, identity, record)
+    if (
+        "assessment_state_manifest" not in record.quarantine_lineage
+        or {
+            **authenticated.lineage,
+            "assessment_state_manifest": record.quarantine_lineage[
+                "assessment_state_manifest"
+            ],
+        }
+        != record.quarantine_lineage
+    ):
+        raise ReviewInputError("quarantine authenticated read custody changed")
+    next_state = successor_state(authenticated, decision)
+    rebound = AuthenticatedQuarantine(
+        record.record_sha256,
+        canonical_bytes(record.quarantine_lineage),
+        authenticated.archive_bytes,
+        authenticated.inventories_bytes,
+        canonical_bytes(next_state),
+        authenticated.source_documents_bytes,
+        authenticated.original_caller,
+        authenticated.original_identity,
+        authenticated.original_ledger,
+    )
+    _register_rebound_authenticated(ledger, caller, identity, rebound)
+    quarantine_selected_predecessor.rebind_decision_lineage(
+        ledger, identity, authenticated, rebound
+    )
+    return rebound
 
 
 @dataclass(frozen=True, eq=False)

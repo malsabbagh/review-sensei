@@ -4,14 +4,14 @@ import inspect
 import io
 import json
 import os
-import sys
 import urllib.request
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from fake_github_http import json_response
+from original_source_observation import watch_code
 from test_review_run import fixture_process_environment
 
 
@@ -97,31 +97,29 @@ def invoke_original(fixture):
     original_execute = inspect.unwrap(review_run.ReviewRun.execute)
     original_publish = inspect.unwrap(review_run.ReviewRunHooks.publish_review)
     original_begin = inspect.unwrap(review_run.ReviewRunHooks.begin_provider_phase)
-    previous = sys.getprofile()
     wire = OriginalWire(fixture)
 
-    def observe(frame, event, value):
-        if (
-            frame.f_code is ApiRunRequestTransport.__init__.__code__
-            and event == "return"
-        ):
-            fixture.accounted = frame.f_locals["self"]
-            fixture.transports.append(fixture.accounted)
-        elif frame.f_code is GitHubHttp.__init__.__code__ and event == "return":
-            fixture.http = frame.f_locals["self"]
-        elif frame.f_code is original_execute.__code__ and event == "call":
-            fixture.selected = frame.f_locals["self"]
-        elif frame.f_code is original_publish.__code__ and event == "call":
-            if fixture.before_publication:
-                fixture.before_publication()
-        elif frame.f_code is original_begin.__code__ and event == "return":
-            if fixture.before_entry:
-                fixture.before_entry()
-        elif frame.f_code is engine_main.__code__ and event == "return":
-            if fixture.after_engine:
-                fixture.after_engine()
-        if previous is not None:
-            previous(frame, event, value)
+    def capture_transport(frame, value):
+        fixture.accounted = frame.f_locals["self"]
+        fixture.transports.append(fixture.accounted)
+
+    def capture_http(frame, value):
+        fixture.http = frame.f_locals["self"]
+
+    def capture_selected(frame):
+        fixture.selected = frame.f_locals["self"]
+
+    def before_publication(frame):
+        if fixture.before_publication:
+            fixture.before_publication()
+
+    def after_begin(frame, value):
+        if fixture.before_entry:
+            fixture.before_entry()
+
+    def after_engine(frame, value):
+        if fixture.after_engine:
+            fixture.after_engine()
 
     def external(_opener, request, data=None, timeout=None):
         assert data is None
@@ -197,8 +195,29 @@ def invoke_original(fixture):
             patch.object(urllib.request.OpenerDirector, "open", external),
             redirect_stdout(io.StringIO()),
             redirect_stderr(errors),
+            ExitStack() as watches,
         ):
-            sys.setprofile(observe)
+            watches.enter_context(
+                watch_code(
+                    ApiRunRequestTransport.__init__.__code__,
+                    returned=capture_transport,
+                )
+            )
+            watches.enter_context(
+                watch_code(GitHubHttp.__init__.__code__, returned=capture_http)
+            )
+            watches.enter_context(
+                watch_code(original_execute.__code__, entered=capture_selected)
+            )
+            watches.enter_context(
+                watch_code(original_publish.__code__, entered=before_publication)
+            )
+            watches.enter_context(
+                watch_code(original_begin.__code__, returned=after_begin)
+            )
+            watches.enter_context(
+                watch_code(engine_main.__code__, returned=after_engine)
+            )
             result = cli.main(argv)
         fixture.error = errors.getvalue()
         if hasattr(fixture, "run_results"):
@@ -207,5 +226,4 @@ def invoke_original(fixture):
         return result, wire
     finally:
         fixture.error = errors.getvalue()
-        sys.setprofile(previous)
         os.chdir(old)

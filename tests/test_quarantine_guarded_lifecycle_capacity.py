@@ -356,7 +356,10 @@ class GuardedLifecycleCapacityTests(unittest.TestCase):
                         not attempts
                         and request.get_method() == "PATCH"
                         and operation is not None
-                        and "stage_finding_lifecycle" in operation.key
+                        and (
+                            "stage_finding_lifecycle" in operation.key
+                            or "_prepare_lifecycle_mutation" in operation.key
+                        )
                     ):
                         guard = _publication_transport(
                             fixture.selected.ledger.http

@@ -280,7 +280,47 @@ def replace_quarantine_checkpoint(caller, ledger, identity, mutate, *, now=None)
         raise ReviewInputError("quarantine checkpoint snapshot cannot be replenished")
     caller._require_ledger(ledger, identity)
     ledger._verify_mutation_grant(identity)
-    comment_id, record = ledger._discover(identity, now=now)
+    comment_id: int | None = None
+    record = None
+    from .publication_recovery import _publication_transport
+    from .quarantine_origin import rebind_same_lineage_owner
+
+    authenticated = getattr(ledger, "_quarantine_authenticated", None)
+    if (
+        getattr(_publication_transport(ledger.http), "_quarantine_capacity_guard", None)
+        is None
+        and getattr(ledger, "_quarantine_lifecycle_capacity", None) is None
+        and caller._terminal_reason is None
+        and caller._action_effect_boundary is None
+        and (
+            getattr(caller, "_admitting_action", False)
+            or (
+                caller.accounting.action is not None
+                and caller.accounting.action.get("phase") == "pending"
+                and caller.accounting.action.get("execution_started") is False
+            )
+        )
+        and getattr(ledger, "_inventory_complete", False) is True
+        and len(ledger._cached_comments()) >= 98
+        and authenticated is not None
+        and caller._checkpoint is None
+        and caller._effect_record is not None
+        and caller._effect_record.record_sha256 == caller._root
+        and caller._effect_record.quarantine_lineage is not None
+        and canonical_bytes(caller._effect_record.quarantine_lineage)
+        == authenticated.lineage_bytes
+    ):
+        try:
+            receipt = confirmed_checkpoint_capacity(caller, ledger, identity)
+            rebind_same_lineage_owner(
+                authenticated, ledger, caller, identity, caller._effect_record
+            )
+        except ReviewInputError:
+            pass
+        else:
+            comment_id, record = receipt.comment_id, receipt.record
+    if record is None:
+        comment_id, record = ledger._discover(identity, now=now)
     authenticated = getattr(ledger, "_quarantine_authenticated", None)
     operation = caller._active_operation
     if (

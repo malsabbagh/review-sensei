@@ -18,12 +18,78 @@ class QuarantineHoldReader:
         self.repository, self.pull_request = repository, pull_request
 
     def read(self, *, head_sha):
+        from review_sensei.bounded_evidence import canonical_bytes
+        from review_sensei.session import SessionLoadResult
+
+        from .api_run_requests import ApiRunSessionLedger
+        from .current_command_execution import _ACTIVE as _CURRENT_COMMAND_ACTIVE
+        from .http import MAX_GITHUB_RESPONSE_BYTES
+        from .publication_recovery import _publication_transport
+        from .quarantine_origin import (
+            has_paged_v2_disposition_snapshot,
+            rebind_same_lineage_owner,
+        )
+
         caller = self.ledger.caller
         identity = SessionIdentity(
             self.repository, self.pull_request, caller.run.repository_id
         )
         caller._require_ledger(self.ledger, identity)
-        loaded = self.ledger.load(identity)
+        loaded = None
+        authenticated = getattr(self.ledger, "_quarantine_authenticated", None)
+        guard = getattr(
+            _publication_transport(self.ledger.http),
+            "_quarantine_capacity_guard",
+            None,
+        )
+        if (
+            isinstance(self.ledger, ApiRunSessionLedger)
+            and getattr(self.ledger, "_inventory_complete", False) is True
+            and caller._checkpoint is None
+            and caller._effect_record is not None
+            and caller._effect_record.record_sha256 == caller._root
+            and caller._effect_record.transaction is not None
+            and caller._effect_record.transaction.head_sha == head_sha
+            and type(getattr(self.ledger, "_quarantine_origin_reader", None))
+            is QuarantineOriginReader
+            and authenticated is not None
+            and caller._effect_record.quarantine_lineage is not None
+            and canonical_bytes(caller._effect_record.quarantine_lineage)
+            == authenticated.lineage_bytes
+        ):
+            cached_comments = self.ledger._cached_comments()
+            unguarded_reuse = guard is None and (
+                len(cached_comments) >= 80
+                or sum(
+                    len(canonical_bytes({"body": item["body"]}))
+                    for item in cached_comments
+                    if isinstance(item, dict) and isinstance(item.get("body"), str)
+                )
+                > MAX_GITHUB_RESPONSE_BYTES
+            )
+            current_paged_v2_reuse = (
+                caller in _CURRENT_COMMAND_ACTIVE
+                and type(caller.accounting.configuration.limit) is int
+                and caller.accounting.configuration.limit >= 1152
+                and has_paged_v2_disposition_snapshot(caller._effect_record)
+            )
+            if unguarded_reuse or current_paged_v2_reuse:
+                try:
+                    rebind_same_lineage_owner(
+                        authenticated,
+                        self.ledger,
+                        caller,
+                        identity,
+                        caller._effect_record,
+                    )
+                except ReviewInputError:
+                    pass
+                else:
+                    loaded = SessionLoadResult(
+                        status="ok", record=caller._effect_record
+                    )
+        if loaded is None:
+            loaded = self.ledger.load(identity)
         record = loaded.record
         reader = getattr(self.ledger, "_quarantine_origin_reader", None)
         if (

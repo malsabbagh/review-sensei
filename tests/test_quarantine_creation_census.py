@@ -268,9 +268,7 @@ class QuarantineCreationCensusTests(unittest.TestCase):
             census._require_lifetime_capacity(over)
 
     def _exercise_native_creator(self, fault=None):
-        import dis
-        import sys
-
+        from original_source_observation import watch_code
         from review_sensei_github import quarantine_creation as creation
         from test_bounded_snapshot_lifecycle import BoundedLifecycleFixture
         from test_quarantine_evidence import git
@@ -303,81 +301,68 @@ class QuarantineCreationCensusTests(unittest.TestCase):
             fixture.creation_metadata = fixture.creator()
             fixture.creation_fault = fault
             execute = creation._execute_creation.__code__
-            returns = {
-                item.offset
-                for item in dis.get_instructions(execute)
-                if item.opname in {"RETURN_VALUE", "RETURN_CONST"}
-            }
             observed = []
 
-            def observe(frame, event, arg):
-                if frame.f_code is not execute:
-                    return
+            def entered(frame):
                 prepared = frame.f_locals["prepared"]
                 plan = frame.f_locals["plan"]
-                if event == "call":
-                    active = census._ACTIVE[prepared.ledger]
-                    issued = active[1]
-                    allocation = issued[6]
-                    self.assertEqual(
-                        (plan["parts"], plan["census_calls"], plan["requests"]),
-                        (4, 9, 40),
-                    )
-                    self.assertEqual(
-                        len(allocation.known) + len(allocation.unknown), 65
-                    )
-                    self.assertEqual(len(allocation.unknown), 49)
-                    self.assertEqual(
-                        prepared.ledger.evidence_budget.ordinary_remaining(), 40
-                    )
-                    self.assertIs(allocation, issued[9].comment_plan)
-                    start = len(fixture.trace)
-                    guard = issued[9]
-                    with patch.object(
-                        issued[8][4], "_quarantine_capacity_guard", copy.copy(guard)
-                    ):
-                        with self.assertRaises(ReviewInputError):
-                            census._require_scope(prepared, issued)
-                    from dataclasses import replace
+                active = census._ACTIVE[prepared.ledger]
+                issued = active[1]
+                allocation = issued[6]
+                self.assertEqual(
+                    (plan["parts"], plan["census_calls"], plan["requests"]),
+                    (4, 9, 40),
+                )
+                self.assertEqual(len(allocation.known) + len(allocation.unknown), 67)
+                self.assertEqual(len(allocation.unknown), 49)
+                self.assertEqual(
+                    prepared.ledger.evidence_budget.ordinary_remaining(), 40
+                )
+                self.assertIs(allocation, issued[9].comment_plan)
+                start = len(fixture.trace)
+                guard = issued[9]
+                with patch.object(
+                    issued[8][4], "_quarantine_capacity_guard", copy.copy(guard)
+                ):
+                    with self.assertRaises(ReviewInputError):
+                        census._require_scope(prepared, issued)
+                from dataclasses import replace
 
-                    with patch.object(
-                        guard,
-                        "comment_plan",
-                        replace(allocation, unknown=allocation.unknown[:-1]),
-                    ):
-                        with self.assertRaises(ReviewInputError):
-                            census._require_scope(prepared, issued)
-                    from review_sensei_github import packed_comment_census
+                with patch.object(
+                    guard,
+                    "comment_plan",
+                    replace(allocation, unknown=allocation.unknown[:-1]),
+                ):
+                    with self.assertRaises(ReviewInputError):
+                        census._require_scope(prepared, issued)
+                from review_sensei_github import packed_comment_census
 
-                    with patch.object(
-                        packed_comment_census.CommentAllocationPlan,
-                        "worst_read_calls",
-                        return_value=1,
-                    ):
-                        with self.assertRaises(ReviewInputError):
-                            census._require_scope(prepared, issued)
-                    self.assertEqual(len(fixture.trace), start)
-                    observed.append((prepared, issued, start))
-                elif event == "return" and frame.f_lasti in returns:
-                    prepared, issued, start = observed[0]
-                    self.assertIsNotNone(prepared.ledger._startup_caller._state)
-                    self.assertEqual(census._ACTIVE[prepared.ledger][2], 0)
-                    self.assertLessEqual(len(fixture.trace) - start, 40)
-                    self.assertEqual(issued[6].unknown, issued[9].comment_plan.unknown)
-                    self.assertEqual(old.api_run_accounting, old_accounting)
-                    raise Created()
+                with patch.object(
+                    packed_comment_census.CommentAllocationPlan,
+                    "worst_read_calls",
+                    return_value=1,
+                ):
+                    with self.assertRaises(ReviewInputError):
+                        census._require_scope(prepared, issued)
+                self.assertEqual(len(fixture.trace), start)
+                observed.append((prepared, issued, start))
 
-            previous = sys.getprofile()
-            try:
-                with registered_resource([registration]):
-                    sys.setprofile(observe)
+            def returned(frame, _value):
+                prepared, issued, start = observed[0]
+                self.assertIsNotNone(prepared.ledger._startup_caller._state)
+                self.assertEqual(census._ACTIVE[prepared.ledger][2], 0)
+                self.assertLessEqual(len(fixture.trace) - start, 40)
+                self.assertEqual(issued[6].unknown, issued[9].comment_plan.unknown)
+                self.assertEqual(old.api_run_accounting, old_accounting)
+                raise Created()
+
+            with registered_resource([registration]):
+                with watch_code(execute, entered=entered, returned=returned):
                     if fault == "absent":
                         self.assertEqual(fixture.invoke(), 1)
                     else:
                         with self.assertRaises(Created, msg=fixture.error):
                             fixture.invoke()
-            finally:
-                sys.setprofile(previous)
             self.assertEqual(len(observed), 1, fixture.error)
             self.assertEqual(fixture.provider_calls, provider_calls)
             self.assertEqual(fixture.root_posts, 1)

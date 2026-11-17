@@ -190,6 +190,7 @@
         "tests/test_quarantine_published_tail_isolation.py",
         "tests/test_quarantine_published_tail_journey.py",
         "tests/original_finish_interrupt.py",
+        "tests/original_source_observation.py",
         "tests/test_quarantine_v3_journey.py",
         "tests/test_quarantine_v3_publication.py",
         "tests/test_quarantine_v3_check_capacity.py",

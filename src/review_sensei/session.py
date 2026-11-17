@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence, ca
 
 from .bounded_evidence import (
     INLINE_ENCODING,
+    MAX_MANIFEST_BYTES,
     MAX_PART_BYTES,
     MAX_PART_READS,
     MAX_STORED_PART_BYTES,
@@ -4488,16 +4489,165 @@ def disposition_snapshot_capacity(record: SessionRecord) -> int:
     if (
         record.finding_lifecycle is not None
         and isinstance(action, Mapping)
-        and action.get("phase") == "pending"
+        and action.get("phase") in {"pending", "terminal"}
     ):
-        from .finding_lifecycle_store import prospective_terminal_history_bytes
+        from .api_work import ACTION_NOOP_REASONS
+        from .finding_lifecycle_store import (
+            HISTORY_REFERENCE_VERSION,
+            _source_semantic_history_width,
+        )
 
-        # Lifecycle checkpoints reprice every prospective reference (including
-        # maximal future manifests and semantic metadata) before native effects.
-        # Keep full staging and terminal domains; this exact reference is not
-        # permission for later unpriced growth. CAS repeats this same guard.
-        shell["finding_lifecycle"] = record.finding_lifecycle
-        shell_bytes = prospective_terminal_history_bytes(shell)
+        rollover_shell = copy.deepcopy(shell)
+        rollover_accounting = rollover_shell.get("api_run_accounting")
+        if isinstance(rollover_accounting, dict):
+            config = rollover_accounting.get("configuration")
+            limit = (
+                config.get("limit", 0)
+                if isinstance(config, dict) and type(config.get("limit")) is int
+                else 0
+            )
+            rollover_accounting["action"] = None
+            rollover_accounting["completed"] = []
+            rollover_accounting["prior_nonstartup_liability"] = limit
+            blocks = rollover_accounting.get("blocks")
+            if isinstance(blocks, list):
+                rollover_accounting["blocks"] = [
+                    {**block, "pending": [], "undispatched": 0}
+                    if isinstance(block, dict)
+                    else block
+                    for block in blocks
+                ]
+        rollover_capacity = (
+            MAX_SESSION_RECORD_BYTES
+            - len(canonical_bytes(rollover_shell))
+            - len(',"disposition_snapshot":')
+            - MAX_HISTORY_ENVELOPE_RESERVE_BYTES
+        )
+        action_shell = copy.deepcopy(record.to_dict())
+        action_shell.pop("disposition_snapshot", None)
+        action_shell["dispositions"] = []
+        action_shell["generation"] = MAX_GENERATION
+        action_shell["updated_at"] = max(
+            str(action_shell["updated_at"]), "9999-12-31T23:59:59.999999Z", key=len
+        )
+        if action.get("phase") == "pending":
+            action_accounting = cast(dict[str, Any], action_shell["api_run_accounting"])
+            action_accounting["action"].update(
+                phase="terminal",
+                execution_started=True,
+                result="x" * (MAX_MANIFEST_BYTES - 2),
+                outcome={
+                    "kind": "explicit_noop",
+                    "reason": max(ACTION_NOOP_REASONS, key=len),
+                },
+            )
+            completed = action_accounting.get("completed")
+            blocks = action_accounting.get("blocks")
+            if isinstance(completed, list) and isinstance(blocks, list):
+                total_slots = len(completed) + sum(
+                    len(b.get("pending", ())) + b.get("undispatched", 0)
+                    for b in blocks
+                    if isinstance(b, dict)
+                    and isinstance(b.get("pending", ()), list)
+                    and type(b.get("undispatched")) is int
+                )
+                target_completed = min(total_slots, 175)
+                if len(completed) < target_completed:
+                    pair_receipts = all(
+                        isinstance(item, list)
+                        and len(item) == 2
+                        and isinstance(item[0], str)
+                        and type(item[1]) is int
+                        for item in completed
+                    )
+                    id_width = max(
+                        [
+                            8,
+                            *(
+                                len(item[0])
+                                for item in completed
+                                if isinstance(item, list)
+                                and len(item) == 2
+                                and isinstance(item[0], str)
+                            ),
+                        ]
+                    )
+                    if pair_receipts:
+                        remaining_to_consume = target_completed - len(completed)
+                        action_accounting["completed"] = [
+                            [f"{seq:0{id_width}d}", 9999999999999]
+                            for seq in range(target_completed)
+                        ]
+                        updated_blocks = []
+                        for b in blocks:
+                            if not isinstance(b, dict):
+                                updated_blocks.append(b)
+                                continue
+                            pending = b.get("pending", ())
+                            undispatched = b.get("undispatched", 0)
+                            if (
+                                not isinstance(pending, list)
+                                or type(undispatched) is not int
+                            ):
+                                updated_blocks.append(b)
+                                continue
+                            block_slots = len(pending) + undispatched
+                            take = min(remaining_to_consume, block_slots)
+                            remaining_to_consume -= take
+                            updated_blocks.append(
+                                {
+                                    **b,
+                                    "pending": [],
+                                    "undispatched": block_slots - take,
+                                }
+                            )
+                        action_accounting["blocks"] = updated_blocks
+                    else:
+                        completed.extend(
+                            [f"{seq:0{id_width}d}", 9999999999999]
+                            for seq in range(len(completed), target_completed)
+                        )
+            fl = action_shell.get("finding_lifecycle")
+            if (
+                isinstance(fl, dict)
+                and isinstance(fl.get("manifest"), dict)
+                and isinstance(fl["manifest"].get("binding"), dict)
+            ):
+                existing_hist = fl.get("accepted_semantic_history")
+                has_two_records = isinstance(existing_hist, dict) and (
+                    (
+                        isinstance(existing_hist.get("records"), list)
+                        and len(existing_hist["records"]) >= 2
+                    )
+                    or (
+                        isinstance(existing_hist.get("prior"), dict)
+                        and isinstance(existing_hist["prior"].get("records"), list)
+                        and len(existing_hist["prior"]["records"]) >= 2
+                    )
+                )
+                if not has_two_records:
+                    max_fl = {
+                        **fl,
+                        "schema_version": HISTORY_REFERENCE_VERSION,
+                        "accepted_semantic_history": _source_semantic_history_width(
+                            fl["manifest"]["binding"]
+                        ),
+                    }
+                    if len(canonical_bytes(max_fl)) > len(canonical_bytes(fl)):
+                        action_shell["finding_lifecycle"] = max_fl
+        action_capacity = (
+            MAX_SESSION_RECORD_BYTES
+            - len(canonical_bytes(action_shell))
+            - len(',"disposition_snapshot":')
+        )
+        return max(
+            0,
+            min(
+                MAX_DISPOSITION_SNAPSHOT_ROOT_BYTES,
+                rollover_capacity,
+                action_capacity,
+            ),
+        )
     return max(
         0,
         min(
@@ -5635,6 +5785,7 @@ class LocalSessionLedger:
             values=values,
             result_digest=result_digest,
             max_manifest_bytes=max_manifest_bytes,
+            allow_packed_index=getattr(record, "finding_lifecycle", None) is not None,
         )
         root = {
             "schema_version": "2.0",

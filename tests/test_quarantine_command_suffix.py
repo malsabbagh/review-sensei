@@ -240,7 +240,7 @@ class GuardedSuffixTests(unittest.TestCase):
                 overflow_refusals = 0
                 for record, accounting, witness, upper, grants in rendered_inputs:
                     larger = raw_result_manifest_upper(
-                        envelope_bytes=4800,
+                        envelope_bytes=5400,
                         binding=upper["binding"],
                         reference_history=True,
                     )

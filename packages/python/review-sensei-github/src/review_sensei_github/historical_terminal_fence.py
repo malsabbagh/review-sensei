@@ -151,9 +151,8 @@ def require_projection_shape(run: Any):
     )
     if (
         api_run_plan.QUARANTINE_CHECKPOINT_REQUESTS != 16
-        or state.configuration.limit != 512
+        or projection._admitted_terminal_shape(state, terminal) is None
         or terminal is None
-        or terminal.undispatched != 50
         or terminal.pending
         or terminal.issued_by != state.owner
         or caller._terminal_reason is not None
@@ -230,10 +229,19 @@ def _registry():
             api_run_requests,
         )
         from . import (
+            historical_terminal_projection as projection,
+        )
+        from . import (
             quarantine_historical_execution as historical,
         )
 
-        for module in (sys.modules[__name__], action_run, api_run_requests, historical):
+        for module in (
+            sys.modules[__name__],
+            action_run,
+            api_run_requests,
+            historical,
+            projection,
+        ):
             require_module_seal(module)
         frame = sys._getframe(1)
         if (
@@ -262,9 +270,9 @@ def _registry():
         terminal = next(
             b for b in caller.accounting.blocks if b.block_id == caller._terminal_block
         )
-        # This production restriction is only the original 512/50 shape. It
-        # grants nothing to other historical budgets and does not alter them.
-        if caller.accounting.configuration.limit != 512 or terminal.undispatched != 50:
+        # This production restriction is only the original 512/50 and V3 612/68
+        # shapes. It grants nothing to other historical budgets and does not alter them.
+        if projection._admitted_terminal_shape(caller.accounting, terminal) is None:
             return
         if (
             id(caller) in active
@@ -328,6 +336,9 @@ def _registry():
         if run is None:
             raise ReviewInputError("terminal projection run is absent")
         caller = run.caller
+        from . import historical_terminal_projection as projection
+
+        require_module_seal(projection)
         entry = active.get(id(caller))
         if (
             entry is None
@@ -337,7 +348,10 @@ def _registry():
             or entry["phase"] != "ordinary"
             or entry["attempts"] != 0
             or entry["operation"] is not None
-            or entry["terminal_initial"].undispatched != 50
+            or projection._admitted_terminal_shape(
+                caller.accounting, entry["terminal_initial"]
+            )
+            is None
         ):
             raise ReviewInputError(
                 "conditional terminal projection has no installed fence"
@@ -538,7 +552,10 @@ def _registry():
         terminal = next(
             b for b in state.blocks if b.block_id == entry["terminal_block"]
         )
-        if terminal.undispatched != 50 - entry["attempts"]:
+        if (
+            terminal.undispatched
+            != entry["terminal_initial"].undispatched - entry["attempts"]
+        ):
             raise ReviewInputError("historical terminal reservation changed")
         entry["attempts"] += 1
 
@@ -615,7 +632,7 @@ def _registry():
                     for b in caller.accounting.blocks
                     if b.block_id == entry["terminal_block"]
                 ).undispatched
-                < 34
+                < entry["terminal_initial"].undispatched - 16
             ):
                 raise ReviewInputError("historical terminal close successor changed")
             retire(caller)

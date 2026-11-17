@@ -1562,6 +1562,54 @@ def _require_joint_projection_root(candidate, projection):
         raise ReviewInputError("joint publication projected root capacity exceeded")
 
 
+def _nonexact_maximum_inline(
+    envelope: Mapping[str, object],
+    *,
+    binding: Mapping[str, object],
+    item_count: int,
+) -> dict[str, object] | None:
+    lifecycle = envelope.get("lifecycle")
+    journal_payload = lifecycle.get("journal") if isinstance(lifecycle, dict) else None
+    skeleton_bytes = (
+        journal_payload.get("decoded_bytes")
+        if isinstance(journal_payload, dict)
+        else None
+    )
+    if (
+        envelope.get("schema_version") != DOCUMENT_VERSION
+        or not isinstance(lifecycle, dict)
+        or lifecycle.get("schema_version") != "finding-lifecycle-packed-v3"
+        or not isinstance(journal_payload, dict)
+        or journal_payload.get("encoding") != "zlib-json-v1"
+        or type(skeleton_bytes) is not int
+        or skeleton_bytes <= 0
+    ):
+        raise ReviewInputError(
+            "current nonexact inline lifecycle root bound is unqualified"
+        )
+    packed_skeleton = (
+        skeleton_bytes
+        + (skeleton_bytes >> 12)
+        + (skeleton_bytes >> 14)
+        + (skeleton_bytes >> 25)
+        + 13
+    )
+    maximum_envelope = {
+        "schema_version": DOCUMENT_VERSION,
+        "lifecycle": {
+            "schema_version": "finding-lifecycle-packed-v3",
+            "journal": {
+                "encoding": "zlib-json-v1",
+                "decoded_bytes": skeleton_bytes,
+                "sha256": "f" * 64,
+                "data": "A" * (4 * ((packed_skeleton + 2) // 3)),
+            },
+            "native_atoms": lifecycle["native_atoms"],
+        },
+    }
+    return inline_manifest(maximum_envelope, binding=binding, item_count=item_count)
+
+
 def _prepare_lifecycle(
     ledger: Any,
     record: Any,
@@ -1575,6 +1623,7 @@ def _prepare_lifecycle(
     item_count: int,
     reserved_tail_calls: int = 0,
     joint_projection: JointPublicationProjection | None = None,
+    nonexact_packed_bound: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], tuple[dict[str, object], ...], int, Any]:
     _sha(operation_id, "operation")
     if not isinstance(document, Mapping):
@@ -1710,6 +1759,23 @@ def _prepare_lifecycle(
         if inlined is not None and len(canonical_bytes(inlined)) <= allowance
         else prospective
     )
+    sizing_target = selected
+    if nonexact_packed_bound and selected is inlined:
+        assert inlined is not None
+        max_inlined = _nonexact_maximum_inline(
+            envelope, binding=binding, item_count=item_count
+        )
+        if max_inlined is None or len(canonical_bytes(max_inlined)) > allowance:
+            partition_allowance = min(allowance, len(canonical_bytes(inlined)) - 1)
+            if len(canonical_bytes(prospective)) > partition_allowance:
+                raise ReviewInputError(
+                    "finding lifecycle partition manifest exceeds joint capacity allowance"
+                )
+            selected = prospective
+            sizing_target = prospective
+            allowance = partition_allowance
+        else:
+            sizing_target = max_inlined
 
     def prepare_candidate(manifest):
         candidate = record.evolve(
@@ -1738,7 +1804,7 @@ def _prepare_lifecycle(
         return candidate
 
     try:
-        candidate = prepare_candidate(selected)
+        candidate = prepare_candidate(sizing_target)
     except ReviewInputError as error:
         # Inline is an optimization, not permission to consume the terminal
         # root's reserved space. The supported partition representation may
@@ -2129,6 +2195,10 @@ def preflight_finding_lifecycle(
                     configuration_digest=configuration_digest,
                     item_count=item_count,
                     reserved_tail_calls=reserved_tail_calls,
+                    nonexact_packed_bound=(
+                        branch_documents is not None
+                        and checkpoint_index not in exact_indices
+                    ),
                 )
             )
             selected = candidate.finding_lifecycle["manifest"]

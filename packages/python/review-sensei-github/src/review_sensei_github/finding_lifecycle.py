@@ -1008,6 +1008,15 @@ class FindingLifecycleJournal:
         self._review_token = review_token
         self._check_token = check_token
         self.effects = [] if document is None else list(_validate(document)["effects"])
+        self._initial_effect_keys = frozenset(
+            e["request_sha256"]
+            for e in self.effects
+            if isinstance(e, dict) and isinstance(e.get("request_sha256"), str)
+        )
+        self._initial_effect_count = len(self.effects)
+        self._initial_had_pending = any(
+            isinstance(e, dict) and e.get("status") != "confirmed" for e in self.effects
+        )
         self._guarded_publication_pair = (
             None if document is None else document.get("guarded_publication_pair")
         )
@@ -1999,19 +2008,38 @@ class FindingLifecycleJournal:
         snapshot = preview_record.disposition_snapshot
         snapshot_reads = 0
         if isinstance(snapshot, dict):
-            from review_sensei.disposition_snapshot import normalize_snapshot
+            from review_sensei.bounded_evidence import read_inline_evidence
+            from review_sensei.disposition_snapshot import (
+                normalize_snapshot,
+                validate_page_index,
+            )
 
             snapshot = normalize_snapshot(snapshot)
-            if snapshot is None or snapshot["schema_version"] != "1.0":
+            if snapshot is None or snapshot["schema_version"] not in {"1.0", "2.0"}:
                 raise ReviewInputError(
                     "command finalization snapshot reads are unqualified"
                 )
             manifest = snapshot["state_manifest"]
-            if manifest["encoding"] == "partitioned-json-v1":
-                snapshot_reads = len(manifest["parts"])
-            elif manifest["encoding"] != "inline-json-v1":
-                raise ReviewInputError(
-                    "command finalization snapshot reads are unqualified"
+            if snapshot["schema_version"] == "1.0":
+                if manifest["encoding"] == "partitioned-json-v1":
+                    snapshot_reads = len(manifest["parts"])
+                elif manifest["encoding"] != "inline-json-v1":
+                    raise ReviewInputError(
+                        "command finalization snapshot reads are unqualified"
+                    )
+            else:
+                if manifest["encoding"] != "inline-json-v1":
+                    raise ReviewInputError(
+                        "command finalization snapshot reads are unqualified"
+                    )
+                index_doc = read_inline_evidence(
+                    manifest, expected_binding=manifest["binding"]
+                )
+                pages = validate_page_index(index_doc, root=snapshot)
+                snapshot_reads = sum(
+                    len(page["parts"])
+                    for page in pages
+                    if page.get("encoding") == "partitioned-json-v1"
                 )
         native_calls = sum(reads.values()) + sum(capabilities.values())
         native_calls += payload.get("cleanup_native_calls", 0)
@@ -2660,6 +2688,109 @@ class FindingLifecycleJournal:
             )
         return replace(prepared, record=current)
 
+    def _compact_finished_command_effects(self, current_state) -> None:
+        caller = getattr(self.ledger, "caller", None)
+        if caller is None or getattr(caller, "job", None) != "command":
+            return
+        if any(effect.get("status") != "confirmed" for effect in self.effects):
+            return
+        key = (self.identity.repository_id, self.identity.pull_request)
+        if key in self.reviewer._unknown_effect_holds:
+            return
+        from review_sensei.source_registry import require_module_seal
+
+        from . import quarantine_historical_execution
+
+        require_module_seal(quarantine_historical_execution)
+        if quarantine_historical_execution.available(caller, self.ledger):
+            return
+        released_threads: set[str] = set()
+        if (
+            current_state is not None
+            and current_state.head_sha == self.head_sha
+            and current_state.base_sha == self.base_sha
+        ):
+            from review_sensei.active_finding_window import ActiveWindowRoundState
+
+            if isinstance(current_state, ActiveWindowRoundState):
+                released_threads.update(
+                    slot.target
+                    for slot in current_state.display_active_findings.slots
+                    if slot.state == "released" and isinstance(slot.target, str)
+                )
+                released_threads.update(
+                    obligation.native_target
+                    for obligation in current_state.authoritative_decision_inventory.obligations
+                    if obligation.target_state == "released"
+                    and isinstance(obligation.native_target, str)
+                )
+            else:
+                released_threads.update(
+                    slot.target
+                    for slot in current_state.slots
+                    if slot.state == "released" and isinstance(slot.target, str)
+                )
+        protected = (
+            3 if getattr(self, "_guarded_publication_pair", None) is not None else 0
+        )
+        prefix = self.effects[:protected]
+        tail = self.effects[protected:]
+        review_prefix = (
+            f"/repos/{self.identity.repository}/pulls/"
+            f"{self.identity.pull_request}/reviews/"
+        )
+        check_prefix = f"/repos/{self.identity.repository}/check-runs/"
+        last_put_by_path: dict[str, int] = {}
+        last_check_patch_by_path: dict[str, int] = {}
+        for index, effect in enumerate(tail):
+            method = effect.get("method")
+            path = effect.get("path")
+            if not isinstance(path, str):
+                continue
+            if method == "PUT" and path.startswith(review_prefix):
+                last_put_by_path[path] = index
+            elif method == "PATCH" and path.startswith(check_prefix):
+                last_check_patch_by_path[path] = index
+        initial_keys: frozenset[object] = getattr(
+            self, "_initial_effect_keys", frozenset()
+        )
+        if (
+            not getattr(self, "_initial_had_pending", False)
+            and len(self.effects) == getattr(self, "_initial_effect_count", -1)
+            and all(
+                effect.get("request_sha256") in initial_keys for effect in self.effects
+            )
+        ):
+            return
+        kept_tail = []
+        for index, effect in enumerate(tail):
+            method = effect.get("method")
+            path = effect.get("path")
+            if (
+                method == "PUT"
+                and isinstance(path, str)
+                and path.startswith(review_prefix)
+                and last_put_by_path.get(path) != index
+            ):
+                continue
+            if (
+                method == "PATCH"
+                and isinstance(path, str)
+                and path.startswith(check_prefix)
+                and last_check_patch_by_path.get(path) != index
+            ):
+                continue
+            target = _thread_effect_target(effect)
+            if (
+                target is not None
+                and target[2]
+                and effect.get("request_sha256") in initial_keys
+                and target[1] in released_threads
+            ):
+                continue
+            kept_tail.append(effect)
+        self.effects = prefix + kept_tail
+
     def finish(self):
         if not self._armed:
             return
@@ -2707,6 +2838,7 @@ class FindingLifecycleJournal:
                     "confirmed",
                     [response[0], receipt],
                 )
+        self._compact_finished_command_effects(current)
         self.checkpoint()
 
     @staticmethod

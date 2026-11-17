@@ -284,6 +284,16 @@ class NativeCapacityGuard:
         self.comment_read_calls = (
             comment_plan.worst_read_calls() if comment_plan is not None else None
         )
+        # Slots removed because reserved archive/operation bodies already
+        # landed. require() still adds the full exposure count, so this many
+        # objects must not be counted a second time.
+        self._spent_reserved_slots = 0
+        # Seeded late historical-head reviews outside authenticated origin
+        # review IDs already consume old review exposure once archive exposure lands.
+        self._spent_review_slots = 0
+        self._known_old_review_ids: tuple[int, ...] = ()
+        self._old_review_heads: tuple[str, ...] = ()
+        self._evidence_author_id: int | None = None
         self.issue_update_bytes = 2 * closure_wire + receipt_update_bytes
         self.comment_bounds = (
             list(comment_bounds) if comment_bounds is not None else None
@@ -464,7 +474,12 @@ class NativeCapacityGuard:
                     raise ReviewInputError(
                         "quarantine current-check response capacity exceeded"
                     )
-            count = current["count"] + old["new_objects"]
+            old_objects = (
+                max(0, old["new_objects"] - self._spent_review_slots)
+                if surface == "reviews"
+                else old["new_objects"]
+            )
+            count = current["count"] + old_objects
             size = (
                 current["bytes"] + old["new_wire_bytes"] + old["positive_update_bytes"]
             )
@@ -488,7 +503,7 @@ class NativeCapacityGuard:
             count += len(tail)
             size += sum(tail) + len(tail) * _RESPONSE_METADATA_BYTES
             # Native response metadata is additional to emitted mutation bytes.
-            size += old["new_objects"] * _RESPONSE_METADATA_BYTES
+            size += old_objects * _RESPONSE_METADATA_BYTES
             largest = max(
                 current["largest"],
                 old["max_object_wire_bytes"] + _RESPONSE_METADATA_BYTES,
@@ -597,9 +612,8 @@ class NativeCapacityGuard:
                 }
                 continue
             if surface == "issue_comments" and self.comment_plan is not None:
-                if count > len(self.comment_plan.known) + len(
-                    self.comment_plan.unknown
-                ):
+                admitted = len(self.comment_plan.known) + len(self.comment_plan.unknown)
+                if count - self._spent_reserved_slots > admitted:
                     raise ReviewInputError(
                         "quarantine comment allocation membership exceeds admission"
                     )
@@ -642,6 +656,17 @@ class NativeCapacityGuard:
     @_tracked_guard_mutation
     def seed(self, surface, rows):
         seen = set()
+        spent_reviews = 0
+        track_reviews = (
+            surface == "reviews"
+            and self._spent_reserved_slots > 0
+            and not self.complete_tail
+            and self.old_check_head is not None
+        )
+        old_review_heads = set(self._old_review_heads) if track_reviews else set()
+        known_old_review_ids = (
+            set(self._known_old_review_ids) if track_reviews else set()
+        )
         for row in rows:
             if (
                 not isinstance(row, dict)
@@ -658,6 +683,25 @@ class NativeCapacityGuard:
             state["bytes"] += size
             state["largest"] = max(state["largest"], size)
             self.objects[surface, row["id"]] = _wire({"body": row.get("body", "")})
+            if (
+                track_reviews
+                and row.get("commit_id") in old_review_heads
+                and row["id"] not in known_old_review_ids
+                and (
+                    self._evidence_author_id is None
+                    or (
+                        isinstance(row.get("user"), dict)
+                        and row["user"].get("type") == "Bot"
+                        and row["user"].get("id") == self._evidence_author_id
+                    )
+                )
+            ):
+                spent_reviews += 1
+        if track_reviews and spent_reviews:
+            max_old = self.reserve["reviews"]["new_objects"]
+            self._spent_review_slots = min(
+                max_old, self._spent_review_slots + spent_reviews
+            )
         self.require(self.stats)
 
     @_tracked_guard_mutation
@@ -1051,6 +1095,8 @@ class _LifecycleExtension:
         None
     )
     current_execution: tuple[Any, Any, tuple[tuple[int, int], ...], int] | None = None
+    # Census membership for checkpoint enumeration. Activation installs `plan`.
+    census_plan: Any = None
 
 
 def _current_lifecycle_sizing(ledger, identity, known, added_parts):
@@ -1144,7 +1190,15 @@ def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
             and historical_execution is None
             and current_execution is None
         ):
-            raise ReviewInputError("quarantine lifecycle installed tail is unsupported")
+            from review_sensei.source_registry import require_module_seal
+
+            from . import quarantine_action
+
+            require_module_seal(quarantine_action)
+            if not quarantine_action.has_grouped_historical_lease(ledger, identity):
+                raise ReviewInputError(
+                    "quarantine lifecycle installed tail is unsupported"
+                )
     bounds = (MAX_PART_BYTES + 512,) * added_parts
     if set(old.known) - set(known):
         raise ReviewInputError(
@@ -1178,18 +1232,52 @@ def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
             and author["login"].casefold() in aliases
         ):
             metadata_known[identifier] = old.metadata_unknown
-    plan = CommentAllocationPlan(
+    stacked = CommentAllocationPlan(
         merged,
         (*old.unknown, *bounds),
         metadata_known=metadata_known,
         metadata_unknown=old.metadata_unknown,
     )
     if (
-        plan.worst_read_calls() > MAX_PAGINATION_PAGES
-        or sum(plan.known.values()) + sum(plan.unknown) > MAX_STORED_PART_BYTES
+        stacked.worst_read_calls() > MAX_PAGINATION_PAGES
+        or sum(stacked.known.values()) + sum(stacked.unknown) > MAX_STORED_PART_BYTES
         or guard.future_parts + added_parts > MAX_STORED_PARTS
     ):
         raise ReviewInputError("quarantine lifecycle original capacity bound exceeded")
+    # Rediscovery lists bodies whose unknown slots were already reserved.
+    # Stacking those wires on the leased multiset spends another physical
+    # read. Keep that multiset and the admitted read proof for activation.
+    # Checkpoint enumeration still uses the stacked census plan.
+    plan = stacked
+    census_plan = None
+    if historical_execution is not None and added_parts == 0:
+        extra_sizes = [
+            amount
+            for identifier, amount in merged.items()
+            if identifier not in old.known
+        ]
+        if extra_sizes and all(
+            any(slot >= size for slot in old.unknown) for size in extra_sizes
+        ):
+            retained = CommentAllocationPlan(
+                {
+                    identifier: max(old.known[identifier], merged[identifier])
+                    for identifier in old.known
+                },
+                old.unknown,
+                metadata_known={
+                    identifier: metadata_known[identifier]
+                    for identifier in old.known
+                    if identifier in metadata_known
+                },
+                metadata_unknown=old.metadata_unknown,
+            )
+            if (
+                stacked.worst_read_calls() > retained.worst_read_calls()
+                and retained.worst_read_calls() <= old.worst_read_calls()
+            ):
+                plan = retained
+                census_plan = stacked
     preview = copy(guard)
     preview.comment_plan = plan
     preview.comment_read_calls = plan.worst_read_calls()
@@ -1208,6 +1296,7 @@ def lifecycle_capacity_extension(ledger, identity, *, known, added_parts):
         sizing,
         historical_execution,
         current_execution,
+        census_plan,
     )
     _CAPACITY_EXTENSIONS[proof] = _extension_seal(proof)
     if (
@@ -1283,6 +1372,15 @@ def _extension_seal(proof):
             id(proof.current_execution[1]),
             proof.current_execution[2],
             proof.current_execution[3],
+        ),
+        None
+        if proof.census_plan is None
+        else (
+            id(proof.census_plan),
+            tuple(proof.census_plan.known.items()),
+            tuple(proof.census_plan.unknown),
+            tuple(proof.census_plan.metadata_known.items()),
+            proof.census_plan.metadata_unknown,
         ),
     )
 
@@ -1519,6 +1617,31 @@ def activate_lifecycle_extension(proof, *, capability=None, operation=None):
     _INSTALLED_GUARDS[guard] = (*installed[:3], _guard_state(guard))
 
 
+def _verified_part_ids(ledger):
+    verified = getattr(ledger, "_verified_parts", None)
+    if not isinstance(verified, dict):
+        return set()
+    identifiers = set()
+    for storage_id in verified:
+        if (
+            isinstance(storage_id, str)
+            and storage_id.isdecimal()
+            and not storage_id.startswith("0")
+        ):
+            identifiers.add(int(storage_id))
+    return identifiers
+
+
+def _spend_fitting_slots(slots, sizes):
+    """Drop the smallest slot that can hold each already observed body."""
+    remaining = list(slots)
+    for size in sizes:
+        choices = [bound for bound in remaining if bound >= size]
+        if choices:
+            remaining.remove(min(choices))
+    return remaining
+
+
 def _comment_allocation_plan(
     ledger,
     receipt,
@@ -1533,10 +1656,12 @@ def _comment_allocation_plan(
 
     The qualified old writers PATCH only session/operation roots. Result,
     inventory-intent and evidence carriers are append-only; their known native
-    IDs retain their complete observed sizes. Old allocations remain reserved
-    even when other old objects are already visible. No hint selects membership.
+    IDs retain their complete observed sizes. The evidence exposure reserve
+    stays intact until its own archive and operation bodies have already landed
+    outside the authenticated manifest; ordinary issue-comment slots remain
+    intact. Other old objects do not spend it. No hint selects membership.
     """
-    from .operation_host import OPERATION_COMMENT_MARKER
+    from .operation_host import OPERATION_COMMENT_MARKER, RESULT_COMMENT_MARKER
     from .packed_comment_census import NODE_METADATA_BYTES, CommentAllocationPlan
     from .session_ledger import SESSION_MARKER_ANY_VERSION
 
@@ -1606,13 +1731,52 @@ def _comment_allocation_plan(
         if type(root_slot) is not int or not 0 <= root_slot < len(current):
             raise ReviewInputError("quarantine mutable root allocation is invalid")
         current[root_slot] = max(current[root_slot], closure_wire)
+    evidence_slots = [parts["max_object_wire_bytes"]] * parts["new_objects"]
+    ordinary_slots = [ordinary["max_object_wire_bytes"]] * ordinary["new_objects"]
+    # Creation installs this plan before a successor manifest exists. Command
+    # installs run after that manifest is authenticated, so only bodies outside
+    # it can be the reserve that has already landed.
+    if getattr(ledger, "_quarantine_authenticated", None) is not None:
+        verified = _verified_part_ids(ledger)
+        evidence_prefix = "ReviewSensei immutable evidence part v1\n```json\n"
+        evidence_suffix = "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
+        landed_evidence = []
+        landed_operations = []
+        for row in ledger._cached_comments():
+            identifier, body = row.get("id"), row.get("body")
+            if (
+                type(identifier) is not int
+                or identifier not in known
+                or not isinstance(body, str)
+                or SESSION_MARKER_ANY_VERSION in body
+            ):
+                continue
+            amount = known[identifier]
+            if body.startswith(evidence_prefix) and body.endswith(evidence_suffix):
+                if identifier not in verified and any(
+                    bound >= amount for bound in evidence_slots
+                ):
+                    landed_evidence.append(amount)
+            elif body.startswith(RESULT_COMMENT_MARKER + "\n") and any(
+                bound >= amount for bound in ordinary_slots
+            ):
+                landed_operations.append(amount)
+        # One full exposure reserve is already present on the ordinary census
+        # and must stay. A second full reserve of archive bodies and operation
+        # bodies is the late landed set; only those surplus evidence-part bodies
+        # spend fitting evidence slots, keeping ordinary_slots intact.
+        extra_evidence = landed_evidence[parts["new_objects"] :]
+        extra_operations = landed_operations[ordinary["new_objects"] :]
+        if (
+            parts["new_objects"] > 0
+            and ordinary["new_objects"] > 0
+            and len(extra_evidence) >= parts["new_objects"]
+            and len(extra_operations) >= ordinary["new_objects"]
+        ):
+            evidence_slots = _spend_fitting_slots(evidence_slots, extra_evidence)
     return CommentAllocationPlan(
         known,
-        (
-            *(parts["max_object_wire_bytes"],) * parts["new_objects"],
-            *(ordinary["max_object_wire_bytes"],) * ordinary["new_objects"],
-            *current,
-        ),
+        (*evidence_slots, *ordinary_slots, *current),
         metadata_known=metadata_known,
         metadata_unknown=metadata_bound,
     )
@@ -1798,6 +1962,43 @@ def install_capacity(
     guard.command_receipt_update_id = (
         None if receipt_update is None else receipt_update[0]
     )
+    exposure = isolation["qualification"]["exposure"]["surfaces"]
+    reserved_slots = (
+        exposure["evidence_parts"]["new_objects"]
+        + exposure["issue_comments"]["new_objects"]
+        + len(comment_bounds)
+    )
+    guard._spent_reserved_slots = max(0, reserved_slots - len(comment_plan.unknown))
+    authenticated = getattr(ledger, "_quarantine_authenticated", None)
+    if (
+        guard._spent_reserved_slots > 0
+        and not guard.complete_tail
+        and guard.old_check_head is not None
+        and authenticated is not None
+    ):
+        known_old_review_ids: set[int] = set()
+        old_review_heads: set[str] = {guard.old_check_head}
+        source_bytes = getattr(authenticated, "source_documents_bytes", b"")
+        if isinstance(source_bytes, (bytes, bytearray)) and source_bytes:
+            docs = json.loads(source_bytes)
+            if isinstance(docs, dict):
+                for source in docs.values():
+                    if not isinstance(source, dict):
+                        continue
+                    review_id = source.get("review_id")
+                    if type(review_id) is int and review_id > 0:
+                        known_old_review_ids.add(review_id)
+                    record = source.get("record")
+                    if isinstance(record, dict):
+                        tx = record.get("transaction")
+                        if isinstance(tx, dict) and isinstance(tx.get("head_sha"), str):
+                            old_review_heads.add(tx["head_sha"])
+        if guard.current_check_head is not None:
+            old_review_heads.discard(guard.current_check_head)
+        guard._known_old_review_ids = tuple(sorted(known_old_review_ids))
+        guard._old_review_heads = tuple(sorted(old_review_heads))
+        author_id = getattr(ledger, "_evidence_author_id", None)
+        guard._evidence_author_id = author_id if type(author_id) is int else None
     if not ledger._inventory_complete:
         raise ReviewInputError(
             "quarantine native capacity needs the complete comment census"

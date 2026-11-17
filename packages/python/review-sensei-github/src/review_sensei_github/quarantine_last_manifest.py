@@ -393,13 +393,14 @@ def conditional_terminal_data(state, *, ordinary, terminal, sequence):
     projected = historical_terminal_projection.terminal_accounting_data(
         state, ordinary=ordinary, terminal=terminal, sequence=sequence
     )
+    reserved = blocks[terminal].undispatched
     return {
         "admission": False,
         "runtime_fence_installed": False,
         "kind": "conditional_last_one_close_terminal16",
-        "reserved_terminal_slots": 50,
+        "reserved_terminal_slots": reserved,
         "maximum_terminal_attempts": 16,
-        "retained_terminal_undispatched": 34,
+        "retained_terminal_undispatched": reserved - 16,
         "unproved_premises": [
             "distinct_original_source_issued_one_close_negative_fence",
             "complete_terminal_census_and_no_extra_carrier_or_history_reads",

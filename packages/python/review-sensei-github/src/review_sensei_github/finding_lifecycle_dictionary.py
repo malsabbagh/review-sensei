@@ -243,6 +243,11 @@ def resolve_stored(ledger, record, stored):
         _bad("original evidence budget is unavailable")
     budget.preflight(restore_cost(ledger, stored, record=record))
     budget.check()
+    obs_before = (
+        len(ledger.caller.observations)
+        if hasattr(ledger, "caller") and hasattr(ledger.caller, "observations")
+        else None
+    )
     base = (
         read_inline_evidence(manifest, expected_binding=base_binding)
         if manifest["encoding"] == "inline-json-v1"
@@ -253,7 +258,38 @@ def resolve_stored(ledger, record, stored):
     budget.check()
     document = unpack(stored, base=base, current_binding=current_binding)
     budget.check()
-    current = ledger.load(record.identity())
+    from review_sensei.session import SessionLoadResult
+
+    from .api_run_requests import ApiRunSessionLedger
+    from .publication_recovery import _publication_transport
+
+    guard = getattr(
+        _publication_transport(ledger.http), "_quarantine_capacity_guard", None
+    )
+    authenticated = getattr(ledger, "_quarantine_authenticated", None)
+    is_v3_guarded = (
+        guard is not None
+        and authenticated is not None
+        and isinstance(authenticated.archive.get("target_isolation"), dict)
+        and authenticated.archive["target_isolation"].get("contract")
+        == "failed-published-tail-isolation-v1"
+    )
+    if (
+        isinstance(ledger, ApiRunSessionLedger)
+        and getattr(ledger, "_quarantine_required", False)
+        and getattr(ledger, "_reuse_listed_parts", False)
+        and ((guard is None and len(ledger._cached_comments()) >= 80) or is_v3_guarded)
+        and getattr(ledger, "_inventory_complete", False)
+        and ledger.caller._checkpoint is None
+        and ledger.caller._effect_record is record
+        and record is not None
+        and record.record_sha256 == ledger.caller._root
+        and obs_before is not None
+        and len(ledger.caller.observations) == obs_before
+    ):
+        current = SessionLoadResult(status="ok", record=record)
+    else:
+        current = ledger.load(record.identity())
     if (
         ledger.evidence_budget is not budget
         or current.status != "ok"

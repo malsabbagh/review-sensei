@@ -208,9 +208,9 @@ class OriginalCurrentCommandExecutionTests(unittest.TestCase):
             if frame.f_code is execution.issue.__code__ and isinstance(value, dict):
                 entry = value
                 self.assertEqual(entry["parts"], 3)
-                self.assertEqual(entry["limits"], {"ordinary": 161, "terminal": 17})
+                self.assertEqual(entry["limits"], {"ordinary": 159, "terminal": 17})
                 blocks = {block.block_id: block for block in entry["state"].blocks}
-                self.assertEqual(blocks[entry["ordinary_block"]].undispatched, 380)
+                self.assertEqual(blocks[entry["ordinary_block"]].undispatched, 365)
                 self.assertEqual(blocks[entry["terminal_block"]].undispatched, 68)
                 caller = entry["ledger"].caller
                 before = caller._sequence, len(caller.observations)
