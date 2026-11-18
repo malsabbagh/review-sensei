@@ -25,6 +25,7 @@ import socket
 import tempfile
 import unittest
 from dataclasses import asdict, replace
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -53,6 +54,7 @@ from review_sensei_github.pre_entry_abort_recovery import (
 )
 from review_sensei_github.publication import (
     FINDING_MARKER_PREFIX_V2,
+    approval_marker,
     review_identity_marker,
 )
 from review_sensei_github.session_ledger import (
@@ -82,15 +84,91 @@ WORKFLOW_SHA = "c" * 40
 IDENTITY = SessionIdentity(repository="owner/repo", pull_request=7, repository_id=123)
 
 
+_APP_AUTHOR = {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"}
+_HUMAN_AUTHOR = {"id": 111, "login": "human-reviewer", "type": "User"}
+_GRAPHQL_APP_AUTHOR = {"databaseId": 999, "login": "ReviewSensei", "__typename": "Bot"}
+_GRAPHQL_HUMAN_AUTHOR = {"login": "human-reviewer", "__typename": "User"}
+_OTHER_HEAD = "d" * 40
+_UNREADABLE = "private-response-content-do-not-emit"
+
+
+def _review_body(head: str = HEAD_SHA) -> str:
+    scoped = review_identity_marker(repository_id=123, pull_request=7, head_sha=head)
+    return f"{scoped} result={'d' * 64} coverage=full -->\nSynthetic review"
+
+
+def _finding_body(head: str = HEAD_SHA, base: str = BASE_SHA) -> str:
+    return (
+        f"{FINDING_MARKER_PREFIX_V2} repo=123 pr=7 head={head} base={base} "
+        f"fingerprint={'d' * 64} state=new blocking=true -->\nSynthetic finding"
+    )
+
+
+def _thread(
+    body: object,
+    *,
+    identifier: str = "T1",
+    author: object = _GRAPHQL_APP_AUTHOR,
+    native_head: str = HEAD_SHA,
+    current_head: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": identifier,
+        "isResolved": False,
+        "comments": {
+            "nodes": [
+                {
+                    "id": "root-" + identifier,
+                    "originalCommit": {"oid": native_head},
+                    "commit": {
+                        "oid": native_head if current_head is None else current_head
+                    },
+                    "author": author,
+                    "body": body,
+                }
+            ]
+        },
+    }
+
+
+def _thread_page(
+    rows: list[Any],
+    *,
+    total: int | None = None,
+    has_next: bool = False,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "totalCount": len(rows) if total is None else total,
+        "pageInfo": {
+            "hasNextPage": has_next,
+            "endCursor": cursor or ("final-cursor" if rows else None),
+        },
+        "nodes": rows,
+    }
+
+
+def _thread_response(connection: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "data": {
+            "repository": {
+                "databaseId": 123,
+                "pullRequest": {"number": 7, "reviewThreads": connection},
+            }
+        }
+    }
+
+
 def _diagnostic_ledger(fixture: Any) -> GitHubIssueCommentSessionLedger:
     """Create a side-effect-free read-only ledger over `fixture` state."""
-    bot = {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"}
 
     def opener(request: Any, timeout: float | None = None) -> Any:
         target = urlsplit(request.full_url)
         path, method = target.path, request.get_method()
+        if hasattr(fixture, "requests"):
+            fixture.requests.append((method, path))
         if path == "/user" or path.startswith("/users/"):
-            return json_response(bot)
+            return json_response(_APP_AUTHOR)
         if path.endswith("/issues/7/comments") and method == "GET":
             query = parse_qs(target.query)
             size = int(query.get("per_page", [100])[0])
@@ -109,27 +187,27 @@ def _diagnostic_ledger(fixture: Any) -> GitHubIssueCommentSessionLedger:
                 return json_response(copy.deepcopy(extra[cid]))
             return json_response({"message": "Not Found"}, 404)
         if path.endswith("/pulls/7/reviews") and method == "GET":
-            return json_response(copy.deepcopy(getattr(fixture, "reviews", [])))
+            if getattr(fixture, "timeout_reviews", False):
+                raise TimeoutError(_UNREADABLE)
+            reviews = getattr(fixture, "reviews", [])
+            page = int(parse_qs(target.query).get("page", [1])[0])
+            pages = getattr(fixture, "review_pages", None)
+            if pages is not None:
+                reviews = pages[page]
+            return json_response(copy.deepcopy(reviews))
         if path == "/graphql" and method == "POST":
-            return json_response(
-                {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "reviewThreads": {
-                                    "pageInfo": {
-                                        "hasNextPage": False,
-                                        "endCursor": None,
-                                    },
-                                    "nodes": copy.deepcopy(
-                                        getattr(fixture, "threads", [])
-                                    ),
-                                }
-                            }
-                        }
-                    }
-                }
+            query = json.loads(request.data)
+            assert query["query"].startswith("query LateAbortEffects(")
+            assert query["variables"]["first"] == 100
+            if hasattr(fixture, "thread_response"):
+                return json_response(copy.deepcopy(fixture.thread_response))
+            pages = getattr(fixture, "thread_pages", None)
+            page = (
+                pages[query["variables"]["after"]]
+                if pages is not None
+                else _thread_page(getattr(fixture, "threads", []))
             )
+            return json_response(_thread_response(copy.deepcopy(page)))
         if "/actions/runs/" in path and method == "GET":
             parts = path.split("/actions/runs/", 1)[1].split("/")
             queried_run = int(parts[0])
@@ -164,7 +242,11 @@ def _diagnostic_ledger(fixture: Any) -> GitHubIssueCommentSessionLedger:
         api_url="https://api.github.test",
         opener=opener,
     )
-    return GitHubIssueCommentSessionLedger(http=http, token="synthetic-diagnostic")
+    return GitHubIssueCommentSessionLedger(
+        http=http,
+        token="synthetic-diagnostic",
+        app_slug=getattr(fixture, "app_slug", "reviewsensei[bot]"),
+    )
 
 
 def _base_accounting(*, run_id: int = 1001, limit: int = 512) -> ApiRunAccounting:
@@ -462,18 +544,14 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             aborted_base = fl.requested_base
             fl.next_run()
 
-            # Inject a late review scoped to the aborted head on the PR:
-            marker = review_identity_marker(
-                repository_id=123,
-                pull_request=7,
-                head_sha=aborted_head,
-            )
+            # Inject a late review scoped to the aborted head on the PR.
             fl.reviews.append(
                 {
                     "id": 9001,
                     "state": "COMMENTED",
                     "commit_id": aborted_head,
-                    "body": f"{marker} -->\nLate review",
+                    "user": _APP_AUTHOR,
+                    "body": _review_body(aborted_head),
                 }
             )
             late_review_qual, _ = inspect_live_no_transaction_predecessor(
@@ -486,27 +564,17 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             )
             self.assertFalse(late_review_qual.qualifies_rollover)
             self.assertFalse(late_review_qual.late_effects_absent)
+            self.assertEqual(
+                late_review_qual.missing_predicates, ("zero_late_native_effects",)
+            )
             self.assertEqual(late_review_qual.conservative_provider_call_hold, 1)
 
             # Now test late finding thread detection when reviews list is clean:
             fl.reviews.clear()
             fl.threads = [
-                {
-                    "id": "T_late",
-                    "isResolved": False,
-                    "comments": {
-                        "nodes": [
-                            {
-                                "id": "C_late",
-                                "body": (
-                                    f"{FINDING_MARKER_PREFIX_V2} repo=123 pr=7 "
-                                    f"head={aborted_head} base={aborted_base} "
-                                    f"fingerprint={'d' * 64} state=new blocking=true -->\nLate finding"
-                                ),
-                            }
-                        ]
-                    },
-                }
+                _thread(
+                    _finding_body(aborted_head, aborted_base), native_head=aborted_head
+                )
             ]
             late_thread_qual, _ = inspect_live_no_transaction_predecessor(
                 ledger=_diagnostic_ledger(fl),
@@ -515,6 +583,9 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             )
             self.assertEqual(
                 late_thread_qual.state_code, "pre_entry_abort_late_effects"
+            )
+            self.assertEqual(
+                late_thread_qual.missing_predicates, ("zero_late_native_effects",)
             )
 
         # Synthetic unit checks for corrupt receipts, uncertain dispatch with receipt,
@@ -560,6 +631,33 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
         self.assertEqual(
             qualify_no_transaction_abort(conflict_rec).state_code,
             "pre_entry_abort_corrupt_receipt",
+        )
+
+        foreign_receipt = _make_record(
+            accounting=replace(
+                base_acc,
+                analysis_abort={
+                    **valid_abort,
+                    "transaction": ReviewTransaction.create(
+                        repository="other/repo",
+                        pull_request=7,
+                        base_sha=BASE_SHA,
+                        head_sha=HEAD_SHA,
+                        reservation_id="5" * 64,
+                        policy_digest="2" * 64,
+                        configuration_digest="1" * 64,
+                        evidence_digest="3" * 64,
+                        generation=1,
+                    ).to_dict(),
+                },
+            )
+        )
+        foreign_qual = qualify_no_transaction_abort(
+            foreign_receipt, owner_ceased=True, late_native_effects_present=False
+        )
+        self.assertEqual(foreign_qual.state_code, "pre_entry_abort_corrupt_receipt")
+        self.assertIn(
+            "matching_abort_transaction_scope", foreign_qual.missing_predicates
         )
 
         # Provider entry started alongside `analysis_abort`
@@ -852,17 +950,11 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
     def test_adversarial_validation_obligation_sources_and_live_inspection_guards(
         self,
     ) -> None:
-        from types import SimpleNamespace
-
         from review_sensei_github.pre_entry_abort_recovery import (
             _count_prior_obligations,
             _detect_late_native_effects,
             _probe_owner_ceased,
             _validate_analysis_abort_receipt,
-        )
-        from review_sensei_github.publication import (
-            APPROVAL_MARKER_PREFIX,
-            REVIEW_MARKER_PREFIX,
         )
 
         # 1. Dataclass invariant rejections (Qualification & Descriptor)
@@ -1217,8 +1309,8 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             _probe_owner_ceased(incomplete_ledger, IDENTITY, base_acc, "tok")
         )
 
-        # 7. `_detect_late_native_effects` without `abort_head` & tokenless ledger
-        self.assertFalse(
+        # 7. `_detect_late_native_effects` without abort head and without a token.
+        self.assertIsNone(
             _detect_late_native_effects(
                 SimpleNamespace(), IDENTITY, plain_rec, base_acc
             )
@@ -1227,65 +1319,38 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
 
         def late_unscoped_opener(request: Any, timeout: float | None = None) -> Any:
             path = urlsplit(request.full_url).path
+            assert timeout is not None and 0 < timeout <= 30
             if path.endswith("/pulls/7/reviews"):
-                if effect_mode["kind"] == "approval":
-                    return json_response(
-                        [
-                            "skip-non-dict",
-                            {"body": 123},
-                            {
-                                "body": (
-                                    f"{APPROVAL_MARKER_PREFIX} repo=123 pr=7 "
-                                    f"head={HEAD_SHA} -->\nApproved"
-                                )
-                            },
-                        ]
+                kind = effect_mode["kind"]
+                if kind == "thread":
+                    return json_response([])
+                body = (
+                    approval_marker(
+                        repository_id=123,
+                        pull_request=7,
+                        head_sha=HEAD_SHA,
+                        base_sha=BASE_SHA,
                     )
-                if effect_mode["kind"] == "review":
-                    return json_response(
-                        [
-                            {
-                                "body": (
-                                    f"{REVIEW_MARKER_PREFIX} repo=123 pr=7 "
-                                    f"head={HEAD_SHA} -->\nReview"
-                                )
-                            }
-                        ]
-                    )
-                return json_response([])
+                    if kind == "approval"
+                    else _review_body()
+                )
+                return json_response(
+                    [
+                        {"id": 2, "body": 123},
+                        {
+                            "id": 3,
+                            "user": _APP_AUTHOR,
+                            "commit_id": HEAD_SHA,
+                            "body": body,
+                        },
+                    ]
+                )
             return json_response(
-                {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "reviewThreads": {
-                                    "pageInfo": {
-                                        "hasNextPage": False,
-                                        "endCursor": None,
-                                    },
-                                    "nodes": [
-                                        "skip-non-dict",
-                                        {"comments": {"nodes": []}},
-                                        {"comments": {"nodes": [{"body": 99}]}},
-                                        {
-                                            "comments": {
-                                                "nodes": [
-                                                    {
-                                                        "body": (
-                                                            f"{FINDING_MARKER_PREFIX_V2} repo=123 pr=7 "
-                                                            f"head={HEAD_SHA} base={BASE_SHA} "
-                                                            f"fingerprint={'a' * 64} state=new blocking=true -->\nLate"
-                                                        )
-                                                    }
-                                                ]
-                                            }
-                                        },
-                                    ],
-                                }
-                            }
-                        }
-                    }
-                }
+                _thread_response(
+                    _thread_page(
+                        ["unreadable-row", _thread(_finding_body(), identifier="T2")]
+                    )
+                )
             )
 
         late_ledger = SimpleNamespace(
@@ -1293,18 +1358,18 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                 api_url="https://api.github.test", opener=late_unscoped_opener
             ),
             token="tok",
+            app_slug="reviewsensei[bot]",
+            _evidence_author_id=999,
         )
-        self.assertTrue(
-            _detect_late_native_effects(late_ledger, IDENTITY, plain_rec, base_acc)
-        )
-        effect_mode["kind"] = "review"
-        self.assertTrue(
-            _detect_late_native_effects(late_ledger, IDENTITY, plain_rec, base_acc)
-        )
-        effect_mode["kind"] = "thread"
-        self.assertTrue(
-            _detect_late_native_effects(late_ledger, IDENTITY, plain_rec, base_acc)
-        )
+        for kind in ("approval", "review", "thread"):
+            with self.subTest(unscoped_effect=kind):
+                effect_mode["kind"] = kind
+                self.assertIs(
+                    _detect_late_native_effects(
+                        late_ledger, IDENTITY, plain_rec, base_acc
+                    ),
+                    True,
+                )
 
         # 8. `inspect_live_no_transaction_predecessor` spoofed human comment & conflict guards
         with self.assertRaises(ReviewInputError):
@@ -1403,16 +1468,9 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             )
 
     def test_multi_page_pagination_bot_identity_and_fail_closed_controls(self) -> None:
-        import json
-        from types import SimpleNamespace
-
         from review_sensei_github.pre_entry_abort_recovery import (
             _detect_late_native_effects,
             _probe_owner_ceased,
-        )
-        from review_sensei_github.publication import (
-            FINDING_MARKER_PREFIX_V2,
-            REVIEW_MARKER_PREFIX,
         )
 
         base_acc = _base_accounting(run_id=1001)
@@ -1473,16 +1531,20 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             ],
             "jobs_p2": [{"id": 101, "status": "completed", "conclusion": "cancelled"}],
             "jobs_total": 101,
-            "reviews_p1": [{"id": i, "body": "human review"} for i in range(1, 101)],
+            "reviews_p1": [
+                {"id": i, "body": None, "user": _HUMAN_AUTHOR} for i in range(1, 101)
+            ],
             "reviews_p2": [],
-            "threads_p1": {
-                "pageInfo": {"hasNextPage": True, "endCursor": "cur-p1"},
-                "nodes": [{"id": "t1", "comments": {"nodes": [{"body": "note"}]}}],
-            },
-            "threads_p2": {
-                "pageInfo": {"hasNextPage": False, "endCursor": None},
-                "nodes": [],
-            },
+            "threads_p1": _thread_page(
+                [_thread(None, author=_GRAPHQL_HUMAN_AUTHOR)],
+                total=2,
+                has_next=True,
+                cursor="cur-p1",
+            ),
+            "threads_p2": _thread_page(
+                [_thread(None, identifier="T2", author=_GRAPHQL_HUMAN_AUTHOR)],
+                total=2,
+            ),
         }
 
         def paged_opener(request: Any, timeout: float | None = None) -> Any:
@@ -1518,9 +1580,7 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                 payload = json.loads(request.data.decode("utf-8"))
                 after = payload["variables"]["after"]
                 conn = state["threads_p1"] if after is None else state["threads_p2"]
-                return json_response(
-                    {"data": {"repository": {"pullRequest": {"reviewThreads": conn}}}}
-                )
+                return json_response(_thread_response(conn))
             raise AssertionError(f"unexpected request: {path}")
 
         paged_ledger = SimpleNamespace(
@@ -1530,8 +1590,8 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             _evidence_author_id=999,
         )
 
-        # 1. Clean multi-page rollover qualification (comment on p2, cancelled job on p2,
-        #    reviews p2 empty, GraphQL threads p2 empty):
+        # 1. Clean multi-page qualification: session and cancelled job on page 2,
+        #    terminal reviews page, and only human thread roots.
         qual_ok, ref_ok = inspect_live_no_transaction_predecessor(
             ledger=paged_ledger, identity=IDENTITY, actions_token="tok"
         )
@@ -1565,56 +1625,44 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             {"id": 101, "status": "completed", "conclusion": "cancelled"}
         ]
 
-        # 4. Late review on page 2 -> detected (`late_native_effects_present=True`)!
+        # 4. A late review on page 2 is positively observed.
         state["reviews_p2"] = [
             {
                 "id": 500,
-                "body": f"{REVIEW_MARKER_PREFIX} repo=123 pr=7 head={HEAD_SHA} -->\nLate",
+                "commit_id": HEAD_SHA,
+                "user": _APP_AUTHOR,
+                "body": _review_body(),
             }
         ]
-        self.assertTrue(
-            _detect_late_native_effects(paged_ledger, IDENTITY, abort_rec, abort_acc)
+        self.assertIs(
+            _detect_late_native_effects(paged_ledger, IDENTITY, abort_rec, abort_acc),
+            True,
         )
         state["reviews_p2"] = []
 
-        # 5. Late finding thread on GraphQL page 2 -> detected!
-        state["threads_p2"] = {
-            "pageInfo": {"hasNextPage": False, "endCursor": None},
-            "nodes": [
-                {
-                    "id": "t2",
-                    "comments": {
-                        "nodes": [
-                            {
-                                "body": (
-                                    f"{FINDING_MARKER_PREFIX_V2} repo=123 pr=7 "
-                                    f"head={HEAD_SHA} base={BASE_SHA} "
-                                    f"fingerprint={'b' * 64} state=new blocking=true -->\nLate"
-                                )
-                            }
-                        ]
-                    },
-                }
-            ],
-        }
-        self.assertTrue(
+        # 5. A late finding thread on GraphQL page 2 is positively observed.
+        clean_thread_page = state["threads_p2"]
+        state["threads_p2"] = _thread_page(
+            [_thread(_finding_body(), identifier="T2")], total=2
+        )
+        self.assertIs(
+            _detect_late_native_effects(paged_ledger, IDENTITY, abort_rec, abort_acc),
+            True,
+        )
+
+        # 6. A non-advancing GraphQL cursor is not proof of either outcome.
+        state["threads_p2"] = _thread_page(
+            [_thread(None, identifier="T2", author=_GRAPHQL_HUMAN_AUTHOR)],
+            total=3,
+            has_next=True,
+            cursor="cur-p1",
+        )
+        self.assertIsNone(
             _detect_late_native_effects(paged_ledger, IDENTITY, abort_rec, abort_acc)
         )
 
-        # 6. Non-advancing GraphQL cursor fails closed (`return True`)!
-        state["threads_p2"] = {
-            "pageInfo": {"hasNextPage": True, "endCursor": "cur-p1"},
-            "nodes": [],
-        }
-        self.assertTrue(
-            _detect_late_native_effects(paged_ledger, IDENTITY, abort_rec, abort_acc)
-        )
-
-        # 7. Clean live `inspect_live_no_transaction_attempt_packet` readback:
-        state["threads_p2"] = {
-            "pageInfo": {"hasNextPage": False, "endCursor": None},
-            "nodes": [],
-        }
+        # 7. Clean live `inspect_live_no_transaction_attempt_packet` readback.
+        state["threads_p2"] = clean_thread_page
         live_pkt = inspect_live_no_transaction_attempt_packet(
             ledger=paged_ledger,
             identity=IDENTITY,
@@ -1943,12 +1991,333 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
                 replace(pkt_142_cold, repository_id=bad_repo_id)  # type: ignore[arg-type]
 
 
+class LateNativeEffectsEvidenceTests(unittest.TestCase):
+    """Public G29 advisor regressions over synthetic, read-only HTTP evidence."""
+
+    def fixture(self, **changes: Any) -> SimpleNamespace:
+        predecessor = _base_accounting()
+        abort = ReviewTransaction.create(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            reservation_id="5" * 64,
+            policy_digest="2" * 64,
+            configuration_digest="1" * 64,
+            evidence_digest="3" * 64,
+            generation=1,
+        )
+        record = _make_record(
+            accounting=replace(
+                predecessor,
+                analysis_abort={
+                    "source_root": "1" * 64,
+                    "cleanup_root": "2" * 64,
+                    "transaction": abort.to_dict(),
+                    "entry_state": "not_started",
+                    "run_id": predecessor.identity.run_id,
+                    "owner": asdict(predecessor.owner),
+                },
+            ),
+        )
+        fixture = SimpleNamespace(
+            record=record,
+            run_id=1002,
+            attempt=1,
+            comment={
+                "id": 203,
+                "body": render_session_comment(
+                    repository_id=123, pull_request=7, record=record
+                ),
+                "user": _APP_AUTHOR,
+            },
+            requests=[],
+        )
+        vars(fixture).update(changes)
+        return fixture
+
+    def inspect(self, fixture: SimpleNamespace) -> NoTransactionAbortQualification:
+        result, comment_ref = inspect_live_no_transaction_predecessor(
+            ledger=_diagnostic_ledger(fixture), identity=IDENTITY
+        )
+        self.assertEqual(comment_ref["id"], 203)
+        self.assertTrue(result.owner_ceased)
+        self.assertTrue(result.provider_entry_proven_absent)
+        self.assertTrue(result.reservation_release_confirmed)
+        self.assertTrue(result.dispatch_clean)
+        self.assertFalse(result.authority)
+        self.assertFalse(result.reenroll_permitted)
+        unprobed = qualify_no_transaction_abort(fixture.record)
+        self.assertEqual(
+            result.conservative_nonstartup_caller_liability,
+            unprobed.conservative_nonstartup_caller_liability,
+        )
+        self.assertEqual(
+            result.conservative_total_caller_liability,
+            unprobed.conservative_total_caller_liability,
+        )
+        self.assertTrue(
+            all(
+                method == "GET" or (method, path) == ("POST", "/graphql")
+                for method, path in fixture.requests
+            )
+        )
+        return result
+
+    def assert_late_effects_hold(
+        self, fixture: SimpleNamespace, *, observed: bool = False
+    ) -> None:
+        result = self.inspect(fixture)
+        self.assertFalse(result.late_effects_absent)
+        self.assertFalse(result.qualifies_rollover)
+        self.assertFalse(result.missing_transaction_means_no_operation)
+        self.assertEqual(result.conservative_provider_call_hold, 1)
+        self.assertEqual(result.state_code, "pre_entry_abort_late_effects")
+        self.assertEqual(
+            result.missing_predicates,
+            (
+                "zero_late_native_effects"
+                if observed
+                else "complete_late_native_effects_readback",
+            ),
+        )
+        self.assertIn("exist" if observed else "unproven", result.operator_action)
+        self.assertNotIn(_UNREADABLE, json.dumps(result.to_dict()))
+
+    def test_unconfigured_app_does_not_supply_its_own_identity(self) -> None:
+        fixture = self.fixture(app_slug=None)
+        self.assert_late_effects_hold(fixture)
+        self.assertNotIn(("GET", "/repos/owner/repo/pulls/7/reviews"), fixture.requests)
+        self.assertNotIn(("POST", "/graphql"), fixture.requests)
+
+    def test_offline_defaults_do_not_invent_cessation_or_absence(self) -> None:
+        record = self.fixture().record
+        for read in (qualify_no_transaction_abort, build_no_transaction_attempt_packet):
+            for supplied, missing in (
+                (
+                    {},
+                    {
+                        "predecessor_owner_cessation",
+                        "complete_late_native_effects_readback",
+                    },
+                ),
+                ({"owner_ceased": True}, {"complete_late_native_effects_readback"}),
+                (
+                    {"late_native_effects_present": False},
+                    {"predecessor_owner_cessation"},
+                ),
+                ({"owner_ceased": True, "late_native_effects_present": False}, set()),
+            ):
+                with self.subTest(read=read.__name__, supplied=supplied):
+                    result = read(record, **supplied)
+                    qual = (
+                        result.qualification
+                        if isinstance(result, NoTransactionAttemptPacket)
+                        else result
+                    )
+                    self.assertFalse(result.authority)
+                    self.assertFalse(qual.reenroll_permitted)
+                    self.assertEqual(
+                        qual.missing_transaction_means_no_operation, not missing
+                    )
+                    self.assertEqual(qual.qualifies_rollover, not missing)
+                    self.assertEqual(set(qual.missing_predicates), missing)
+                    self.assertEqual(
+                        qual.owner_ceased, supplied.get("owner_ceased", False)
+                    )
+                    self.assertEqual(
+                        qual.late_effects_absent,
+                        "late_native_effects_present" in supplied,
+                    )
+
+    def test_unreadable_and_unattributable_review_evidence_holds(self) -> None:
+        review = {"id": 11, "user": _APP_AUTHOR, "commit_id": HEAD_SHA}
+        for rows in (
+            [None],
+            [{**review, "id": True, "body": _review_body()}],
+            [review],
+            [{**review, "body": None}],
+            [{**review, "body": {"not_text": _UNREADABLE}}],
+            [{**review, "body": ""}],
+            [{**review, "body": "Edited or otherwise unidentifiable App review"}],
+            [{**review, "body": _review_body().removesuffix(" -->\nSynthetic review")}],
+            [{**review, "body": _review_body() + _review_body(_OTHER_HEAD)}],
+            [
+                {
+                    **review,
+                    "user": {"type": "Bot", "login": "reviewsensei[bot]", "id": 1},
+                }
+            ],
+            [{**review, "body": _review_body(), "user": None}],
+            [{**review, "body": _review_body(), "commit_id": _OTHER_HEAD}],
+        ):
+            with self.subTest(rows=rows):
+                self.assert_late_effects_hold(self.fixture(reviews=rows))
+
+        # A typed transport timeout is unknown, not positive and not retried.
+        fixture = self.fixture(timeout_reviews=True)
+        self.assert_late_effects_hold(fixture)
+        self.assertEqual(
+            fixture.requests.count(("GET", "/repos/owner/repo/pulls/7/reviews")), 1
+        )
+        self.assertNotIn(("POST", "/graphql"), fixture.requests)
+
+    def test_unreadable_and_unattributable_thread_evidence_holds(self) -> None:
+        for row in (
+            None,
+            {"id": "T1", "isResolved": True, "comments": []},
+            {"id": "T1", "isResolved": True, "comments": {"nodes": []}},
+            {"id": "T1", "isResolved": True, "comments": {"nodes": [None]}},
+            {
+                "id": "T1",
+                "isResolved": True,
+                "comments": {"nodes": [{}, {}]},
+            },
+            _thread(None),
+            _thread({"not_text": _UNREADABLE}),
+            _thread(""),
+            _thread(_finding_body(), author=None),
+            _thread(
+                _finding_body(), author={**_GRAPHQL_APP_AUTHOR, "databaseId": True}
+            ),
+            _thread(_finding_body() + _finding_body(_OTHER_HEAD)),
+            _thread(None, native_head=_OTHER_HEAD),
+            _thread(
+                _finding_body(_OTHER_HEAD),
+                native_head=HEAD_SHA,
+                current_head=_OTHER_HEAD,
+            ),
+            _thread(
+                _finding_body(_OTHER_HEAD),
+                native_head=_OTHER_HEAD,
+                current_head=HEAD_SHA,
+            ),
+        ):
+            with self.subTest(row=row):
+                self.assert_late_effects_hold(self.fixture(threads=[row]))
+
+        fixture = self.fixture(threads=[_thread({"not_text": _UNREADABLE})])
+        packet = inspect_live_no_transaction_attempt_packet(
+            ledger=_diagnostic_ledger(fixture), identity=IDENTITY
+        )
+        self.assertFalse(packet.authority)
+        self.assertFalse(packet.reenroll_permitted)
+        self.assertFalse(packet.late_effects_absent)
+        self.assertFalse(packet.qualification.qualifies_rollover)
+        self.assertIn(
+            "complete_late_native_effects_readback", packet.missing_proof_holds
+        )
+        self.assertNotIn(_UNREADABLE, json.dumps(packet.to_dict()))
+
+    def test_ambiguous_native_pagination_never_proves_absence(self) -> None:
+        reviews = [{"id": i, "user": _HUMAN_AUTHOR} for i in range(1, 101)]
+        repeated = self.fixture(review_pages={1: reviews, 2: [reviews[0]]})
+        self.assert_late_effects_hold(repeated)
+
+        root = _thread(None, author=_GRAPHQL_HUMAN_AUTHOR)
+        next_root = _thread(None, identifier="T2", author=_GRAPHQL_HUMAN_AUTHOR)
+        first_page = _thread_page([root], total=2, has_next=True, cursor="first")
+        cases = (
+            _thread_page([root], total=2),
+            _thread_page([next_root], total=2, cursor="first"),
+            _thread_page([next_root], total=3),
+            _thread_page([], total=2),
+        )
+        for second_page in cases:
+            with self.subTest(second_page=second_page):
+                fixture = self.fixture(
+                    thread_pages={None: first_page, "first": second_page}
+                )
+                self.assert_late_effects_hold(fixture)
+                self.assertEqual(fixture.requests.count(("POST", "/graphql")), 2)
+
+        wrong_scope = _thread_response(_thread_page([]))
+        wrong_scope["data"]["repository"]["databaseId"] = 124
+        for response in (
+            wrong_scope,
+            _thread_response(_thread_page([])) | {"errors": {}},
+            _thread_response(_thread_page([root] * 101)),
+        ):
+            with self.subTest(response=response):
+                self.assert_late_effects_hold(self.fixture(thread_response=response))
+
+    def test_attributable_effect_is_distinct_from_ambiguity(self) -> None:
+        for fixture in (
+            self.fixture(
+                reviews=[
+                    {
+                        "id": 10,
+                        "user": _APP_AUTHOR,
+                        "commit_id": HEAD_SHA,
+                        "body": None,
+                    },
+                    {
+                        "id": 11,
+                        "user": _APP_AUTHOR,
+                        "commit_id": HEAD_SHA,
+                        "body": _review_body(),
+                    },
+                ]
+            ),
+            self.fixture(
+                reviews=[None],
+                threads=[
+                    _thread(
+                        _finding_body(),
+                        identifier="later-effect",
+                        native_head=_OTHER_HEAD,
+                    )
+                ],
+            ),
+        ):
+            self.assert_late_effects_hold(fixture, observed=True)
+
+    def test_empty_and_provably_unrelated_native_inventory_admits_diagnosis(
+        self,
+    ) -> None:
+        for fixture in (
+            self.fixture(),
+            self.fixture(
+                reviews=[
+                    {"id": 10, "user": _HUMAN_AUTHOR, "body": None},
+                    {"id": 11, "user": _HUMAN_AUTHOR, "body": _review_body()},
+                    {
+                        "id": 12,
+                        "user": _APP_AUTHOR,
+                        "commit_id": _OTHER_HEAD,
+                        "body": None,
+                    },
+                    {
+                        "id": 13,
+                        "user": {"type": "Bot", "login": "foreign[bot]", "id": 222},
+                        "body": None,
+                    },
+                ],
+                threads=[
+                    _thread(None, author=_GRAPHQL_HUMAN_AUTHOR),
+                    _thread(
+                        _finding_body(),
+                        identifier="human-quote",
+                        author=_GRAPHQL_HUMAN_AUTHOR,
+                    ),
+                    _thread(
+                        _finding_body(_OTHER_HEAD),
+                        identifier="old-head",
+                        native_head=_OTHER_HEAD,
+                    ),
+                ],
+            ),
+        ):
+            result = self.inspect(fixture)
+            self.assertTrue(result.qualifies_rollover)
+            self.assertTrue(result.late_effects_absent)
+            self.assertEqual(result.missing_predicates, ())
+
+
 class OwnerCessationEvidenceTests(unittest.TestCase):
     """Malformed Actions evidence must never release a predecessor hold."""
 
     def probe(self, run_changes=None, page_changes=None):
-        from types import SimpleNamespace
-
         from review_sensei_github.pre_entry_abort_recovery import _probe_owner_ceased
 
         run = {
