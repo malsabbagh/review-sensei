@@ -233,7 +233,6 @@ def require_pre_entry_abort_admission(
             identity.repository,
             identity.pull_request,
         )
-        or aborted.generation >= record.generation
     ):
         raise _hold("abort receipt does not authenticate the retained scope")
     budget, app_slug = ledger.evidence_budget, ledger.app_slug

@@ -390,7 +390,10 @@ def _validate_analysis_abort_receipt(
     if record.reservation_id is not None or record.reserved_slot is not None:
         failures.append("confirmed_reservation_release")
     if not failures and (
-        record.generation < 2 or record.record_sha256 in {source_root, cleanup_root}
+        abort_tx is None
+        or record.generation < 2
+        or abort_tx.generation >= record.generation
+        or record.record_sha256 in {source_root, cleanup_root}
     ):
         failures.append("verified_cleanup_root_lineage")
     return (len(failures) == 0), abort_tx, tuple(failures)
@@ -893,7 +896,7 @@ def _probe_owner_ceased(
                 and run_conclusion in _TERMINAL_JOB_CONCLUSIONS
                 and isinstance(attempt, int)
                 and not isinstance(attempt, bool)
-                and attempt >= old.owner.run_attempt
+                and attempt == old.owner.run_attempt
             ):
                 all_jobs: list[dict[str, Any]] = []
                 seen_job_ids: set[int] = set()

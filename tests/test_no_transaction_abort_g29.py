@@ -619,6 +619,19 @@ class NoTransactionAbortG29Tests(unittest.TestCase):
             qualify_no_transaction_abort(bad_gen_rec).state_code,
             "pre_entry_abort_corrupt_receipt",
         )
+        later_tx = replace(abort_tx, generation=2)
+        unrelated_generation = _make_record(
+            accounting=replace(
+                base_acc,
+                analysis_abort={**valid_abort, "transaction": later_tx.to_dict()},
+            ),
+            generation=2,
+        )
+        unrelated = qualify_no_transaction_abort(
+            unrelated_generation, owner_ceased=True, late_native_effects_present=False
+        )
+        self.assertFalse(unrelated.qualifies_rollover)
+        self.assertIn("verified_cleanup_root_lineage", unrelated.missing_predicates)
 
         # Conflicting `record.transaction` alongside `analysis_abort`
         conflict_rec = _make_record(
@@ -2383,6 +2396,9 @@ class OwnerCessationEvidenceTests(unittest.TestCase):
                         }
                     )
                 )
+
+    def test_newer_attempt_is_not_the_retained_owners_complete_inventory(self):
+        self.assertFalse(self.probe(run_changes={"run_attempt": 2}))
 
     def test_empty_or_unidentified_jobs_refuse(self):
         self.assertFalse(self.probe(page_changes={"total_count": 0, "jobs": []}))
