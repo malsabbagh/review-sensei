@@ -162,8 +162,11 @@ class PendingCheckSuccessorReadbackTests(unittest.TestCase):
         for fault in (
             None,
             "duplicate",
+            "duplicate_changed_output",
             "truncated",
             "malformed_count",
+            "missing_count",
+            "inconsistent_conclusion",
             "foreign_app",
             "foreign_numeric_app_identity",
             "missing_app_identity",
@@ -175,13 +178,17 @@ class PendingCheckSuccessorReadbackTests(unittest.TestCase):
                 native = native_check(**CREATE)
                 runs = [native]
                 count = 1
-                if fault == "duplicate":
+                if fault in {"duplicate", "duplicate_changed_output"}:
                     runs.append(native_check(check_id=502, **CREATE))
+                    if fault == "duplicate_changed_output":
+                        runs[1]["output"]["summary"] = "Different retained output"
                     count = 2
                 elif fault == "truncated":
                     count = 2
                 elif fault == "malformed_count":
                     count = True
+                elif fault == "inconsistent_conclusion":
+                    native["conclusion"] = "success"
                 elif fault == "foreign_app":
                     native["app"]["slug"] = "foreign"
                 elif fault == "foreign_numeric_app_identity":
@@ -190,12 +197,43 @@ class PendingCheckSuccessorReadbackTests(unittest.TestCase):
                     del native["app"]["id"]
                 elif fault == "foreign_head":
                     native["head_sha"] = "f" * 40
-                http = FakeHTTP((200, {"check_runs": runs, "total_count": count}))
+                page = {"check_runs": runs}
+                if fault != "missing_count":
+                    page["total_count"] = count
+                http = FakeHTTP((200, page))
                 result = value._readback(http, value.effects[0], token="synthetic")
                 self.assertEqual(result, (200, native) if fault is None else None)
                 self.assertEqual(value.effects[0]["status"], "pending")
-                self.assertEqual(len(http.calls), 1)
-                self.assertEqual(http.calls[0][0], "GET")
+                self.assertEqual(
+                    [(method, path) for method, path, _ in http.calls],
+                    [
+                        (
+                            "GET",
+                            f"/repos/owner/repo/commits/{HEAD}/check-runs?check_name=ReviewSensei&per_page=100&filter=all",
+                        )
+                    ],
+                )
+
+    def test_cold_targeted_update_preserves_prior_creation_external_id(self):
+        value, native = fixture()
+        native["external_id"] = "foreign-run"
+        before = copy.deepcopy(value.effects)
+        http = FakeHTTP((200, native))
+        self.assertIsNone(value._readback(http, value.effects[1], token="synthetic"))
+        self.assertEqual(value.effects, before)
+        self.assertEqual(len(http.calls), 1)
+
+    def test_pending_update_does_not_conflict_with_authenticated_app(self):
+        for selected in (0, 1):
+            value, native = fixture()
+            value.ledger.authenticated_app_id = 1_000
+            before = copy.deepcopy(value.effects)
+            http = FakeHTTP((200, native))
+            self.assertIsNone(
+                value._readback(http, value.effects[selected], token="synthetic")
+            )
+            self.assertEqual(value.effects, before)
+            self.assertEqual(len(http.calls), 1)
 
     def test_missing_or_foreign_precondition_and_other_unknown_work_remain_held(self):
         for fault in (

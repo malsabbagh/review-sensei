@@ -135,14 +135,10 @@ class CheckReceiptBindingTests(unittest.TestCase):
                 self.assertEqual(http.calls[0][0], "GET")
                 self.assertEqual(cold.effects[0]["status"], "pending")
 
-    def test_pending_update_without_a_precondition_cannot_adopt_foreign_target(self):
+    def test_pending_update_without_a_precondition_does_not_read_or_settle(self):
         retained = fixture.document([fixture.effect(BODY, path=PATH, method="PATCH")])
         journal = fixture.journal(retained=retained)
-        result = native()
-        result["id"] += 1
-        http = fixture.FakeHTTP((200, result))
+        http = fixture.FakeHTTP((200, native()))
         self.assertIsNone(journal._readback(http, journal.effects[0], token="fixture"))
         self.assertEqual(journal.effects[0]["status"], "pending")
-        self.assertEqual(
-            [(method, path) for method, path, _ in http.calls], [("GET", PATH)]
-        )
+        self.assertEqual(http.calls, [])

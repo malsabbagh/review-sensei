@@ -319,7 +319,11 @@ def recover(capture, *, token):
         expected = (
             (
                 prefix + f"/commits/{journal.head_sha}/check-runs",
-                {"check_name": ["ReviewSensei"], "per_page": ["100"]},
+                {
+                    "check_name": ["ReviewSensei"],
+                    "per_page": ["100"],
+                    "filter": ["all"],
+                },
             ),
         )
     elif capture.method == "PATCH" and "/check-runs/" in capture.path:

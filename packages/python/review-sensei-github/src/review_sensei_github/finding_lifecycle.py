@@ -5177,14 +5177,40 @@ class FindingLifecycleJournal:
             raise ReviewInputError("finding lifecycle observed check identity changed")
         return dict(observed[1])
 
-    def _check_update_matches(self, effect, payload):
+    def _check_update_matches(self, effect, payload, *, recovered=False):
         precondition = effect.get("check_update_precondition")
-        return (
+        if not (
             isinstance(precondition, dict)
             and self._check_commitment(payload) == precondition
             and payload.get("errors") in (None, [])
             and _check_request_matches(payload, effect["request"])
-        )
+        ):
+            return False
+        source_app_id = getattr(self.ledger, "authenticated_app_id", None)
+        if (
+            recovered
+            and source_app_id is not None
+            and precondition["app_id"] != source_app_id
+        ):
+            return False
+        # If this journal created the same check, keep its request's external
+        # identity bound even on an exact-target update. Independent legacy
+        # update preconditions do not contain this optional provenance.
+        for prior in self.effects:
+            if prior is effect:
+                break
+            if (
+                prior["method"] == "POST"
+                and prior["path"] + f"/{precondition['check_run_id']}" == effect["path"]
+                and prior["status"] == "confirmed"
+                and isinstance(prior["response"][1], dict)
+                and prior["response"][1].get("id") == precondition["check_run_id"]
+                and prior["response"][1].get("app_id") == precondition["app_id"]
+                and "external_id" in prior["request"]
+                and payload.get("external_id") != prior["request"]["external_id"]
+            ):
+                return False
+        return True
 
     def _body_receipts(self, review_id):
         return [
@@ -5629,6 +5655,14 @@ class FindingLifecycleJournal:
     def _readback(self, http, effect, *, token):
         path, request = effect["path"], effect["request"]
         response = effect["response"]
+        expected_slug = (self.app_slug or "").removesuffix("[bot]")
+        if (
+            "/check-runs/" in path
+            and effect["method"] == "PATCH"
+            and response is None
+            and "check_update_precondition" not in effect
+        ):
+            return None
         if effect["method"] == "PUT":
             selected = re.fullmatch(
                 re.escape(
@@ -5655,25 +5689,63 @@ class FindingLifecycleJournal:
             and effect["method"] == "POST"
             and response is None
         ):
+            stable = ("name", "head_sha", "external_id")
+            external_id = request.get("external_id")
+            if (
+                path != f"/repos/{self.identity.repository}/check-runs"
+                or request.get("name") != "ReviewSensei"
+                or request.get("head_sha") != self.head_sha
+                or not isinstance(external_id, str)
+                or not external_id
+            ):
+                return None
             status, payload = http.request(
                 "GET",
                 path.rsplit("/check-runs", 1)[0]
                 + "/commits/"
-                + str(request.get("head_sha"))
-                + "/check-runs?check_name=ReviewSensei&per_page=100",
+                + self.head_sha
+                + "/check-runs?check_name=ReviewSensei&per_page=100&filter=all",
                 token=token,
             )
             runs = payload.get("check_runs") if isinstance(payload, dict) else None
             if (
                 status == 200
                 and isinstance(runs, list)
-                and type(payload.get("total_count", len(runs))) is int
-                and payload.get("total_count", len(runs)) == len(runs)
+                and type(payload.get("total_count")) is int
+                and payload["total_count"] == len(runs)
                 and len(runs) < 100
             ):
-                candidates = [
-                    run for run in runs if _check_request_matches(run, request)
-                ]
+                # The default latest filter can hide an older run with this
+                # stable identity. Count all owned matches before inspecting
+                # their mutable output, and never page beyond this bounded GET.
+                candidates = []
+                source_app_id = getattr(self.ledger, "authenticated_app_id", None)
+                for run in runs:
+                    if not isinstance(run, dict):
+                        return None
+                    if not all(run.get(key) == request[key] for key in stable):
+                        continue
+                    app = run.get("app")
+                    if (
+                        not isinstance(app, dict)
+                        or type(app.get("id")) is not int
+                        or app["id"] <= 0
+                        or not isinstance(app.get("slug"), str)
+                        or not app["slug"]
+                    ):
+                        return None
+                    if source_app_id is not None and app["id"] != source_app_id:
+                        continue
+                    if app["slug"] != expected_slug:
+                        if source_app_id is not None:
+                            return None
+                        continue
+                    candidates.append(run)
+                if len(candidates) == 1 and (
+                    candidates[0].get("conclusion") != request.get("conclusion")
+                    or not _check_request_matches(candidates[0], request)
+                ):
+                    return None
         elif path.endswith("/reviews") and effect["method"] == "POST":
             status, values = http.request(
                 "GET", path + "?per_page=100&page=1", token=token
@@ -5722,7 +5794,7 @@ class FindingLifecycleJournal:
                                 item["status"] == "pending" for item in self.effects
                             )
                             == 1
-                            and self._check_update_matches(later, value)
+                            and self._check_update_matches(later, value, recovered=True)
                         ):
                             # A response-lost final update may supersede this
                             # earlier confirmed creation. The same fresh GET
@@ -5735,7 +5807,7 @@ class FindingLifecycleJournal:
             return None
         value = candidates[0]
         if "check_update_precondition" in effect and not self._check_update_matches(
-            effect, value
+            effect, value, recovered=response is None
         ):
             return None
         if effect["method"] == "PUT":
@@ -5757,22 +5829,10 @@ class FindingLifecycleJournal:
         producer = self.ledger.evidence_producer()
         if "/check-runs" in path:
             commitment = self._check_commitment(value)
-            source_app_id = getattr(self.ledger, "authenticated_app_id", None)
-            expected_slug = (
-                self.app_slug[:-5]
-                if self.app_slug and self.app_slug.endswith("[bot]")
-                else self.app_slug
-            )
             if (
                 commitment is None
                 or "user" in value
                 or value["app"]["slug"] != expected_slug
-                or (
-                    response is None
-                    and effect["method"] == "POST"
-                    and source_app_id is not None
-                    and commitment["app_id"] != source_app_id
-                )
                 or value.get("errors") not in (None, [])
                 or (
                     effect["method"] == "PATCH"
@@ -5806,7 +5866,7 @@ class FindingLifecycleJournal:
         if (
             "user" in value
             and expected_producer is not None
-            and user.get("id") != expected_producer
+            and (not isinstance(user, dict) or user.get("id") != expected_producer)
         ):
             return None
         if value.get("edited_by_human") is True:
