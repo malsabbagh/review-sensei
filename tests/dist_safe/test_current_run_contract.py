@@ -185,7 +185,7 @@ INSTALLED_CLASS_SHARD_CONTRACT = (
         ),
         (
             "original_source_observation.py",
-            "d3ca86402609a9d8b8f48df0d46b322f6b0c70f9a1a6c08fe11398e0a34cfc5b",
+            "340c52e403310393bc9794c7812b7255aff9b0f7f24722d50a0161dbb2bdd6f8",
         ),
         (
             "packaging_guard.py",
